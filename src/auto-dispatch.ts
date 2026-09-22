@@ -5,7 +5,8 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { Work } from './model.js';
-import type { SessionHandleInput } from './model/sessions.js';
+import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
+import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
@@ -34,6 +35,14 @@ import { independentProducerProfiles, launchProducer, reconcileProducers, sessio
  * with none waits and the tick says which limit it waits on. The limit is read from the live
  * configuration on every tick, so raising it starts more sessions on the next tick and lowering it
  * launches nothing new until the running sessions drain — none is stopped.
+ *
+ * This interval is also what reconciles session liveness (GY-113; model/sessions.ts). A session
+ * recorded as running is otherwise believed until something ends it, and a session that died reports
+ * nothing — so every tick sweeps the graph's running handles against what the runtime reports,
+ * closes the ones that vanished, ended, were superseded by a head or a candidate moving on, or hold
+ * a slot a newer session already holds, and counts a role slot as taken only while the reconciled
+ * record says a live session has it. Closing finished sessions is therefore no longer a duty
+ * anybody performs by hand.
  */
 
 /**
@@ -44,9 +53,16 @@ import { independentProducerProfiles, launchProducer, reconcileProducers, sessio
  * sentence is bounded again before it becomes a tick reason — so a reason at its cap still
  * yields a valid tick. `bounded` marks every cut with an ellipsis rather than hiding it.
  */
-export const cursorTextLimit = 500, capacityReasonLimit = 1000, dispatchFailureReasonLimit = 300;
+export const cursorTextLimit = 500, capacityReasonLimit = 1000, dispatchFailureReasonLimit = 300, closureFailureReasonLimit = 300;
 export const ellipsis = '…';
 export const bounded = (text: string, limit: number) => text.length > limit ? `${text.slice(0, Math.max(0, limit - ellipsis.length))}${ellipsis}` : text;
+/**
+ * The closure failures a tick stores, as the sentences the cursor holds. The sentence wraps a
+ * reason already bounded below the cap, and is bounded again so a reason at its own cap cannot
+ * push the stored string past `cursorTextLimit` and refuse the whole tick's persist.
+ */
+export const closeFailureReasons = (failures: { work: string; id: string; reason: string }[]) =>
+  failures.slice(0, 20).map(failure => bounded(`${failure.work} session ${failure.id}: ${failure.reason}`, cursorTextLimit));
 export const dispatchFailureSchema = z.object({
   kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40),
   attempts: z.number().int().min(1).max(1000), reason: z.string().max(cursorTextLimit), at: z.string(), nextAt: z.string(),
@@ -77,6 +93,8 @@ export const dispatchCursorSchema = z.object({
    * so the counts and the reasons nothing launched are kept for `master status`.
    */
   lastTick: z.object({ at: z.string(), launched: z.number().int().min(0), refused: z.number().int().min(0), waiting: z.number().int().min(0), settled: z.number().int().min(0),
+    /** Session records this tick closed against the runtime, and the closures it could not write back. */
+    closed: z.number().int().min(0).default(0), closeFailures: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
     reasons: z.array(z.string().max(cursorTextLimit)).max(20).default([]) }).strict().nullable().default(null),
   /**
    * A role none of whose accounts can launch (GY-89): why, and when its accounts are read again.
@@ -84,6 +102,13 @@ export const dispatchCursorSchema = z.object({
    * request that waited out a week-long reset launches the moment an account returns.
    */
   capacity: z.object({ review: capacityHoldSchema.optional(), producer: capacityHoldSchema.optional() }).strict().default({}),
+  /**
+   * The session handles the runtime had stopped reporting when the last tick swept, each carrying
+   * when it was first missed (GY-113). Absence is only evidence that a session is gone once it
+   * persists, so the grace is counted from here rather than from one short listing, and carrying
+   * it on the cursor keeps that judgment across a restart of the loop.
+   */
+  sessionMisses: z.record(z.string(), z.string()).default({}),
   /**
    * What launches last observed about each agent account and the launches that skipped an account,
    * with the reason. Read from the environment log beside the cursor, which every launcher writes;
@@ -97,6 +122,8 @@ export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatchFailureLimit = 12;
 /** How long a role with no account left is not launched before its accounts are read again. */
 export const capacityRecheckMs = 60_000;
+/** How many missing session handles the cursor remembers between ticks; a file, not a database. */
+export const sessionMissLimit = 500;
 /**
  * A tick whose snapshot read fails is retried on its own short backoff rather than a whole
  * interval later, never faster than the first step and never slower than the interval. The read
@@ -207,6 +234,12 @@ export interface DispatchEffects {
   selectedAccount?: (role: 'reviewer' | 'producer', profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
   holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<{ until?: string } | void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Ends one session record the liveness sweep found settled. A dispatcher wired without it still
+   * launches and still judges liveness — it simply leaves the record standing, which is the state
+   * GY-113 exists to end, so the shipped `dispatchEffects` always wires it.
+   */
+  endSession?: (closure: SessionClosure) => Promise<unknown>;
   persist: (cursor: DispatchCursor) => Promise<void>;
 }
 
@@ -277,10 +310,18 @@ export function watchInstantExit(run: HerdrRun, now: () => number = Date.now): I
  * transcript the agent writes — the session records for itself against
  * `POST /api/work/GY-N/session`, which is the only party that has them. A handle with no pane
  * carries no attach command rather than one that cannot work.
+ *
+ * It also records what liveness reconciliation needs of it (GY-113): the runtime's own name for the
+ * session, so the handle can be matched against the runtime's listing even after its pane is gone;
+ * the slot it occupies, which is its kind and, for a producer session, the one proof group it runs;
+ * and the exact head it is bound to, so a session for a head the item has moved past is recognised
+ * as superseded rather than left running against a candidate nobody is waiting for.
  */
-export function launchedSessionHandle(kind: 'review' | 'proof', request: DispatchRequest, subject: string, host: string, launched: { pane?: string | null } | undefined, runtime: string, workspace?: string, principal?: string): SessionHandleInput {
+export function launchedSessionHandle(kind: 'review' | 'proof', request: DispatchRequest, subject: string, host: string, launched: { pane?: string | null; agentName?: string | null } | undefined, runtime: string, workspace?: string, principal?: string): SessionHandleInput {
   return {
     id: request.id, kind, runtime, host,
+    role: kind === 'proof' && request.group ? `proof:${request.group}` : kind, head: request.sha,
+    ...(launched?.agentName ? { agentName: launched.agentName } : {}),
     // Whose session it is, when the launcher knows: a producer session runs under its own
     // credential, and naming it here is what lets that session — and nobody else — fill in the
     // tab and transcript the launcher cannot see.
@@ -291,9 +332,105 @@ export function launchedSessionHandle(kind: 'review' | 'proof', request: Dispatc
   };
 }
 
+/**
+ * The liveness sweep this loop runs every tick (GY-113). The rules it applies are the model's —
+ * `sessionLiveness` for what the runtime says, `supersededSession` for what the item says — and
+ * the sweep over the graph, the closure it records and the write-back live here with the interval
+ * that runs them. It is pure over the snapshot: the caller writes each closure back through the
+ * coordinator mutation, so one sweep answers a status reader and this loop alike.
+ */
+export type ClosureCause = 'vanished' | 'ended' | 'superseded' | 'duplicate';
+export interface SessionClosure { workId: string; key: string; id: string; kind: SessionKind; role: string; runtime: string; host: string; subject: string; cause: ClosureCause; outcome: string }
+/** How one handle is named between ticks: the item it sits on, and its own id. */
+export const sessionHandleKey = (workId: string, id: string) => `${workId}\u0000${id}`;
+/** Whose vocabulary a reported state is judged by, whose runtime answers for a handle, and how long a handle the runtime has stopped reporting is left alone. */
+export type ReconcileOptions = LivenessOptions & { graceMs?: number;
+  /** This host: a handle another host launched is not judged against this host's runtime listing. */
+  hostId?: string | null;
+  /** When each handle the runtime had stopped reporting was first missed, as the previous sweep left it. */
+  missing?: Record<string, string> };
+export interface SessionSweep {
+  /** Every running handle on the graph that is over, with the outcome it is closed with. */
+  closures: SessionClosure[];
+  /**
+   * The handles this runtime did not report, each carrying when it was first missed — the next
+   * sweep's `missing`. A vanished handle is closed only once the runtime has failed to report it
+   * for the whole grace, so a single listing that comes back short closes nothing; an entry
+   * survives its closure, so a write-back that failed is retried on the next tick rather than
+   * starting the grace again.
+   */
+  missing: Record<string, string>;
+}
+export function reconcileSessionLiveness(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: ReconcileOptions = {}): SessionSweep {
+  const states = options.states ?? runtimeEndedStates, graceMs = options.graceMs ?? sessionVanishGraceMs;
+  const previous = options.missing ?? {}, missing: Record<string, string> = {};
+  const closures: SessionClosure[] = [];
+  for (const work of all) {
+    const running = (work.sessions ?? []).filter(handle => handle.state === 'running');
+    const closed = new Set<string>();
+    const close = (handle: SessionHandle, cause: ClosureCause, outcome: string) => {
+      closed.add(handle.id);
+      closures.push({ workId: work.id, key: work.key, id: handle.id, kind: handle.kind, role: sessionRole(handle), runtime: handle.runtime, host: handle.host, subject: handle.subject, cause, outcome: outcome.slice(0, 500) });
+    };
+    for (const handle of running) {
+      // The item first: a session bound to a head that merged, was superseded or went back to a
+      // worker is over whether or not its runtime still lists it, and why it is over is what is
+      // worth recording — the runtime would only ever say it vanished.
+      const superseded = supersededSession(work, handle, now);
+      if (superseded) { close(handle, 'superseded', `superseded: ${superseded}`); continue; }
+      const liveness = sessionLiveness(handle, runtime, states, options.hostId);
+      if (liveness !== 'vanished' && liveness !== 'ended') continue;
+      const since = Date.parse(handle.updatedAt), idleMs = Number.isFinite(since) ? now.getTime() - since : 0;
+      const where = handle.pane ? `pane ${handle.pane}` : `session ${handle.agentName}`;
+      if (liveness === 'ended') {
+        // The runtime says so itself, in its own vocabulary; the grace still covers a handle
+        // recorded moments ago against a stale listing.
+        if (idleMs < graceMs) continue;
+        close(handle, 'ended', `the ${handle.runtime} runtime on ${handle.host} reports ${where} as ${runtimeSessionOf(handle, runtime ?? [])?.agent_status ?? 'ended'}, so the session is over`);
+        continue;
+      }
+      // Absence is weaker evidence than a reported state, so it must persist: the runtime has to
+      // have failed to report the session for the whole grace, counted from the first sweep that
+      // missed it, and the handle has to be older than the grace too — a session recorded at
+      // launch appears in its runtime's inventory a moment later. One short listing closes nothing.
+      const key = sessionHandleKey(work.id, handle.id);
+      const first = Date.parse(previous[key] ?? '');
+      const firstMissedAt = Number.isFinite(first) ? Math.min(first, now.getTime()) : now.getTime();
+      missing[key] = new Date(firstMissedAt).toISOString();
+      const missingMs = now.getTime() - firstMissedAt;
+      if (idleMs < graceMs || missingMs < graceMs) continue;
+      close(handle, 'vanished', `vanished: the ${handle.runtime} runtime on ${handle.host} has not reported ${where} for ${Math.round(missingMs / 1000)}s, ${Math.round(idleMs / 1000)}s after its last observed activity at ${handle.updatedAt}`);
+    }
+    // One slot, one live session: a second review or proof session for the same role and head
+    // supersedes the ones before it, so a relaunch under a fresh id never leaves two standing. An
+    // implementation session is not collapsed here any more than it is superseded above — its
+    // lease is what says which attempt may still act, and two handles under one epoch are the
+    // worker's own record of its sessions.
+    const slots = new Map<string, SessionHandle[]>();
+    for (const handle of running) {
+      if (closed.has(handle.id) || !handle.head || (handle.kind !== 'review' && handle.kind !== 'proof')) continue;
+      const slot = `${sessionRole(handle)}\u0000${handle.head}`;
+      slots.set(slot, [...slots.get(slot) ?? [], handle]);
+    }
+    for (const [, slot] of slots) {
+      if (slot.length < 2) continue;
+      const newest = slot.reduce((latest, handle) => Date.parse(handle.startedAt) >= Date.parse(latest.startedAt) ? handle : latest);
+      for (const handle of slot) if (handle !== newest)
+        close(handle, 'duplicate', `superseded: session ${newest.id} holds the same role (${sessionRole(handle)}) on head ${handle.head!.slice(0, 12)}, and one item holds one live session per role and head`);
+    }
+  }
+  return { closures, missing };
+}
+/** What a closure is written back as: the handle's own identity, ended, carrying why. */
+export function closureHandle(closure: SessionClosure): SessionHandleInput {
+  return { id: closure.id, kind: closure.kind, runtime: closure.runtime, host: closure.host, subject: closure.subject, state: 'finished', outcome: closure.outcome };
+}
+
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean }
 export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string }
-export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number }
+export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
+  /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
+  closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[] }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math.max(0, attempts - 1), dispatchRetryMaxMs);
@@ -339,10 +476,26 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const snapshot = await boundedRead(effects.snapshot, readTimeoutMs);
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
-  const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0 };
+  const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
   const herdr = effects.agents();
   const { reviews } = await effects.reconcileReviews(snapshot.work, herdr);
   const { producers } = await effects.reconcileProducers(snapshot.work, herdr);
+  // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
+  // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
+  // is made before anything launches, because the slot check below reads it.
+  const sweep = reconcileSessionLiveness(snapshot.work, herdr, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId, missing: cursor.sessionMisses });
+  const closures = sweep.closures;
+  // What the runtime did not report this tick, for the next one to measure the grace against. The
+  // map holds only handles currently missing, so it is bounded by the graph's live sessions; the
+  // ceiling is there because the cursor is a file, not a database.
+  cursor.sessionMisses = Object.fromEntries(Object.entries(sweep.missing).slice(0, sessionMissLimit));
+  for (const closure of closures) {
+    // A closure that cannot be written back still stands as a judgment — the session is over
+    // whichever way the record went — so the slot is freed either way and the tick says what failed.
+    try { await effects.endSession?.(closure); tick.closed.push(closure); }
+    catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
+  }
+  const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
   // each profile's sessions against its limit; the requests wait and the tick says so.
   const agents = herdr ?? [];
@@ -354,7 +507,19 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const inventory = () => [...agents, ...started];
   const launchedName = (profile: { agentName: string; concurrency?: number }, request: DispatchRequest, result: unknown) =>
     typeof (result as { agentName?: unknown })?.agentName === 'string' ? (result as { agentName: string }).agentName : sessionAgentName(profile, { id: request.id, requestId: request.id });
-  const room = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => profileSessions(profile, inventory(), records);
+  /**
+   * The slots recorded sessions still hold. A handle is the durable record of a live session, so a
+   * session this host has not listed yet — or one another host launched — holds its profile's slot
+   * as surely as a listed pane does, and the record outlives a restart of this loop. A session the
+   * sweep above judged over holds nothing: that is what makes a name busy only while a live session
+   * has it, rather than until somebody ends the record by hand (GY-113 AC-2).
+   */
+  const held = () => snapshot.work.flatMap(item => (item.sessions ?? [])
+    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)))
+    .map(handle => ({ name: handle.agentName! })));
+  // The launchers still see the runtime's own inventory unfiltered: a name the runtime lists at all
+  // cannot be taken again, whatever state it is in, and that check is theirs to make.
+  const room = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => profileSessions(profile, [...inventory(), ...held()], records);
   const atLimit = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => { const sessions = room(profile, records); return `${profile.name}: at its concurrency limit (${sessions.running.length} running, limit ${sessions.limit})`; };
   const wait = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, reason: string) => tick.waiting.push({ kind, work: item.key, requestId: request.id, sha: request.sha, reason, ...(request.group ? { group: request.group } : {}) });
   const refuse = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
@@ -439,7 +604,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
             started.push({ name: launchedName(launched.profile, review, launched.result) }); delete cursor.failures[review.id]; delete cursor.capacity.review;
             // The session is running somewhere; put its coordinates where every Graphyard reader
             // looks, so watching this reviewer never means reading this host's local ledger.
-            await effects.recordSession?.(item, launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, launched.result as { pane?: string | null }, launched.profile.kind, config.herdrWorkspace))
+            await effects.recordSession?.(item, launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, review, launched.result) }, launched.profile.kind, config.herdrWorkspace))
               .catch(() => { /* the launch landed; a handle that could not be written is not a failed launch */ });
             tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
           } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
@@ -466,7 +631,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       try {
         const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
         started.push({ name: launchedName(launched.profile, request, launched.result) }); delete cursor.failures[request.id]; delete cursor.capacity.producer;
-        await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, launched.result as { pane?: string | null }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
+        await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
           .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
         tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
       } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
@@ -477,7 +642,9 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
-  cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped, reasons: composed().map(([reason]) => reason) };
+  cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
+    closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
+    reasons: composed().map(([reason]) => reason) };
   await persist();
   return tick;
 }
@@ -512,7 +679,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
   reload?: () => Promise<ConfigReload> }) {
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const ticks: DispatchTick[] = [];
-  let refused: string | null = null, waiting = '';
+  let refused: string | null = null, waiting = '', closeFailed = '';
   do {
     if (options.signal?.aborted) break;
     const interval = typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
@@ -533,6 +700,13 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       ticks.push(tick);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
+      for (const closure of tick.closed) log(`[graphyard-dispatch] closed ${closure.role} session ${closure.id} on ${closure.key}: ${closure.outcome}`);
+      // A closure that cannot be written back is retried every tick, so it is logged when it
+      // starts and when it changes rather than once per tick for as long as it lasts; `master
+      // status` carries the standing list under `dispatch.sessionReconcile.failures`.
+      const failures = tick.closeFailures.map(failure => `${failure.work} session ${failure.id}: ${failure.reason}`).join(' | ');
+      if (failures && failures !== closeFailed) log(`[graphyard-dispatch] could not close ${tick.closeFailures.length} session record(s): ${failures}`);
+      closeFailed = failures;
       // A tick that launched nothing says why, once per distinct set of reasons: a request waiting
       // on a busy profile or a backoff is the dispatcher working, and silence would hide both.
       const reasons = (cursor.lastTick?.reasons ?? []).join(' | ');
@@ -589,6 +763,9 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     // The handle goes where every Graphyard reader already looks, so watching a reviewer or
     // producer session the loop launched never means reading this host's own ledger.
     recordSession: (work: Work, handle: SessionHandleInput) => mutate(`work/${work.id}/session`, handle, randomUUID()),
+    // And ends one when the sweep finds it over. The same coordinator mutation: a record that says
+    // running is what holds the role slot, so closing it is as much this loop's job as opening it.
+    endSession: (closure: SessionClosure) => mutate(`work/${closure.workId}/session`, closureHandle(closure), randomUUID()),
     // The same three moves the coordination loop makes for a session exhausted mid-work.
     selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
     holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.()),
@@ -602,6 +779,10 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
   const lastTickAt = cursor.lastTickAt ? Date.parse(cursor.lastTickAt) : Number.NaN;
   const lagMs = Number.isFinite(lastTickAt) ? now - lastTickAt : null;
   return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
+    // The liveness sweep runs on this interval too, so its bound is reported beside it.
+    sessionReconcile: { intervalMs, graceMs: sessionVanishGraceMs, boundMs: sessionClosureBoundMs, closed: cursor.lastTick?.closed ?? 0,
+      // Handles the runtime did not report on the last sweep: each is inside its grace, and closes on the sweep after it passes.
+      missing: Object.keys(cursor.sessionMisses).length, failures: cursor.lastTick?.closeFailures ?? [] },
     lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure, lastTick: cursor.lastTick ?? null,
     failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
     // A role with no account left, as one entry per role rather than a failure per request.
