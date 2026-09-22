@@ -23,6 +23,7 @@ import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetV
 import type { Principal, Work } from '../src/model.js';
 import { FleetOverview } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
@@ -103,8 +104,9 @@ async function master(workers: { name: string; principal: string; kind: string; 
 const herdr = (calls: string[][], fail?: (args: string[]) => boolean) => (_command: string, args: string[]) => {
   calls.push(args);
   if (fail?.(args)) throw new Error('herdr refused the launch');
-  return JSON.stringify({ result: args[0] === 'tab' && args[1] === 'create' ? { type: 'tab_created', root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' }, tab: { tab_id: 'tab-1' } }
-    : args[0] === 'agent' && args[1] === 'get' ? { agent: { pane_id: 'pane-1', agent_status: 'idle' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+  // The typed launch starts its runtime at once, and Herdr sees it ready under the pane (GY-121).
+  return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' && args[1] === 'create' ? { type: 'tab_created', root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' }, tab: { tab_id: 'tab-1' } }
+    : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 };
 const tabEnvironment = (tab: string[]) => Object.fromEntries(tab.flatMap((value, index) => value === '--env' ? [tab[index + 1].split(/=(.*)/s).slice(0, 2)] : []));
 let items = 0;
@@ -266,7 +268,8 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   assert.match(reasons[0], /claude-off is disabled/); assert.match(reasons[1], /claude-spent quota is exhausted until .*7d window at 100%/); assert.match(reasons[2], /claude-out is not logged in/); assert.match(reasons[3], /claude-remote is placed on build-host-2; this executor is build-host-1/);
   const tab = tabEnvironment(calls[0]);
   assert.equal(tab.CLAUDE_CONFIG_DIR, fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
-  assert.match(calls[1][3]!, /'--' 'claude' '--permission-mode' 'bypassPermissions' '--model' 'claude-opus-5'/, 'the registry runtime\'s contract and the account\'s model, not the profile\'s runtime');
+  const typed = expandTypedCommand(calls[1][3]!);
+  assert.equal(typed.kind, 'claude'); assert.deepEqual(typed.args.slice(0, 4), ['--permission-mode', 'bypassPermissions', '--model', 'claude-opus-5'], 'the registry runtime\'s contract and the account\'s model, not the profile\'s runtime');
   assert.doesNotMatch(calls[1][3]!, /gpt-codex-only/);
 
   // The choice and its reason are recorded in the control plane, with what the executor observed.
@@ -304,8 +307,8 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const approverCalls: string[][] = [];
   const approver = await launchApprover(root, readyWork('GY-950'), 'decision-1', undefined, [], herdr(approverCalls), probe);
   assert.equal(approver.account!.environment, 'muse-a');
-  const started = approverCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
-  assert.deepEqual(started.slice(started.indexOf('--kind'), started.indexOf('--kind') + 2), ['--kind', 'muse']); assert.deepEqual(started.slice(started.indexOf('--') + 1), ['--approval-mode', 'never', '--trust-workspace']);
+  const started = expandTypedCommand(approverCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+  assert.equal(started.kind, 'muse'); assert.deepEqual(started.args, ['--approval-mode', 'never', '--trust-workspace']);
   // …and a role the registry does not define is not guessed at: reviewer falls to the local profile, which names none.
   assert.deepEqual(await selectAccount(config, 'reviewer', { name: 'review-a' }, probe), { account: null, health: null, skipped: [] });
   const source = await readFile(new URL('../src/master.ts', import.meta.url), 'utf8');
