@@ -229,7 +229,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const stalled = stalledActionAttention(snapshot);
   // The GitHub budget (GY-117): a pause as one incident, an exhaustion ahead, a silent webhook.
   const budget = githubBudgetAttention(coordinator);
-  const attentionItems = [...diskAttention, ...budget, ...scopeRequests, ...unanswered, ...stalled, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...stalled, ...budget, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above).
   attentionItems.unshift(...loopItems);
@@ -253,7 +253,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, stalledActions: stalled.length,
-      attention: status.counts.attention + diskAttention.length + budget.length + generatedFiles.length + unanswered.length + stalled.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + loopItems.length + budget.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,

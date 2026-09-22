@@ -42,7 +42,9 @@ export const cacheEntries = 4096;
  *   is made. A candidate at the merge gate is observed every 20 seconds, because its freshness is
  *   exactly what the merge executor spends. A candidate whose next action is a dispatch, a rework
  *   or an escalation is observed every five minutes, because nothing on GitHub can move it.
- *   Everything else sits between, and a candidate that came back unchanged settles to two minutes.
+ *   Everything else sits between, and a candidate that came back unchanged settles to the
+ *   steady-state interval: two minutes at least, stretched so the whole fleet's steady-state
+ *   polling stays inside `steadyStateShare` of the hourly limit (`steadyStateInterval`).
  * - **The merge-path reserve** (`reserveDecision`). Below `mergePathReserve` requests remaining,
  *   non-merge observations are rescheduled past the reset rather than spent. The merge path,
  *   webhook wakes and merge verification keep what is left.
@@ -86,7 +88,10 @@ export const defaultHourlyLimit = 5000, assumedObservationRequests = 10;
 export function steadyStateInterval(openCandidates: number, meanRequests: number | null, limit: number | null) {
   const perObservation = meanRequests && meanRequests > 0 ? meanRequests : assumedObservationRequests;
   const share = Math.max(1, (limit ?? defaultHourlyLimit) * steadyStateShare);
-  const affordable = Math.ceil(Math.max(1, openCandidates) * perObservation * 3600_000 / share);
+  // One round of the fleet costs this much; the hour holds the round already made plus one more
+  // per interval, and all of them together must fit the share.
+  const round = Math.max(1, openCandidates) * perObservation;
+  const affordable = share > round ? Math.ceil(round * 3600_000 / (share - round)) : 3600_000;
   return Math.min(3600_000, Math.max(observationCadenceMs.steady, affordable));
 }
 /**
@@ -307,7 +312,8 @@ export class GitHub {
     }
     const meter = this.meter.getStore();
     if (meter) { meter.requests++; if (response.status !== 304) meter.uncached++; }
-    if (response.status === 304 || !charged) return;
+    // A 304 costs nothing, and the refusal that announces an exhausted budget did not spend it.
+    if (response.status === 304 || !charged || response.status === 429 || response.status === 403 && remaining === 0) return;
     this.charges.push({ at: now, kind: requestKind(path) });
     if (this.charges.length > 8192) this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
   }
@@ -1094,8 +1100,10 @@ export async function processJob(engine: Engine, github: GitHub) {
       github.noteFleet?.(openCandidates(all));
       // Below the merge-path reserve, an observation that is neither a merge-gate candidate's nor
       // a webhook wake is rescheduled past the reset rather than spent.
+      // A paused client spends nothing on any job: the job runs into the pause, keeps the refusal
+      // in the ledger, and is rescheduled to the pause's end below, which is the incident's record.
       const budget = github.budget?.(now.getTime());
-      const deferral = budget ? reserveDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
+      const deferral = budget && !budget.paused ? reserveDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
       if (deferral) { github.recordDeferral(work.id, deferral); await engine.store.deferJob(job.work_id, job.token, deferral.until); return true; }
       const previous = work.observation ?? null;
       const observation = await github.observe(work, all);
