@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { approverSessionName, assertSessionName, atomicPrivateWrite, distinctSessionName, launchApprover, saveWorkerProfile, loadMasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, sessionName, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, setupMaster, startAgentSession, startMaster, workerProfileSchema, type HerdrAgent, type MasterConfig, type MasterRun } from '../src/master.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { approverLaunchAttention } from '../src/cli/master-status.js';
 import { buildProposal, proposedWorkerProfileSchema } from '../src/onboarding.js';
@@ -140,7 +141,7 @@ test('unit:generated-session-names-valid — every session name Graphyard genera
     // refusal names the limit, the name attempted and how to retry.
     const calls: string[][] = [];
     const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: {} }); };
-    assert.throws(() => startAgentSession('Approver-GY-101', 'claude', 'pane-1', [], 'Judge it', run, { retry: 'graphyard master approver GY-101 4cb51514' }),
+    assert.throws(() => startAgentSession('Approver-GY-101', 'claude', 'pane-1', [], 'Judge it', run, { directory: root, retry: 'graphyard master approver GY-101 4cb51514' }),
       (error: unknown) => error instanceof SessionNameRefusedError && /1-32 characters/.test(error.message) && /Approver-GY-101/.test(error.message) && /graphyard master approver GY-101 4cb51514/.test(error.message));
     assert.deepEqual(calls, [], 'the runtime was never asked to start a session it would refuse to name');
 
@@ -200,15 +201,16 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
       const refusing = (_command: string, args: string[]) => {
         herdr.push(args);
         if (args[0] === 'tab' && args[1] === 'create') return JSON.stringify({ result: { root_pane: { pane_id: 'pane-4', tab_id: 'tab-4' } } });
-        if (args[0] === 'agent' && args[1] === 'start') throw Object.assign(new Error('Command failed: herdr agent start'), { stdout: JSON.stringify({ error: { code: 'invalid_argument', message: 'agent name must start with a lowercase letter and contain only lowercase letters, digits, \'-\' or \'_\' (1-32 characters)' } }) });
-        return JSON.stringify({ result: {} });
+        // The runtime is named once it is seen started (GY-121); a name Herdr refuses is refused there.
+        if (args[0] === 'agent' && args[1] === 'rename') throw Object.assign(new Error('Command failed: herdr agent rename'), { stdout: JSON.stringify({ error: { code: 'invalid_argument', message: 'agent name must start with a lowercase letter and contain only lowercase letters, digits, \'-\' or \'_\' (1-32 characters)' } }) });
+        return startedAtOnce(args) ?? JSON.stringify({ result: {} });
       };
       await assert.rejects(launchApprover(root, item, decision, 'claude', [], refusing), (error: unknown) => {
         assert.ok(error instanceof SessionNameRefusedError, 'a refused name is reported as a refused name');
         refusal = error;
         return true;
       });
-      assert.ok(herdr.some(call => call[0] === 'pane' && call[1] === 'close'), 'the tab opened for a session that never started is closed');
+      assert.ok(herdr.some(call => call[0] === 'pane' && call[1] === 'close'), 'the tab opened for a session that could not be named is closed');
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(credentials, { recursive: true, force: true });
