@@ -2123,7 +2123,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const decide: DaemonEffects['decide'] = async (work, action, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, {}), reason });
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, current().reviewers[0]?.kind ?? 'claude', listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
+  // The approver's runtime and account come from the registry's approver role; naming a kind here
+  // would be a runtime read out of code, and the role would decide nothing.
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
