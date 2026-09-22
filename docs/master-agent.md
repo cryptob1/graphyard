@@ -470,9 +470,11 @@ read a loop that was merely waiting as a loop that had stalled.
 child the coordinator runs goes through one asynchronous runner (`src/child-runner.ts`), and a
 test (`unit:no-sync-child-processes`) refuses a synchronous child call — `execFileSync`,
 `spawnSync`, `execSync` or a blocking sleep — in `src/master.ts`, `src/master-daemon.ts`,
-`src/auto-dispatch.ts`, `src/producer.ts`, `src/reviewer.ts` and the helpers they reach for Herdr,
-gh, git and systemctl. The one synchronous child left is the CLI reading its own checkout's commit
-for the version-skew guard, once, when a `master` command starts and before the loop runs a cycle.
+`src/auto-dispatch.ts`, `src/producer.ts`, `src/reviewer.ts`, the helpers they reach for Herdr,
+gh, git and systemctl, and the [standalone executor](#running-executors-beside-the-daemon), which
+is a dispatcher running outside the daemon and must renew the claim it holds while a launch is in
+flight. The one synchronous child left is the CLI reading its own checkout's commit for the
+version-skew guard, once, when a `master` command starts and before the loop runs a cycle.
 
 **What the runner guarantees.** A child is spawned and awaited on the event loop, so a slow launch
 delays only the launcher that asked for it: the cycle's reads, the dispatcher's next tick and the
@@ -819,6 +821,13 @@ claiming at the same instant are serialized by the coordination lock, and the lo
 row. An executor that dies mid-action renews nothing, its claim expires, another takes the row as
 a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
 handler that throws returns its row to the queue with the reason and a widening backoff.
+
+It runs its children through the same asynchronous runner the loop does, and for the same reason
+(see [never blocked on a child process](#never-blocked-on-a-child-process)): while a `dispatch`
+row's launch waits on the runtime, this process is what tells the control plane the claim is still
+held, and a blocked event loop would lose the row mid-flight and have a second executor run the
+action beside it. Every runtime read it makes is awaited too — an inventory read left unawaited
+reports no Herdr agents at all, and an executor that claimed a launch then fails it.
 
 ### A row that keeps failing for the same reason
 
