@@ -51,8 +51,13 @@ export function humanNeeded(action: NextAction): HumanNeeded | null {
     resolve: `graphyard master decide ${action.key} rework REASON, then graphyard master approver ${action.key} DECISION` };
   const trigger = action.inputs.kind === 'escalate' ? action.inputs.trigger : 'refusal';
   const standing = (escalationTriggers as readonly string[]).includes(trigger);
+  const detail = action.inputs.kind === 'escalate' ? action.inputs.detail : action.reason;
+  // A standing trigger is settled by resolving it. Everything else is a gate refusing something
+  // no executor step answers — an exhausted reviewer roster, an unverified branch protection —
+  // and what has to be decided is named in the refusal itself, so the command that reads it out
+  // with the item's own state is the one to run: the same fallback `master status` uses.
   return { decision: `resolving ${action.key}'s ${trigger} ${standing ? 'escalation' : 'refusal'}`,
-    resolve: standing ? escalationResolution(action.key, trigger) : action.inputs.kind === 'escalate' ? action.inputs.detail : `graphyard diagnose ${action.key}` };
+    resolve: standing ? escalationResolution(action.key, trigger) : `graphyard diagnose ${action.key} — ${detail}` };
 }
 
 const carriedConcern = (key: string, escalation: { trigger: string; reason: string; at: string }): CarriedConcern =>

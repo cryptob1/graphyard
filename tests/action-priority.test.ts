@@ -355,7 +355,7 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   assert.equal(computed.kind, 'escalate');
   assert.equal(actionJudgment.escalate, 'in-step');
   assert.ok(!executorRunnableKinds.includes('escalate'), 'no executor may hold a handler for it, so no executor will ever claim the row');
-  assert.deepEqual(computed.needsHuman, { decision: `resolving ${owedItem.key}'s merge refusal`, resolve: refusal });
+  assert.deepEqual(computed.needsHuman, { decision: `resolving ${owedItem.key}'s merge refusal`, resolve: `graphyard diagnose ${owedItem.key} — ${refusal}` });
   assert.deepEqual(humanNeeded(computed), computed.needsHuman, 'what the action records is what the rule says');
 
   // Beside it, a row an executor is simply yet to take.
@@ -381,7 +381,7 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   const page = humanNeededAttention({ work, now: now.toISOString() });
   assert.deepEqual(page.map(entry => [entry.subject, entry.role, entry.approvedBy]), [[owedItem.key, 'master', 'approver']]);
   assert.match(page[0].text, /no executor may run it/);
-  assert.equal(page[0].next, refusal);
+  assert.equal(page[0].next, `graphyard diagnose ${owedItem.key} — ${refusal}`, 'and the command that reads out what it is waiting on');
 
   // Counted apart from work that is merely queued: the two rows are both unclaimed, and only one
   // of them is waiting for an executor.
