@@ -902,9 +902,32 @@ request that has no session yet:
   path in `GRAPHYARD_TOKEN_FILE`, never as a value, works in a detached worktree of the exact
   head in the session directory allocated for it under the
   [managed worktree root](#the-managed-worktree-root), outside every Graphyard worktree, and submits each proof with `graphyard evidence` bound
-  to that exact head, base and policy revision — a failing run as `fail`, never omitted. With
-  fewer free producer profiles than groups the remaining groups wait and `master status` says
-  so; add profiles for parallelism.
+  to that exact head, base and policy revision — a failing run as `fail`, never omitted. The
+  launcher selects among the independent profiles up to each one's concurrency (below); with
+  fewer free slots than groups the remaining groups wait and `master status` says which limit
+  they wait on.
+
+**Each role runs as many sessions at once as its profiles declare.** A reviewer or producer
+profile carries `concurrency` (1–20; absent means 1): how many sessions it runs at the same time.
+Concurrency is declared per role in the fleet configuration — the reviewer profiles bound the
+review lane, the producer profiles the proof lane — never implied by a profile's single agent
+name, which is what once serialised every review and every proof run across the whole
+installation. A profile that runs one session keeps its fixed `agentName`; one that runs more
+gives each session a name unique to its request (`<agentName>-<first 8 hex of the request id>`,
+with the attempt appended after the first, composed inside Herdr's 32-character limit so a long
+profile name gives way to a digest while the tail stays whole), so a second review on another
+item launches while the first runs and the two never share a Herdr name, a tab label or a
+session directory. The
+dispatcher counts a profile's running sessions from Herdr's inventory on every tick — every agent
+carrying one of its names, and every agent a pending ledger record of the profile names — and
+launches on the first profile with a slot left; a request no profile has room for waits, and the
+tick names the limit (`every reviewer profile is busy: claude-reviewer: at its concurrency limit
+(3 running, limit 3)`). The limit is read from `.graphyard/master.json` before each tick like
+every other profile setting, so raising it starts more sessions on the next tick without a
+restart, and lowering it launches nothing new until the running sessions drain — none is stopped.
+A producer's independence stays per item, never per process: a profile whose principal has held
+an assignment on the item is skipped for that item however many slots it has, and the control
+plane refuses that principal's evidence for the item regardless of who launched the session.
 
 A request has **one live session at a time**: the reviewer ledger (`.graphyard/reviews.json`)
 and the producer ledger (`.graphyard/producers.json`) record which request each session answers,
@@ -997,6 +1020,18 @@ cadence, last tick and failures, and `counts.dispatchRequested`, `counts.dispatc
 `counts.dispatchAwaiting` total the requests, the acknowledged sessions running for them, and
 the sessions still awaiting acknowledgement.
 
+Queueing at the gates is visible without reading a session list: `concurrency` reports, per role,
+`running` against `limit` (the sum of the role's profile concurrencies, with each profile's own
+`running`, `limit` and session names under `profiles`), `waiting` — the open requests with no
+session that nothing but a slot holds: no refused launch, no retry still backing off, no settled
+session that no attempt follows, and for a producer request at least one profile independent of
+the item — `longestWaitMs` with the request that has waited longest under `longest`, and `starved`
+when `running` has reached `limit` with requests waiting. A role starved for ten minutes is raised
+in `attentionItems` as `reviewer concurrency` or `producer concurrency`, addressed to the master
+with the remedy (raise `concurrency` on a profile, or add a profile on another account), and
+counted in `counts.concurrencyStarved`. How to size the limits against the worker count is in
+[onboarding](onboarding.md#size-review-and-proof-capacity).
+
 A tick whose snapshot read fails or times out is retried promptly with a widening wait, and
 each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…), up to the
 dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
@@ -1012,6 +1047,7 @@ Profiles change while the loop runs; it adopts each change on its next tick.
 | `master producer replace FILE` | Replace the producer profile of the same name — a new principal, credential, kind or agent name — verified like `add` |
 | `master producer remove NAME` | Remove a producer profile; sessions it launched stay in the ledger and settle as usual |
 | `master reviewer remove NAME` | Remove a reviewer profile; a `run.reviewerProfile` naming it is cleared with it |
+| `concurrency` in a profile | How many sessions the reviewer or producer profile runs at once (1–20, default 1); set it in the profile file `add` reads or edit `.graphyard/master.json`, and the next tick honours it |
 
 `master status` reports setup that would silently stop every launch under `setup.attention`: a
 reviewer App that `master reviewer setup` registered but that was never bound (the flow stopped
