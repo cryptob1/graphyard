@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
+import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { dispatchSummary, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -92,8 +93,8 @@ const herdr = (calls: string[][], answer: (args: string[]) => unknown = () => ({
   calls.push(args);
   const custom = answer(args);
   if (custom !== undefined && custom !== null && typeof custom === 'object' && Object.keys(custom as object).length) return JSON.stringify(custom);
-  return JSON.stringify({ result: args[0] === 'tab' && args[1] === 'create' ? { type: 'tab_created', root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' }, tab: { tab_id: 'tab-1' } }
-    : args[0] === 'agent' && args[1] === 'get' ? { agent: { pane_id: 'pane-1', agent_status: 'idle' } }
+  // The typed launch is accepted and its runtime seen ready at once (GY-121 startedAtOnce).
+  return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' && args[1] === 'create' ? { type: 'tab_created', root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' }, tab: { tab_id: 'tab-1' } }
     : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 };
 const tabEnvironment = (tab: string[]) => Object.fromEntries(tab.flatMap((value, index) => value === '--env' ? [tab[index + 1].split(/=(.*)/s).slice(0, 2)] : []));
@@ -224,10 +225,14 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const dispatched = await dispatchWork(root, ready(), config.workers[0], [], herdr(calls), [ready()], async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe });
     const tab = tabEnvironment(calls[0]);
     assert.equal(tab.CLAUDE_CONFIG_DIR, homes.fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
-    // GY-93: the role file is followed by the launch authorization it leaves out, then the request.
-    assert.ok(calls[1][3]!.includes(`'--' 'claude' '--permission-mode' 'bypassPermissions' '--setting-sources' 'user' '--settings' '${sessionHarnessFile(root, 'worker', 'worker-a')}' '--append-system-prompt' '`), 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
-    assert.match(calls[1][3]!, /'Implement GY-68: [^']*'$/, 'the request is the last argument');
-    assert.doesNotMatch(calls[1][3]!, /gpt-codex/);
+    // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
+    // GY-121: both come from the files in the worktree that the short typed line references.
+    assert.match(calls[1][3]!, / -- claude --permission-mode bypassPermissions --setting-sources user --settings \S+ --append-system-prompt-file "\$GY\.role" "\$\(cat "\$GY\.request"\)"$/, 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
+    const worker = expandTypedCommand(calls[1][3]!);
+    assert.equal(worker.kind, 'claude'); assert.equal(worker.args[5], sessionHarnessFile(root, 'worker', 'worker-a'));
+    assert.equal(roleOf(worker.args), launchAuthorization.replace(/\s+/g, ' '), 'the role file holds the launch authorization');
+    assert.match(worker.args.at(-1)!, /^Implement GY-68: /, 'the request is the last argument');
+    assert.doesNotMatch(calls[1][3]! + worker.args.join(' '), /gpt-codex/);
     assert.equal(dispatched.account!.environment, 'claude-c'); assert.deepEqual(dispatched.account!.skipped.map(entry => entry.environment), ['codex', 'claude-a', 'claude-b']);
     let claimed = false;
     await assert.rejects(dispatchWork(root, ready(), config.workers[1], [], herdr([]), [ready()], async () => { claimed = true; return { epoch: 9, path: root, base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { probe }), /No healthy agent account for worker profile worker-spent/);
@@ -266,10 +271,11 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const reviewedCross = await launchReview(root, work(), 'review-cross', [], new Date().toISOString(), { run: herdr(reviewCrossCalls), mint, probe });
     assert.equal(reviewedCross.account!.environment, 'claude-c');
     assert.equal(tabEnvironment(reviewCrossCalls[0]).CLAUDE_CONFIG_DIR, homes.fresh);
-    const reviewStart = reviewCrossCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
-    assert.equal(reviewStart[4], 'claude', 'the session runs the account\'s runtime, not the profile\'s');
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--') + 1, -1), ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', sessionHarnessFile(root, 'reviewer', 'review-cross'), '--append-system-prompt', launchAuthorization.replace(/\s+/g, ' ')]);
-    assert.match(reviewStart.at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
+    const reviewStart = expandTypedCommand(reviewCrossCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+    assert.equal(reviewStart.kind, 'claude', 'the session runs the account\'s runtime, not the profile\'s');
+    assert.deepEqual(reviewStart.args.slice(0, -1), ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', sessionHarnessFile(root, 'reviewer', 'review-cross'), '--append-system-prompt-file', `${reviewStart.stem}.role`]);
+    assert.equal(roleOf(reviewStart.args), launchAuthorization.replace(/\s+/g, ' '));
+    assert.match(reviewStart.args.at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
     const roleFile = JSON.parse(await readFile(sessionHarnessFile(root, 'reviewer', 'review-cross'), 'utf8'));
     assert.ok(roleFile.permissions.allow.includes('Bash(gh api --method POST repos/owner/project/pulls/68/reviews*)'), 'the failed-over reviewer keeps its one verdict allow');
     assert.ok(roleFile.permissions.deny.includes('Bash(git push:*)'), 'the failed-over reviewer keeps its role denies');
@@ -284,9 +290,9 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const produceCrossCalls: string[][] = [];
     const producedCross = await launchProducer(root, producingCross, requestedCross, config.producers.find(profile => profile.name === 'producer-cross')!, [], new Date().toISOString(), { run: herdr(produceCrossCalls), probe });
     assert.equal(producedCross.account!.environment, 'codex-b'); assert.deepEqual(producedCross.account!.skipped.map(entry => entry.environment), ['claude-a', 'claude-b']);
-    const produceStart = produceCrossCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
-    assert.equal(produceStart[4], 'codex', 'the session runs the account\'s runtime, not the profile\'s');
-    const produceTail = produceStart.slice(produceStart.indexOf('--') + 1);
+    const produceStart = expandTypedCommand(produceCrossCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+    assert.equal(produceStart.kind, 'codex', 'the session runs the account\'s runtime, not the profile\'s');
+    const produceTail = produceStart.args;
     assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', sharedGitDirectory(root)]);
     assert.match(produceTail.at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
@@ -414,10 +420,10 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     // The master itself launches with its broadest mode, on its own request (GY-93).
     const masterCalls: string[][] = [];
     await startMaster(root, 'codex', [], [], herdr(masterCalls));
-    const start = masterCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
-    assert.deepEqual(start.slice(start.indexOf('--') + 1, start.indexOf('--') + 5), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
-    assert.ok(start.includes('sandbox_workspace_write.network_access=true') && start.includes(join(credentialDirectory, 'masters')));
-    assert.deepEqual(masterCalls.map(args => args[1]), ['create', 'start']); assert.match(start.at(-1)!, /dedicated Graphyard master agent/);
+    const start = expandTypedCommand(masterCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+    assert.equal(start.kind, 'codex'); assert.deepEqual(start.args.slice(0, 4), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
+    assert.ok(start.args.includes('sandbox_workspace_write.network_access=true') && start.args.includes(join(credentialDirectory, 'masters')));
+    assert.deepEqual(masterCalls.map(args => args[1]), ['create', 'run', 'get', 'rename'], 'typed, seen ready, named; nothing pasted'); assert.match(start.args.at(-1)!, /dedicated Graphyard master agent/);
 
     // The master harness covers everything the master owns, and still no merge path or credential
     // read: master.json is read, never edited — its owned settings change through `master config` —

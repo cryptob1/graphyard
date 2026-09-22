@@ -14,6 +14,7 @@ import type { GitHub } from '../src/github.js';
 import { Refusal, standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { assembleEscalationContext, canonical, contextFingerprint, contextLadder, defaultContextBudget, followPrecedent, handleEscalation, type EscalationContext } from '../src/model/escalation-context.js';
 import { launchEscalationHandler, masterConfigSchema, runAutonomyCommand, type AutonomyDependencies, type MasterConfig } from '../src/master.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { Store } from '../src/store.js';
 
 // GY-90: the control plane assembles an escalation's context from the project — the repository's
@@ -329,15 +330,18 @@ console.log(JSON.stringify({ result, reads }));
   const herdr = (_command: string, args: string[]) => {
     herdrCalls.push(args);
     if (args[0] === 'tab' && args[1] === 'create') return JSON.stringify({ result: { root_pane: { pane_id: 'pane-escalation', tab_id: 'tab-escalation' } } });
-    return JSON.stringify({ result: {} });
+    return startedAtOnce(args) ?? JSON.stringify({ result: {} });
   };
   const launched = await launchEscalationHandler(masterRoot, config, before, 'claude', [], herdr);
   assert.equal(launched.delivery, 'request');
-  const start = herdrCalls.find(call => call[0] === 'agent' && call[1] === 'start')!;
-  assert.deepEqual(start.slice(2, 7), [launched.agentName, '--kind', 'claude', '--pane', 'pane-escalation']);
-  assert.ok(start.includes('--timeout'), 'the start is bounded, so a session already at work on its request is adopted rather than closed');
-  const request = start.at(-1)!;
-  assert.ok(start.indexOf('--') > 0 && start.indexOf('--') < start.length - 1, 'the request follows the runtime arguments');
+  // GY-121: the typed line references the request file in the master's own checkout; the shell hands the runtime its text.
+  const typed = herdrCalls.find(call => call[0] === 'pane' && call[1] === 'run')!;
+  assert.equal(typed[2], 'pane-escalation');
+  const start = expandTypedCommand(typed[3]);
+  assert.equal(start.kind, 'claude'); assert.equal(start.stem, join(masterRoot, '.graphyard/launch', launched.agentName));
+  assert.deepEqual(herdrCalls.find(call => call[0] === 'agent' && call[1] === 'rename')?.slice(2), ['pane-escalation', launched.agentName], 'the started runtime takes the session name');
+  const request = start.args.at(-1)!;
+  assert.ok(start.args.length > 1 && start.args.slice(0, -1).every(word => word.startsWith('--') || word === 'bypassPermissions'), 'the request follows the runtime arguments');
   assert.match(request, new RegExp(`^You are a Graphyard escalation handler spawned for the requirement-weakening escalation on ${work.key}`));
   assert.ok(request.includes(launched.context) && request.includes(`--context ${before.fingerprint}`), 'the prompt names the context file and its fingerprint');
   assert.equal(herdrCalls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0, 'nothing is typed into the session');
