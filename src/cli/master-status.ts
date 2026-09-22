@@ -11,6 +11,7 @@ import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
+import { readThroughputMeasurement, throughputClaimVisibility } from '../throughput.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 
@@ -215,10 +216,16 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   }
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
+  // GY-87's throughput claim against the release now serving: verified, or unverified with what
+  // missed. Delivered is not proven, and nothing else on this report would say which this is.
+  const throughput = throughputClaimVisibility(await readThroughputMeasurement(root).catch(() => null),
+    { revision: coordinator?.release?.revision ?? null, version: coordinator?.release?.version ?? null },
+    snapshot.work.filter((item: Work) => item.stage === 'done' && item.delivery).length);
+  if (throughput.attention) attentionItems.push(throughput.attention);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
-    terminalDecisions: decisions.listed,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + (throughput.attention ? 1 : 0) + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    terminalDecisions: decisions.listed, throughput,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
