@@ -183,8 +183,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // credential is gone, a Herdr workspace that no longer exists.
   const reviewerBinding = await reviewerBindingHealth(master);
   const workspace = herdrWorkspaceHealth(master);
-  // Supervision verified, not assumed (GY-114): GY-84's automatic restart held only where somebody
-  // had installed and enabled a supervisor, which nothing checked. Read from the host, every run.
+  // GY-114: supervision is read from the host every run, never assumed.
   const supervisor = await loopSupervision({ root, cliPath: master.cliPath }, dependencies.supervisorHost);
   const supervisorAttention = loopSupervisionAttention(supervisor);
   const setup = { reviewer: reviewerBinding, supervisor, herdrWorkspace: workspace,
@@ -238,7 +237,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above).
   attentionItems.unshift(...loopItems);
-  // An unsupervised loop is why a stopped loop stays stopped; each state names what repairs it.
+  // An unsupervised loop stays stopped; each state names its repair.
   for (const item of supervisorAttention) attentionItems.push({ subject: 'setup', text: item.text, ...agentOwner('master', item.next) });
   // Setup that stops every launch is the master's to repair.
   for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
