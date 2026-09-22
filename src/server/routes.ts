@@ -11,6 +11,7 @@ import type { DelegationLimitReport } from './limits.js';
 import type { BuildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import type { Principal } from '../model.js';
+import type { InterventionPolicy } from '../model/interventions.js';
 
 /** Everything the assembled control plane owns, handed to every route. */
 export interface Services {
@@ -24,6 +25,8 @@ export interface Services {
   /** Production deployment observation, when the process hosts one. */
   production: ProductionWatch | null;
   validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents; proofGrants: ProofGrants; productionDelivery: ProductionDelivery;
+  /** When a recurring intervention becomes work (GY-98): the threshold and window read at boot. */
+  interventionPolicy: InterventionPolicy;
 }
 
 /** The response was written by the handler itself (raw bytes, or a status other than 200). */

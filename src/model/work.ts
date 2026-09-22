@@ -14,6 +14,7 @@ import type { ScopeDecision, ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import { proofSchema } from './proof.js';
+import { workOriginSchema } from './interventions.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
@@ -38,6 +39,9 @@ export const createSchema = z.object({
   // the human operator. See model/dispatch.ts.
   producerProofs: z.array(proofSchema).max(50).optional().refine(proofs => !proofs || proofs.every(proof => proof.startsWith('manual:')), 'producerProofs names only manual: proofs; unit and integration proofs are producer-runnable already')
     .refine(proofs => !proofs || new Set(proofs).size === proofs.length, 'producerProofs must be unique'),
+  // Where Graphyard itself opened the item from feedback (GY-98): a recurring intervention
+  // pattern with its linked instances, or an operator's judgement about delivered work.
+  origin: z.lazy(() => workOriginSchema).optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent

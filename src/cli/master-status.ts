@@ -11,6 +11,7 @@ import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
+import { interventionSummary } from './intervention-status.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 
@@ -241,7 +242,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   }
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
-  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
+  const interventions = await interventionSummary(masterApi);
+  attentionItems.push(...interventions.attentionItems);
+  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems], interventions: interventions.summary,
     counts: { ...status.counts, dispatchUnanswered: unanswered.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
