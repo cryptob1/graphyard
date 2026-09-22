@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { broadScope, dispatchOrder, dispatchOverlap, scopeBreadth } from '../src/coordination.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 import { candidateConflicts, fetchCandidateHeads, gitConflictProbe } from '../src/conflicts.js';
 import { assertDispatchable, buildMasterStatus, dispatchSchedule, dispatchWork, masterConfigSchema, sequenceAdvice, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -92,7 +93,7 @@ test('unit:overlap-detection — dispatch holds an overlapping item unless the o
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
     const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
     const calls: string[][] = [];
-    const herdr = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'p1', agent_status: 'idle' } } : {} }); };
+    const herdr = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : {} }); };
     const prepare = async () => ({ epoch: 2, path: join(root, 'assigned'), base: 'c'.repeat(40) });
     await assert.rejects(dispatchWork(root, item, profile, [], herdr, [item, live], prepare, async () => {}, 1, iso(0)), /held by planned-file overlap/);
     assert.equal(calls.length, 0, 'a held dispatch creates no session');

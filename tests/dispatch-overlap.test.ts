@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, dispatchOverlap, effectiveConcurrency, exclusionPaths } from '../src/coordination.js';
 import { assertDispatchable, broadScopeFlag, buildMasterStatus, dispatchSchedule, dispatchWork, guardBroadScope, masterConfigSchema, runAutonomyCommand, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
@@ -231,7 +232,7 @@ test('integration:hold-is-bounded — a hold three deep names its chain, is hono
       const credential = join(credentialDirectory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
       await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
       const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
-      const herdr = (_command: string, args: string[]) => JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'p1', agent_status: 'idle' } } : {} });
+      const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : {} });
       const prepare = async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) });
       await assert.rejects(dispatchWork(root, x, profile, [], herdr, all, prepare, async () => {}, 1, iso(0)), /held by planned-file overlap/);
       const result = await dispatchWork(root, x, profile, [], herdr, all, prepare, async () => {}, 1, iso(40 * 60_000));

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, statfs, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
@@ -1013,45 +1013,174 @@ export function preservePartialWork(path: string, label: string, run: (command: 
  * own command line instead, where it is the user's own first message: Claude Code, Codex and
  * Cursor as a positional argument after their flags, OpenCode through `--prompt`. A runtime with
  * no such contract keeps the paste, and the record says so.
+ *
+ * What is typed into the pane is short and constant-size (GY-121). Herdr types a launch command
+ * into an interactive shell keystroke by keystroke and the shell redraws the line as it grows, so
+ * a multi-kilobyte request took the whole start bound to echo under host load and the runtime was
+ * declared dead before it existed. The request and the role authorization are written to files
+ * inside the session's own checkout directory instead (`.graphyard/launch/NAME.request` and
+ * `NAME.role`, mode 0600, removed with the checkout), and the command line references them by
+ * their shared stem, `GY=DIR/.graphyard/launch/NAME;`: the role file through the runtime's own
+ * flag (`--append-system-prompt-file "$GY.role"`), the request through the shell's own
+ * substitution (`"$(cat "$GY.request")"`), which the interactive POSIX shell expands before the
+ * runtime starts, so the text is still the runtime's own first argument and never a paste. The
+ * typed line holds only the runtime, its flags and one path, and is bounded by
+ * `launchCommandLimit` whatever the request is.
  */
-export const launchRequestContracts: Record<string, (text: string) => string[]> = {
-  claude: text => [text], codex: text => [text], cursor: text => [text], opencode: text => ['--prompt', text],
+export const launchRequestContracts: Record<string, (reference: string) => string> = {
+  claude: reference => reference, codex: reference => reference, cursor: reference => reference, opencode: reference => `--prompt ${reference}`,
 };
+/** How a runtime loads the launch authorization from a file; only Claude Code, which leaves AGENTS.md out under a role file, needs one. */
+export const launchRoleContracts: Record<string, (reference: string) => string> = { claude: reference => `--append-system-prompt-file ${reference}` };
 export type RequestDelivery = 'request' | 'paste';
-export function launchRequest(kind: string | undefined, text: string): { args: string[]; delivery: RequestDelivery } {
-  const contract = kind ? launchRequestContracts[kind] : undefined;
-  return contract ? { args: contract(text), delivery: 'request' } : { args: [], delivery: 'paste' };
+export const launchDelivery = (kind: string | undefined): RequestDelivery => kind && launchRequestContracts[kind] ? 'request' : 'paste';
+/** The most bytes a launch command line may hold: the runtime, its flags and two file paths, never the request. */
+export const launchCommandLimit = 512;
+export const launchDirectory = (directory: string) => resolve(directory, '.graphyard/launch');
+/** The session's launch files: `stem` is `DIR/.graphyard/launch/NAME`, and each file present is `STEM.role` or `STEM.request`. */
+export interface LaunchFiles { stem: string; role: string | null; request: string | null }
+/** A word for the pane's shell: bare when it needs no quoting, single-quoted otherwise. */
+export const shellWord = (value: string) => /^[A-Za-z0-9_./:=@%+,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+/** The shell variable the command line binds to the stem, so each file is referenced once and the line stays short. */
+export const launchVariable = 'GY';
+const roleReference = `"$${launchVariable}.role"`, requestReference = `"$(cat "$${launchVariable}.request")"`;
+/**
+ * Writes the session's request and role authorization where its command line reads them: private
+ * files under the checkout's own `.graphyard/launch/`, holding the exact text, replaced on every
+ * launch under the same name and removed with the checkout.
+ */
+export function writeLaunchFiles(directory: string, name: string, text: { role?: string | null; request?: string | null }): LaunchFiles {
+  const folder = launchDirectory(directory);
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const stem = resolve(folder, name);
+  const write = (suffix: string, value: string | null | undefined) => {
+    if (value === null || value === undefined) return null;
+    writeFileSync(`${stem}.${suffix}`, value, { mode: 0o600 }); chmodSync(`${stem}.${suffix}`, 0o600);
+    return `${stem}.${suffix}`;
+  };
+  return { stem, role: write('role', text.role), request: write('request', text.request) };
+}
+/** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), the runtime, its arguments and the file references. */
+export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = []) {
+  const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
+  const request = files.request ? launchRequestContracts[kind]?.(requestReference) : undefined;
+  const binding = role || request ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
+  const command = [...binding, ...prefix.map(shellWord), kind, ...args.map(shellWord), ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  const bytes = Buffer.byteLength(command);
+  if (bytes > launchCommandLimit) throw new Error(`the launch command line is ${bytes} bytes, over the ${launchCommandLimit}-byte bound; it holds only the runtime, its flags and the paths of the session's request and role files, so shorten the repository path, the managed worktree root or the profile's agent arguments: ${command.slice(0, 160)}…`);
+  return command;
 }
 
 /**
- * Start a session on its request. Herdr's `agent start` returns once the runtime is ready for
- * input, which a session already at work on its own first request may not show within the bound:
- * a start that times out on a pane where Herdr sees the expected runtime acting is a session that
- * started, and it is named rather than closed. Only a runtime without a request contract is
- * prompted after it starts, through the confirmed paste delivery below.
+ * The start bound reads the pane rather than guessing against a clock (GY-121). Herdr's `agent
+ * get` names the runtime occupying the pane and whether it is ready; the pane's text shows the
+ * runtime's own screen — its banner, its spinner over the request it is already working on —
+ * before Herdr classifies it, or the launch command still echoing, or the runtime's own error.
+ * The producers this item was filed for died exactly there: Claude Code was on screen with its
+ * spinner while Herdr still reported it `unknown` at 30 s, and the launcher closed a live session.
+ *
+ * A runtime seen ready within `agentStartTimeoutMs` has started: Herdr reports it `idle` or
+ * `done`, or `working` for a session already at work on its own request — or Herdr reports the
+ * runtime under the pane, whatever it makes of its state, and the runtime's screen is showing:
+ * that session is adopted, never closed. A runtime still to be prompted must be reported idle.
+ * One that is *starting* at the bound — its process exists under the pane but nothing of it is on
+ * screen yet, or its banner is on screen before Herdr sees a process — is given until
+ * `agentStartCeilingMs`; one that is absent at the bound never started; one `blocked` before it
+ * is ready sits at a dialog no launcher answers and is refused at once, as before. Every refusal
+ * names which case it saw and the pane's last non-empty line, bounded, so the operator reads
+ * `command still echoing`, the dialog, or the runtime's own words rather than Herdr's
+ * `agent_not_found`.
+ */
+export const agentStartTimeoutMs = 30_000, agentStartCeilingMs = 120_000, startPollMs = 500, paneLineLimit = 200;
+export const startedStates = ['idle', 'done', 'working'], promptableStates = ['idle', 'done'];
+/**
+ * The runtime's own screen, per kind: its banner, its status line, or its spinner at the start of a
+ * line (Claude Code's `∙ ✻ ✶ ✳ ✢` over the request it is working on). Nothing here matches the
+ * echoed launch command — lowercase runtime names, no spaces inside `bypassPermissions` — or a
+ * shell prompt, whose `❯` some shells draw at the start of a line too.
+ */
+export const runtimeScreens: Record<string, RegExp> = {
+  claude: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
+  codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\bOpenCode\b/, gemini: /\bGemini\b/,
+};
+export type StartState = 'ready' | 'starting' | 'absent' | 'blocked';
+export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string }
+export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; wait?: (ms: number) => void; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[] }
+export class SessionStartError extends Error {
+  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
+}
+/** The pane's terminal as text, unwrapped; null when Herdr cannot read it. */
+export function readPaneScreen(pane: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), lines = 40) {
+  try { return String(run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
+}
+/** The pane's last non-empty line, bounded for a record. */
+export function paneLastLine(text: string | null, limit = paneLineLimit) {
+  const line = (text ?? '').split('\n').map(entry => entry.replace(/\s+/g, ' ').trim()).filter(Boolean).at(-1) ?? '';
+  return line.length > limit ? `${line.slice(0, limit)}…` : line;
+}
+/** Whether the pane's last line is the launch command itself — typed, or still being typed — and not yet answered: it opens with the stem binding and names the runtime. */
+export const commandEchoing = (line: string, command: string) => !!line && (line.includes(command.slice(0, 24)) || (line.includes(`${launchVariable}=`) && line.includes(` ${command.replace(/^GY=\S+; /, '').split(' ')[0]}`)));
+export function observeStart(pane: string, kind: string, command: string, run?: (command: string, args: string[]) => string, readyStates = startedStates): StartObservation {
+  let agent: HerdrAgent | null = null;
+  try { const raw = herdrJson(['agent', 'get', pane], run); agent = raw?.agent ?? raw ?? null; } catch { agent = null; }
+  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
+  const screen = readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
+  const showing = screen !== null && !!runtimeScreens[kind]?.test(screen);
+  if (agent?.agent === kind && agent.agent_status === 'blocked') return { state: 'blocked', agent, detail: 'Herdr reports it blocked', line };
+  // Herdr sees the runtime's process and its screen is showing: a session at work that Herdr has
+  // not classified yet, adopted rather than closed — unless it is still to be prompted, when only
+  // Herdr's idle counts.
+  if (agent?.agent === kind && showing && readyStates.includes('working')) return { state: 'ready', agent, detail: `the ${kind} runtime is on screen while Herdr reports it ${agent.agent_status ?? 'unknown'}`, line };
+  if (agent?.agent === kind) return { state: 'starting', agent, detail: `the ${kind} runtime process exists under the pane, Herdr reports it ${agent.agent_status ?? 'unknown'}${showing ? ', its screen showing' : ''}`, line };
+  if (showing) return { state: 'starting', agent: null, detail: `the ${kind} banner is on screen`, line };
+  return { state: 'absent', agent: null, line, detail: commandEchoing(last, command) ? 'command still echoing' : agent?.agent ? `the pane holds ${agent.agent}, not ${kind}` : 'no runtime under the pane' };
+}
+export function awaitRuntimeStart(pane: string, kind: string, command: string, run?: (command: string, args: string[]) => string, bounds: StartBounds = {}) {
+  const timeoutMs = bounds.timeoutMs ?? agentStartTimeoutMs, ceilingMs = Math.max(timeoutMs, bounds.ceilingMs ?? agentStartCeilingMs), pollMs = bounds.pollMs ?? startPollMs;
+  const clock = bounds.clock ?? Date.now, wait = bounds.wait ?? ((ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); });
+  const startedAt = clock();
+  const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
+  let extended: string | null = null;
+  for (;;) {
+    const observed = observeStart(pane, kind, command, run, bounds.readyStates), waitedMs = clock() - startedAt;
+    if (observed.state === 'ready') return { ...observed, waitedMs, extended };
+    const quoted = observed.line ? `; the pane last showed: "${observed.line}"` : '; the pane showed nothing';
+    if (observed.state === 'blocked') throw new SessionStartError('blocked', pane, observed.line, waitedMs, `the ${kind} runtime is blocked before it is ready in pane ${pane} (${observed.detail})${quoted}`);
+    if (waitedMs >= timeoutMs && observed.state !== 'starting') throw new SessionStartError('never started', pane, observed.line, waitedMs, `the ${kind} runtime never started within ${seconds(timeoutMs)} in pane ${pane} (${observed.detail})${quoted}`);
+    if (waitedMs >= ceilingMs) throw new SessionStartError('still starting', pane, observed.line, waitedMs, `the ${kind} runtime was still starting after ${seconds(ceilingMs)} in pane ${pane} (${observed.detail})${quoted}`);
+    if (waitedMs >= timeoutMs) extended ??= `${observed.detail} at ${seconds(timeoutMs)}; waiting up to ${seconds(ceilingMs)}`;
+    wait(pollMs);
+  }
+}
+
+/**
+ * Start a session on its request: its files are written, the short command line is typed into the
+ * pane, and the pane is read until the runtime is ready (awaitRuntimeStart), when Herdr's record
+ * of it takes the session's name. Only a runtime without a request contract is prompted after it
+ * starts, through the confirmed paste delivery below.
  *
  * The name goes in before the runtime does. A name the runtime would refuse — too long, or built
  * from characters it does not take — is refused here as that refusal, naming the limit, the name
  * attempted and the command that retries the launch, rather than reaching the caller as whatever
  * the runtime says about its arguments (GY-101).
  */
-export const agentStartTimeoutMs = 30_000;
-export function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { timeoutMs?: number; confirm?: 'inline' | 'follow'; retry?: string } = {}) {
-  const request = launchRequest(kind, text);
+export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string }
+export function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ((command: string, args: string[]) => string) | undefined, options: SessionStart) {
   assertSessionName(name, options.retry);
-  try { herdrJson(['agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', String(options.timeoutMs ?? agentStartTimeoutMs), '--', ...args, ...request.args], run); }
+  const delivery = launchDelivery(kind);
+  const files = writeLaunchFiles(options.directory, name, { role: options.role, request: delivery === 'request' ? text : null });
+  const command = launchCommand(kind, args, files, options.prefix);
+  herdrRun(['pane', 'run', pane, command], run);
+  const started = awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });
+  try { herdrJson(['agent', 'rename', pane, name], run); }
   catch (error) {
     // A runtime whose own naming rules are narrower than the ones checked above says so in its
     // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
     if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
-    if (request.delivery !== 'request' || herdrErrorCode(error) !== 'timeout') throw error;
-    const raw = herdrJson(['agent', 'get', pane], run);
-    const agent = raw?.agent ?? raw;
-    if (agent?.agent !== kind || !['working', 'idle', 'done'].includes(agent?.agent_status)) throw error;
-    herdrJson(['agent', 'rename', pane, name], run);
+    throw error;
   }
-  if (request.delivery === 'paste') deliverPrompt(name, text, run, options);
-  return { delivery: request.delivery };
+  if (delivery === 'paste') deliverPrompt(name, text, run, options);
+  return { delivery, command, files, started: { detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
 /**
@@ -2291,23 +2420,6 @@ export function observeHerdrAgents(run?: (command: string, args: string[]) => st
   catch { return { agents: [] as HerdrAgent[], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' }; }
 }
 
-/** `onRequest`: the session started on its own request (launchRequest), so one already working is ready too; a session still to be prompted must be idle. */
-export function waitForHerdrAgent(target: string, run?: (command: string, args: string[]) => string, timeoutMs = 30_000, onRequest = false) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
-    let agent: any;
-    try {
-      const raw = herdrJson(['agent', 'get', target], run);
-      agent = raw?.agent ?? raw;
-    } catch (error) { lastError = error; }
-    if (agent?.agent_status === 'blocked') throw new Error('Launched worker is blocked before it is ready for a prompt');
-    if (['idle', 'done', ...(onRequest ? ['working'] : [])].includes(agent?.agent_status)) return agent as HerdrAgent;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
-  }
-  throw new Error(`Launched worker did not become visible in Herdr within ${timeoutMs}ms${lastError instanceof Error ? `: ${lastError.message}` : ''}`);
-}
-
 export function closeHerdrPane(pane: string, run?: (command: string, args: string[]) => string, timeoutMs = 5_000) {
   herdrJson(['pane', 'close', pane], run);
   const deadline = Date.now() + timeoutMs;
@@ -2466,16 +2578,18 @@ async function repositoryCarriesClaudeSettings(root: string) {
  * settings. A Claude session under a repository that carries no project settings inherits nothing
  * and is launched with its profile arguments unchanged. Loading only the user settings also leaves
  * out the repository's AGENTS.md, so such a session carries the launch authorization written there
- * (repository-setup.ts launchAuthorization) on its own command line instead.
+ * (repository-setup.ts launchAuthorization) as its role text, loaded from the session's role file.
  */
 export async function prepareSessionHarness(root: string, config: MasterConfig, input: Omit<SessionHarnessInput, 'cliPath' | 'repository' | 'baseBranch' | 'credentialHome' | 'credentialDirectories'> & { profile: string; credentialFiles?: string[] }) {
   const plan = sessionHarnessPlan({ ...input, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),
     credentialDirectories: [dirname(config.credentialFile), ...(config.reviewer ? [dirname(config.reviewer.credentialFile)] : []), ...(input.credentialFiles ?? []).map(file => dirname(file))] });
-  if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[] };
+  if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null };
   const file = sessionHarnessFile(root, input.role, input.profile);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) } }, null, 2)}\n`);
-  return { plan, file, args: ['--setting-sources', 'user', '--settings', file, '--append-system-prompt', launchAuthorization.replace(/\s+/g, ' ')] };
+  // The authorization is the session's role text: startAgentSession writes it to the session's
+  // role file and the command line loads that file (GY-121), never the text itself.
+  return { plan, file, args: ['--setting-sources', 'user', '--settings', file], role: launchAuthorization.replace(/\s+/g, ' ') as string | null };
 }
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
@@ -2506,7 +2620,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it.
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { confirm: 'follow', retry: masterRetry }));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
@@ -2519,7 +2633,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
 type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies };
 
-export interface DispatchOptions { allowOverlap?: boolean; holdBoundMs?: number; probe?: EnvironmentProbe; prompt?: PromptDelivery }
+export interface DispatchOptions { allowOverlap?: boolean; holdBoundMs?: number; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds }
 export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
   const now = Date.parse(observedAt);
@@ -2562,7 +2676,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
-      try { ({ target, harness, dependencies, delivery } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt)); break; }
+      try { ({ target, harness, dependencies, delivery } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start)); break; }
       catch (error) { if (!(error instanceof PromptNotAcceptedError) || attempt >= 2) throw error; relaunched++; }
     }
   }
@@ -2575,7 +2689,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     overlap: hold ? { allowed: true, ahead: hold.ahead, hold, note: `Dispatched over a planned-file overlap with ${describeOverlap(hold.ahead)}${hold.overdue ? ` after a hold of ${hours(hold.ageMs)}, past the ${hours(hold.boundMs)} bound${hold.chain.length > hold.ahead.length ? `, behind ${describeChain(hold.chain)}` : ''}` : ' by operator override'}; expect a sync → review → proof round for whichever lands second` } : null };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds) {
   const prepared = await prepare(root, work.key, profile.name);
   // The worker's own rules go into its worktree before the session starts, so pushing its
   // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
@@ -2588,14 +2702,11 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
     const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request, on the runtime's command line under
-    // the supervisor (launchRequest); only a runtime without that contract is prompted after.
-    const request = launchRequest(launch.kind, prompt);
-    const supervised = [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--', launch.kind!, ...launch.args, ...sessionHarness.args, ...request.args].map(shellQuote).join(' ');
-    herdrRun(['pane', 'run', pane, supervised], run);
-    waitForHerdrAgent(pane, run, agentTimeoutMs, request.delivery === 'request');
-    herdrJson(['agent', 'rename', pane, profile.agentName], run);
-    if (request.delivery === 'paste') deliverPrompt(profile.agentName, prompt, run, delivery);
-    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: request.delivery };
+    // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
+    // that contract is prompted after.
+    const started = startAgentSession(profile.agentName, launch.kind!, pane, [...launch.args, ...sessionHarness.args], prompt, run,
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'] });
+    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) {
@@ -3236,7 +3347,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { retry }));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry }));
   } catch (error) {
     if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
@@ -3276,7 +3387,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { retry: escalationRetry }));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry }));
   } catch (error) {
     if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
