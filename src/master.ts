@@ -5,6 +5,8 @@ import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, statfs, sym
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
+import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameField, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError } from './session-name.js';
+export { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, sessionNameRule, suffixedSessionName } from './session-name.js';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { launchAuthorization, loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
@@ -13,7 +15,7 @@ import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
-import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
+import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, refusedReconciliation, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
@@ -50,11 +52,15 @@ export const agentEnvironmentSchema = z.object({
 }).strict();
 export type AgentEnvironment = z.infer<typeof agentEnvironmentSchema>;
 const accountList = z.array(profileName).min(1).max(20).optional();
+// How many sessions a reviewer or producer profile runs at once (GY-107): the fleet's review and
+// proof capacity is declared here, per role, never implied by the one agent name a profile has.
+// Absent means one, which keeps the profile's fixed session name; see profileConcurrency.
+const sessionConcurrency = z.number().int().min(1).max(20).optional();
 
 export const workerProfileSchema = z.object({
   name: profileName,
   principal: z.string().trim().min(1).max(200),
-  agentName: z.string().trim().min(1).max(100),
+  agentName: sessionNameField,
   mode: z.enum(['existing', 'launch']),
   kind: agentKindSchema.optional(),
   credentialFile: z.string().optional(),
@@ -73,12 +79,13 @@ export type WorkerProfile = z.infer<typeof workerProfileSchema>;
 // verdict with a short-lived reviewer-App token, so it needs no principal and no credential file.
 export const reviewerProfileSchema = z.object({
   name: profileName,
-  agentName: z.string().trim().min(1).max(100),
+  agentName: sessionNameField,
   kind: agentKindSchema,
   agentArgs: z.array(z.string().max(1000)).max(30).default([]),
   approvals: approvalMode,
   environment: safeEnvironment,
   accounts: accountList,
+  concurrency: sessionConcurrency,
 }).strict();
 export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
 
@@ -89,17 +96,72 @@ export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
 export const producerProfileSchema = z.object({
   name: profileName,
   principal: z.string().trim().min(1).max(200),
-  agentName: z.string().trim().min(1).max(100),
+  agentName: sessionNameField,
   kind: agentKindSchema,
   credentialFile: z.string(),
   agentArgs: z.array(z.string().max(1000)).max(30).default([]),
   approvals: approvalMode,
   environment: safeEnvironment,
   accounts: accountList,
+  concurrency: sessionConcurrency,
 }).strict().superRefine((profile, context) => {
   if (!isAbsolute(profile.credentialFile)) context.addIssue({ code: 'custom', message: 'credentialFile must be absolute', path: ['credentialFile'] });
 });
 export type ProducerProfile = z.infer<typeof producerProfileSchema>;
+
+/**
+ * Per-role concurrency (GY-107). Reviews and proofs used to serialise across the installation
+ * because each role's profile had one fixed Herdr agent name, and a second launch was refused
+ * while that name was visible. A profile now runs `concurrency` sessions at once (default 1).
+ * A profile that runs one session keeps its fixed name, which every existing ledger, tab label
+ * and failover path expects; one that runs more names each session for the request it answers
+ * — the profile's name and the first 8 hex of the request id, with the attempt appended after
+ * the first, or the session's own id for a launch by hand — so a second review on another item
+ * starts while the first runs and the two never share a name. The name is composed inside the
+ * runtime's limit (session-name.ts): the tail that tells the sessions apart is kept whole and a
+ * profile name too long for it gives way to a digest, so a session is recognised as the
+ * profile's by rebuilding its name from that tail rather than by prefix.
+ */
+export const profileConcurrency = (profile: { concurrency?: number }) => Math.max(1, profile.concurrency ?? 1);
+function derivedSessionName(profile: { agentName: string }, tag: string, attempt: number) {
+  // As suffixedSessionName composes a name, with the tail kept verbatim: it is hex and digits,
+  // and the name starts with the profile's own (already launchable) name, so it needs no slug.
+  const tail = `${tag}${attempt > 1 ? `-${attempt}` : ''}`, head = profile.agentName;
+  if (head.length + tail.length + 1 <= sessionNameLimit) return assertSessionName(`${head}-${tail}`);
+  const digest = createHash('sha256').update([head, tail].join('\u0000')).digest('hex').slice(0, sessionNameDigestLength);
+  const shortened = head.slice(0, Math.max(1, sessionNameLimit - tail.length - sessionNameDigestLength - 2)).replace(/-+$/, '');
+  return assertSessionName(`${shortened}-${digest}-${tail}`);
+}
+export function sessionAgentName(profile: { agentName: string; concurrency?: number }, session: { id: string; requestId?: string; attempt?: number }) {
+  if (profileConcurrency(profile) === 1) return profile.agentName;
+  const tag = (session.requestId ?? session.id).toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 8).padEnd(8, '0');
+  return derivedSessionName(profile, tag, session.attempt ?? 1);
+}
+/** Whether a Herdr agent name is one of the profile's sessions: its fixed name, or a name this launcher derived from it. */
+export function isProfileSession(profile: { agentName: string }, name: string | undefined) {
+  if (!name) return false;
+  if (name === profile.agentName) return true;
+  const derived = /-([0-9a-f]{8})(?:-(\d+))?$/.exec(name);
+  return !!derived && derivedSessionName(profile, derived[1], Number(derived[2] ?? 1)) === name;
+}
+/**
+ * The sessions a profile is running, counted against its limit: every Herdr agent that carries
+ * one of its names, and every agent a pending ledger record of the profile names — the same
+ * inventory the one-session rule read, so a session Herdr no longer lists frees its slot as it
+ * did before, and the ledger's grace settles the record. `free` is how many more may launch.
+ */
+export function profileSessions(profile: { name: string; agentName: string; concurrency?: number }, agents: { name?: string }[], records: { profile: string; agentName: string; state: string }[] = []) {
+  const pending = new Set(records.filter(record => record.state === 'pending' && record.profile === profile.name).map(record => record.agentName));
+  const running = [...new Set(agents.map(agent => agent.name).filter((name): name is string => !!name && (isProfileSession(profile, name) || pending.has(name))))];
+  const limit = profileConcurrency(profile);
+  return { running, limit, free: Math.max(0, limit - running.length) };
+}
+/** The refusal a launch raises for a profile with no slot left; the one-session case reads as it always did. */
+export function profileAtLimit(role: 'Reviewer' | 'Producer', profile: { name: string; agentName: string; concurrency?: number }, sessions: { running: string[]; limit: number }) {
+  return sessions.limit === 1
+    ? `${role} agent ${sessions.running[0] ?? profile.agentName} is already visible in Herdr; profile ${profile.name} runs one session at a time (concurrency 1)`
+    : `${role} profile ${profile.name} is at its concurrency limit (${sessions.running.length} running, limit ${sessions.limit}: ${sessions.running.join(', ')}); raise concurrency in .graphyard/master.json or add a ${role.toLowerCase()} profile`;
+}
 
 export const reviewerIdentitySchema = z.object({
   appId: z.number().int().positive(),
@@ -166,7 +228,7 @@ export const masterConfigSchema = z.object({
   githubAppId: z.number().int().positive(),
   hostId: z.string().trim().min(1).max(200),
   herdrWorkspace: z.string().trim().min(1).max(200).optional(),
-  masterAgentName: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/),
+  masterAgentName: sessionNameField,
   autoMerge: z.boolean().default(true),
   mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
   workers: z.array(workerProfileSchema).max(100).default([]),
@@ -426,7 +488,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? `graphyard-master-${repositoryName}`, autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -967,12 +1029,21 @@ export function launchRequest(kind: string | undefined, text: string): { args: s
  * a start that times out on a pane where Herdr sees the expected runtime acting is a session that
  * started, and it is named rather than closed. Only a runtime without a request contract is
  * prompted after it starts, through the confirmed paste delivery below.
+ *
+ * The name goes in before the runtime does. A name the runtime would refuse — too long, or built
+ * from characters it does not take — is refused here as that refusal, naming the limit, the name
+ * attempted and the command that retries the launch, rather than reaching the caller as whatever
+ * the runtime says about its arguments (GY-101).
  */
 export const agentStartTimeoutMs = 30_000;
-export function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { timeoutMs?: number; confirm?: 'inline' | 'follow' } = {}) {
+export function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { timeoutMs?: number; confirm?: 'inline' | 'follow'; retry?: string } = {}) {
   const request = launchRequest(kind, text);
+  assertSessionName(name, options.retry);
   try { herdrJson(['agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', String(options.timeoutMs ?? agentStartTimeoutMs), '--', ...args, ...request.args], run); }
   catch (error) {
+    // A runtime whose own naming rules are narrower than the ones checked above says so in its
+    // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
+    if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
     if (request.delivery !== 'request' || herdrErrorCode(error) !== 'timeout') throw error;
     const raw = herdrJson(['agent', 'get', pane], run);
     const agent = raw?.agent ?? raw;
@@ -998,6 +1069,14 @@ export class PromptNotAcceptedError extends Error { readonly promptDropped = tru
 export function herdrErrorCode(error: unknown) {
   const text = [(error as any)?.herdrCode, (error as any)?.stdout, (error as any)?.stderr, (error as any)?.message].filter(value => value !== undefined && value !== null).map(String).join('\n');
   return (error as any)?.herdrCode ?? /"code"\s*:\s*"([a-z_]+)"/.exec(text)?.[1] ?? null;
+}
+/** Everything a Herdr failure said, whichever stream it said it on. */
+export function herdrErrorText(error: unknown) {
+  return [(error as any)?.stdout, (error as any)?.stderr, error instanceof Error ? error.message : error].filter(value => value !== undefined && value !== null && value !== '').map(String).join('\n');
+}
+/** A runtime refusing the name it was given, rather than failing to start the session it names. */
+export function nameRefusedByRuntime(error: unknown) {
+  return /\b(?:agent|session) name\b|\binvalid (?:agent |session )?name\b/i.test(herdrErrorText(error));
 }
 export interface PromptDelivery { attempts?: number; acceptMs?: number; pauseMs?: number }
 export function deliverPrompt(target: string, text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { confirm?: 'inline' | 'follow' } = {}) {
@@ -1195,28 +1274,32 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
       return found;
     };
     const profileNameOf = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^[^a-zA-Z0-9]+/, '').slice(0, 80) || 'agent';
+    // A profile name is Graphyard's own label, in its own syntax; the session name onboarding
+    // generates beside it is what Herdr is asked to launch, so it is built inside the runtime's
+    // naming rules (GY-101) rather than taken from the label and refused at the first launch.
+    const agentNameOf = (name: string) => sessionName(name);
     for (const { file, principal } of await issued('worker')) {
       const name = profileNameOf(principal);
-      if (next.workers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(name)) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
+      if (next.workers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(agentNameOf(name))) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
       const index = next.workers.filter(profile => profile.mode === 'launch').length, accounts = accountsFor(undefined, index);
       const kind = next.environments.find(entry => entry.name === accounts[0])!.kind;
-      next.workers.push(workerProfileSchema.parse({ name, principal, agentName: name, mode: 'launch', kind, credentialFile: file, accounts: accountsFor(kind, index) }));
+      next.workers.push(workerProfileSchema.parse({ name, principal, agentName: agentNameOf(name), mode: 'launch', kind, credentialFile: file, accounts: accountsFor(kind, index) }));
       changes.push({ role: 'worker', profile: name, action: 'added', accounts: accountsFor(kind, index), principal });
     }
     for (const { file, principal } of await issued('producer')) {
       const name = profileNameOf(`produce-${principal}`);
       if (next.workers.some(profile => profile.principal === principal)) { skipped.push({ file, reason: `${principal} is also a worker principal; the control plane refuses evidence from an implementer` }); continue; }
-      if (next.producers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(name)) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
+      if (next.producers.some(profile => profile.principal === principal || profile.name === name) || agentNames().has(agentNameOf(name))) { skipped.push({ file, reason: `a profile already uses principal or name ${principal}` }); continue; }
       const index = next.producers.length, accounts = accountsFor(undefined, index);
       const kind = next.environments.find(entry => entry.name === accounts[0])!.kind;
-      next.producers.push(producerProfileSchema.parse({ name, principal, agentName: name, kind, credentialFile: file, accounts: accountsFor(kind, index) }));
+      next.producers.push(producerProfileSchema.parse({ name, principal, agentName: agentNameOf(name), kind, credentialFile: file, accounts: accountsFor(kind, index) }));
       changes.push({ role: 'producer', profile: name, action: 'added', accounts: accountsFor(kind, index), principal });
     }
     for (const environment of loggedIn) {
       const name = profileNameOf(`review-${environment.name}`);
-      if (next.reviewers.some(profile => profile.name === name) || agentNames().has(name)) continue;
+      if (next.reviewers.some(profile => profile.name === name) || agentNames().has(agentNameOf(name))) continue;
       const accounts = [environment.name, ...accountsFor(environment.kind, 0).filter(entry => entry !== environment.name)];
-      next.reviewers.push(reviewerProfileSchema.parse({ name, agentName: name, kind: environment.kind, accounts }));
+      next.reviewers.push(reviewerProfileSchema.parse({ name, agentName: agentNameOf(name), kind: environment.kind, accounts }));
       changes.push({ role: 'reviewer', profile: name, action: 'added', accounts });
     }
     // Automatic review answers with one profile and fails over to the rest.
@@ -1896,10 +1979,54 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
   return { review: state.review ? describe(state.review, reviewRecords) : null, producers: state.producers.map(request => describe(request, producerRecords)),
     recent: state.history.slice(-5).map(request => ({ kind: request.kind, ...(request.group ? { group: request.group } : {}), sha: request.sha, state: request.state, resolution: request.resolution ?? null, resolvedAt: request.resolvedAt ?? null })) };
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }) {
+/**
+ * Queueing at the gates, per role (GY-107): how many sessions run against the limit the fleet
+ * declares, and how long the longest request has waited for a slot. A request waits for a slot
+ * when it is open, has no session, and nothing else holds it — no launch refused, no retry
+ * pending, no settled session that no attempt follows — and, for a producer request, when some
+ * profile is independent of the item at all. A fleet starving on review capacity reads here as
+ * `running` at `limit` with `waiting` above zero and `longestWaitMs` climbing, without a session list.
+ */
+export interface RoleConcurrencyProfile { profile: string; agentName: string; limit: number; running: number; sessions: string[] }
+export interface RoleConcurrencyReport { role: 'reviewer' | 'producer'; limit: number; running: number; free: number; waiting: number; longestWaitMs: number | null; longest: { work: string; requestId: string; group: string | null; waitedMs: number } | null; starved: boolean; profiles: RoleConcurrencyProfile[] }
+export interface RoleProfiles { reviewers: { name: string; agentName: string; concurrency?: number }[]; producers: { name: string; agentName: string; principal: string; concurrency?: number }[] }
+export function roleConcurrency(role: 'reviewer' | 'producer', profiles: RoleProfiles['reviewers'] | RoleProfiles['producers'], work: Work[], agents: { name?: string }[], records: { pending: any[]; completed: any[] }, sessions: Pick<DispatchSessions, 'failures' | 'retries'>, now: number): RoleConcurrencyReport {
+  const all = [...records.completed, ...records.pending];
+  const perProfile = profiles.map(profile => { const counted = profileSessions(profile, agents, all); return { profile: profile.name, agentName: profile.agentName, limit: counted.limit, running: counted.running.length, sessions: counted.running }; });
+  const limit = perProfile.reduce((total, entry) => total + entry.limit, 0), running = perProfile.reduce((total, entry) => total + entry.running, 0);
+  // How long an open request has waited for a slot, or null when something other than a slot holds it.
+  const slotWait = (request: { id: string; requestedAt: string }): number | null => {
+    const last = [...all].reverse().find(record => record.requestId === request.id);
+    if (last && last.state === 'pending') return null;
+    if (last && !['failed', 'expired'].includes(last.state)) return null;
+    if (sessions.failures.some(failure => failure.requestId === request.id)) return null;
+    const retry = sessions.retries?.find(entry => entry.requestId === request.id);
+    if (retry) return retry.exhausted || (retry.nextAt && Date.parse(retry.nextAt) > now) ? null : Math.max(0, now - Date.parse(retry.nextAt ?? last?.closedAt ?? request.requestedAt));
+    return last ? null : Math.max(0, now - Date.parse(request.requestedAt));
+  };
+  const waiting = work.filter(item => item.stage !== 'done' && item.autoDispatch).flatMap(item => {
+    if (role === 'reviewer') { const review = item.autoDispatch!.review; return review?.state === 'requested' && review.provider === 'github' ? [{ item, request: review }] : []; }
+    const implementers = new Set(implementerIdentities(item));
+    if (!(profiles as RoleProfiles['producers']).some(profile => !implementers.has(profile.principal))) return [];
+    return item.autoDispatch!.producers.filter(request => request.state === 'requested').map(request => ({ item, request }));
+  }).flatMap(({ item, request }) => { const waitedMs = slotWait(request); return waitedMs === null ? [] : [{ work: item.key, requestId: request.id, group: request.group ?? null, waitedMs }]; }).sort((a, b) => b.waitedMs - a.waitedMs);
+  const longest = waiting[0] ?? null;
+  return { role, limit, running, free: Math.max(0, limit - running), waiting: waiting.length, longestWaitMs: longest?.waitedMs ?? null, longest, starved: limit > 0 && running >= limit && waiting.length > 0, profiles: perProfile };
+}
+/** A starved role is attention for the master: the limit and the wait, with what raises the one. */
+export const concurrencyStarvedMs = 10 * 60_000;
+export function concurrencyAttention(reports: RoleConcurrencyReport[]): AttentionItem[] {
+  return reports.filter(report => report.starved && (report.longestWaitMs ?? 0) >= concurrencyStarvedMs).map(report => ({ subject: `${report.role} concurrency`,
+    text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
+    ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
+}
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles) {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane);
+  // Per-role concurrency (GY-107): sessions against the declared limit, and the queue at the gate.
+  const concurrency = roles ? [roleConcurrency('reviewer', roles.reviewers, snapshot.work, agents, reviews, sessions, now), roleConcurrency('producer', roles.producers, snapshot.work, agents, sessions.producers, sessions, now)] : [];
+  const concurrencyItems = concurrencyAttention(concurrency);
   const workerSessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
@@ -2032,7 +2159,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + concurrencyItems.length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
@@ -2041,11 +2168,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length },
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...installation.attentionItems] as AttentionItem[],
-    // What waits on the human, longest first, with how to answer; and the roles out of capacity.
-    humanRequests, capacity,
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...concurrencyItems, ...installation.attentionItems] as AttentionItem[],
+    // What waits on the human, longest first, with how to answer; the roles out of capacity; and
+    // each role's sessions against its concurrency limit with the longest wait for a slot.
+    humanRequests, capacity, concurrency,
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
@@ -2325,7 +2453,9 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   if (!kind) throw new Error('Choose a supported master agent kind');
   const config = await loadMasterConfig(root);
-  if (agents.some(agent => agent.name === config.masterAgentName)) throw new Error(`Master agent ${config.masterAgentName} is already visible in Herdr`);
+  const masterRetry = `graphyard master start ${kind}, once masterAgentName in .graphyard/master.json is a name Herdr can launch`;
+  const name = nameForLaunch(masterRetry, () => config.masterAgentName);
+  if (agents.some(agent => agent.name === name)) throw new Error(`Master agent ${name} is already visible in Herdr`);
   // Installation, not operator memory: the harness the master runs under learns the master's own
   // commands before the session starts, so a routine status or review never waits on a keypress.
   const harness = await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
@@ -2349,14 +2479,14 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it.
-    ({ delivery } = startAgentSession(config.masterAgentName, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { confirm: 'follow' }));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { confirm: 'follow', retry: masterRetry }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Master startup failed'}; Herdr could not confirm cleanup of the created tab`); }
     throw error;
   }
-  return { agentName: config.masterAgentName, kind, pane: pane!, status: delivery === 'request' ? 'started on its request' : 'started and prompted', delivery, focusChanged: false, harness };
+  return { agentName: name, kind, pane: pane!, status: delivery === 'request' ? 'started on its request' : 'started and prompted', delivery, focusChanged: false, harness };
 }
 
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
@@ -3055,13 +3185,18 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
  * after a verdict, rework after a base conflict, a merge approval — and an approver stops when it
  * has judged, leaving its tab listed. Named per item, that finished tab refused the launch of the
  * next decision's approver until somebody closed it by hand.
+ *
+ * Per decision and inside the runtime's limit, both (GY-101): the fixed prefix and an eight-
+ * character decision fragment left four characters for the key, so every key from GY-10 up built a
+ * 33-character name no runtime would take and no approver could be launched at all. The key is
+ * kept whole now and the decision id takes what the limit leaves.
  */
-export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
-  `graphyard-approver-${work.key.toLowerCase()}-${decision.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'decision'}`;
+export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) => distinctSessionName(['graphyard-approver', 'gy-approver'], work.key, decision);
 export async function launchApprover(root: string, work: Work, decision: string, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
-  const name = approverSessionName(work, decision);
+  const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
+  const name = nameForLaunch(retry, () => approverSessionName(work, decision));
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
   const launch = agentLaunchPlan(kind, 'auto');
   const cli = `node ${config.cliPath}`;
@@ -3071,7 +3206,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { retry }));
   } catch (error) {
     if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
@@ -3096,7 +3231,8 @@ export function verifiedContext(context: EscalationContext) {
  */
 export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
   await agentToken(root, config, 'operatorAgent');
-  const name = `graphyard-escalation-${context.key.toLowerCase()}-${context.escalation.trigger}`;
+  const escalationRetry = `graphyard master escalation ${context.key} ${context.escalation.trigger} ${kind}`;
+  const name = nameForLaunch(escalationRetry, () => distinctSessionName(['graphyard-escalation', 'graphyard-esc', 'gy-esc'], context.key, context.escalation.trigger));
   if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
   const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);
@@ -3110,7 +3246,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run));
+    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { retry: escalationRetry }));
   } catch (error) {
     if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
