@@ -3,6 +3,8 @@ import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
+import { elapsed, overlongSessionLines, type SessionKind } from '../model/sessions.js';
+import { runtimeEndedStates } from '../harness.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
@@ -55,9 +57,6 @@ export function approverLaunchAttention(daemon: {
 
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
 
-/** Long waits read in the unit the reader thinks in; a request measured in seconds is still young. */
-const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
-
 /** Who answers a request whose session settled unanswered, and with which command. */
 export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
   return request.kind === 'review'
@@ -80,6 +79,17 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
     return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
       ...unansweredRequestOwner(row.key, request) };
   }));
+}
+
+/**
+ * One attention item per running session past its role's maximum (`model/sessions.ts`), whether or
+ * not it is still live: a session that died is closed by the liveness sweep and needs nobody, while
+ * one that is running and making no progress holds its role slot, its provider seat and its item
+ * while reporting nothing wrong. Nothing is closed from this line — only a reader can tell.
+ */
+export function overlongSessionAttention(snapshot: { work: Work[]; now: string }, runtime: { agents: HerdrAgent[]; available: boolean }, maximums?: Partial<Record<SessionKind, number>>): AttentionItem[] {
+  return overlongSessionLines(snapshot.work, runtime.available ? runtime.agents : null, new Date(snapshot.now), { states: runtimeEndedStates, ...(maximums ? { maximums } : {}) })
+    .map(line => ({ subject: line.subject, text: line.text, ...agentOwner('master', line.next) }));
 }
 
 /**
@@ -218,10 +228,12 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
   const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
+  // A session past its role's maximum: running but making no progress is as visible as one that died.
+  const overlong = overlongSessionAttention(snapshot, runtime, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
   const unanswered = unansweredRequestAttention(status.work);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...overlong, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above).
   attentionItems.unshift(...loopItems);
@@ -244,8 +256,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, overlongSessions: overlong.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + overlong.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
