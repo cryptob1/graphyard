@@ -362,10 +362,13 @@ why nothing else on that list is moving. `master status` reports `daemon.livenes
 `stalled` (no completed cycle for more than two intervals) or `absent` (no lock, or a lock whose
 process is gone on this host), each with the command that restarts it — `master restart` — and a
 supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
-limit, and the loop sends its supervisor a keep-alive after every completed cycle, so a cycle that
-hangs is restarted as surely as a process that exits. `WatchdogSec` must stay longer than two cycle
-intervals; a window that would restart a healthy loop mid-cycle is recorded by name in
-`master status` rather than obeyed. The keep-alive is sent with `systemd-notify`, a short-lived
+limit, and the loop sends its supervisor a keep-alive after every cycle, completed or failed, so a
+cycle that hangs is restarted as surely as a process that exits. That restart is reserved for a hung
+process, which only the watchdog detects; a cycle that throws is not one (see
+[a cycle that fails](#a-cycle-that-fails)), and a loop waiting out a failed-cycle backoff announces
+when its next cycle is due, so it reads as `running` until that cycle is overdue by two intervals.
+`WatchdogSec` must stay longer than two cycle intervals; a window that would restart a healthy loop
+mid-cycle is recorded by name in `master status` rather than obeyed. The keep-alive is sent with `systemd-notify`, a short-lived
 child the unit admits with `NotifyAccess=all`. From systemd 246 that tool waits until the manager
 has processed the message, so it cannot exit before it is attributed to the unit; on an older
 systemd one can be lost to that race, which is why the packaged window is 180 seconds against a
@@ -399,6 +402,53 @@ whether or not its first approver session could be launched:
 | approval → merge | p90 at or under 10 minutes over at least ten deliveries |
 | mergeable → merge | 5 minutes, per candidate |
 | standing verdict → rework requested | 5 minutes, per candidate |
+
+### A cycle that fails
+
+A rejection that escapes a cycle — the control plane's snapshot read aborting on its timeout, a
+Herdr command that fails, a `.graphyard/master.json` reload that no longer parses — fails that
+cycle and nothing more. The process does not exit. The cycle counter advances, the failure is
+written to the cursor and logged with its cycle number, and the next cycle runs after a delay; a
+cycle that hangs is the watchdog's to restart, and a cycle that threw has just proved it did not
+hang. Before GY-119 the same rejection ended the process with exit status 1, costing the in-flight
+cycle, the dispatcher beside it and every approver watch in memory, and under a longer network fault
+the unit crash-looped at `RestartSec` cadence while `master status` advised restarting a loop that
+was restarting itself every ten seconds.
+
+**Where to read it.** `master status` reports the loop's own failures under `daemon.failures`:
+
+| Field | Meaning |
+| --- | --- |
+| `consecutive` | Failed cycles since the last one that completed; the backoff and the attention item read it |
+| `total` | Every failed cycle this cursor has seen, so a loop that failed and recovered still says so |
+| `last` | The most recent failure: its `cycle`, when (`at`), the `phase` (`cycle` or `reload`), the `call` it escaped from (`snapshot`, `credentials`, `merge`, ... or `reload`), the runtime's `reason`, and the `delayMs` and `nextAt` chosen for the next cycle |
+| `unhandled` | Unhandled rejections and uncaught exceptions the process caught and survived |
+| `lastUnhandled` | The most recent of those: `origin` (`unhandledRejection` or `uncaughtException`), `reason`, and the cycle it landed during |
+
+The journal carries the same facts as one line per event: `cycle 41 failed in the snapshot call:
+The operation was aborted due to timeout; 2 consecutive failure(s), the next cycle runs in 40s at
+…`, and `cycle 43 complete … recovered after 2 failed cycle(s)` when the run ends. `master run
+--once` reports `failedCycles` and `lastFailure` beside `cycles` in its result.
+
+**Backoff.** The first failure waits the configured interval, as any cycle would: one timed-out read
+is not a fault. Each consecutive failure doubles the wait — 20, 40, 80, 160 seconds on the default
+interval — to a ceiling of five minutes, or the interval itself when that is longer. Under a
+supervisor with a watchdog the ceiling is half the watchdog window (90 seconds against the packaged
+180), so a loop backing off is never mistaken for one that hung. The first cycle that completes
+resets the count and the wait; `total` keeps the history.
+
+**Attention.** Three consecutive failures raise an attention item at the head of the list, naming
+the failing call and its reason — `The master loop has failed 3 consecutive cycles, the last (cycle
+42 at …) in the snapshot call: The operation was aborted due to timeout` — and saying that the loop
+keeps cycling in-process, with `daemon.failures` as the place to read it. Its owner is the master:
+the next command is to clear what that call is refusing on (a control plane that is not answering,
+a Herdr that is not running), because a restart does not clear a read that times out every time.
+
+**Outside the cycle.** An unhandled rejection or uncaught exception anywhere in the loop process — a
+detached promise in the dispatcher, an approver watch, a Herdr read nobody awaited — is caught at
+the process level, logged with its origin (`unhandledRejection caught at the process level during
+cycle 41 …`), counted under `daemon.failures.unhandled`, and survived. It is not a failed cycle:
+the cycle it landed during completes as usual. Only a stop signal ends the loop.
 
 ### Restartability
 
