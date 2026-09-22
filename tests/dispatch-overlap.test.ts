@@ -156,18 +156,18 @@ test('unit:effective-concurrency-reported — master status reports how many ite
   const graph = effectiveConcurrency(items, clock);
   assert.equal(graph.effective, 1); assert.equal(graph.nodes, 14); assert.equal(graph.edges, 91); assert.equal(graph.exact, true);
   const status = buildMasterStatus({ work: items, now: iso(0) }, profiles, [], {}, {}, { pending: [], completed: [] });
-  assert.equal(status.concurrency.effective, 1); assert.equal(status.concurrency.idleWorkers, 11); assert.equal(status.concurrency.workers, 11);
-  assert.equal(status.concurrency.inFlight, 2); assert.equal(status.concurrency.dispatchable, 12); assert.equal(status.concurrency.held, 12);
+  assert.equal(status.effectiveConcurrency.effective, 1); assert.equal(status.effectiveConcurrency.idleWorkers, 11); assert.equal(status.effectiveConcurrency.workers, 11);
+  assert.equal(status.effectiveConcurrency.inFlight, 2); assert.equal(status.effectiveConcurrency.dispatchable, 12); assert.equal(status.effectiveConcurrency.held, 12);
   assert.equal(status.counts.effectiveConcurrency, 1); assert.equal(status.counts.idleWorkers, 11); assert.equal(status.counts.held, 12);
-  assert.match(status.concurrency.statement, /^1 item could be in flight at once over 14 open items \(91 overlaps\); 11 of 11 launch profiles idle; 12 held, 0 past the 2h hold bound$/);
+  assert.match(status.effectiveConcurrency.statement, /^1 item could be in flight at once over 14 open items \(91 overlaps\); 11 of 11 launch profiles idle; 12 held, 0 past the 2h hold bound$/);
   // The same fourteen items with their files named: the graph falls apart and the fleet can use its workers.
   const named = items.map((item, index) => index < 2 ? item : { ...item, plannedFiles: [`web/pages/page-${index}.tsx`] } as Work);
   const open = effectiveConcurrency(named, clock);
   assert.equal(open.effective, 13, 'only GY-1 (src/) and GY-2 (its candidate changed src/master.ts) still exclude each other');
   assert.equal(open.edges, 1); assert.ok(!(open.items.includes('GY-1') && open.items.includes('GY-2')) && open.items.length === 13);
   const busy = buildMasterStatus({ work: named, now: iso(0) }, profiles, [{ name: 'agent-worker-1', agent_status: 'working' }], {}, {}, { pending: [], completed: [] });
-  assert.equal(busy.concurrency.idleWorkers, 10, 'a profile whose session Herdr reports is not idle');
-  assert.equal(busy.concurrency.effective, 13);
+  assert.equal(busy.effectiveConcurrency.idleWorkers, 10, 'a profile whose session Herdr reports is not idle');
+  assert.equal(busy.effectiveConcurrency.effective, 13);
   // A candidate is a node on its changed files: two directory claims whose candidates changed different files are compatible.
   const candidates = [submitted('GY-x', ['tests/'], ['tests/x.test.ts']), rework('GY-y', ['tests/'], ['tests/y.test.ts']), work('GY-z', { plannedFiles: ['tests/'] })];
   assert.deepEqual(effectiveConcurrency(candidates, clock), { effective: 2, items: ['GY-x', 'GY-y'], nodes: 3, edges: 2, exact: true });
@@ -220,7 +220,7 @@ test('integration:hold-is-bounded — a hold three deep names its chain, is hono
     assert.match(row.attention!, /^GY-x has been held 2\.2h behind GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d \(submitted, merge, merge queue position 1\) → GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\), past the 2h bound; it is offered over the overlap/);
     assert.equal(row.attentionOwner?.role, 'master'); assert.match(row.attentionOwner!.next, /graphyard master dispatch GY-x PROFILE/);
     assert.ok(status.attentionItems.some(entry => entry.subject === 'GY-x' && /past the 2h bound/.test(entry.text)));
-    assert.equal(status.counts.holdsOverdue, 1); assert.equal(status.concurrency.overdue, 1);
+    assert.equal(status.counts.holdsOverdue, 1); assert.equal(status.effectiveConcurrency.overdue, 1);
     // The loop dispatches it on the next cycle, and the launcher records the overlap it went over.
     loop.set(all, 40 * 60_000);
     await runCycle(loop.master, loop.state, loop.effects, () => later);
