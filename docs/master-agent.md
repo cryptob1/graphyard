@@ -516,11 +516,15 @@ and keeps its lease:
 node "$GRAPHYARD_CLI" scope-request GY-N EPOCH docs/master-agent.md -- The guide documents the behaviour this item changes
 ```
 
-That request is state, not prose: the paths, the reason, the requester and the epoch. The loop
-asks the control plane to decide it on the cycle it appears (`POST /api/work/:id/autoscope`,
-the coordinator's only scope call), and the control plane recomputes the verdict from the item
-itself — never from what the caller claims — exactly as it recomputes containment death for
-`autosettle`. Two kinds of request are **approved**, with the implication as the audited reason:
+That request is state, not prose: the paths, the reason, the requester and the epoch. It is one of
+the nine typed actions: the control plane names `approve-scope` for it, and whoever gets there
+first — the durable loop on the cycle it appears, or any executor that claims the row — asks the
+control plane to decide it (`POST /api/work/:id/autoscope`, the coordinator's only scope call).
+The control plane recomputes the verdict from the item itself — never from what the caller claims
+— exactly as it recomputes containment death for `autosettle`, so nothing is granted by asking.
+No master session is on that path, and `master status` names only the requests somebody actually
+has to decide: a widening the item already carries is not one of them. Two kinds of request are
+**approved**, with the implication as the audited reason:
 
 - **documentation this repository requires updating when behaviour changes** — `docs/`, `AGENTS.md`
   and `README.md` (AGENTS.md: *"Update the relevant guide under `docs/` when behavior changes"*),
@@ -628,6 +632,43 @@ settlement capability, a verified containment assessment (`master settle-contain
 which the loop also applies on its own when it can verify the supervisor is gone) or an operator's
 stopped-worker recovery. The escalation names which, and the `reclaim` handler refuses an item
 whose quarantine still stands rather than reporting it free.
+
+### A concern carried beside the work
+
+An escalation refuses delivery, and it refuses nothing else. It used to be answered before
+anything else about an item was considered, so a concern that blocked nothing stopped everything:
+three items whose leases lapsed when the operator killed every session to clear a wedged shell —
+a deliberate shutdown, explained by the ledger, blocking no work — sat for fifty minutes with no
+action but `escalate` while ten worker profiles idled.
+
+What an item needs is now named as it would be with no escalation standing, and the escalation is
+**carried** beside it, in `carried` on the computed action and in `master status`. A ready item
+carrying a `lease-loss` is named `dispatch` and assigned; a submitted one is re-read, reviewed and
+proven exactly as it would have been. Only the merge gate refuses for the escalation, as it
+always did, so nothing is delivered under one and nothing else waits on one.
+
+The exception is an item nothing can be assigned to anyway. An assignment held by an exclusive
+resource or by planned-file overlap is not an action an executor could complete — the launcher
+refuses it, the row fails and backs off, and the judgment the item owes would be hidden behind a
+dispatch nobody could run. There the concern is what is named, with the hold in its reason.
+
+### Actions that need a person
+
+Two kinds are judgments made in the step itself — `escalate` and `request-rework` — so no
+executor holds a handler for either, and their rows are never claimed, never fail, and never
+appear as a refused launch. Such a row is recorded as needing somebody: the computed action
+carries `needsHuman` (what is being decided, and the command that answers it), `master status`
+lists it under `actions.needsHuman` and as its own attention line, and `counts.needsHuman` counts
+it **apart from** the queue — a row waiting for an executor is work in progress, a row no
+executor may claim is work waiting on a judgement. It is visible from the cycle that computed it,
+not five minutes later when it ages into the idle list nobody was coming for, and the durable
+loop names each one once in its own record. A standing escalation carried beside work that is
+running is listed the same way: the work is not frozen by it, and it is not lost behind the work.
+
+To answer one: `graphyard master escalation GY-N TRIGGER` spawns a handler whose whole input is
+the [escalation context](#escalation-context) and which follows the precedent that applies;
+where no precedent does, `graphyard master decide GY-N resolve '{"trigger":"TRIGGER"}' REASON`
+and `graphyard master approver GY-N DECISION` put it in front of the two parties that decide it.
 
 An executor holds a coordinator credential, a host name, and one handler per kind it can run.
 Graphyard ships one:
@@ -1482,26 +1523,31 @@ its own ([exhaustion in the middle of a session](#exhaustion-in-the-middle-of-a-
 5. create a fresh workspace and preserve the old attempt.
 
 A `lease-loss` escalation stands only for a worker that silently vanished: a lease that lapsed
-with no submission, no carried `blocked` report and no stopped-worker attestation for its epoch.
-Every other lapse is `lease.expired` history with its cause — `submitted` (the lease ended at
-`complete`), `blocked-awaiting-operator` (the worker reported `blocked` and stopped to wait on
-you), or `stopped-by-attestation` (you stopped the worker and said so with
-`rework --previous-worker-stopped` or `recover-containment --previous-worker-stopped`, before or
-after the lapse) — and raises nothing. Do not treat any of those as an incident needing anyone.
+with no submission, no carried `blocked` report, no stopped-worker attestation and no recorded
+provider exhaustion for its epoch. Every other lapse is `lease.expired` history with its cause —
+`submitted` (the lease ended at `complete`), `blocked-awaiting-operator` (the worker reported
+`blocked` and stopped to wait on you), `stopped-by-attestation` (you stopped the worker and said
+so with `rework --previous-worker-stopped` or `recover-containment --previous-worker-stopped`,
+before or after the lapse), or `exhausted-capacity` (the loop recorded that the account the
+attempt ran on had no quota left) — and raises nothing. Do not treat any of those as an incident
+needing anyone.
 
 Who settles what:
 
 - reconciliation settles, on deploy and every later tick, a standing `lease-loss` whose epoch has
-  a bound submission, a carried blocked report, or a stopped-worker attestation in the ledger
-  (`escalation.auto-settled`, with the note and the attestation it rests on). Attest first, then
-  wait a tick: an applied two-party `rework` decision for the lapsed epoch (or an `admin`'s
-  `rework --previous-worker-stopped`) is the attestation;
+  a bound submission, a carried blocked report, a stopped-worker attestation in the ledger, or the
+  loop's own exhaustion record (`escalation.auto-settled`, with the note and the attestation it
+  rests on). Attest first, then wait a tick: an applied two-party `rework` decision for the lapsed
+  epoch (or an `admin`'s `rework --previous-worker-stopped`) is the attestation. A session the
+  loop reported as out of quota needs nothing from you at all: the report is the explanation, and
+  the item is claimable on another account as soon as its containment settles;
 - an `admin` session — this path does not require a declared human session — settles a
   control-plane-raised `lease-loss` by citing the attestation:
   `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`. The server verifies the
   citation against the ledger and refuses one that is not there; the `escalation.resolved` entry
   records who, why and which attestation;
-- a lapse nothing explains — no report, no attestation — is a vanished worker; it, and
+- a lapse nothing explains — no report, no attestation, no exhaustion record — is a vanished
+  worker; it, and
   `security-concern`, `requirement-weakening`, `evidence-policy-conflict` and any lease-loss a
   lead raised, are resolved by a two-party `resolve` decision (`master decide GY-N resolve
   '{"trigger":"TRIGGER"}' REASON`) that the approver agent approves after checking the cause, or

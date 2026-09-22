@@ -5,12 +5,15 @@ import { leadHoldRefusal } from './delegation.js';
 import { deliveryState } from './delivery.js';
 import { openAgentRequests } from './agent-requests.js';
 import type { Work } from './work.js';
-import { nextActionKinds, nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
+import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
+import { carriedAction, type OpenAction } from './concerns.js';
 
-// The vocabulary lives in `action-kinds.ts`; it is re-exported here so that what an item needs
-// next and the kinds it can need are still read from one place.
+// The vocabulary lives in `action-kinds.ts` and what stands beside an action in `concerns.ts`;
+// both are re-exported here, so what an item needs is still read from one place.
 export { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextActionKinds, nextActionLlmRoles } from './action-kinds.js';
 export type { LlmRole, NextAction, NextActionInputs, NextActionKind } from './action-kinds.js';
+export { carriedAction, dispatchHold, escalationResolution, humanNeeded, humanNeededActions, openAction } from './concerns.js';
+export type { CarriedConcern, HumanNeeded, HumanNeededRow, OpenAction } from './concerns.js';
 
 /**
  * The typed next action.
@@ -177,17 +180,19 @@ function proofInputs(work: Work, all: Work[], now: Date): NextActionInputs | nul
 const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null });
 
 /**
- * What this item needs next, or null when it needs nothing from anybody: it is delivered and
- * verified, or every refusal standing against it belongs to another item (an unfinished
- * dependency is that other item's dispatch, not this one's).
+ * The step this item needs next, or null when it needs nothing from anybody: it is delivered and
+ * verified, a session is already doing what the gate waits for, or every refusal standing against
+ * it belongs to another item (an unfinished dependency is that item's dispatch, not this one's).
  *
- * The order is the order a delivery actually unblocks in: a standing escalation first, because
- * nothing may deliver under one; then a typed request an agent left behind, because a session
- * gave up its lease waiting for that answer; then the deployment a delivered item still owes; then
- * an assignment nobody holds any more; then a live worker blocked on a scope answer; then the
- * first refusing gate; and finally the merge a fully proven candidate is authorized for.
+ * The order is the order a delivery actually unblocks in: a typed request an agent left behind
+ * first, because a session gave up its lease waiting for that answer; then the deployment a
+ * delivered item still owes; then an assignment nobody holds any more; then a live worker blocked
+ * on a scope answer; then the first refusing gate; and finally the merge a fully proven candidate
+ * is authorized for. A standing escalation is not in that order at all: it refuses delivery, the
+ * merge gate carries its refusal like any other, and `carriedAction` (concerns.ts) decides what it
+ * does to the step named here — which, for everything before delivery, is nothing.
  */
-export function nextAction(work: Work, all: Work[], now: Date): NextAction | null {
+function pendingAction(work: Work, all: Work[], now: Date): NextAction | null {
   const key = work.key, id = work.id;
   // Backlog is not open work: an item nobody has released is waiting on the operator deciding it
   // is ready, which is a goal-setting call and not an action anyone runs. Its refusal still maps
@@ -195,10 +200,6 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
   if (!work.ready) return null;
   const make = (kind: NextActionKind, reason: string, inputs: NextActionInputs, binding: string, gate: string | null = null, refusal: string | null = null): NextAction =>
     ({ kind, work: id, key, gate, refusal, reason, inputs, llmRole: inputs.kind === 'dispatch' && inputs.target === 'proof' ? 'produce-evidence' : nextActionLlmRoles[kind], binding });
-
-  const escalation = standingEscalations(work)[0];
-  if (escalation) return make('escalate', `${key} has a standing ${escalation.trigger} escalation: ${escalation.reason}`,
-    { kind: 'escalate', trigger: escalation.trigger, detail: escalation.reason }, `escalation:${escalation.trigger}:${escalation.at}`);
 
   // A typed request an agent recorded instead of blocking on a prose question. A scope ask is the
   // control plane's own deterministic rule to apply; a two-party decision is somebody else's
@@ -310,4 +311,9 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
     { kind: 'merge', pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null },
     `merge:${work.candidate.sha}:${work.candidate.baseSha}:${work.policyRevision}`);
   return null;
+}
+
+/** What this item needs next, and every standing concern beside it (`concerns.ts`). */
+export function nextAction(work: Work, all: Work[], now: Date): OpenAction | null {
+  return carriedAction(work, pendingAction(work, all, now), all, now);
 }

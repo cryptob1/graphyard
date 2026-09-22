@@ -3,6 +3,8 @@ import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
+import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
+import { decideScopeRequest } from '../model/scope.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
@@ -15,19 +17,53 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 
 /**
- * One attention item per open worker scope request whose epoch still holds the lease: addressed
- * to the master, naming the requested paths and the worker's reason, with the one command that
- * approves it. A request from a lease that ended is never surfaced.
+ * One attention item per open worker scope request that somebody actually has to decide.
+ *
+ * A request the item's own criteria — or this repository's documentation rule — already imply is
+ * nobody's decision: the control plane computes `approve-scope` for it and an executor applies the
+ * widening, with no master session and no command. Naming those here asked a master to run
+ * `master scope` for a verdict already determined, and an item one file short of finishing waited
+ * on that line being read. The verdict is recomputed from the item itself, never taken from the
+ * request; a request from a lease that ended is never surfaced.
  */
 export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
   return snapshot.work.flatMap(work => {
     const request = work.scopeRequest;
     const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
-    return live ? [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}`, ...agentOwner('master', `graphyard master scope ${work.key}`) }] : [];
+    if (!live) return [];
+    const decision = request.decision ?? decideScopeRequest(work, request);
+    if (decision.state === 'approved') return [];
+    return [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}. The widening rule refuses it: ${decision.reason}`,
+      ...agentOwner('master', `graphyard master scope ${work.key}`) }];
   });
 }
 
+/**
+ * One attention item per action nobody in the executor loop may run (`model/concerns.ts`): it is
+ * never claimed, never fails and never shows as a refused launch, so without a line of its own it
+ * was one more unclaimed row in the queue. Each names what is waiting, how long it has waited and
+ * the command that answers it; `counts.needsHuman` counts them apart from what is merely queued.
+ */
+export function humanNeededAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
+  return humanNeededActions(snapshot.work, new Date(snapshot.now)).map(row => ({
+    subject: row.key,
+    text: `${row.reason} — no executor may run it; ${row.decision} has been owed for ${elapsed(row.waitedMs)}`,
+    ...agentOwner('master', row.resolve, 'approver'),
+  }));
+}
+
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
+
+/**
+ * The action report with the two populations separated: rows an executor will take, and rows only
+ * a judgment settles. `waiting` and `idle` are what the queue offers executors, so a row nobody
+ * may claim is taken out of both — it would otherwise age into the idle list as though an
+ * executor were late to it.
+ */
+export function needsHumanActions<T extends { waiting: { id: string }[]; idle: { id: string }[] }>(report: T, owed: HumanNeededRow[]) {
+  const rows = new Set(owed.map(entry => entry.action).filter((id): id is string => !!id));
+  return { ...report, needsHuman: owed, waiting: report.waiting.filter(entry => !rows.has(entry.id)), idle: report.idle.filter(entry => !rows.has(entry.id)) };
+}
 
 /** Long waits read in the unit the reader thinks in; a request measured in seconds is still young. */
 const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
@@ -190,10 +226,18 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
   const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
+  // Every action no executor may claim, and every concern carried beside an action that is
+  // running: the work that waits on a judgment rather than on capacity.
+  const needsHuman = humanNeededActions(snapshot.work, new Date(snapshot.now));
+  const needsHumanItems = humanNeededAttention(snapshot);
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
   const unanswered = unansweredRequestAttention(status.work);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  // An item whose row already carries an attention line says this once; the rest would be named
+  // nowhere at all, which is the silence this list exists to end.
+  const rowAttention = (key: string) => !!(status.work as { key: string; attention: string | null }[]).find(row => row.key === key)?.attention;
+  const owedItems = needsHumanItems.filter(item => !rowAttention(item.subject));
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...owedItems, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above).
   attentionItems.unshift(...loopItems);
@@ -217,7 +261,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      // Counted apart from the queue: a row waiting for an executor is work in progress, a row
+      // no executor may claim is work waiting on somebody.
+      needsHuman: needsHuman.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + owedItems.length + scopeRequests.filter(item => !rowAttention(item.subject)).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
@@ -226,7 +273,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     setup, administration, daemon, dispatch,
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
-    actions: actionReport(snapshot), sessions: sessionReport(snapshot),
+    actions: needsHumanActions(actionReport(snapshot), needsHuman), sessions: sessionReport(snapshot),
     requests: agentRequestReport(snapshot),
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
     disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
