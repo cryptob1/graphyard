@@ -3133,7 +3133,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
   // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
   const selected = explicitKind ? null : await selectFleetSession(config, 'approver', { name, principal: config.approver!.id }, { ...probe, work: work.key });
-  const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind;
+  // Nothing here names a runtime: the role's account decides, then the operator's own argument,
+  // then a runtime this installation already configured for another session.
+  const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
   if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
   const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
   const cli = `node ${config.cliPath}`;
