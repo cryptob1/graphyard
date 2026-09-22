@@ -1,30 +1,34 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { readdirSync, readFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentRuntimeRun, agentRuntimeTimeoutMs, daemonExecutor, listHerdrAgents, masterConfigSchema, masterHarness, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
 import { daemonEffects, emptyDaemonState, runDaemon, writeDaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
-import { installLoopSupervisor, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, unsupervisedInstruction } from '../src/supervisor.js';
+import { installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
 
 /**
  * Each test is named for the proof it produces (GY-114): integration:setup-installs-supervisor,
- * unit:supervision-reported, unit:unsupervised-host-stated and integration:runtime-calls-bounded.
+ * unit:supervision-reported, unit:unsupervised-host-stated, integration:runtime-calls-bounded,
+ * manual:supervisor-onboarding-review and integration:supervisor-install-explicit-only.
  *
  * GY-84 promised that "a supervised deployment restarts it automatically". Nothing installed that
  * supervisor and nothing checked for one, so the promise held only where somebody had copied the
  * packaged unit by hand. These cover the three halves of closing that: setup installs it, status
- * verifies it, and a host that cannot have one is told so instead of being left to find out.
+ * verifies it, and a host that cannot have one is told so instead of being left to find out — and
+ * the guard that the install is an explicit operator action and never a side effect, added after a
+ * test run wrote the real user's unit with a temporary checkout as its WorkingDirectory.
  */
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 const source = (name: string) => readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), 'utf8');
+const supervisedUser = String(process.getuid?.() ?? '');
 
 async function repository() {
   const root = await mkdtemp(join(tmpdir(), 'graphyard-supervision-'));
@@ -40,7 +44,10 @@ function config(credentialFile: string, overrides: Record<string, unknown> = {})
 
 /**
  * A stub of the host's supervisor: it records every command, and answers the state queries the
- * way the real one does — on stdout, with a non-zero exit for every state but the good one.
+ * way the real one does — on stdout, with a non-zero exit for every state but the good one, and
+ * `loginctl show-user` answering nothing unless the user is named. Its repositories live under the
+ * system temporary directory, so it declares no temporary directory of its own; the real default is
+ * exercised by the explicit-only proof.
  */
 function hostStub(states: { enabled?: string; active?: string; linger?: string } = {}) {
   const calls: string[][] = [];
@@ -53,9 +60,11 @@ function hostStub(states: { enabled?: string; active?: string; linger?: string }
     calls,
     host: {
       platform: 'linux' as NodeJS.Platform,
+      temporaryDirectories: [] as string[],
       run: (command: string, args: string[]) => {
         calls.push([command, ...args]);
-        if (command === 'loginctl' && args[0] === 'show-user') return `${states.linger ?? 'yes'}\n`;
+        // Without a user argument, `show-user` describes the login manager, which has no Linger.
+        if (command === 'loginctl' && args[0] === 'show-user') return args[1] && !args[1].startsWith('--') ? `${states.linger ?? 'yes'}\n` : '\n';
         if (command === 'loginctl') return '';
         const text = answer(args);
         // systemctl reports a bad state on stdout and exits non-zero; the reader must take the word.
@@ -67,6 +76,8 @@ function hostStub(states: { enabled?: string; active?: string; linger?: string }
     },
   };
 }
+const changes = (calls: string[][]) => calls.filter(call => call[0] === 'systemctl' && ['daemon-reload', 'enable', 'restart', 'start', 'stop', 'disable'].includes(call[2]) || call[0] === 'loginctl' && call[1] === 'enable-linger');
+const fileState = async (path: string) => { try { const info = await stat(path); return { size: info.size, mtimeMs: info.mtimeMs, ino: info.ino }; } catch { return null; } };
 
 test('integration:setup-installs-supervisor — setup writes, enables and starts the loop unit, and a second run changes nothing', async () => {
   const root = await repository();
@@ -74,7 +85,7 @@ test('integration:setup-installs-supervisor — setup writes, enables and starts
   const home = await mkdtemp(join(tmpdir(), 'graphyard-supervision-home-'));
   try {
     const first = hostStub();
-    const setup = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, run: { intervalSeconds: 20 } },
+    const setup = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, run: { intervalSeconds: 20 }, installSupervisor: true },
       coordinatorStatus as typeof fetch, { supervisorHost: { ...first.host, home } });
 
     // The unit is written from this installation, not copied from an example.
@@ -100,33 +111,37 @@ test('integration:setup-installs-supervisor — setup writes, enables and starts
     assert.ok(loopWatchdogSeconds(20) * 1000 > 2 * 20_000, 'the packaged window never restarts a healthy loop mid-cycle');
 
     // It is enabled (so it returns after a reboot), started now, and this user lingers.
-    assert.deepEqual(first.calls.filter(call => call[0] === 'systemctl' && ['daemon-reload', 'enable'].includes(call[2])),
-      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', loopUnitName]]);
-    assert.ok(first.calls.some(call => call[0] === 'loginctl' && call[1] === 'enable-linger'), 'the user manager is made to start at boot');
+    assert.deepEqual(changes(first.calls),
+      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', loopUnitName], ['loginctl', 'enable-linger']]);
     assert.deepEqual({ installed: setup.supervisor!.installed, enabled: setup.supervisor!.enabled, active: setup.supervisor!.active, linger: setup.supervisor!.linger },
       { installed: true, enabled: true, active: true, linger: true });
     // It reports what it installed, in the words of the commands it ran.
     assert.ok(setup.supervisor!.performed.some(step => step.includes(unitPath)));
     assert.ok(setup.supervisor!.performed.includes(`systemctl --user enable --now ${loopUnitName}`));
+    assert.equal(setup.supervisor!.refused, null);
     assert.deepEqual(setup.attention, [], 'a supervised installation raises nothing');
 
     // Re-running setup is idempotent: the same unit content is left alone and nothing is reloaded.
     const again = hostStub();
-    const repeated = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, run: { intervalSeconds: 20 } },
+    const repeated = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, run: { intervalSeconds: 20 }, installSupervisor: true },
       coordinatorStatus as typeof fetch, { supervisorHost: { ...again.host, home } });
     assert.equal(repeated.supervisor!.state, 'unchanged');
     assert.equal(await readFile(unitPath, 'utf8'), unit, 'the unit on disk is byte-for-byte what the first run wrote');
     assert.equal(again.calls.some(call => call[2] === 'daemon-reload'), false, 'an unchanged unit is not reloaded');
+    assert.equal(again.calls.some(call => call[2] === 'restart'), false, 'and the running loop is left alone');
     assert.ok(again.calls.some(call => call[2] === 'enable'), 'enabling stays idempotent rather than conditional');
     assert.deepEqual({ enabled: repeated.supervisor!.enabled, active: repeated.supervisor!.active }, { enabled: true, active: true });
 
-    // A changed interval rewrites the unit and reloads it, so the watchdog window follows the loop.
+    // A changed interval rewrites the unit, reloads it, and restarts the loop so the new window
+    // takes effect now rather than at the next crash; no replace flag is needed for the same loop.
     const retuned = hostStub();
-    const rewritten = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, run: { intervalSeconds: 120 } },
+    const rewritten = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, run: { intervalSeconds: 120 }, installSupervisor: true },
       coordinatorStatus as typeof fetch, { supervisorHost: { ...retuned.host, home } });
     assert.equal(rewritten.supervisor!.state, 'updated');
     assert.match(await readFile(unitPath, 'utf8'), new RegExp(`^WatchdogSec=${loopWatchdogSeconds(120)}$`, 'm'));
-    assert.ok(retuned.calls.some(call => call[2] === 'daemon-reload'), 'a rewritten unit is reloaded before it is enabled');
+    assert.deepEqual(changes(retuned.calls).map(call => call.slice(0, 3)),
+      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']], 'a rewritten unit is reloaded, enabled and restarted, in that order');
+    assert.ok(rewritten.supervisor!.performed.includes(`systemctl --user restart ${loopUnitName}`), 'and setup says the loop was restarted');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(home, { recursive: true, force: true }); }
 });
 
@@ -143,13 +158,20 @@ test('unit:supervision-reported — master status reports whether the loop is su
     const report = (host: NonNullable<Parameters<typeof masterStatusReport>[5]>['supervisorHost']) =>
       masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { supervisorHost: host });
 
-    // Installed, enabled and running: the setup section says so and raises nothing.
-    await installLoopSupervisor({ root, cliPath: launcher, repository: 'owner/project', intervalSeconds: 20 }, { ...hostStub().host, home });
-    const healthy = await report({ ...hostStub().host, home });
-    assert.deepEqual({ supported: healthy.setup.supervisor.supported, installed: healthy.setup.supervisor.installed, enabled: healthy.setup.supervisor.enabled, active: healthy.setup.supervisor.active },
-      { supported: true, installed: true, enabled: true, active: true });
+    // Installed, enabled and running: the setup section says so and raises nothing. The unit is
+    // placed as an operator's install would leave it; status only ever reads.
+    await mkdir(join(home, '.config/systemd/user'), { recursive: true });
+    await writeFile(join(home, '.config/systemd/user', loopUnitName), loopUnitText({ root, cliPath: launcher, repository: 'owner/project', intervalSeconds: 20 }));
+    const healthyHost = hostStub();
+    const healthy = await report({ ...healthyHost.host, home });
+    assert.deepEqual({ supported: healthy.setup.supervisor.supported, installed: healthy.setup.supervisor.installed, enabled: healthy.setup.supervisor.enabled, active: healthy.setup.supervisor.active, linger: healthy.setup.supervisor.linger },
+      { supported: true, installed: true, enabled: true, active: true, linger: true });
     assert.deepEqual(healthy.setup.attention, []);
     assert.equal(healthy.attentionItems.some(item => /supervis/i.test(item.text)), false, 'a supervised loop is not an attention item');
+    // Lingering is read for this user by name: `show-user` with no user describes the login manager.
+    assert.ok(healthyHost.calls.some(call => call[0] === 'loginctl' && call[1] === 'show-user' && call[2] === supervisedUser && call.includes('--property=Linger')),
+      `status asks loginctl about user ${supervisedUser}: ${JSON.stringify(healthyHost.calls.filter(call => call[0] === 'loginctl'))}`);
+    assert.equal(changes(healthyHost.calls).length, 0, 'status changes nothing on the host');
 
     // Disabled: the loop runs now but nothing brings it back, and the fix is named exactly.
     const disabled = await report({ ...hostStub({ enabled: 'disabled' }).host, home });
@@ -176,6 +198,13 @@ test('unit:supervision-reported — master status reports whether the loop is su
       assert.match(absent!.next, /master init/);
     } finally { await rm(bare, { recursive: true, force: true }); }
 
+    // Not lingering: enabled, running, and still down after the next reboot, with the fix named.
+    const unlingering = await report({ ...hostStub({ linger: 'no' }).host, home });
+    assert.equal(unlingering.setup.supervisor.linger, false);
+    const reboot = unlingering.attentionItems.find(entry => /may not start at boot/.test(entry.text));
+    assert.ok(reboot, 'a user manager that does not start at boot is reported');
+    assert.match(reboot!.next, /^loginctl enable-linger/);
+
     // A supervisor that cannot be read at all is unverified, never reported as healthy.
     const unreadable = await report({ platform: 'linux', home, run: (command: string, args: string[]) => { if (args[1]?.startsWith('is-')) throw new Error('systemd is not answering'); return ''; } });
     assert.equal(unreadable.setup.supervisor.enabled, null);
@@ -192,7 +221,7 @@ test('unit:unsupervised-host-stated — a host that can have no supervisor is to
     assert.match(supervisorSupport({ platform: 'linux', run: () => { throw new Error('Failed to connect to bus'); } }).reason!, /no reachable systemd user manager/);
 
     for (const host of [{ platform: 'darwin' as NodeJS.Platform }, { platform: 'linux' as NodeJS.Platform, run: () => { throw new Error('Failed to connect to bus'); } }]) {
-      const setup = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory },
+      const setup = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, installSupervisor: true },
         coordinatorStatus as typeof fetch, { supervisorHost: host });
       assert.deepEqual({ supported: setup.supervisor!.supported, installed: setup.supervisor!.installed, state: setup.supervisor!.state }, { supported: false, installed: false, state: 'none' });
       // The limitation is stated, not implied: what does not happen, and what the operator must run.
@@ -286,7 +315,7 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
 
 test('manual:supervisor-onboarding-review — the onboarding guide states that the loop must be supervised, how setup does it, and how to confirm it', async () => {
   const guide = await readFile(fileURLToPath(new URL('../docs/onboarding.md', import.meta.url)), 'utf8');
-  for (const fragment of [loopUnitName, 'master status', 'systemctl --user enable --now', 'loginctl enable-linger']) {
+  for (const fragment of [loopUnitName, 'master status', 'systemctl --user enable --now', 'loginctl enable-linger', '--replace-supervisor', 'never a side effect']) {
     assert.ok(guide.includes(fragment), `docs/onboarding.md names ${fragment}`);
   }
   assert.match(guide, /^### The loop must be supervised$/m);
@@ -294,4 +323,146 @@ test('manual:supervisor-onboarding-review — the onboarding guide states that t
   const unit = loopUnitText({ root: '/path/to/coordinator-checkout', cliPath: launcher, repository: 'owner/project', intervalSeconds: 20 });
   assert.match(unit, /^Restart=always$/m);
   assert.ok(guide.includes('setup.supervisor'), 'the guide names the field an operator reads the answer from');
+});
+
+test('integration:supervisor-install-explicit-only — the unit is written only by an explicit operator install into the coordinator checkout on durable storage, never as a side effect', async () => {
+  const root = await repository();
+  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-supervision-explicit-credentials-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-supervision-explicit-'));
+  const home = join(scratch, 'home');
+  const previous = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  // The unit under the real user home, as it stands: this proof reads it and must leave it exactly so.
+  const realUnit = join(loopUnitDirectory({ env: { ...process.env } }), loopUnitName);
+  const realBefore = await fileState(realUnit);
+  try {
+    assert.ok(underTestRunner(), 'this proof runs under the test runner, which marks its processes; the shared guard keys on that mark');
+    const setup = (input: Record<string, unknown> = {}, dependencies: Parameters<typeof setupMaster>[3] = {}) =>
+      setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, ...input }, coordinatorStatus as typeof fetch, dependencies);
+
+    // 1. setupMaster with no supervisorHost and no option writes nothing outside the temporary root —
+    //    not into the process's home either, which is redirected to a temp so a write would show.
+    process.env.HOME = home; process.env.XDG_CONFIG_HOME = join(home, '.config');
+    const plain = await setup();
+    assert.equal(plain.supervisor, null, 'no option, no install, and nothing reported as installed');
+    assert.deepEqual(plain.attention, []);
+    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnitName)), null, 'the process home holds no unit');
+    // A host stub given without the option is not even consulted: the host is where, not whether.
+    const idle = hostStub();
+    const withHost = await setup({}, { supervisorHost: { ...idle.host, home } });
+    assert.equal(withHost.supervisor, null);
+    assert.deepEqual(idle.calls, [], 'a supervisor host without installSupervisor runs nothing');
+    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnitName)), null);
+    process.env.HOME = previous.HOME; process.env.XDG_CONFIG_HOME = previous.XDG_CONFIG_HOME;
+    if (previous.XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME;
+
+    // 2. An explicit install whose WorkingDirectory is under the system temporary directory is
+    //    refused by name, before anything is written or enabled, and setup still completes.
+    const temporary = hostStub();
+    delete (temporary.host as { temporaryDirectories?: string[] }).temporaryDirectories;
+    const refusedByName = await setup({ installSupervisor: true }, { supervisorHost: { ...temporary.host, home } });
+    assert.equal(refusedByName.supervisor!.state, 'refused');
+    const named = temporaryDirectories().find(directory => refusedByName.supervisor!.refused!.includes(directory));
+    assert.ok(named, `the refusal names the temporary directory: ${refusedByName.supervisor!.refused}`);
+    assert.ok(refusedByName.supervisor!.refused!.includes(root), 'and the WorkingDirectory it refused');
+    assert.match(refusedByName.supervisor!.instruction!, /master init from the coordinator checkout on durable storage/);
+    assert.deepEqual(changes(temporary.calls), [], 'nothing was reloaded, enabled, started or restarted');
+    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnitName)), null, 'no unit was written');
+    assert.deepEqual(refusedByName.supervisor!.performed, []);
+    assert.equal(refusedByName.attention.length, 1);
+    assert.ok(refusedByName.attention[0].includes(refusedByName.supervisor!.refused!) && refusedByName.attention[0].includes(refusedByName.supervisor!.instruction!), refusedByName.attention[0]);
+    assert.ok(refusedByName.next.startsWith(`${refusedByName.attention[0]}.`), `next states the refusal first: ${refusedByName.next}`);
+    assert.match(await readFile(join(root, '.graphyard/master.json'), 'utf8'), /"repository": "owner\/project"/, 'the configuration was still written');
+
+    // 3. The installer's own refusals, against a host that declares its own temporary directory so
+    //    the rest of this scratch space counts as durable for it.
+    const volatile = join(scratch, 'volatile');
+    const coordinator = join(scratch, 'coordinator');
+    const unit = (checkout: string, cliPath = launcher, intervalSeconds = 20) => ({ root: checkout, cliPath, repository: 'owner/project', intervalSeconds });
+    const stub = (states: Parameters<typeof hostStub>[0] = {}) => { const host = hostStub(states); return { calls: host.calls, host: { ...host.host, home, temporaryDirectories: [volatile] } }; };
+    const configured = async (checkout: string) => { await mkdir(join(checkout, '.graphyard'), { recursive: true }); await writeFile(join(checkout, '.graphyard/master.json'), '{}\n'); return checkout; };
+    const refusal = async (input: ReturnType<typeof unit>, expected: RegExp, options?: { replace?: boolean }) => {
+      const host = stub();
+      const result = await installLoopSupervisor(input, host.host, options);
+      assert.equal(result.wrote, 'refused', `refused: ${JSON.stringify(result)}`);
+      assert.match(result.refused!, expected);
+      assert.deepEqual(changes(host.calls), [], `a refusal changes nothing on the host: ${result.refused}`);
+      assert.deepEqual(result.performed, []);
+      return result;
+    };
+    await refusal(unit(await configured(join(volatile, 'checkout'))), /under the temporary directory/);
+    await refusal(unit(join(scratch, 'unconfigured')), /not the configured coordinator checkout/);
+    await refusal(unit(await configured(join(scratch, 'durable', '.graphyard', 'worktrees', 'GY-1-1'))), /assignment worktree or session checkout/);
+    await refusal(unit('relative/checkout'), /absolute path/);
+    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnitName)), null, 'none of them wrote the unit');
+
+    // 4. The coordinator checkout installs; a unit that runs another loop is not replaced by a
+    //    re-run from elsewhere unless the operator says so; the same loop is retuned without it.
+    await configured(coordinator);
+    const installed = await installLoopSupervisor(unit(coordinator), stub().host);
+    assert.equal(installed.wrote, 'created');
+    const unitPath = join(home, '.config/systemd/user', loopUnitName);
+    const written = await readFile(unitPath, 'utf8');
+    assert.match(written, new RegExp(`^WorkingDirectory=${coordinator}$`, 'm'));
+    const other = await configured(join(scratch, 'other-checkout'));
+    const foreign = await refusal(unit(other), /already runs a different loop/);
+    assert.match(foreign.refused!, new RegExp(`WorkingDirectory=${coordinator}`));
+    assert.match(foreign.instruction!, /master init --token-stdin --replace-supervisor/);
+    assert.deepEqual({ installed: foreign.installed, enabled: foreign.enabled, active: foreign.active }, { installed: true, enabled: true, active: true }, 'what is there is reported as observed');
+    await refusal(unit(coordinator, join(scratch, 'another-launcher.mjs')), /ExecStart=/);
+    assert.equal(await readFile(unitPath, 'utf8'), written, 'the installed unit is untouched by a refused replacement');
+    const retuned = stub();
+    assert.equal((await installLoopSupervisor(unit(coordinator, launcher, 60), retuned.host)).wrote, 'updated', 'the same loop with a new interval is rewritten without a flag');
+    assert.ok(retuned.calls.some(call => call[2] === 'restart'));
+    // The packaged example, installed by hand for this same checkout, spells it with systemd's %h:
+    // that is this loop, upgraded in place, not a foreign unit to refuse.
+    const nested = await configured(join(home, 'code', 'coordinator'));
+    await writeFile(unitPath, loopUnitText(unit(coordinator)).replace(`WorkingDirectory=${coordinator}`, 'WorkingDirectory=%h/code/coordinator').replace(` ${launcher} master run`, ` %h/code/coordinator/bin/graphyard.mjs master run`));
+    const upgraded = await installLoopSupervisor(unit(nested, join(nested, 'bin/graphyard.mjs')), stub().host);
+    assert.equal(upgraded.wrote, 'updated', `a hand-installed unit for the same checkout is upgraded, not refused: ${upgraded.refused}`);
+    assert.match(await readFile(unitPath, 'utf8'), new RegExp(`^WorkingDirectory=${nested}$`, 'm'));
+    await refusal(unit(coordinator), /already runs a different loop/);
+    const replaced = stub();
+    const replacement = await installLoopSupervisor(unit(other), replaced.host, { replace: true });
+    assert.equal(replacement.wrote, 'updated');
+    assert.match(await readFile(unitPath, 'utf8'), new RegExp(`^WorkingDirectory=${other}$`, 'm'));
+    assert.deepEqual(changes(replaced.calls).map(call => call.slice(0, 3)), [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']]);
+
+    // 5. The shared test guard: under the test runner, a home outside the system temporary
+    //    directory is refused at the installer, whatever the test passed and before it reads or
+    //    writes anything — the real user home included, which this proof leaves exactly as found.
+    assert.throws(() => testSuiteHomeGuard(join(homedir(), '.config/systemd/user')), (error: unknown) => error instanceof LoopSupervisorRefusal && /test suite may not write/.test(error.message));
+    assert.doesNotThrow(() => testSuiteHomeGuard(join(home, '.config/systemd/user')), 'a temp-rooted home passes');
+    assert.doesNotThrow(() => testSuiteHomeGuard(join(homedir(), '.config/systemd/user'), {}, []), 'outside the test runner the guard is not a test guard');
+    const real = stub();
+    const guarded = await installLoopSupervisor(unit(coordinator), { ...real.host, home: homedir() });
+    assert.equal(guarded.wrote, 'refused');
+    assert.match(guarded.refused!, /test suite may not write/);
+    assert.match(guarded.instruction!, /home under the system temporary directory/);
+    assert.deepEqual(changes(real.calls), []);
+    assert.deepEqual(await fileState(realUnit), realBefore, 'the unit under the real user home is exactly as it was');
+
+    // 6. Structurally: the install is reached from setupMaster only through the explicit option,
+    //    which master init alone passes; nothing derives it from another argument; and the guard
+    //    runs at the installer before its first write, so every test reaching either is covered.
+    const master_ts = source('master.ts');
+    assert.ok(master_ts.includes('input.installSupervisor === true ? await installLoopSupervisor('), 'setupMaster installs only on the explicit option');
+    assert.doesNotMatch(master_ts, /credentialDirectory === undefined/, 'no other argument stands in for the option');
+    assert.equal((master_ts.match(/installLoopSupervisor\(/g) ?? []).length, 1, 'one call site in setupMaster');
+    const cli = source('cli/master.ts');
+    assert.equal((cli.match(/installSupervisor: true/g) ?? []).length, 1, 'master init is the one command that passes it');
+    assert.ok(cli.includes("'replace-supervisor': { type: 'boolean' }") && cli.includes("replaceSupervisor: !!values['replace-supervisor']"), 'and --replace-supervisor is the explicit replace flag');
+    const sources = readdirSync(fileURLToPath(new URL('../src', import.meta.url)), { recursive: true, withFileTypes: true })
+      .filter(entry => entry.isFile() && entry.name.endsWith('.ts')).map(entry => resolve(entry.parentPath, entry.name));
+    const callers = sources.filter(file => /(?<![.\w])installLoopSupervisor\(/.test(readFileSync(file, 'utf8'))).map(file => file.slice(file.indexOf('/src/') + 5));
+    assert.deepEqual(callers.sort(), ['master.ts', 'supervisor.ts'], 'no other source reaches the installer');
+    const supervisor_ts = source('supervisor.ts');
+    const installer = supervisor_ts.slice(supervisor_ts.indexOf('export async function installLoopSupervisor('));
+    assert.ok(installer.indexOf('testSuiteHomeGuard(unitDirectory') > 0 && installer.indexOf('testSuiteHomeGuard(unitDirectory') < installer.indexOf('await mkdir('), 'the guard runs before the installer writes');
+    assert.ok(installer.indexOf('assertCoordinatorCheckout(input.root') < installer.indexOf('await readFile('), 'and the WorkingDirectory is judged before the existing unit is read');
+    assert.equal((await readdir(join(home, '.config/systemd/user'))).filter(name => name.endsWith('.tmp')).length, 0, 'no temporary unit file is left behind');
+  } finally {
+    process.env.HOME = previous.HOME; process.env.XDG_CONFIG_HOME = previous.XDG_CONFIG_HOME;
+    if (previous.XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME;
+    await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(scratch, { recursive: true, force: true });
+  }
 });

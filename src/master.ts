@@ -454,7 +454,11 @@ async function atomicPrivateText(file: string, value: string) {
   await chmod(file, 0o600);
 }
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser }, fetcher: typeof fetch = fetch, dependencies: { probe?: FilesystemProbe; supervisorHost?: LoopSupervisorHost } = {}) {
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser;
+  /** Install the loop's supervisor (GY-114). Explicit, never implied: only `master init` passes it. */
+  installSupervisor?: boolean;
+  /** Replace an installed unit that runs a different loop; `master init --replace-supervisor`. */
+  replaceSupervisor?: boolean }, fetcher: typeof fetch = fetch, dependencies: { probe?: FilesystemProbe; supervisorHost?: LoopSupervisorHost } = {}) {
   const url = serverOrigin(input.url); const token = input.token.trim();
   const workerConnection = await loadConnection(root);
   if (workerConnection && workerConnection.url !== url) throw new Error('Worker connection uses another Graphyard server; migrate the repository connection before master setup');
@@ -512,25 +516,27 @@ export async function setupMaster(root: string, input: { url: string; token: str
    * outcome fails setup: the configuration is already written, and an install that refused here
    * would leave the master with no configuration at all rather than with an honest gap.
    *
-   * One host runs one user-level unit, so setup installs it only when it is installing this
-   * user's own coordinator — the ordinary `master init`, which takes the configuration home as it
-   * finds it. A caller that places the coordinator credential somewhere else is setting up a
-   * second or embedded coordinator beside one whose unit is already installed, and that unit is
-   * left exactly as it is. `master status` still verifies supervision on the host itself.
+   * Installing it is an explicit operator action and never a side effect: it happens only when
+   * the caller passed `installSupervisor: true`, which `master init` does and nothing else — not
+   * a library caller that omitted the option, not the test suite, not a worker, reviewer or
+   * producer checkout. The installer itself refuses, by name, a WorkingDirectory that is not this
+   * configured coordinator checkout on a durable path, an installed unit that runs a different
+   * loop unless `replaceSupervisor` was passed, and any test-suite reach outside the temporary
+   * directory. A refusal is reported like every other outcome and never fails setup.
+   * `master status` verifies supervision on the host itself either way.
    */
-  const supervisorHost = dependencies.supervisorHost ?? (input.credentialDirectory === undefined ? {} : null);
-  const supervisor: LoopSupervisorInstallation | null = supervisorHost && await installLoopSupervisor(
-    { root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds }, supervisorHost,
-  ).catch(error => ({ supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, performed: [],
+  const supervisor: LoopSupervisorInstallation | null = input.installSupervisor === true ? await installLoopSupervisor(
+    { root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds }, dependencies.supervisorHost ?? {}, { replace: input.replaceSupervisor === true },
+  ).catch(error => ({ supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
     reason: `Installing the loop's supervisor failed: ${error instanceof Error ? error.message : String(error)}`,
-    instruction: unsupervisedInstruction({ root, cliPath: config.cliPath }) }));
+    instruction: unsupervisedInstruction({ root, cliPath: config.cliPath }) })) : null;
   // A permission the installed App lacks is announced here with its exact migration steps, not
   // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
   const { attention, appPermissions, delegationLimits, production } = controlPlaneAttention(status);
   // A loop nothing restarts is an installation fact like any other, so it is stated where the rest
   // are — in the same words `master status` will keep using — rather than left for whoever
-  // eventually notices the silence.
-  const supervision = supervisor ? loopSupervisionAttention(supervisor).map(gap => `${gap.text}: ${gap.next}`) : [];
+  // eventually notices the silence. A refused install is stated with what the operator runs.
+  const supervision = !supervisor ? [] : supervisor.wrote === 'refused' ? [`${supervisor.reason}: ${supervisor.instruction}`] : loopSupervisionAttention(supervisor).map(gap => `${gap.text}: ${gap.next}`);
   attention.push(...supervision);
   // Each installation fact keeps its own remedy: a permission shortfall is a GitHub migration, a
   // capacity variable is a deployment setting, and production lag is a deploy to confirm.
@@ -550,7 +556,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.
     supervisor: supervisor ? { supported: supervisor.supported, unit: supervisor.unit, unitPath: supervisor.unitPath, installed: supervisor.installed, enabled: supervisor.enabled,
-      active: supervisor.active, linger: supervisor.linger, state: supervisor.wrote, performed: supervisor.performed, reason: supervisor.reason, instruction: supervisor.instruction } : null,
+      active: supervisor.active, linger: supervisor.linger, state: supervisor.wrote, refused: supervisor.refused, performed: supervisor.performed, reason: supervisor.reason, instruction: supervisor.instruction } : null,
     next: `${supervision.length ? `${supervision[0]}. Then ${remedy ? `${remedy}, then ${start}` : start}` : remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1)}; give the master its agent identities once with graphyard master autonomy --admin-token-stdin --apply` };
 }
 

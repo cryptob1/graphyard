@@ -1,9 +1,9 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir, userInfo } from 'node:os';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
@@ -512,7 +512,10 @@ export const loopRestartSeconds = 10;
  * The keep-alive window. A cycle that hangs leaves the process alive and the pipeline silent,
  * which no `Restart=` setting notices, so the loop pings systemd after every completed cycle. The
  * window must stay well past two cycle intervals or a healthy loop would be restarted mid-cycle —
- * the bound `watchdogPlan` refuses by name — and past the loop's own longest bounded external call.
+ * the bound `watchdogPlan` refuses by name — and past the 90s bound on every call into the agent
+ * runtime. It is shorter than the 600s a worker launch may take on a large repository: a launch
+ * that slow outlasts the window and the loop is restarted mid-launch, which its persisted cursors
+ * make a resumption rather than a repeat. That is the packaged unit's trade, kept here.
  */
 export const loopWatchdogSeconds = (intervalSeconds: number) => Math.max(180, Math.ceil(intervalSeconds * 6));
 
@@ -529,8 +532,21 @@ export interface LoopSupervisorHost {
   env?: NodeJS.ProcessEnv;
   /** Where `~/.config/systemd/user` is rooted; a test host points this at its own directory. */
   home?: string;
+  /**
+   * The directories this host treats as temporary: a unit whose WorkingDirectory is under one is
+   * refused by name (`temporaryDirectories()` by default). A test host that redirects `home` names
+   * its own, so the temp-rooted repository it sets up counts as durable for that host alone.
+   */
+  temporaryDirectories?: string[];
   /** Runs one supervisor command, throwing what it printed when it fails. */
   run?: (command: string, args: string[]) => string;
+}
+export interface LoopSupervisorInstallOptions {
+  /**
+   * Replace an installed unit that runs a different loop (another ExecStart or WorkingDirectory).
+   * Never implied: without it such a unit is left as it is and the install is refused by name.
+   */
+  replace?: boolean;
 }
 export interface LoopSupervision {
   supported: boolean;
@@ -546,13 +562,74 @@ export interface LoopSupervision {
   instruction: string | null;
 }
 export interface LoopSupervisorInstallation extends LoopSupervision {
-  wrote: 'created' | 'updated' | 'unchanged' | 'none';
+  /** `refused`: nothing was written or enabled; `refused` below says why and `instruction` what to run. */
+  wrote: 'created' | 'updated' | 'unchanged' | 'none' | 'refused';
+  refused: string | null;
   /** Exactly what the install did, in order, so setup reports what it installed. */
   performed: string[];
 }
 
 const supervisorRun = (host: LoopSupervisorHost) => host.run
   ?? ((command: string, args: string[]) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 })));
+
+/**
+ * An install that must not happen, with what the operator runs instead. The installer turns it
+ * into a `refused` record rather than a failure: the unit under the real user home is written only
+ * by the setup command an operator runs on the coordinator host, and every other reach — a call
+ * whose caller omitted the option, the test suite, a worker, reviewer or producer checkout, a unit
+ * that already runs another loop — is named and left alone (GY-114).
+ */
+export class LoopSupervisorRefusal extends Error {
+  override readonly name = 'LoopSupervisorRefusal';
+  constructor(message: string, readonly instruction: string) { super(message); }
+}
+
+const canonical = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
+const within = (path: string, parent: string) => path === parent || path.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
+/**
+ * The directories every host treats as temporary, by name. A unit whose WorkingDirectory is under
+ * one outlives the directory: on 2026-09-22 a unit written with a reviewer's `/var/tmp` checkout as
+ * its WorkingDirectory crash-looped 233 times in 40 minutes after that checkout was deleted.
+ */
+export const temporaryDirectories = () => [...new Set([tmpdir(), '/tmp', '/var/tmp'].map(canonical))];
+
+/** Node's test runner marks every process it runs a test file in; the guard below keys on that mark. */
+export const underTestRunner = (env: NodeJS.ProcessEnv = process.env, execArgv: string[] = process.execArgv) => !!env.NODE_TEST_CONTEXT || execArgv.includes('--test');
+/**
+ * The one guard the test suite shares. Under the test runner the loop's unit directory must be
+ * rooted in the system temporary directory, so a test that reaches `setupMaster` or
+ * `installLoopSupervisor` runs against a temp-rooted home or is refused here, before anything is
+ * written — enforced once, at the only place that writes the unit, rather than by each test
+ * remembering to redirect its host's home.
+ */
+export function testSuiteHomeGuard(unitDirectory: string, env: NodeJS.ProcessEnv = process.env, execArgv: string[] = process.execArgv) {
+  if (!underTestRunner(env, execArgv)) return;
+  const temporary = canonical(tmpdir());
+  if (within(canonical(unitDirectory), temporary)) return;
+  throw new LoopSupervisorRefusal(`the test suite may not write ${unitDirectory}: under the test runner the loop's unit directory must be rooted in ${temporary}`,
+    'give the test host a home under the system temporary directory (LoopSupervisorHost.home); the real user home is written only by graphyard master init run by an operator');
+}
+
+/**
+ * The WorkingDirectory an installed unit may name: the configured coordinator checkout, on a
+ * durable path. A temporary directory is refused by name, a managed assignment worktree is never
+ * the coordinator, and a checkout without the master configuration is not one this setup wrote.
+ */
+function assertCoordinatorCheckout(root: string, host: LoopSupervisorHost) {
+  const operator = 'run graphyard master init from the coordinator checkout on durable storage; that is the only command which installs the unit';
+  if (!isAbsolute(root)) throw new LoopSupervisorRefusal(`the loop's WorkingDirectory must be an absolute path, not ${root}`, operator);
+  const checkout = canonical(root);
+  const temporary = (host.temporaryDirectories ?? temporaryDirectories()).map(canonical).find(directory => within(checkout, directory));
+  if (temporary) throw new LoopSupervisorRefusal(`the loop's WorkingDirectory ${root} is under the temporary directory ${temporary}: a unit rooted there outlives its checkout and crash-loops once the directory is gone`, operator);
+  if (checkout.split(sep).includes('.graphyard')) throw new LoopSupervisorRefusal(`the loop's WorkingDirectory ${root} is inside a managed .graphyard directory (an assignment worktree or session checkout), never the coordinator checkout`, operator);
+  if (!existsSync(join(checkout, '.graphyard', 'master.json'))) throw new LoopSupervisorRefusal(`the loop's WorkingDirectory ${root} is not the configured coordinator checkout: it holds no .graphyard/master.json`, operator);
+}
+/**
+ * One setting of a unit file, with systemd's `%h` (the user's home, as the packaged example spells
+ * its checkout) expanded so a hand-installed unit for this same checkout reads as this loop.
+ */
+const unitSetting = (text: string, key: string, home: string) =>
+  text.split(/\r?\n/).find(line => line.startsWith(`${key}=`))?.slice(key.length + 1).replace(/%%|%h/g, specifier => specifier === '%%' ? '%' : home) ?? null;
 /**
  * `systemctl is-enabled` and `is-active` answer on stdout and exit non-zero for every state but
  * the good one, so a state is read from what the command printed; only a command that printed
@@ -578,6 +655,11 @@ function unitValue(value: string, field: string) {
   if (/[\r\n\0"\\]/.test(value)) throw new Error(`The loop's ${field} cannot be written as a systemd setting because it contains a newline, quote, or backslash: ${value}`);
   return /\s/.test(value) ? `"${value}"` : value;
 }
+/** `WorkingDirectory=` is taken literally by systemd, quotes included, so a path with whitespace has no spelling. */
+function unitDirectoryValue(value: string, field: string) {
+  if (/\s/.test(value)) throw new Error(`The loop's ${field} cannot be written as a systemd WorkingDirectory because it contains whitespace: ${value}`);
+  return unitValue(value, field);
+}
 
 /**
  * The unit, derived from this installation rather than copied from the packaged example: its own
@@ -588,7 +670,9 @@ function unitValue(value: string, field: string) {
  */
 export function loopUnitText(input: LoopUnitInput) {
   const execPath = input.execPath ?? process.execPath;
-  return `# Generated by graphyard master init. Re-running setup rewrites this file; edits are replaced.
+  return `# Generated by graphyard master init, run by an operator from the coordinator checkout below; nothing
+# else writes it. Re-running master init from that checkout rewrites this file and edits are replaced;
+# a unit that runs another checkout or launcher is replaced only with master init --replace-supervisor.
 #
 # The loop authenticates with the coordinator credential stored outside the repository. Never add a
 # worker, producer, or operator credential here: the coordinator must not be able to claim work,
@@ -604,7 +688,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-WorkingDirectory=${unitValue(input.root, 'checkout')}
+WorkingDirectory=${unitDirectoryValue(input.root, 'checkout')}
 ExecStart=${unitValue(execPath, 'Node executable')} ${unitValue(input.cliPath, 'CLI path')} master run
 # The loop persists its cursor before and after every action, so a restart resumes rather than
 # repeating. Give it time to finish the action in flight before SIGKILL.
@@ -646,6 +730,9 @@ export function unsupervisedInstruction(input: Pick<LoopUnitInput, 'root' | 'cli
   return `Graphyard cannot install a supervisor for the loop on this host, so its self-healing does not apply here: a crashed, killed, or rebooted loop stays down until a person starts it, and no restart follows the attention item that reports it. Keep it alive yourself - run "${command}" from ${input.root} under this platform's own always-restart supervisor (launchd on macOS, an init service or a container restart policy elsewhere), configure that supervisor to start at boot, and read the loop line in graphyard master status to confirm it is cycling.`;
 }
 
+/** The user whose manager runs the unit, as `loginctl` must be told it: by uid, or by name where there is none. */
+const supervisedUser = () => String(process.getuid?.() ?? userInfo().username);
+
 /** Read back what the supervisor reports about the unit, without changing anything. */
 function observeUnit(run: (command: string, args: string[]) => string) {
   const enabled = supervisorState(run, ['--user', 'is-enabled', loopUnitName]);
@@ -661,20 +748,46 @@ function observeUnit(run: (command: string, args: string[]) => string) {
  * Install and enable the loop's supervisor, idempotently. A unit whose content already matches is
  * left alone and nothing is reloaded; enabling and starting are idempotent by construction, so a
  * second setup run changes nothing and reports the same state.
+ *
+ * It is reached only by `setupMaster` given `installSupervisor: true`, which only `master init`
+ * passes. Before it writes anything it refuses, by name, the test suite (`testSuiteHomeGuard`), a
+ * WorkingDirectory that is not the configured coordinator checkout on a durable path, and an
+ * installed unit that runs a different loop unless `replace` was passed explicitly.
  */
-export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupervisorHost = {}): Promise<LoopSupervisorInstallation> {
+export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupervisorHost = {}, options: LoopSupervisorInstallOptions = {}): Promise<LoopSupervisorInstallation> {
   const support = supervisorSupport(host);
-  const unitPath = join(loopUnitDirectory(host), loopUnitName);
+  const unitDirectory = loopUnitDirectory(host);
+  const unitPath = join(unitDirectory, loopUnitName);
   if (!support.supported) return { supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null,
-    wrote: 'none', performed: [], reason: support.reason, instruction: unsupervisedInstruction(input) };
+    wrote: 'none', refused: null, performed: [], reason: support.reason, instruction: unsupervisedInstruction(input) };
   const run = supervisorRun(host);
   const text = loopUnitText(input);
   const performed: string[] = [];
   let existing: string | null = null;
+  const refused = (refusal: LoopSupervisorRefusal): LoopSupervisorInstallation => {
+    // Nothing was written; what is there is reported as observed, so setup never claims a state.
+    const observed = observeUnit(run);
+    return { supported: true, unit: loopUnitName, unitPath, installed: existing !== null, enabled: existing === null ? false : observed.enabled, active: existing === null ? false : observed.active,
+      linger: null, wrote: 'refused', refused: refusal.message, performed: [], reason: `Installing the loop's supervisor was refused: ${refusal.message}`, instruction: refusal.instruction };
+  };
+  try {
+    testSuiteHomeGuard(unitDirectory, host.env);
+    assertCoordinatorCheckout(input.root, host);
+  } catch (error) { if (error instanceof LoopSupervisorRefusal) return refused(error); throw error; }
   try { existing = await readFile(unitPath, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  // A unit that runs another loop — a different checkout or launcher — is somebody's installation,
+  // and a re-run of setup from elsewhere must not take it over silently. A unit for this loop whose
+  // other settings changed (the watchdog window follows the interval) is rewritten as before.
+  if (existing !== null && !options.replace) {
+    const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());
+    const differs = (['WorkingDirectory', 'ExecStart'] as const).filter(key => unitSetting(existing!, key, home) !== unitSetting(text, key, home));
+    if (differs.length) return refused(new LoopSupervisorRefusal(
+      `${unitPath} already runs a different loop (${differs.map(key => `${key}=${unitSetting(existing!, key, home) ?? '(missing)'}`).join(', ')}), not this checkout's (${differs.map(key => `${key}=${unitSetting(text, key, home)}`).join(', ')})`,
+      `graphyard master init --token-stdin --replace-supervisor from this checkout, only if that unit is the coordinator you mean to replace`));
+  }
   let wrote: LoopSupervisorInstallation['wrote'] = 'unchanged';
   if (existing !== text) {
-    await mkdir(loopUnitDirectory(host), { recursive: true });
+    await mkdir(unitDirectory, { recursive: true });
     const temporary = `${unitPath}.${randomUUID()}.tmp`;
     await writeFile(temporary, text, { mode: 0o644, flag: 'wx' });
     await rename(temporary, unitPath);
@@ -686,6 +799,10 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
   // `enable --now` is the whole restart policy: enabled for every boot, started for this one.
   run('systemctl', ['--user', 'enable', '--now', loopUnitName]);
   performed.push(`systemctl --user enable --now ${loopUnitName}`);
+  // A rewritten unit takes effect only when the service starts from it: `enable --now` leaves a
+  // running loop on the old ExecStart and watchdog window, so it is restarted, and resumes from
+  // the cursors it persists before and after every action.
+  if (wrote === 'updated') { run('systemctl', ['--user', 'restart', loopUnitName]); performed.push(`systemctl --user restart ${loopUnitName}`); }
   // An enabled unit still never runs if this user's manager stops at logout and does not start at
   // boot, so lingering is part of "comes back after a reboot". A host that refuses it is reported
   // rather than left looking supervised.
@@ -695,7 +812,7 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
   const observed = observeUnit(run);
   const unreadable = [observed.enabled === null ? 'enabled' : null, observed.active === null ? 'active' : null].filter(Boolean).join(' and ');
   return { supported: true, unit: loopUnitName, unitPath, installed: true, enabled: observed.enabled, active: observed.active, linger,
-    wrote, performed, instruction: null,
+    wrote, refused: null, performed, instruction: null,
     reason: [unreadable ? `systemd did not report whether the unit is ${unreadable}` : null, lingerReason].filter(Boolean).join('; ') || null };
 }
 
@@ -715,8 +832,10 @@ export async function loopSupervision(input: Pick<LoopUnitInput, 'root' | 'cliPa
   installed ||= observed.enabledState !== null && observed.enabledState !== 'not-found';
   const unreadable = [observed.enabled === null ? 'enabled' : null, observed.active === null ? 'active' : null].filter(Boolean).join(' and ');
   // Lingering is read, never assumed: a host that cannot answer leaves it unknown rather than false.
+  // `show-user` needs the user named: without one it shows the login manager, which has no Linger
+  // property and answers nothing, and the reboot half of the restart policy went unverified.
   let linger: boolean | null = null;
-  try { const answer = run('loginctl', ['show-user', '--property=Linger', '--value']).trim().toLowerCase(); linger = answer === 'yes' ? true : answer === 'no' ? false : null; } catch { linger = null; }
+  try { const answer = run('loginctl', ['show-user', supervisedUser(), '--property=Linger', '--value']).trim().toLowerCase(); linger = answer === 'yes' ? true : answer === 'no' ? false : null; } catch { linger = null; }
   return { supported: true, unit: loopUnitName, unitPath, installed, enabled: installed ? observed.enabled : false, active: installed ? observed.active : false, linger,
     instruction: null, reason: unreadable ? `systemd did not report whether the unit is ${unreadable}` : null };
 }

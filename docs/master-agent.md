@@ -1605,7 +1605,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 
 | Command | Purpose |
 | --- | --- |
-| `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
+| `master init --token-stdin [--browser-profile PROFILE] [--replace-supervisor]` | Install the operating mode and, run by an operator from the coordinator checkout, the loop's systemd user unit; name the operator's browser profile; `--replace-supervisor` takes over a unit that runs another checkout or launcher |
 | `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
 | `master start KIND` | Launch the visible master session with its harness rules |
 | `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |

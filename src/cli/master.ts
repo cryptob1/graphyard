@@ -28,8 +28,9 @@ export const masterCommands = defineCommands([
     help: [
       '  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]',
       '              [--dispatch-interval SECONDS] [--reviewer-profile NAME] [--producer-timeout MINUTES]',
-      '                                Install the recommended master-agent operating mode; PROFILE is',
-      "                                the operator's Chrome profile the master administers GitHub",
+      '              [--replace-supervisor] Install the operating mode and, in the coordinator',
+      "                                checkout, the loop's systemd unit; --replace-supervisor replaces",
+      "                                another loop's. PROFILE: the operator's Chrome profile",
       '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
       '  master worker add FILE        Add an existing or launchable Herdr worker profile',
       '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App; NAME',
@@ -85,7 +86,7 @@ export const masterCommands = defineCommands([
       // The guide's first line is its docs-index entry, not guide body.
       if (id === 'guide') return console.log((await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
       if (id === 'init') {
-        const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'dispatch-interval': { type: 'string' }, 'reviewer-profile': { type: 'string' }, 'producer-timeout': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' } }, allowPositionals: false });
+        const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'dispatch-interval': { type: 'string' }, 'reviewer-profile': { type: 'string' }, 'producer-timeout': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' }, 'replace-supervisor': { type: 'boolean' } }, allowPositionals: false });
         if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
         const masterToken = await readSecretFromStdin(10_000); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
         const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
@@ -93,7 +94,7 @@ export const masterCommands = defineCommands([
           ...(values['dispatch-interval'] ? { dispatchIntervalSeconds: Number(values['dispatch-interval']) } : {}), ...(values['reviewer-profile'] ? { reviewerProfile: values['reviewer-profile'] } : {}), ...(values['producer-timeout'] ? { producerTimeoutMinutes: Number(values['producer-timeout']) } : {}) };
         if (values['browser-executable'] && !values['browser-profile']) throw new Error('--browser-executable requires --browser-profile');
         const browser = values['browser-profile'] ? { profile: values['browser-profile'], ...(values['browser-executable'] ? { executable: values['browser-executable'] } : {}) } : undefined;
-        return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) }));
+        return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}), installSupervisor: true, replaceSupervisor: !!values['replace-supervisor'] }));
       }
       const master = await loadMasterConfig(root);
       const masterToken = await readCredentialFile(master.credentialFile);
