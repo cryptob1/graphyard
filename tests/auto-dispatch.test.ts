@@ -12,6 +12,7 @@ import { Engine } from '../src/engine.js';
 import { createSchema, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { automatableOutcomes, automatableProof, dispatchIneligibility, dispatchRequestsFor, reconcileAutoDispatch, reviewNeed, type DispatchRequest } from '../src/model/dispatch.js';
 import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, producerProfileSchema, saveProducerProfile, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
 import { assertProducerCandidate, independentProducerProfiles, launchProducer, producerIdleGraceMs, producerPrompt, proofOutcome, readProducerLedger, reconcileProducers, summarizeProducers, type ProducerRecord } from '../src/producer.js';
 import { dispatchCursorPath, dispatchFailureLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, writeDispatchCursor, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -239,16 +240,17 @@ test('integration:auto-dispatch-review — a pending reviewer session for a repl
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
     const config = await loadMasterConfig(root);
     const calls: string[][] = [];
-    const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
+    const run = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
     const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
     const item = work({ observation: observation({ sha: H, baseSha: B }, { at: new Date().toISOString() }) });
     reconcileAutoDispatch(item, [item], new Date());
     const request = item.autoDispatch!.review!;
     const launched = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint, requestId: request.id });
     assert.equal(launched.requestId, request.id);
-    // GY-93: the request is the last argument of the start, the runtime's positional prompt.
-    assert.deepEqual(calls[1].slice(0, 2), ['agent', 'start']);
-    assert.match(calls[1].at(-1)!, /repeat it every 5 seconds until mergeable is no longer UNKNOWN/, 'the reviewer polls mergeability before posting');
+    // GY-93: the request is the last argument of the runtime's command line, its positional
+    // prompt, which the shell reads from the request file the typed line references (GY-121).
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'pane-review']);
+    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, /repeat it every 5 seconds until mergeable is no longer UNKNOWN/, 'the reviewer polls mergeability before posting');
     const ledger = await readReviewLedger(root);
     assert.equal(ledger.reviews[0].requestId, request.id); assert.equal(ledger.reviews[0].state, 'pending');
     const sessionDirectory = ledger.reviews[0].sessionDirectory;
@@ -431,17 +433,21 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
     for (const fragment of ['GY-64', '#64', H, B, 'policy revision 1', 'integration:auto-dispatch-review', 'integration:auto-dispatch-producers', 'never print, copy, cat, or echo', 'git worktree add --detach', '"result":"pass"|"fail"', `node ${config.cliPath} evidence GY-64`, 'never weaken, skip or narrow a test']) assert.ok(prompt.includes(fragment), `the producer prompt must state ${fragment}`);
     assert.equal(prompt.includes('producer-token-'), false, 'the credential value never reaches the prompt');
     const calls: string[][] = [];
-    const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-produce', tab_id: 'tab-produce' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
+    const run = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-produce', tab_id: 'tab-produce' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
     const launched = await launchProducer(root, item, request, profile, [], new Date().toISOString(), { run });
     assert.deepEqual([launched.work, launched.sha, launched.group, launched.pane, launched.principal, launched.requestId], ['GY-64', H, 'integration', 'pane-produce', 'proof-runner', request.id]);
     const tab = calls[0];
     assert.ok(tab.includes(`GRAPHYARD_TOKEN_FILE=${credential}`), 'the session receives the credential path, not the value');
     assert.equal(JSON.stringify(calls).includes('producer-token-'), false);
     assert.ok(tab.includes('GRAPHYARD_URL=https://graphyard.example') && tab.includes(`GRAPHYARD_PRODUCER=GY-64@${H}`));
-    assert.deepEqual(calls[1].slice(0, 6), ['agent', 'start', 'produce-a', '--kind', 'claude', '--pane']);
-    // GY-93: the request rides the start as the positional prompt; nothing is pasted afterwards.
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'pane-produce']);
+    const typed = expandTypedCommand(calls[1][3]);
+    assert.equal(typed.kind, 'claude'); assert.deepEqual(calls.find(call => call[0] === 'agent' && call[1] === 'rename')?.slice(2), ['pane-produce', 'produce-a']);
+    // GY-93: the request is the runtime's positional prompt; nothing is pasted afterwards. GY-121:
+    // the shell reads it from the request file in the session checkout, never from the typed line.
     // GY-88: it names the session directory the launch allocated under the managed worktree root.
-    assert.equal(calls[1].at(-1), producerPrompt(config, { ...binding, checkout: launched.checkout }, profile)); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
+    assert.equal(typed.args.at(-1), producerPrompt(config, { ...binding, checkout: launched.checkout }, profile)); assert.equal(typed.stem, join(launched.checkout, '.graphyard/launch/produce-a'));
+    assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readProducerLedger(root);
     assert.equal(ledger.producers.length, 1); assert.equal(ledger.producers[0].state, 'pending'); assert.deepEqual(ledger.producers[0].outcome, { 'integration:auto-dispatch-review': 'missing', 'integration:auto-dispatch-producers': 'missing' });
     assert.equal((await stat(join(root, '.graphyard/producers.json'))).mode & 0o777, 0o600);
