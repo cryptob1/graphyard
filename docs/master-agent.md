@@ -824,26 +824,38 @@ That is what made a dead session hold its role slot until a person noticed.
 **On what interval.** The liveness sweep runs on every automatic-dispatch tick — `run.dispatchIntervalSeconds`
 in `.graphyard/master.json`, 10 seconds by default and 30 at most. It is a sweep, not a reaction to
 something reporting in, because a session that died reports nothing. A handle whose session the
-runtime no longer reports is left alone for a 60-second grace first, since a session recorded at
-launch appears in its runtime's listing a moment later, so a vanished session's record is closed
-within 90 seconds of its last observed activity. `master status` reports the bound, the closures the
-last tick made, and any closure it could not write back, under `dispatch.sessionReconcile`.
+runtime no longer reports is left alone for a 60-second grace first, counted from the first sweep
+that missed it and never shorter than the handle's own age, since a session recorded at launch
+appears in its runtime's listing a moment later and one listing that comes back short is not a
+death. So a vanished session's record is closed within 90 seconds of the runtime dropping it, and a
+session the runtime reports again in the meantime starts the grace over. `master status` reports the
+bound, the closures the last tick made, how many handles are inside their grace, and any closure it
+could not write back, under `dispatch.sessionReconcile`.
+
+The sweep judges what this host's runtime answers for. A handle another host launched is left to
+that host's loop — this inventory was never asked about it — and holds its slot until then, exactly
+as an unreadable runtime does.
 
 **What it closes, and with which reason.**
 
-- **Vanished** — the runtime no longer reports the pane or the session name its launcher recorded.
-  The outcome names that it vanished, from which runtime and host, and how long after its last
-  observed activity.
-- **Ended** — the runtime still lists it but reports one of that runtime's terminal states
-  (`src/harness.ts`). `idle` and `blocked` are deliberately not terminal anywhere: a session waiting
-  at a prompt still holds its pane, and that is the one moment somebody needs its attach command.
+- **Vanished** — the runtime has not reported the pane or the session name its launcher recorded
+  for the whole grace. This is how a coding session that exited is recognised: it is simply absent
+  from the runtime's listing. The outcome names that it vanished, from which runtime and host, how
+  long the runtime has not reported it, and how long after its last observed activity.
+- **Ended** — the runtime still lists it and reports one of that runtime's terminal states
+  (`src/harness.ts`), which today only Muse has (`exited-error`, `terminated`). `idle`, `done` and
+  `blocked` are deliberately not terminal anywhere: each is a live session waiting at its prompt —
+  Herdr reports `done` for one that finished work nobody has looked at yet, the same underlying
+  state as `idle` — and that is the one moment somebody needs its attach command.
 - **Superseded** — a review or proof session bound to something the item has moved past: a candidate
-  that merged, a head the item no longer has, or an item returned to a worker for rework. The
-  outcome names which of those it was. An implementation session is never closed this way; its lease
-  decides what it may still do.
-- **Duplicate** — two live sessions for one role and head cannot both stand, so the older is closed
-  naming the session that holds the slot. One item holds one live review of a head and one producer
-  session per proof group of it.
+  that merged, an item already delivered, a head the item no longer has, or an item returned to a
+  worker for rework. The outcome names which of those it was. A delivered item is closed the same
+  way as any other: delivery makes an item's decisions immutable, and ending a handle it still
+  carries decides nothing. An implementation session is never closed this way; its lease decides
+  what it may still do.
+- **Duplicate** — two live review or proof sessions for one role and head cannot both stand, so the
+  older is closed naming the session that holds the slot. One item holds one live review of a head
+  and one producer session per proof group of it. Implementation handles are left alone here too.
 
 A closure is a record, never authority: it decides no gate, ends no lease, and stops no process —
 the runtime already did, or the session is stalled rather than gone.

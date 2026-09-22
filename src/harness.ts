@@ -28,12 +28,14 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
  * still holding its place — and the answer is the runtime's own vocabulary, so it belongs here with
  * the rest of the per-runtime startup contracts rather than in the rule. A runtime with no entry
  * gets the shared set: Herdr normalizes the coding runtimes onto the same states, and only a
- * runtime with terminal states of its own needs naming. `idle` and `blocked` are deliberately not
- * ended anywhere — a session waiting at a prompt still holds its pane, and closing its handle would
- * take away the attach command at the one moment somebody needs it.
+ * runtime with terminal states of its own needs naming — a coding session that exited is simply
+ * absent from `agent list`, which the `vanished` rule covers without any state at all. `idle`,
+ * `done` and `blocked` are deliberately not ended anywhere: each is a live session waiting at its
+ * prompt, and closing its handle would take away the attach command at the one moment somebody
+ * needs it.
  */
 export const runtimeEndedSessionStates: Record<string, readonly string[]> = {
-  // Herdr's Muse states name the exit and offline cases in their own words (docs/herdr.md).
+  // Muse is the one runtime whose listing reports an exit rather than dropping the session.
   muse: [...endedRuntimeStates, 'exited-error', 'terminated'],
 };
 export const runtimeEndedStates: RuntimeStates = runtime => runtimeEndedSessionStates[runtime] ?? endedRuntimeStates;

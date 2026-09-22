@@ -87,8 +87,9 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
  * one that is running and making no progress holds its role slot, its provider seat and its item
  * while reporting nothing wrong. Nothing is closed from this line — only a reader can tell.
  */
-export function overlongSessionAttention(snapshot: { work: Work[]; now: string }, runtime: { agents: HerdrAgent[]; available: boolean }, maximums?: Partial<Record<SessionKind, number>>): AttentionItem[] {
-  return overlongSessionLines(snapshot.work, runtime.available ? runtime.agents : null, new Date(snapshot.now), { states: runtimeEndedStates, ...(maximums ? { maximums } : {}) })
+export function overlongSessionAttention(snapshot: { work: Work[]; now: string }, runtime: { agents: HerdrAgent[]; available: boolean; hostId?: string | null }, maximums?: Partial<Record<SessionKind, number>>): AttentionItem[] {
+  return overlongSessionLines(snapshot.work, runtime.available ? runtime.agents : null, new Date(snapshot.now),
+    { states: runtimeEndedStates, hostId: runtime.hostId ?? null, ...(maximums ? { maximums } : {}) })
     .map(line => ({ subject: line.subject, text: line.text, ...agentOwner('master', line.next) }));
 }
 
@@ -229,7 +230,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const sudo = administration.sudo;
   const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
   // A session past its role's maximum: running but making no progress is as visible as one that died.
-  const overlong = overlongSessionAttention(snapshot, runtime, { proof: master.run.producerTimeoutMinutes * 60_000 });
+  const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
   const unanswered = unansweredRequestAttention(status.work);

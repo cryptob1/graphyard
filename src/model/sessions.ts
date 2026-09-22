@@ -173,11 +173,21 @@ export function runningSessions(all: Work[], now: Date) {
 export interface RuntimeSession { name?: string; pane_id?: string; agent_status?: string }
 /**
  * The reported states that mean a session has ended rather than one still holding its place. Any
- * other state is live, `idle` and `blocked` included: a session waiting at a prompt is stalled, not
- * gone, and that is the one moment somebody needs its attach command. A runtime with terminal
- * states of its own extends this (`harness.ts`).
+ * other state is live — `idle`, `done` and `blocked` all included.
+ *
+ * `done` in particular is not an ending: a multiplexer reports it for a session that finished work
+ * nobody has looked at yet, the same underlying at-prompt state as `idle` and differing only in
+ * whether a human focused the tab, which in a headless fleet nobody ever does. It is how a live
+ * session waiting for its next prompt is normally reported, which is why the rest of the codebase
+ * groups it with `idle` as ready for input (`master-daemon.ts`'s `stoppedStates`) and closes such a
+ * pane deliberately rather than believing it already gone. A session waiting at a prompt still
+ * holds its pane, and that is the one moment somebody needs its attach command.
+ *
+ * A coding runtime that actually exited is *absent* from the listing, which the `vanished` rule
+ * already covers; the states named here are the ones a listing may still report for a session that
+ * is over, and a runtime with terminal states of its own extends them (`harness.ts`).
  */
-export const endedRuntimeStates: readonly string[] = ['done', 'exited', 'exit', 'error', 'failed', 'killed', 'stopped', 'offline', 'gone'];
+export const endedRuntimeStates: readonly string[] = ['exited', 'exit', 'error', 'failed', 'killed', 'stopped', 'offline', 'gone'];
 export type RuntimeStates = (runtime: string) => readonly string[];
 /** Which runtime's vocabulary to judge a reported state by; the shared set answers when nothing is passed. */
 export interface LivenessOptions { states?: RuntimeStates }
@@ -198,12 +208,15 @@ export function runtimeSessionOf(handle: Pick<SessionHandle, 'pane' | 'agentName
 
 export type Liveness = 'live' | 'ended' | 'vanished' | 'unreconciled' | 'unknown';
 /**
- * What the runtime says about a recorded session. `unknown` is a runtime that could not be read and
- * `unreconciled` a handle with no coordinate to match on: neither is evidence that a session is
- * gone, and neither closes a record — an unreadable runtime would close the whole graph at once.
+ * What the runtime says about a recorded session. `unknown` is a runtime that could not be read,
+ * a handle another host launched — this runtime inventory was never asked about it, and every
+ * other local-runtime judgment in the codebase is host-scoped the same way — and `unreconciled` a
+ * handle with no coordinate to match on: none of the three is evidence that a session is gone, and
+ * none closes a record, where an unreadable runtime would otherwise close the whole graph at once.
  */
-export function sessionLiveness(handle: Pick<SessionHandle, 'pane' | 'agentName' | 'runtime'>, runtime: RuntimeSession[] | null, states: RuntimeStates = defaultStates): Liveness {
+export function sessionLiveness(handle: Pick<SessionHandle, 'pane' | 'agentName' | 'runtime' | 'host'>, runtime: RuntimeSession[] | null, states: RuntimeStates = defaultStates, hostId?: string | null): Liveness {
   if (!runtime) return 'unknown';
+  if (hostId && handle.host !== hostId) return 'unknown';
   if (!handle.pane && !handle.agentName) return 'unreconciled';
   const entry = runtimeSessionOf(handle, runtime);
   if (!entry) return 'vanished';
@@ -248,7 +261,9 @@ export interface OverlongSession {
 }
 /** One reader's line per overlong session, and what to do about it; `next` never names a command that ends a session. */
 export interface OverlongSessionLine { subject: string; text: string; next: string }
-export type OverlongOptions = LivenessOptions & { maximums?: Partial<Record<SessionKind, number>> };
+export type OverlongOptions = LivenessOptions & { maximums?: Partial<Record<SessionKind, number>>;
+  /** This host, when the reader has one: a session another host launched is not judged against this host's runtime listing. */
+  hostId?: string | null };
 /**
  * Every running session past its role's maximum, longest first, whether or not it is still live. A
  * session that died is caught by reconciliation; one running and making no progress is not, and is
@@ -262,7 +277,7 @@ export function overlongSessions(all: Work[], runtime: RuntimeSession[] | null, 
     const startedAt = Date.parse(handle.startedAt), lastAt = Date.parse(handle.updatedAt);
     const ageMs = Number.isFinite(startedAt) ? Math.max(0, now.getTime() - startedAt) : 0;
     if (ageMs <= maximumMs) return [];
-    const liveness = sessionLiveness(handle, runtime, states);
+    const liveness = sessionLiveness(handle, runtime, states, options.hostId);
     return [{ workId: work.id, key: work.key, id: handle.id, kind: handle.kind, role: sessionRole(handle), principal: handle.principal,
       runtime: handle.runtime, host: handle.host, ageMs, maximumMs, lastActivityAt: handle.updatedAt,
       idleMs: Number.isFinite(lastAt) ? Math.max(0, now.getTime() - lastAt) : ageMs,
@@ -276,7 +291,9 @@ export function overlongSessionLines(all: Work[], runtime: RuntimeSession[] | nu
   return overlongSessions(all, runtime, now, options).map(session => {
     const observed = session.live === true ? `the ${session.runtime} runtime on ${session.host} still reports it live`
       : session.live === false ? `the runtime no longer reports it live (${session.liveness}), so the liveness sweep closes its record within ${bound}`
-      : 'whether it is still live is unknown, because the runtime inventory could not be read';
+      : options.hostId && session.host !== options.hostId
+        ? `whether it is still live is unknown: it runs on ${session.host}, and this host's runtime inventory does not answer for it`
+        : 'whether it is still live is unknown, because the runtime inventory could not be read';
     return { subject: session.key,
       text: `${session.role} session ${session.id} on ${session.key} (${session.principal}) has run ${elapsed(session.ageMs)}, past the ${elapsed(session.maximumMs)} maximum for its role; last observed activity ${elapsed(session.idleMs)} ago at ${session.lastActivityAt}, and ${observed}. It holds its role slot while it stands${session.outcome ? `; last recorded outcome: ${session.outcome}` : ''}`,
       next: session.live === false ? 'graphyard master run --once reconciles the record; no session has to be closed by hand'

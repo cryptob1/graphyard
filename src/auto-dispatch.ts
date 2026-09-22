@@ -5,7 +5,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { Work } from './model.js';
-import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionReconcileIntervalMs, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
+import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
@@ -76,6 +76,13 @@ export const dispatchCursorSchema = z.object({
    */
   capacity: z.object({ review: capacityHoldSchema.optional(), producer: capacityHoldSchema.optional() }).strict().default({}),
   /**
+   * The session handles the runtime had stopped reporting when the last tick swept, each carrying
+   * when it was first missed (GY-113). Absence is only evidence that a session is gone once it
+   * persists, so the grace is counted from here rather than from one short listing, and carrying
+   * it on the cursor keeps that judgment across a restart of the loop.
+   */
+  sessionMisses: z.record(z.string(), z.string()).default({}),
+  /**
    * What launches last observed about each agent account and the launches that skipped an account,
    * with the reason. Read from the environment log beside the cursor, which every launcher writes;
    * never persisted in the cursor itself.
@@ -88,6 +95,8 @@ export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatchFailureLimit = 12;
 /** How long a role with no account left is not launched before its accounts are read again. */
 export const capacityRecheckMs = 60_000;
+/** How many missing session handles the cursor remembers between ticks; a file, not a database. */
+export const sessionMissLimit = 500;
 /**
  * A tick whose snapshot read fails is retried on its own short backoff rather than a whole
  * interval later, never faster than the first step and never slower than the interval. The read
@@ -207,11 +216,29 @@ export function launchedSessionHandle(kind: 'review' | 'proof', request: Dispatc
  */
 export type ClosureCause = 'vanished' | 'ended' | 'superseded' | 'duplicate';
 export interface SessionClosure { workId: string; key: string; id: string; kind: SessionKind; role: string; runtime: string; host: string; subject: string; cause: ClosureCause; outcome: string }
-/** Whose vocabulary a reported state is judged by, and how long a handle the runtime has stopped reporting is left alone. */
-export type ReconcileOptions = LivenessOptions & { graceMs?: number };
-/** Every running handle on the graph that is over, with the outcome it is closed with. */
-export function reconcileSessionLiveness(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: ReconcileOptions = {}): SessionClosure[] {
+/** How one handle is named between ticks: the item it sits on, and its own id. */
+export const sessionHandleKey = (workId: string, id: string) => `${workId}\u0000${id}`;
+/** Whose vocabulary a reported state is judged by, whose runtime answers for a handle, and how long a handle the runtime has stopped reporting is left alone. */
+export type ReconcileOptions = LivenessOptions & { graceMs?: number;
+  /** This host: a handle another host launched is not judged against this host's runtime listing. */
+  hostId?: string | null;
+  /** When each handle the runtime had stopped reporting was first missed, as the previous sweep left it. */
+  missing?: Record<string, string> };
+export interface SessionSweep {
+  /** Every running handle on the graph that is over, with the outcome it is closed with. */
+  closures: SessionClosure[];
+  /**
+   * The handles this runtime did not report, each carrying when it was first missed — the next
+   * sweep's `missing`. A vanished handle is closed only once the runtime has failed to report it
+   * for the whole grace, so a single listing that comes back short closes nothing; an entry
+   * survives its closure, so a write-back that failed is retried on the next tick rather than
+   * starting the grace again.
+   */
+  missing: Record<string, string>;
+}
+export function reconcileSessionLiveness(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: ReconcileOptions = {}): SessionSweep {
   const states = options.states ?? runtimeEndedStates, graceMs = options.graceMs ?? sessionVanishGraceMs;
+  const previous = options.missing ?? {}, missing: Record<string, string> = {};
   const closures: SessionClosure[] = [];
   for (const work of all) {
     const running = (work.sessions ?? []).filter(handle => handle.state === 'running');
@@ -226,21 +253,37 @@ export function reconcileSessionLiveness(all: Work[], runtime: RuntimeSession[] 
       // worth recording — the runtime would only ever say it vanished.
       const superseded = supersededSession(work, handle, now);
       if (superseded) { close(handle, 'superseded', `superseded: ${superseded}`); continue; }
-      const liveness = sessionLiveness(handle, runtime, states);
+      const liveness = sessionLiveness(handle, runtime, states, options.hostId);
       if (liveness !== 'vanished' && liveness !== 'ended') continue;
-      // A handle younger than the grace is left alone: its runtime may not have listed it yet.
       const since = Date.parse(handle.updatedAt), idleMs = Number.isFinite(since) ? now.getTime() - since : 0;
-      if (idleMs < graceMs) continue;
       const where = handle.pane ? `pane ${handle.pane}` : `session ${handle.agentName}`;
-      close(handle, liveness, liveness === 'vanished'
-        ? `vanished: the ${handle.runtime} runtime on ${handle.host} no longer reports ${where}, ${Math.round(idleMs / 1000)}s after its last observed activity at ${handle.updatedAt}`
-        : `the ${handle.runtime} runtime on ${handle.host} reports ${where} as ${runtimeSessionOf(handle, runtime ?? [])?.agent_status ?? 'ended'}, so the session is over`);
+      if (liveness === 'ended') {
+        // The runtime says so itself, in its own vocabulary; the grace still covers a handle
+        // recorded moments ago against a stale listing.
+        if (idleMs < graceMs) continue;
+        close(handle, 'ended', `the ${handle.runtime} runtime on ${handle.host} reports ${where} as ${runtimeSessionOf(handle, runtime ?? [])?.agent_status ?? 'ended'}, so the session is over`);
+        continue;
+      }
+      // Absence is weaker evidence than a reported state, so it must persist: the runtime has to
+      // have failed to report the session for the whole grace, counted from the first sweep that
+      // missed it, and the handle has to be older than the grace too — a session recorded at
+      // launch appears in its runtime's inventory a moment later. One short listing closes nothing.
+      const key = sessionHandleKey(work.id, handle.id);
+      const first = Date.parse(previous[key] ?? '');
+      const firstMissedAt = Number.isFinite(first) ? Math.min(first, now.getTime()) : now.getTime();
+      missing[key] = new Date(firstMissedAt).toISOString();
+      const missingMs = now.getTime() - firstMissedAt;
+      if (idleMs < graceMs || missingMs < graceMs) continue;
+      close(handle, 'vanished', `vanished: the ${handle.runtime} runtime on ${handle.host} has not reported ${where} for ${Math.round(missingMs / 1000)}s, ${Math.round(idleMs / 1000)}s after its last observed activity at ${handle.updatedAt}`);
     }
-    // One slot, one live session: a second session for the same role and head supersedes the ones
-    // before it, so a relaunch under a fresh id never leaves two standing.
+    // One slot, one live session: a second review or proof session for the same role and head
+    // supersedes the ones before it, so a relaunch under a fresh id never leaves two standing. An
+    // implementation session is not collapsed here any more than it is superseded above — its
+    // lease is what says which attempt may still act, and two handles under one epoch are the
+    // worker's own record of its sessions.
     const slots = new Map<string, SessionHandle[]>();
     for (const handle of running) {
-      if (closed.has(handle.id) || !handle.head) continue;
+      if (closed.has(handle.id) || !handle.head || (handle.kind !== 'review' && handle.kind !== 'proof')) continue;
       const slot = `${sessionRole(handle)}\u0000${handle.head}`;
       slots.set(slot, [...slots.get(slot) ?? [], handle]);
     }
@@ -251,7 +294,7 @@ export function reconcileSessionLiveness(all: Work[], runtime: RuntimeSession[] 
         close(handle, 'duplicate', `superseded: session ${newest.id} holds the same role (${sessionRole(handle)}) on head ${handle.head!.slice(0, 12)}, and one item holds one live session per role and head`);
     }
   }
-  return closures;
+  return { closures, missing };
 }
 /** What a closure is written back as: the handle's own identity, ended, carrying why. */
 export function closureHandle(closure: SessionClosure): SessionHandleInput {
@@ -310,14 +353,19 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
   // is made before anything launches, because the slot check below reads it.
-  const closures = reconcileSessionLiveness(snapshot.work, herdr, new Date(clock), { states: runtimeEndedStates });
+  const sweep = reconcileSessionLiveness(snapshot.work, herdr, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId, missing: cursor.sessionMisses });
+  const closures = sweep.closures;
+  // What the runtime did not report this tick, for the next one to measure the grace against. The
+  // map holds only handles currently missing, so it is bounded by the graph's live sessions; the
+  // ceiling is there because the cursor is a file, not a database.
+  cursor.sessionMisses = Object.fromEntries(Object.entries(sweep.missing).slice(0, sessionMissLimit));
   for (const closure of closures) {
     // A closure that cannot be written back still stands as a judgment — the session is over
     // whichever way the record went — so the slot is freed either way and the tick says what failed.
     try { await effects.endSession?.(closure); tick.closed.push(closure); }
     catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: message(error).slice(0, 500) }); }
   }
-  const settledHandles = new Set(closures.map(closure => `${closure.workId}\u0000${closure.id}`));
+  const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
   // each profile's sessions against its limit; the requests wait and the tick says so.
   const agents = herdr ?? [];
@@ -337,7 +385,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
    * has it, rather than until somebody ends the record by hand (GY-113 AC-2).
    */
   const held = () => snapshot.work.flatMap(item => (item.sessions ?? [])
-    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(`${item.id}\u0000${handle.id}`))
+    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)))
     .map(handle => ({ name: handle.agentName! })));
   // The launchers still see the runtime's own inventory unfiltered: a name the runtime lists at all
   // cannot be taken again, whatever state it is in, and that check is theirs to make.
@@ -463,7 +511,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
   reload?: () => Promise<ConfigReload> }) {
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const ticks: DispatchTick[] = [];
-  let refused: string | null = null, waiting = '';
+  let refused: string | null = null, waiting = '', closeFailed = '';
   do {
     if (options.signal?.aborted) break;
     const interval = typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
@@ -481,7 +529,12 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
       for (const closure of tick.closed) log(`[graphyard-dispatch] closed ${closure.role} session ${closure.id} on ${closure.key}: ${closure.outcome}`);
-      for (const failure of tick.closeFailures) log(`[graphyard-dispatch] could not close session ${failure.id} on ${failure.work}: ${failure.reason}`);
+      // A closure that cannot be written back is retried every tick, so it is logged when it
+      // starts and when it changes rather than once per tick for as long as it lasts; `master
+      // status` carries the standing list under `dispatch.sessionReconcile.failures`.
+      const failures = tick.closeFailures.map(failure => `${failure.work} session ${failure.id}: ${failure.reason}`).join(' | ');
+      if (failures && failures !== closeFailed) log(`[graphyard-dispatch] could not close ${tick.closeFailures.length} session record(s): ${failures}`);
+      closeFailed = failures;
       // A tick that launched nothing says why, once per distinct set of reasons: a request waiting
       // on a busy profile or a backoff is the dispatcher working, and silence would hide both.
       const reasons = (cursor.lastTick?.reasons ?? []).join(' | ');
@@ -540,7 +593,9 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
   const lagMs = Number.isFinite(lastTickAt) ? now - lastTickAt : null;
   return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
     // The liveness sweep runs on this interval too, so its bound is reported beside it.
-    sessionReconcile: { intervalMs, graceMs: sessionVanishGraceMs, boundMs: sessionClosureBoundMs, closed: cursor.lastTick?.closed ?? 0, failures: cursor.lastTick?.closeFailures ?? [] },
+    sessionReconcile: { intervalMs, graceMs: sessionVanishGraceMs, boundMs: sessionClosureBoundMs, closed: cursor.lastTick?.closed ?? 0,
+      // Handles the runtime did not report on the last sweep: each is inside its grace, and closes on the sweep after it passes.
+      missing: Object.keys(cursor.sessionMisses).length, failures: cursor.lastTick?.closeFailures ?? [] },
     lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure, lastTick: cursor.lastTick ?? null,
     failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
     // A role with no account left, as one entry per role rather than a failure per request.
