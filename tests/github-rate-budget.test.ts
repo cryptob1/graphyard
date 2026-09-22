@@ -338,7 +338,7 @@ test('integration:observation-cadence-by-state — a merge-gate candidate is obs
   assert.ok(await scheduledInMs(idle) >= 295_000, 'and returns to its five-minute cadence');
 });
 
-test('integration:merge-path-reserve-held — below the reserve a merge-gate candidate is still observed, a build-stage candidate is deferred past the reset with a reason naming the reserve, and a webhook wake is still served', async t => {
+test('integration:merge-path-reserve-held — below the reserve a merge-gate candidate is still observed, a build-stage candidate is deferred past the reset with a reason naming the reserve, a webhook wake is still served, and once the reset has passed the deferred candidate is observed without one', async t => {
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client(); await serve(github);
@@ -378,9 +378,35 @@ test('integration:merge-path-reserve-held — below the reserve a merge-gate can
   assert.ok(building.observation, 'the woken build-stage candidate was observed below the reserve');
   assert.equal(github.budget().deferrals.find(entry => entry.work === building.id), undefined, 'and its deferral is cleared');
   assert.deepEqual((await status()).githubBudget.reserve, mergePathReserve, '/api/status reports the reserve');
+  // The reserve is decided only against a count still in force: a reading whose reset has passed,
+  // or that reports none, is unknown and never defers, because only a spent request refreshes it.
+  assert.equal(reserveDecision('active', { ...budget, resetAt: new Date(Date.now() - 1000).toISOString() }, false, new Date()), null, 'a reading past its reset never defers');
+  assert.equal(reserveDecision('active', { ...budget, resetAt: null }, false, new Date()), null, 'a reading without a reset never defers');
+  // The woken observation read the budget still below the reserve, so the next scheduled one is deferred again.
+  building = await job(building, github);
+  assert.equal(github.budget().deferrals.find(entry => entry.work === building.id)?.until, new Date(api.resetAt * 1000 + 2000).toISOString(), 'the build-stage candidate is deferred past the reset again');
+  const deferredAt = building.observation!.at; const chargedBeforeReset = api.charged(); const expiredReset = budget.resetAt!;
+  // The clock passes the reset with no delivery. GitHub has replenished the budget, which only a
+  // spent request can read: the reading from before the reset is unknown now, not below the reserve.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.setTime(api.resetAt * 1000 + 3000);
+  api.remaining = api.limit; api.resetAt = Math.ceil(Date.now() / 1000) + 3600;
+  const expired = github.budget();
+  assert.equal(expired.remaining, null, 'the count from before the reset is not reported as what is left');
+  assert.equal(expired.belowReserve, false); assert.equal(expired.resetAt, null); assert.equal(expired.exhaustsBeforeReset, false);
+  assert.equal(expired.expiredResetAt, expiredReset, 'the reading that expired names its reset');
+  assert.equal(reserveDecision('active', expired, false, new Date()), null, 'an expired reading never defers');
+  building = await job(building, github);
+  assert.ok(Date.parse(building.observation!.at) > Date.parse(deferredAt), 'the deferred build-stage candidate is observed once the reset has passed, with no webhook');
+  assert.ok(api.charged() > chargedBeforeReset, 'the observation was spent, which is what reads the fresh headers');
+  const refreshed = github.budget();
+  assert.equal(refreshed.expiredResetAt, null); assert.equal(refreshed.resetAt, new Date(api.resetAt * 1000).toISOString(), 'the fresh reset is read from the response');
+  assert.equal(refreshed.belowReserve, false); assert.ok(refreshed.remaining! > mergePathReserve, `the replenished budget is read (${refreshed.remaining})`);
+  assert.equal(refreshed.deferrals.find(entry => entry.work === building.id), undefined, 'and the deferral is cleared');
+  t.mock.timers.reset();
 });
 
-test('integration:rate-limit-pause-single-incident — twenty jobs refused for rate limiting are one attention item stating the pause, until when, what spent the budget and that gates read stale, while each job keeps its error in the ledger', async t => {
+test('integration:rate-limit-pause-single-incident — twenty jobs refused for rate limiting are one attention item stating the pause, until when, what spent the budget and that gates read stale, while each job keeps its error in the ledger; and once the pause lifts every job observes again without a wake', async t => {
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client(); await serve(github);
@@ -413,7 +439,31 @@ test('integration:rate-limit-pause-single-incident — twenty jobs refused for r
   assert.match(incident.text, /20 integration jobs recorded the refusal in the ledger/);
   assert.equal(incident.role, 'control plane'); assert.match(incident.next, /observation resumes at/);
   assert.deepEqual(pauseAttention(report).length, 1); assert.deepEqual(exhaustionAttention(report), [], 'a pause is not also raised as an exhaustion ahead');
+  assert.equal(report.githubBudget.remaining, 0, 'the refusal reported zero remaining'); assert.equal(report.githubBudget.resetAt, report.githubBudget.paused.until);
+  // The pause lifts with no delivery. The refusal's reading (zero remaining, this reset) expired
+  // with the reset, so the jobs that come back after `paused.until` observe rather than being held
+  // below the reserve on the count from before the pause; the first spent request reads the fresh budget.
   api.refuse = false;
+  const observedBefore = new Map(items.map(work => [work.id, work.observation!.at]));
+  const refusalsOnTheWire = api.requests.filter(request => request.status === 403).length;
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.setTime(Date.parse(report.githubBudget.paused.until) + 2000);
+  api.remaining = api.limit; api.resetAt = Math.ceil(Date.now() / 1000) + 3600;
+  const lifted = github.budget();
+  assert.equal(lifted.paused, null, 'the pause has lifted');
+  assert.equal(lifted.remaining, null); assert.equal(lifted.belowReserve, false);
+  assert.equal(lifted.expiredResetAt, report.githubBudget.paused.until, 'the refusal\'s reading expired with the reset');
+  assert.deepEqual(githubBudgetAttention({ ...report, githubBudget: lifted }), [], 'nothing is raised once the pause lifts');
+  // The jobs come back at the pause's end, as their schedule says; nothing woke them.
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL');
+  for (let index = 0; index < 20; index++) await processJob(engine, github);
+  const resumed = (await store.pool.query('SELECT work_id, error FROM jobs')).rows;
+  assert.equal(resumed.length, 20); assert.ok(resumed.every(row => row.error === null), `every job ran clean once the pause lifted: ${JSON.stringify(resumed.filter(row => row.error))}`);
+  for (const work of items) { const current = await reload(work); assert.ok(Date.parse(current.observation!.at) > Date.parse(observedBefore.get(work.id)!), `${work.key} was observed after the pause without a wake`); }
+  assert.equal(api.requests.filter(request => request.status === 403).length, refusalsOnTheWire, 'nothing ran into the refusal again');
+  assert.deepEqual(github.budget().deferrals, [], 'nothing was held below the reserve on the count from before the pause');
+  assert.equal(github.budget().belowReserve, false); assert.equal(github.budget().expiredResetAt, null, 'the fresh reading is in force');
+  t.mock.timers.reset();
 });
 
 test('integration:webhook-liveness-visible — status reports the last delivery and the count in the last hour, and master status raises one item naming the App webhook settings page when nothing has arrived for an hour while pull requests are open', async t => {

@@ -47,7 +47,10 @@ export const cacheEntries = 4096;
  *   polling stays inside `steadyStateShare` of the hourly limit (`steadyStateInterval`).
  * - **The merge-path reserve** (`reserveDecision`). Below `mergePathReserve` requests remaining,
  *   non-merge observations are rescheduled past the reset rather than spent. The merge path,
- *   webhook wakes and merge verification keep what is left.
+ *   webhook wakes and merge verification keep what is left. The reading expires with its reset:
+ *   once the reset has passed, the budget is unknown until a spent request reads the fresh
+ *   headers, and an unknown budget never defers, so the observation that follows a reset (or a
+ *   pause) is made rather than held on the count from before it.
  * - **Conditional reads.** Every read carries its ETag and GitHub charges nothing for the 304 it
  *   answers with, so observing an unchanged candidate costs at most a couple of charged requests.
  *
@@ -141,6 +144,12 @@ export interface GitHubBudget {
   windowMs: number; spentInWindow: number; perMinute: number;
   /** When the current rate reaches zero, and whether that lands before the reset. */
   projectedExhaustionAt: string | null; exhaustsBeforeReset: boolean;
+  /**
+   * The reset of a reading that has expired: it has passed, GitHub has replenished the budget,
+   * and the count the last response reported is no longer what is left, so `remaining`, `used`
+   * and `resetAt` read unknown until the next installation response refreshes them.
+   */
+  expiredResetAt: string | null;
   /** The merge-path reserve and whether the budget has fallen below it. */
   reserve: number; belowReserve: boolean;
   /** The steady-state share of the hourly limit, the request count it works out to, and the interval that keeps the fleet inside it. */
@@ -212,9 +221,16 @@ export const openCandidates = (all: Work[]) => all.filter(work => work.stage !==
 export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'remaining' | 'resetAt' | 'reserve'>, woken: boolean, now: Date): { until: string; reason: string } | null {
   if (band === 'merge' || woken) return null;
   if (budget.remaining === null || budget.remaining >= budget.reserve) return null;
+  // A deferred observation makes no request, so nothing but a spent request refreshes the
+  // reading. A reading whose reset has passed (or reports none) says nothing about the budget now
+  // in force: deferring on it would hold every non-merge observation past a reset that has
+  // already happened, for as long as no merge-gate candidate or webhook wake read fresh headers.
+  // The reserve is held only against a count that is still in force; past its reset the
+  // observation is spent, and the headers it comes back with decide the next one.
   const reset = budget.resetAt ? Date.parse(budget.resetAt) : NaN;
-  const until = new Date(Number.isFinite(reset) && reset > now.getTime() ? reset + 2000 : now.getTime() + observationCadenceMs.idle).toISOString();
-  return { until, reason: `GitHub budget is below the ${budget.reserve}-request merge-path reserve (${budget.remaining} remaining, reset ${budget.resetAt ?? 'unknown'}); this ${band}-cadence observation is rescheduled to ${until} rather than spent, so the merge path, webhook wakes and merge verification keep the reserve` };
+  if (!Number.isFinite(reset) || reset <= now.getTime()) return null;
+  const until = new Date(reset + 2000).toISOString();
+  return { until, reason: `GitHub budget is below the ${budget.reserve}-request merge-path reserve (${budget.remaining} remaining, reset ${budget.resetAt}); this ${band}-cadence observation is rescheduled to ${until} rather than spent, so the merge path, webhook wakes and merge verification keep the reserve` };
 }
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 /**
@@ -352,7 +368,16 @@ export class GitHub {
     this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
     const spentInWindow = this.charges.filter(charge => now - charge.at <= budgetWindowMs).length;
     const perMinute = spentInWindow / (budgetWindowMs / 60_000);
-    const { limit, remaining, used, resetAt, observedAt } = this.rate;
+    const { limit, observedAt } = this.rate;
+    // The reading expires with its reset. Past it GitHub has replenished the budget and the count
+    // the last response reported is not what is left, so it reads unknown until a spent request
+    // refreshes it: the reserve never defers on it and no exhaustion is projected from it. After a
+    // pause this is what lets the first observation past the reset be made at all, since the 403
+    // that raised the pause reported zero remaining.
+    const expired = this.rate.resetAt !== null && this.rate.resetAt <= now;
+    const remaining = expired ? null : this.rate.remaining;
+    const used = expired ? null : this.rate.used;
+    const resetAt = expired ? null : this.rate.resetAt;
     const exhaustion = remaining !== null && perMinute > 0 ? now + (remaining / perMinute) * 60_000 : null;
     const counts = new Map<string, number>();
     for (const charge of this.charges) counts.set(charge.kind, (counts.get(charge.kind) ?? 0) + 1);
@@ -365,6 +390,7 @@ export class GitHub {
       windowMs: budgetWindowMs, spentInWindow, perMinute: Math.round(perMinute * 100) / 100,
       projectedExhaustionAt: exhaustion === null ? null : new Date(exhaustion).toISOString(),
       exhaustsBeforeReset: exhaustion !== null && resetAt !== null && exhaustion < resetAt,
+      expiredResetAt: expired ? new Date(this.rate.resetAt!).toISOString() : null,
       reserve: mergePathReserve, belowReserve: remaining !== null && remaining < mergePathReserve,
       steadyStateShare, steadyStateBudget: Math.floor((limit ?? defaultHourlyLimit) * steadyStateShare),
       steadyState: { openCandidates: this.fleet, meanRequests: mean(samples.map(sample => sample.requests)) ?? assumedObservationRequests, intervalMs: steadyStateInterval(this.fleet, mean(samples.map(sample => sample.requests)), limit) },

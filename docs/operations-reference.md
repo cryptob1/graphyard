@@ -180,6 +180,8 @@ A webhook delivery wakes every job at once whatever its band (`woken` on the cla
 
 When the remaining budget falls below a reserve sized for the merge path — **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE` on the deployment for an installation with a different limit — non-merge observations yield: they are rescheduled past the reset rather than spent, and `githubBudget.deferrals` lists each one with the reason naming the reserve. Merge-gate candidates, webhook wakes and merge verification (the exact-head read the guarded merge makes) continue, so a candidate that has nothing left to prove still lands while the rest of the fleet waits for the reset.
 
+The reading expires with its reset. A deferred observation makes no request, so only a spent request refreshes the count; once `resetAt` has passed, GitHub has replenished the budget and the count from before it is no longer what is left. `githubBudget` then reports `remaining`, `used` and `resetAt` as unknown (`null`) with `expiredResetAt` naming the reset that passed, the reserve never defers on an unknown reading, and the first observation due after the reset (or after a pause lifts, whose refusal reported zero remaining) is made rather than held: its response reads the fresh budget, and that reading decides the observations that follow.
+
 ### What an observation costs
 
 Every request carries its `ETag`, and GitHub charges nothing for the `304` it answers with, so a candidate whose head, base tip and check state are unchanged since the last observation costs at most two uncached requests, usually none. The request count of each observation — every request, and the ones GitHub actually charged — is recorded against the job that made it (`githubBudget.observations.jobs`, with the band and cadence it earned) and `graphyard status` reports the mean cost per observation over the last hour (`githubBudget.observations.meanRequests`, `meanUncached`). The conditional-read cache holds 4,096 entries, enough for tens of open candidates; an entry evicted between two observations of the same candidate turns a free 304 back into a charged read.
@@ -190,7 +192,7 @@ A `403`/`429` GitHub answers for rate limiting pauses every request until the re
 
 ### Reading the budget
 
-- `graphyard status` (or `GET /api/status`) → `githubBudget`: `remaining` of `limit`, `resetAt`, `perMinute`, `projectedExhaustionAt`, `exhaustsBeforeReset`, `reserve`/`belowReserve`, `paused`, `lastHour.byKind`, `cadence`, `steadyState`, `observations`, `deferrals`.
+- `graphyard status` (or `GET /api/status`) → `githubBudget`: `remaining` of `limit`, `resetAt`, `perMinute`, `projectedExhaustionAt`, `exhaustsBeforeReset`, `reserve`/`belowReserve`, `paused`, `lastHour.byKind`, `cadence`, `steadyState`, `observations`, `deferrals`. `remaining: null` with `expiredResetAt` set means the last reading's reset has passed and the next spent request refreshes it; `remaining: null` with `observedAt: null` means no installation response has been read yet.
 - `graphyard master status` → `attentionItems` with subject `github`: the pause in force, the projected exhaustion, or the silent webhook, each with who resolves it and what to run.
 - The dashboard's home page shows the pause as one notice.
 
