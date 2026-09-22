@@ -224,17 +224,21 @@ Each cycle:
 8. **invokes only the guarded merge** for a candidate whose gates are all green. With automatic
    merging off it merges exactly the candidate an approver agent approved, and step 6 is what asked
    for that approval;
-9. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
-   whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
-   workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
-   [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
+9. **verifies the deployed SHA** against what Graphyard recorded as delivered — containment is
+   derived from this checkout's own git history at a GitHub cost that does not grow with the
+   delivery history (see [what the deployment step costs](#what-the-deployment-step-costs)) — and
+   for a delivery whose policy sets `deploySmoke` records that observation on the item, requests
+   the trusted smoke workflow once per deployed commit, and escalates a failed verdict with
+   rollback guidance (see the [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
 10. **records what it could act on, what it did, and how long each passage took** — stage p50/p90
     for every open stage, delivered lead time, creation-to-deployment latency, merge-to-smoke-verdict
     post-deploy time with the failure count, scope-request latency with the longest request still
     undecided, and the four delivery latencies of [liveness and silence](#liveness-and-silence).
 
-Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
-deployment observation, per-profile health, recent actions, and anything still unresolved.
+Every action lands in `master status` under `daemon`: the current cycle, its measurements, where
+the last cycle's time went step by step (`daemon.cost`, see
+[where a cycle's time goes](#where-a-cycles-time-goes)), the deployment observation, per-profile
+health, recent actions, and anything still unresolved.
 
 The configured interval is the idle cadence, not a bound on how long ready work may sit: while
 anything is actionable the loop comes back within thirty seconds, whatever `run.intervalSeconds`
@@ -338,9 +342,14 @@ waiting on it?
 
 **The loop's own liveness** comes first on the attention list, because a coordinator that stopped is
 why nothing else on that list is moving. `master status` reports `daemon.liveness` as `running`,
-`stalled` (no completed cycle for more than two intervals) or `absent` (no lock, or a lock whose
-process is gone on this host), each with the command that restarts it — `master restart` — and a
-supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
+`slow` (no completed cycle for more than two intervals, but the last measured cycle was itself
+longer than that bound, so the loop is inside a long cycle at a named step — see
+[where a cycle's time goes](#where-a-cycles-time-goes)), `stalled` (no completed cycle for more
+than two intervals and no measured cycle that accounts for it) or `absent` (no lock, or a lock
+whose process is gone on this host). A stall and an absence each carry the command that restarts
+the loop — `master restart` — and a slow cycle carries the step to shorten instead, because
+restarting a loop that is still cycling only starts the same slow cycle again. A supervised
+deployment needs no command at all: the packaged unit sets `Restart=always` with no start
 limit, and the loop sends its supervisor a keep-alive after every completed cycle, so a cycle that
 hangs is restarted as surely as a process that exits. `WatchdogSec` must stay longer than two cycle
 intervals; a window that would restart a healthy loop mid-cycle is recorded by name in
@@ -378,6 +387,72 @@ whether or not its first approver session could be launched:
 | approval → merge | p90 at or under 10 minutes over at least ten deliveries |
 | mergeable → merge | 5 minutes, per candidate |
 | standing verdict → rework requested | 5 minutes, per candidate |
+
+### Where a cycle's time goes
+
+A cycle is one process doing one thing at a time, so a cycle that outgrows its interval has a step
+that outgrew it, and the loop says which. Every recorded cycle carries `steps`: the milliseconds it
+spent in each of its six phases, in the order the cycle runs them —
+
+| Step | What it covers |
+| --- | --- |
+| `observe` | Reading the coordination snapshot and reconciling the actions an interrupted cycle left |
+| `close` | Closing finished sessions, failing over exhausted ones, reclaiming worktrees and settling quarantines |
+| `decisions` | Deciding scope requests and requesting, watching and adopting the routine decisions an approver applies |
+| `dispatch` | Dispatching claimable work and shepherding the review and proof requests |
+| `merge` | The guarded merges |
+| `deployment` | Observing the deployed release, recording it on deliveries and requesting the smoke workflow |
+
+The six add up to a little under `durationMs`; the remainder is the cursor writes and the
+measurement itself, which belong to no step. `master status` reads the last cycle's breakdown as
+`daemon.cost`: `durationMs` against `intervalMs` and the two-interval `stalledAfterMs` it is judged
+on, `withinInterval` and `withinLivenessBound`, the `steps`, the `slowest` of them, and `breakdown`,
+the same figures as one sentence, longest step first (`deployment 80.2s, dispatch 3.1s, …`); the
+full record of every retained cycle, `steps` included, is `daemon.metrics`.
+
+A cycle that did not fit its interval is an attention item whatever the liveness says, because the
+loop looks healthy the instant a long cycle ends and the cost is the only reading that names what
+took the time: `Cycle 412 took 80s, longer than the 20s interval and past the two-interval liveness
+bound of 40s: deployment 80.2s, dispatch 3.1s, …. The deployment step is the slowest, at 80s`, with
+the next step being to shorten that step. While such a cycle is under way and the lag has passed the
+liveness bound, `daemon.liveness` is `slow` rather than `stalled` — the measured cycle explains the
+silence — until the lag outgrows even that cycle's own cost plus the bound, at which point nothing
+explains it any more and the loop is stalled. A cycle inside its interval raises nothing.
+
+### What the deployment step costs
+
+The deployment step answers one question per delivered item: does the release production serves
+contain this delivery's merge commit? Until GY-118 it asked GitHub — one compare request per
+delivered item on every cycle — so the step grew with the delivery history until a cycle over
+ninety-one deliveries took ninety seconds against a twenty-second interval and `master status`
+reported a loop that was cycling as stalled.
+
+Containment is git ancestry, and the coordinator's checkout holds the history, so the step now
+derives it locally: one `git fetch` of the base branch, made lazily on the first delivery the cycle
+has to look at, then `git merge-base --is-ancestor MERGE RELEASE` for each delivery whose containment
+the loop has not already established. A merge git cannot place — a commit this checkout does not
+hold, a base branch it could not fetch — is unknown, and unknown containment is never read as
+deployed; the observation's `reason` says when the base branch could not be refreshed. The GitHub
+requests the step makes are only those that find the release: none with `--deployment-url`
+configured, and otherwise one listing of the base branch's deployments plus at most one status
+listing per deployment in it, so at most `1 + 20 = 21` requests (`maxDeploymentRequests` in
+`src/master-daemon.ts`) however many items have been delivered. The observation reports what it
+cost as `requests`, `derived` (deliveries whose containment was derived this pass) and `retained`
+(deliveries answered from the previous cycle), and `daemon.actions` records the request count in
+the deployment action's detail.
+
+What one cycle establishes, the next does not derive again. The observation keeps
+`containment`: the release it verified against and, per delivered item, the release its containment
+was first established against — the record of when the delivery started serving, never rewritten
+by a later release that merely still holds it. On the next cycle, a release equal to the retained
+one, or one that descends from it (one ancestry check), carries the whole retained set forward, and
+only deliveries the retained release did not serve are looked at again; a release that does not
+descend from it — a rollback, an unrelated commit — retains nothing and every delivery is derived
+again. A cycle whose deliveries are all retained and whose release has not moved fetches nothing
+and runs no ancestry at all. A failed observation keeps the containment already established: it is
+a record of releases that did serve those deliveries, and the failure makes nothing about that
+untrue. The retention is bounded at 1,000 deliveries; older ones are derived again if ever asked
+about.
 
 ### Restartability
 

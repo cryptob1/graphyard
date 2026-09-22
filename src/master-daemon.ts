@@ -45,8 +45,36 @@ export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
 const percentileSchema = z.object({ count: z.number().int().min(0), p50Ms: z.number().int().min(0), p90Ms: z.number().int().min(0) }).strict();
 const noMeasurement = { count: 0, p50Ms: 0, p90Ms: 0 };
+/**
+ * The six phases of one cycle, in the order the cycle runs them, each the milliseconds that cycle
+ * spent in it. A cycle is one process doing one thing at a time, so a cycle that outgrows its
+ * interval has a step that outgrew it, and the loop says which rather than leaving `durationMs` to
+ * be read as a stall. The six sum to a little under `durationMs`: the remainder is the cursor
+ * writes and the measurement itself, which belong to no step.
+ */
+export const cycleStepNames = ['observe', 'close', 'decisions', 'dispatch', 'merge', 'deployment'] as const;
+export type CycleStepName = typeof cycleStepNames[number];
+export const cycleStepsSchema = z.object({
+  /** Reading the coordination snapshot and reconciling the actions an interrupted cycle left. */
+  observe: z.number().int().min(0),
+  /** Closing finished sessions, failing over exhausted ones, and reclaiming worktrees and quarantines. */
+  close: z.number().int().min(0),
+  /** Deciding scope requests and requesting the routine decisions an approver applies. */
+  decisions: z.number().int().min(0),
+  /** Dispatching claimable work and shepherding the review and proof requests. */
+  dispatch: z.number().int().min(0),
+  /** The guarded merges. */
+  merge: z.number().int().min(0),
+  /** Observing the deployed release and the post-deployment smoke requests. */
+  deployment: z.number().int().min(0),
+}).strict();
+export type CycleSteps = z.infer<typeof cycleStepsSchema>;
+export const emptyCycleSteps = (): CycleSteps => ({ observe: 0, close: 0, decisions: 0, dispatch: 0, merge: 0, deployment: 0 });
+
 export const cycleMetricsSchema = z.object({
   cycle: z.number().int().min(0), at: z.string(), durationMs: z.number().int().min(0),
+  /** Where `durationMs` went. Absent on a cycle recorded before the loop measured its steps. */
+  steps: cycleStepsSchema.optional(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
   /**
    * What the cycle could act on, and the longest any one of those has gone unacted (see
@@ -69,10 +97,35 @@ export const cycleMetricsSchema = z.object({
 }).strict();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 
+/**
+ * What one observation has established about containment, carried to the next cycle. `release` is
+ * the release every retained entry has been verified against: a later release that descends from it
+ * contains everything it contains, so one ancestry check revalidates the whole set. `settled` keeps,
+ * per delivered item, the release its containment was first established against — the record of when
+ * the delivery started serving, which is never rewritten by a later release that merely still holds it.
+ */
+export const containmentRetentionSchema = z.object({
+  release: z.string().min(7).max(40),
+  settled: z.record(z.string().max(40), z.string().min(7).max(40)).default({}),
+}).strict();
+export type ContainmentRetention = z.infer<typeof containmentRetentionSchema>;
+/** Containment is retained for this many deliveries; older ones are derived again if ever asked about. */
+export const retainedContainments = 1000;
+
 export const deploymentObservationSchema = z.object({
   source: z.enum(['endpoint', 'github-deployment', 'unavailable']),
   sha: z.string().nullable(), at: z.string(), reason: z.string().max(500).nullable(),
   deployed: z.array(z.string()).max(200).default([]), pending: z.array(z.string()).max(200).default([]),
+  /**
+   * What the observation cost, so the bound is a reading rather than a claim: GitHub requests made
+   * (never more than `maxDeploymentRequests`, whatever has been delivered), deliveries whose
+   * containment was derived locally this pass, and deliveries answered from `containment`.
+   * Absent — never zero — on an observation recorded before the loop measured it.
+   */
+  requests: z.number().int().min(0).optional(),
+  derived: z.number().int().min(0).optional(),
+  retained: z.number().int().min(0).optional(),
+  containment: containmentRetentionSchema.nullable().optional(),
 }).strict();
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
@@ -810,14 +863,42 @@ export function latencyBudget(samples: LatencySample[]): LatencyBudget {
 }
 
 // ---- The loop's own liveness ---------------------------------------------------------------
-export type LoopState = 'running' | 'stalled' | 'absent';
-export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledAfterMs: number; cycle: number; lock: DaemonState['lock']; detail: string; restart: string }
+export type LoopState = 'running' | 'slow' | 'stalled' | 'absent';
+export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledAfterMs: number; cycle: number; lock: DaemonState['lock']; detail: string; restart: string; cost: CycleCost | null }
+
+/**
+ * What the last measured cycle cost, against the cadence it is judged on. A cycle is the loop's
+ * whole clock: while one runs nothing else coordinates, so a cycle longer than the interval is the
+ * interval, and a cycle past the two-interval liveness bound is indistinguishable from a stopped
+ * loop unless the measurement says otherwise. `slowest` names the step to shorten.
+ */
+export interface CycleCost {
+  cycle: number; at: string; durationMs: number; intervalMs: number; stalledAfterMs: number;
+  steps: CycleSteps | null; slowest: { step: CycleStepName; ms: number } | null;
+  withinInterval: boolean; withinLivenessBound: boolean;
+  /** The step breakdown as an operator sentence, longest first. */
+  breakdown: string;
+}
+export function cycleCost(metrics: CycleMetrics | null | undefined, intervalMs: number): CycleCost | null {
+  if (!metrics) return null;
+  const steps = metrics.steps ?? null;
+  const ordered = steps ? (Object.entries(steps) as [CycleStepName, number][]).sort((a, b) => b[1] - a[1]) : [];
+  const slowest = ordered.length && ordered[0][1] > 0 ? { step: ordered[0][0], ms: ordered[0][1] } : null;
+  const seconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
+  return { cycle: metrics.cycle, at: metrics.at, durationMs: metrics.durationMs, intervalMs, stalledAfterMs: 2 * intervalMs, steps, slowest,
+    withinInterval: metrics.durationMs <= intervalMs, withinLivenessBound: metrics.durationMs <= 2 * intervalMs,
+    breakdown: ordered.length ? ordered.map(([step, ms]) => `${step} ${seconds(ms)}`).join(', ') : 'no step breakdown was recorded for this cycle' };
+}
+
 /**
  * Whether the loop is cycling, from its own cursor. Nothing else in the installation notices a
  * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
  * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence.
+ * A measured cycle that is itself longer than that bound explains the lag: the loop is inside a
+ * slow cycle, not stopped, and the step to shorten is named instead of a restart nobody needs.
  */
-export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'metrics'>>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
+  const cost = cycleCost(state.metrics?.at(-1) ?? null, intervalMs);
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
   const stalledAfterMs = 2 * intervalMs;
@@ -825,24 +906,36 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
   const lock = state.lock;
   const gone = !!lock && !!hostId && lock.host === hostId && !liveProcess(lock.pid);
   if (!lock || gone) {
-    return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+    return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
       detail: gone ? `No master loop is running: the cursor's lock (pid ${lock!.pid} on ${lock!.host}) names a process that is gone, last cycle ${state.lastCycleAt ?? 'never'}. Nothing is dispatching, deciding or merging until it is restarted.`
         : `No master loop holds this repository${state.lastCycleAt ? `; the last cycle was at ${state.lastCycleAt}` : ' and none has ever cycled'}. Nothing is dispatching, deciding or merging until it is started.` };
   }
   if (lagMs === null || lagMs > stalledAfterMs) {
-    return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+    // A cycle measured longer than the bound accounts for the lag, until the lag outgrows even
+    // that cycle: past its measured cost plus the bound, nothing is explaining the silence.
+    const slow = cost && !cost.withinLivenessBound && lagMs !== null && lagMs <= cost.durationMs + stalledAfterMs;
+    if (slow) return { state: 'slow', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
+      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle for ${Math.round(lagMs / 1000)}s, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s, but cycle ${cost.cycle} took ${Math.round(cost.durationMs / 1000)}s of its own: ${cost.breakdown}. The loop is inside a slow cycle, not stalled${cost.slowest ? `; the ${cost.slowest.step} step is the one to shorten` : ''}.` };
+    return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
       detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled.` };
   }
-  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago` };
+  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago` };
 }
 
 /**
  * The loop's own attention, ahead of every work item: a coordinator that is not cycling is why
  * nothing else on the list is moving. A breached silence bound or latency budget follows it.
  */
-export function loopAttention(report: { liveness: LoopLiveness; silence?: SilenceReport | null; budget?: LatencyBudget | null }): AttentionItem[] {
+export function loopAttention(report: { liveness: LoopLiveness; silence?: SilenceReport | null; budget?: LatencyBudget | null; cost?: CycleCost | null }): AttentionItem[] {
   const items: AttentionItem[] = [];
-  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.restart) });
+  const cost = report.cost ?? report.liveness.cost;
+  const shorten = cost?.slowest ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; shorten the ${cost.slowest.step} step rather than restarting a loop that is still cycling` : 'graphyard master status shows the last cycle under daemon.cost';
+  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart) });
+  // A cycle that does not fit its interval is raised whatever the lag says: the loop looks healthy
+  // the instant a long cycle ends, and the cost is the only reading that names what took the time.
+  if (cost && !cost.withinInterval && report.liveness.state !== 'slow' && report.liveness.state !== 'absent') {
+    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} took ${Math.round(cost.durationMs / 1000)}s, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`}: ${cost.breakdown}${cost.slowest ? `. The ${cost.slowest.step} step is the slowest, at ${Math.round(cost.slowest.ms / 1000)}s` : ''}`, ...agentOwner('master', shorten) });
+  }
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
     ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.restart}`) });
@@ -895,7 +988,12 @@ export interface DaemonEffects {
    */
   decideScope?: (work: Work) => Promise<Work>;
   merge: (work: Work) => Promise<unknown>;
-  observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
+  /**
+   * The deployed release and which deliveries it serves. The containment the previous observation
+   * retained is handed back so the cycle re-derives only what the release has not already been
+   * shown to contain (see `observeDeployment`).
+   */
+  observeDeployment: (delivered: Work[], retained?: ContainmentRetention | null) => Promise<DeploymentObservation>;
   /** Records the coordinator's own deployment observation on the delivered item. */
   recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
@@ -1002,6 +1100,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const performed: DaemonAction[] = [];
   const resumed = reconcilePendingActions(state, snapshot.work, clock);
   if (resumed.length) { performed.push(...resumed); await effects.persist(state); }
+  // Where this cycle's time goes. One process, one thing at a time: each `spent` closes the step
+  // that just ran, so the cycle can say which step outgrew the interval instead of only that it did.
+  const steps = emptyCycleSteps();
+  let stepStartedAt = startedAt;
+  const spent = (step: CycleStepName) => { const at = now(); steps[step] += Math.max(0, at - stepStartedAt); stepStartedAt = at; };
+  spent('observe');
 
   const agents = effects.agents();
   const credentials = await effects.credentials(config.workers);
@@ -1161,6 +1265,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // A pane this cycle just closed frees its profile, so health is read after the closures.
   const health = profileHealth(config.workers, credentials, effects.agents(), state, clock);
 
+  spent('close');
+
   // 2. Decide the open scope requests. A worker that needs a file its own criteria — or this
   //    repository's documentation rule — already imply must not wait for a master session to run
   //    a command: the control plane recomputes the decision from the item itself, and the loop
@@ -1214,6 +1320,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (state.actions[key]?.detail === breach.detail) continue;
     performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
+
+  spent('decisions');
 
   // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
   //    it. Every attempt and every rework checks the repository out again, so without this step
@@ -1278,6 +1386,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Containment settlement refused for ${item.key} epoch ${epoch}: ${message(error)}`, attempts: state.actions[key].attempts, epoch, cycle: state.cycle }, now(), effects.persist));
     }
   }
+
+  spent('close');
 
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
@@ -1405,6 +1515,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
+
+  spent('dispatch');
 
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
   //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
@@ -1583,6 +1695,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if ((closed && withdrawn) || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];
   }
 
+  spent('decisions');
+
   // 5. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
   //    and trusted producers publish evidence; the daemon records exactly one request per candidate
   //    and escalates what only a human or a producer may resolve.
@@ -1627,6 +1741,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       performed.push(await record(state, key, { kind: 'proof', work: item.key, principal: null, state: 'failed', detail: `Could not request ${config.run.proofWorkflow} for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
+
+  spent('dispatch');
 
   // 6. Merge. The only path is the guarded command, which rechecks the exact candidate, every gate,
   //    branch protection and the published queue tip immediately before the provider call.
@@ -1674,19 +1790,23 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  spent('merge');
+
   // 7. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
   //    marked the work Done on an observed merge, and a lagging rollout must stay visible as lag.
   const delivered = snapshot.work.filter(item => item.stage === 'done' && item.delivery)
     .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
   const deploymentKey = `deployment:${delivered.at(-1)?.delivery?.mergeSha ?? 'none'}`;
   try {
-    const observation = await effects.observeDeployment(delivered);
+    const observation = await effects.observeDeployment(delivered, state.deployment?.containment ?? null);
     state.deployment = deploymentObservationSchema.parse(observation);
     if (state.actions[deploymentKey]?.detail !== deploymentDetail(state.deployment)) {
       performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: observation.source === 'unavailable' ? 'failed' : 'done', detail: deploymentDetail(state.deployment), attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }
   } catch (error) {
-    state.deployment = { source: 'unavailable', sha: null, at: new Date(now()).toISOString(), reason: message(error), deployed: [], pending: delivered.map(item => item.key) };
+    // A failed observation keeps the containment already established: it is a record of releases
+    // that did serve these deliveries, and nothing about this failure makes that untrue.
+    state.deployment = { source: 'unavailable', sha: null, at: new Date(now()).toISOString(), reason: message(error), deployed: [], pending: delivered.map(item => item.key), containment: state.deployment?.containment ?? null };
     performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: 'failed', detail: `Deployment SHA could not be verified: ${message(error)}`, attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
@@ -1735,6 +1855,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  spent('deployment');
+
   // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have
   //    acted on and how long the longest of those has waited, and the passage of every item it
   //    watches: ready→claim, ready→first push, approval→merge and how long a mergeable candidate
@@ -1747,7 +1869,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals });
   const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
-  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length,
+  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), steps, open: open.length, actions: performed.length,
     actionable: silence.actionable, idleMs: silence.longestIdleMs, stages, lead, production, postDeploy, postDeployFailures,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
@@ -1771,18 +1893,67 @@ const message = (error: unknown) => {
 };
 function deploymentDetail(observation: DeploymentObservation) {
   if (observation.source === 'unavailable') return `Deployment SHA is unverified: ${observation.reason ?? 'no deployment observation is configured or available'}`;
-  return `Deployed SHA ${observation.sha?.slice(0, 12) ?? 'unknown'} from ${observation.source}; verified ${observation.deployed.length} delivered item(s), ${observation.pending.length} not yet serving`;
+  return `Deployed SHA ${observation.sha?.slice(0, 12) ?? 'unknown'} from ${observation.source}; verified ${observation.deployed.length} delivered item(s), ${observation.pending.length} not yet serving, from ${observation.requests ?? 0} GitHub request(s)${observation.reason ? `; ${observation.reason}` : ''}`;
+}
+
+/**
+ * How many deployments of the base branch the observation reads, and therefore how many GitHub
+ * requests one observation may make: the listing itself, plus at most one status listing for each
+ * deployment in it. Nothing below this bound scales with how much has been delivered — containment
+ * is derived locally — so the cycle's deployment step costs the same on the first delivery as on
+ * the five hundredth. A configured `--deployment-url` costs zero GitHub requests.
+ */
+export const deploymentListingSize = 20;
+export const maxDeploymentRequests = 1 + deploymentListingSize;
+
+/**
+ * Local ancestry over this checkout's own object store, which is what "does the release contain
+ * this merge" actually asks. The base branch is fetched once, lazily: an observation that answers
+ * every delivery from the retained containment fetches nothing at all.
+ */
+function localAncestry(root: string, baseBranch: string, run: (command: string, args: string[]) => string) {
+  let fetched: string | null | undefined;
+  const git = (...args: string[]) => run('git', ['-C', root, ...args]);
+  const fetchBase = () => {
+    if (fetched !== undefined) return fetched;
+    try { git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`); fetched = null; }
+    catch (error) { fetched = message(error).split('\n')[0]; }
+    return fetched;
+  };
+  return {
+    get fetchFailure() { return fetched || null; },
+    /** `true`/`false` when git could answer, `null` when this checkout does not hold both commits. */
+    contains(ancestor: string, descendant: string): boolean | null {
+      if (ancestor === descendant) return true;
+      fetchBase();
+      try { git('merge-base', '--is-ancestor', ancestor, descendant); return true; }
+      // Exit 1 is git's "not an ancestor". Anything else — a commit this checkout does not hold,
+      // a broken repository — is unknown, and unknown containment is never read as deployed.
+      catch (error: any) { return error?.status === 1 ? false : null; }
+    },
+  };
 }
 
 /**
  * The deployed commit, taken from a configured endpoint that reports it or from the provider's own
  * deployment record. A delivered item counts as deployed when the serving commit is its merge commit
  * or a descendant of it, so later merges do not make earlier ones look undeployed.
+ *
+ * Containment is derived from git, not from the forge: one fetch of the base branch and
+ * `git merge-base --is-ancestor` per delivery whose containment this loop has not already
+ * established. What it has established is retained with the release it was verified against, and
+ * one ancestry check carries the whole retained set onto a release that descends from it — so a
+ * steady cycle derives containment only for deliveries newer than the last observed release, and
+ * the GitHub requests stay under `maxDeploymentRequests` however long the delivery history grows.
+ * A release that does not descend from the retained one (a rollback, an unrelated commit) drops
+ * the retention and every delivery is derived again.
  */
-export async function observeDeployment(config: MasterConfig, delivered: Work[], run: (command: string, args: string[]) => string, fetcher: typeof fetch = fetch, now = () => Date.now()): Promise<DeploymentObservation> {
+export async function observeDeployment(config: MasterConfig, delivered: Work[], run: (command: string, args: string[]) => string, fetcher: typeof fetch = fetch, now = () => Date.now(),
+  options: { root?: string; retained?: ContainmentRetention | null } = {}): Promise<DeploymentObservation> {
   const at = new Date(now()).toISOString();
-  const unavailable = (reason: string): DeploymentObservation => ({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key) });
-  if (!delivered.length) return { source: 'unavailable', sha: null, at, reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [] };
+  let requests = 0;
+  const unavailable = (reason: string): DeploymentObservation => ({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key), requests, derived: 0, retained: 0, containment: options.retained ?? null });
+  if (!delivered.length) return { source: 'unavailable', sha: null, at, reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [], requests, derived: 0, retained: 0, containment: options.retained ?? null };
   let sha: string | null = null, source: DeploymentObservation['source'] = 'unavailable';
   if (config.run.deploymentUrl) {
     let payload: any;
@@ -1796,27 +1967,43 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     sha = value.toLowerCase(); source = 'endpoint';
   } else {
     let deployments: any[];
-    try { deployments = JSON.parse(run('gh', ['api', `repos/${config.repository}/deployments?per_page=20&ref=${encodeURIComponent(config.baseBranch)}`])); }
+    requests++;
+    try { deployments = JSON.parse(run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentListingSize}&ref=${encodeURIComponent(config.baseBranch)}`])); }
     catch (error) { return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`); }
     if (!Array.isArray(deployments) || !deployments.length) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
-    for (const deployment of deployments) {
+    for (const deployment of deployments.slice(0, deploymentListingSize)) {
       let statuses: any[];
+      requests++;
       try { statuses = JSON.parse(run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
       catch { continue; }
       if (Array.isArray(statuses) && statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
     }
     if (!sha) return unavailable('No GitHub deployment for the managed base branch reports a successful status');
   }
+  const ancestry = localAncestry(options.root ?? dirname(config.cliPath), config.baseBranch, run);
+  // The retained set is carried forward whole, on one ancestry check, or dropped whole.
+  const retention = options.retained ?? null;
+  const carried = retention && (retention.release === sha || ancestry.contains(retention.release, sha) === true) ? retention : null;
   const deployed: string[] = [], pending: string[] = [];
+  const settled: Record<string, string> = {};
+  let derived = 0, retainedCount = 0;
   for (const item of delivered) {
     const mergeSha = item.delivery!.mergeSha.toLowerCase();
-    if (mergeSha === sha) { deployed.push(item.key); continue; }
-    try {
-      const comparison = JSON.parse(run('gh', ['api', `repos/${config.repository}/compare/${mergeSha}...${sha}`]));
-      (comparison?.status === 'ahead' || comparison?.status === 'identical' ? deployed : pending).push(item.key);
-    } catch { pending.push(item.key); }
+    const established = carried?.settled[item.key];
+    // Already shown to be served by a release this one descends from: nothing to ask git again.
+    if (established) { deployed.push(item.key); settled[item.key] = established; retainedCount++; continue; }
+    // Everything else is derived this pass, so `derived + retained` is always the delivery count.
+    // The release's own merge needs no ancestry; every other delivery asks git once.
+    derived++;
+    if (mergeSha === sha || ancestry.contains(mergeSha, sha) === true) { deployed.push(item.key); settled[item.key] = sha; }
+    else pending.push(item.key);
   }
-  return deploymentObservationSchema.parse({ source, sha, at, reason: null, deployed: deployed.slice(-200), pending: pending.slice(-200) });
+  const keep = Object.entries(settled).slice(-retainedContainments);
+  // A base branch this checkout could not fetch is said out loud: containment was then derived
+  // from whatever objects are here, and a delivery git could not place stays pending, never deployed.
+  const stale = ancestry.fetchFailure;
+  return deploymentObservationSchema.parse({ source, sha, at, reason: stale ? `Containment was derived without a fresh base branch: ${stale}` : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
+    requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
 }
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
@@ -1836,6 +2023,9 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     escalations: recent.filter(action => action.kind === 'escalation').slice(0, 20),
     actions: recent.slice(0, 40),
     metrics: state.metrics.at(-1) ?? null,
+    // Where the last cycle's time went, against the interval and the liveness bound it is judged
+    // on: a cycle that outgrew its cadence is a step to shorten, not a loop to restart.
+    cost: cycleCost(state.metrics.at(-1) ?? null, intervalMs),
     deployment: state.deployment,
     profiles: state.profiles,
     config: state.config,
@@ -2024,7 +2214,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
     merge: work => mergeExecutor(current(), deps.snapshot, deps.mutate, deps.executor, randomUUID(), run)(work),
-    observeDeployment: delivered => observeDeployment(current(), delivered, run),
+    // `root` is this checkout: containment is derived from its object store, never from the forge.
+    observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: work => {
       const config = current();
