@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { answeringVerdicts, liveReviewRequest, reconcileAutoDispatch, unansweredRequest, unansweredRequests, type RequestProgress } from '../src/model/dispatch.js';
 import { buildMasterStatus, loadMasterConfig, setupMaster } from '../src/master.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, dismissalResolution, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { sessionRetry, sessionRetryBaseMs, sessionRetryLimit } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -45,7 +46,7 @@ function stubs(reviews: () => unknown[]) {
   const run = (_command: string, args: string[]) => {
     calls.push(args);
     if (args[0] === 'api') return JSON.stringify(reviews());
-    return JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+    return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
   return { calls, run, mint: async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() }) };
 }

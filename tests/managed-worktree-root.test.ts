@@ -9,6 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, worktreeRootAttention, writeFailure, type MasterRun } from '../src/master.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { launchProducer, producerPrompt, readProducerLedger, reclaimCheckouts, reconcileProducers, producerIdleGraceMs, type ProducerBinding } from '../src/producer.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
@@ -35,11 +36,13 @@ function herdr(calls: string[][] = []) {
   return (_command: string, args: string[]) => {
     calls.push(args);
     if (args[0] === 'tab') { pane++; return JSON.stringify({ result: { type: 'tab_created', root_pane: { pane_id: `pane-${pane}`, tab_id: `tab-${pane}` }, tab: { tab_id: `tab-${pane}` } } }); }
-    return JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+    return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
 }
-// Since GY-93 the request is the session's own first message: the last argument of its command line.
-const promptOf = (calls: string[][]) => calls.find(args => args[0] === 'agent' && args[1] === 'start')!.at(-1)!;
+// Since GY-93 the request is the session's own first message: the last argument of its command
+// line, which since GY-121 the shell reads from the request file the typed line references.
+const launchOf = (calls: string[][]) => expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+const promptOf = (calls: string[][]) => launchOf(calls).args.at(-1)!;
 
 /** A managed repository with one commit, a bound reviewer, a reviewer profile and two producer profiles, its worktree root under `managed`. */
 async function installation(run: Partial<MasterRun> = {}) {
@@ -98,8 +101,9 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.match(produced.checkout, /\/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}$/);
     assert.ok(existsSync(produced.checkout));
     assert.equal((await readProducerLedger(root)).producers[0].checkout, produced.checkout, 'the session record owns the checkout');
-    const produceStart = produceCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
+    const produceStart = launchOf(produceCalls).args;
     assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root)]);
+    assert.equal(launchOf(produceCalls).stem, join(produced.checkout, '.graphyard/launch/produce-a'), 'the request file lives in the session\'s own checkout');
     const producerText = promptOf(produceCalls);
     assert.ok(producerText.includes(`git worktree add --detach ${join(produced.checkout, 'checkout')} ${H}`));
     assert.ok(producerText.includes(join(produced.checkout, 'integration-managed-worktree-root.evidence.json')));
@@ -112,7 +116,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.equal(dirname(reviewed.checkout), managed);
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
-    const reviewStart = reviewCalls.find(args => args[0] === 'agent' && args[1] === 'start')!;
+    const reviewStart = launchOf(reviewCalls).args;
     assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), -1), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root)]);
     assert.ok(promptOf(reviewCalls).includes(`git worktree add --detach ${join(reviewed.checkout, 'checkout')} ${H}`));
     const plan = sessionHarnessPlan({ role: 'reviewer', kind: 'claude', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: scratch, credentialDirectories: [], pr: 88, checkout: join(reviewed.checkout, 'checkout') });
@@ -221,10 +225,10 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     await reconcile(work('GY-108'), { now: Date.now() + 3_600_000 }); assert.equal(await reviewState(lapsed), 'expired'); gone(lapsed);
 
     // A launch that never became a session leaves nothing behind either.
-    const broken = (_command: string, args: string[]) => { if (args[0] === 'agent') throw new Error('herdr agent start failed'); return herdr()(_command, args); };
+    const broken = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') throw new Error('herdr pane run failed'); return herdr()(_command, args); };
     const unlucky = request();
-    await assert.rejects(launchProducer(root, producing('GY-109', unlucky), unlucky, { ...config.producers[0], agentName: 'produce-gy-109' }, [], new Date().toISOString(), { run: broken, filesystem: durable }), /herdr agent start failed/);
-    await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, mint, filesystem: durable }), /herdr agent start failed/);
+    await assert.rejects(launchProducer(root, producing('GY-109', unlucky), unlucky, { ...config.producers[0], agentName: 'produce-gy-109' }, [], new Date().toISOString(), { run: broken, filesystem: durable }), /herdr pane run failed/);
+    await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, mint, filesystem: durable }), /herdr pane run failed/);
     assert.deepEqual(await readdir(managed).catch(() => []), [], 'every resolved or failed launch is gone from the root');
 
     // A session that died with its master: a checkout no record owns. One live session is left
@@ -421,9 +425,9 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
   const { root, managed, cleanup } = await installation();
   try {
     const config = await loadMasterConfig(root), asked = request();
-    const exhausted = (_command: string, args: string[]) => { if (args[0] === 'agent') throw Object.assign(new Error('Command failed: herdr agent start'), { stderr: 'write error: No space left on device\n' }); return herdr()(_command, args); };
+    const exhausted = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') throw Object.assign(new Error('Command failed: herdr pane run'), { stderr: 'write error: No space left on device\n' }); return herdr()(_command, args); };
     await assert.rejects(launchProducer(root, producing('GY-88', asked), asked, config.producers[0], [], new Date().toISOString(), { run: exhausted, filesystem: durable }), (error: Error) => {
-      assert.match(error.message, new RegExp(`^Launching the GY-88 producer session \\(Command failed: herdr agent start\\) failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}: `));
+      assert.match(error.message, new RegExp(`^Launching the GY-88 producer session \\(Command failed: herdr pane run\\) failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}: `));
       assert.ok(error.message.endsWith(reclaimAdvice)); return true;
     });
     await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, mint: async () => ({ token: 'ghs_session_token_value', expiresAt: future(3_000_000) }), filesystem: durable }),

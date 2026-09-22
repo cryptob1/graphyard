@@ -58,8 +58,11 @@ async function privateDirectory(prefix: string) {
 }
 
 /**
- * A Herdr on PATH whose `agent start` takes thirty seconds — until the test releases it — and
- * whose every other command answers at once. The script is a real child process: what it
+ * A Herdr on PATH whose session start takes thirty seconds — until the test releases it — and
+ * whose every other command answers at once. Since GY-121 a launch is `pane run` typing the
+ * command line and then `agent get` and `pane read` until the runtime is ready: here `pane run`
+ * itself holds for the delay, exactly as `agent start … --timeout 30000` held before it, and the
+ * runtime is seen ready the moment it returns. The script is a real child process: what it
  * exercises is the runner, not a stub of it.
  */
 async function slowHerdr(directory: string, startDelayMs: number) {
@@ -69,11 +72,14 @@ async function slowHerdr(directory: string, startDelayMs: number) {
     import { existsSync } from 'node:fs';
     const args = process.argv.slice(2);
     const answer = value => { process.stdout.write(JSON.stringify(value)); };
-    if (args[0] === 'agent' && args[1] === 'start') {
+    if (args[0] === 'pane' && args[1] === 'run') {
       const deadline = Date.now() + ${startDelayMs};
-      const wait = () => { if (existsSync(${JSON.stringify(release)}) || Date.now() >= deadline) answer({ result: { started: true } }); else setTimeout(wait, 25); };
+      const wait = () => { if (existsSync(${JSON.stringify(release)}) || Date.now() >= deadline) answer({ result: { ran: true } }); else setTimeout(wait, 25); };
       wait();
-    } else if (args[0] === 'agent' && args[1] === 'list') answer({ result: { agents: [{ name: 'someone-else', pane_id: 'pane-9', agent_status: 'working' }] } });
+    } else if (args[0] === 'pane' && args[1] === 'read') process.stdout.write('claude ready\\n');
+    else if (args[0] === 'agent' && args[1] === 'get') answer({ result: { agent: { agent: 'claude', agent_status: 'idle', pane_id: args[2] } } });
+    else if (args[0] === 'agent' && args[1] === 'rename') answer({ result: { agent: { agent: 'claude', agent_status: 'idle', name: args[3] } } });
+    else if (args[0] === 'agent' && args[1] === 'list') answer({ result: { agents: [{ name: 'someone-else', pane_id: 'pane-9', agent_status: 'working' }] } });
     else if (args[0] === 'tab' && args[1] === 'create') answer({ result: { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } });
     else answer({ result: {} });
   `);
@@ -129,7 +135,7 @@ test('unit:no-sync-child-processes — the loop, the dispatcher, the merge broke
   await assert.rejects(runChild('graphyard-no-such-command-125', []), (error: unknown) => error instanceof ChildProcessError && /could not be started/.test(error.message));
 });
 
-test('integration:snapshot-read-unblocked-by-launch — while the dispatcher waits thirty seconds on `herdr agent start`, a cycle beside it reads its snapshot in under two seconds and completes without a failure', async () => {
+test('integration:snapshot-read-unblocked-by-launch — while the dispatcher waits thirty seconds on a Herdr session start, a cycle beside it reads its snapshot in under two seconds and completes without a failure', async () => {
   const { directory, token } = await privateDirectory('graphyard-unblocked-');
   const herdr = await slowHerdr(directory, 30_000);
   const run = childRunner({ timeoutMs: 60_000, env: { ...process.env, PATH: herdr.path } });
@@ -151,8 +157,9 @@ test('integration:snapshot-read-unblocked-by-launch — while the dispatcher wai
     const master = config(token, { producers: [{ name: 'producer-a', principal: 'producer-a', agentName: 'producer-a', kind: 'claude', credentialFile: join(directory, 'producer.token'), agentArgs: [], approvals: 'auto', environment: {} } as ProducerProfile] });
     const request: DispatchRequest = { id: 'req-unit', kind: 'producer', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, pr: 125, group: 'unit', proofs: ['unit:child-wait-attributed'], requestedAt: iso(0), reason: 'unit proofs', state: 'requested' };
     const submitted = work({ stage: 'review', epoch: 1, submission: { epoch: 1, pr: 125 }, candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 125, branch: 'graphyard/gy-125-1', author: 'worker' }, autoDispatch: { review: null, producers: [request], history: [] } } as Partial<Work>);
-    // The dispatcher's tick launches the producer through the real launch path: `herdr agent
-    // start … --timeout 30000`, run by the runner against the Herdr above, which does not answer.
+    // The dispatcher's tick launches the producer through the real launch path — the request file
+    // written, `herdr pane run` typing the command line — run by the runner against the Herdr
+    // above, whose `pane run` does not answer.
     const launches: string[] = [];
     const dispatcher: DispatchEffects = {
       snapshot: async () => ({ work: [submitted], now: iso(0) }),
@@ -160,7 +167,7 @@ test('integration:snapshot-read-unblocked-by-launch — while the dispatcher wai
       credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
       reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }),
       launchReview: async () => { throw new Error('no review in this test'); },
-      launchProducer: async (item, req, profile) => { launches.push(`${item.key}:${req.group}:${profile.name}`); return startAgentSession('producer-gy-125-1', 'claude', 'pane-1', [], 'Produce the unit proofs', run); },
+      launchProducer: async (item, req, profile) => { launches.push(`${item.key}:${req.group}:${profile.name}`); return startAgentSession('producer-gy-125-1', 'claude', 'pane-1', [], 'Produce the unit proofs', run, { directory }); },
       persist: async () => {},
     };
     const tickStartedAt = Date.now();

@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
+import { launchAuthorization } from '../src/repository-setup.js';
+import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { writeHarnessPermissions } from '../src/harness.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewerBindingHealth, reviewerRegistrationFile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, summarizeReviews, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
@@ -64,7 +66,8 @@ const herdr = (calls: string[][], extra: (args: string[]) => unknown = () => und
   calls.push(args);
   const special = extra(args);
   if (special !== undefined) return JSON.stringify({ result: special });
-  return JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : args[0] === 'agent' && args[1] === 'get' ? { agent: { pane_id: 'pane-1', agent_status: 'idle' } } : {} });
+  // The typed launch is accepted and its runtime seen ready at once (GY-121 startedAtOnce).
+  return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 };
 const producerVerify = (principal: string) => async () => ({ actor: { id: principal, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
 const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
@@ -400,8 +403,11 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
       async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40), branch: 'graphyard/gy-69-4' }), async () => {}, 5_000);
     const workerFile = sessionHarnessFile(root, 'worker', 'claude-worker');
     const run = calls.find(call => call[0] === 'pane' && call[1] === 'run')!;
-    // GY-93: the role file is followed by the launch authorization it leaves out, then the request.
-    assert.match(run[3], new RegExp(`'--' 'claude' '--permission-mode' 'bypassPermissions' '--setting-sources' 'user' '--settings' '${workerFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' '--append-system-prompt' '.*' 'Implement GY-69: [^']*'$`));
+    // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
+    // GY-121: both are read from the files in the worktree that the short typed line references.
+    assert.match(run[3], new RegExp(` -- claude --permission-mode bypassPermissions --setting-sources user --settings ${workerFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} --append-system-prompt-file "\\$GY\\.role" "\\$\\(cat "\\$GY\\.request"\\)"$`));
+    const typedWorker = expandTypedCommand(run[3]);
+    assert.equal(roleOf(typedWorker.args), launchAuthorization.replace(/\s+/g, ' ')); assert.match(typedWorker.args.at(-1)!, /^Implement GY-69: /);
     const workerSettings = JSON.parse(await readFile(workerFile, 'utf8'));
     assert.ok(workerSettings.permissions.allow.includes('Bash(git push origin graphyard/gy-69-4)'));
     assert.equal(denied(workerSettings.permissions.deny, 'git push origin graphyard/gy-69-4'), false, 'the only deny rules the worker loads cannot block its push');
@@ -416,8 +422,11 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const reviewCalls: string[][] = [];
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr(reviewCalls), mint });
     const reviewerFile = sessionHarnessFile(root, 'reviewer', 'claude-reviewer');
-    assert.deepEqual(reviewCalls[1].slice(-10, -3), ['--', '--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', reviewerFile]);
-    assert.equal(reviewCalls[1].at(-3), '--append-system-prompt'); assert.match(reviewCalls[1].at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
+    const typedReview = expandTypedCommand(reviewCalls[1][3]);
+    assert.deepEqual(reviewCalls[1].slice(0, 2), ['pane', 'run']); assert.equal(typedReview.kind, 'claude');
+    assert.deepEqual(typedReview.args.slice(-9, -3), ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', reviewerFile]);
+    assert.equal(typedReview.args.at(-3), '--append-system-prompt-file'); assert.equal(roleOf(typedReview.args), launchAuthorization.replace(/\s+/g, ' '));
+    assert.match(typedReview.args.at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
     const reviewerSettings = JSON.parse(await readFile(reviewerFile, 'utf8'));
     assert.ok(reviewerSettings.permissions.allow.includes('Bash(gh api --method POST repos/owner/project/pulls/69/reviews*)'));
     assert.equal(denied(reviewerSettings.permissions.deny, `gh api --method POST repos/owner/project/pulls/69/reviews -f commit_id=${H} -f event=APPROVE`), false, 'the master deny on review calls cannot block the reviewer');
@@ -430,8 +439,9 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const produceCalls: string[][] = [];
     await launchProducer(root, item, item.autoDispatch!.producers[0], (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(produceCalls) });
     const producerFile = sessionHarnessFile(root, 'producer', 'producer-a');
-    assert.deepEqual(produceCalls[1].slice(-7, -3), ['--setting-sources', 'user', '--settings', producerFile]);
-    assert.match(produceCalls[1].at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
+    const typedProduce = expandTypedCommand(produceCalls[1][3]);
+    assert.deepEqual(typedProduce.args.slice(-7, -3), ['--setting-sources', 'user', '--settings', producerFile]);
+    assert.match(typedProduce.args.at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
     const producerSettings = JSON.parse(await readFile(producerFile, 'utf8'));
     assert.ok(producerSettings.permissions.allow.includes(`Bash(node ${launcher} evidence:*)`));
     assert.ok(producerSettings.permissions.deny.includes('Bash(git push:*)'));
@@ -442,7 +452,8 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const ledger = await readReviewLedger(root); ledger.reviews = []; await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(ledger), { mode: 0o600 });
     const cursorCalls: string[][] = [];
     await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), mint });
-    assert.deepEqual(cursorCalls[1].slice(-4, -1), ['--', '--force', '--trust']); assert.match(cursorCalls[1].at(-1)!, /^You are the independent Graphyard reviewer/, 'plus the request (GY-93)');
+    const typedCursor = expandTypedCommand(cursorCalls[1][3]);
+    assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.match(typedCursor.args.at(-1)!, /^You are the independent Graphyard reviewer/, 'plus the request (GY-93)');
   } finally { await cleanup(); }
 });
 

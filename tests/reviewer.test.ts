@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
 import { buildMasterStatus, dispatchWork, loadMasterConfig, masterHarness, reviewerProfileSchema, setupMaster, workerProfileSchema } from '../src/master.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
 import { applyProtection, protectionPlan, requiredReviewProtection } from '../src/protection.js';
 import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
@@ -132,7 +133,7 @@ test('master review mints a private session credential, records the request, and
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
     const config = await loadMasterConfig(root);
     const calls: string[][] = [];
-    const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
+    const run = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
     const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
     const launched = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run, mint });
     assert.equal(launched.work, 'GY-42'); assert.equal(launched.sha, 'a'.repeat(40)); assert.equal(launched.reviewer, 'graphyard-reviewer[bot]'); assert.equal(launched.pane, 'pane-review');
@@ -142,11 +143,14 @@ test('master review mints a private session credential, records the request, and
     assert.equal((await stat(join(sessionDirectory, 'hosts.yml'))).mode & 0o777, 0o600);
     assert.match(await readFile(join(sessionDirectory, 'hosts.yml'), 'utf8'), /oauth_token: ghs_review_session_token/);
     assert.equal(sessionDirectory.startsWith(`${root}/`), false, 'session credentials never live inside the repository');
-    assert.deepEqual(calls[1].slice(0, 6), ['agent', 'start', 'review-claude-1', '--kind', 'claude', '--pane']);
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'pane-review']);
+    const typed = expandTypedCommand(calls[1][3]);
+    assert.equal(typed.kind, 'claude'); assert.deepEqual(calls.find(call => call[0] === 'agent' && call[1] === 'rename')?.slice(2), ['pane-review', 'review-claude-1'], 'the started runtime takes the session name');
     // GY-93: the request is the session's own first message, the positional prompt after the
-    // approval flag; nothing is pasted into the session afterwards.
-    assert.deepEqual(calls[1].slice(-3, -1), ['--permission-mode', 'bypassPermissions']);
-    assert.match(calls[1].at(-1)!, /pull request #42 at head a{40} against base b{40}/);
+    // approval flag; nothing is pasted into the session afterwards. GY-121: the shell reads it
+    // from the request file in the session checkout that the short typed line references.
+    assert.deepEqual(typed.args.slice(-3, -1), ['--permission-mode', 'bypassPermissions']);
+    assert.match(typed.args.at(-1)!, /pull request #42 at head a{40} against base b{40}/); assert.equal(typed.stem, join(launched.checkout, '.graphyard/launch/review-claude-1'));
     assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readReviewLedger(root);
     assert.equal(ledger.reviews.length, 1); assert.equal(ledger.reviews[0].state, 'pending'); assert.equal(ledger.reviews[0].policyRevision, 2);
@@ -179,7 +183,7 @@ test('a reviewer launch leaves no credential or record behind when Herdr refuses
     const calls: string[][] = [];
     const run = (_command: string, args: string[]) => {
       calls.push(args);
-      if (args[0] === 'agent' && args[1] === 'start') throw new Error('start refused');
+      if (args[0] === 'pane' && args[1] === 'run') throw new Error('start refused');
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'pane-failed' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     };
     await assert.rejects(launchReview(root, work(), 'reviewer-cursor', [], new Date().toISOString(), { run, mint: async () => ({ token: 'ghs_failed_session', expiresAt: new Date(Date.now() + 3_500_000).toISOString() }) }), /start refused/);
@@ -246,16 +250,18 @@ test('dispatch starts a supervised worker with its runtime approval contract, or
     await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const profile = { name: 'cursor-primary', principal: 'worker-a', agentName: 'eng-cursor-1', mode: 'launch' as const, kind: 'cursor' as const, credentialFile: credential, agentArgs: [], approvals: 'auto' as const, environment: {} };
     const calls: string[][] = [];
-    const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'p1', agent_status: 'idle' } } : {} });
+    const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'p1', agent: expandTypedCommand(calls.filter(call => call[0] === 'pane' && call[1] === 'run').at(-1)!.at(-1)!).kind, agent_status: 'idle' } } : {} });
     };
     const ready = () => work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null });
     const dispatched = await dispatchWork(root, ready(), profile, [], run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }));
     assert.equal(dispatched.launch.applied, true);
     // GY-93: the instruction follows the flags as the runtime's positional prompt.
-    assert.match(calls[1][3], /'--' 'cursor' '--force' '--trust' 'Implement GY-42: [^']*'$/, 'the supervised command carries the runtime non-interactive flags, then the request');
+    assert.match(calls[1][3], / -- cursor --force --trust "\$\(cat "\$GY\.request"\)"$/, 'the supervised command carries the runtime non-interactive flags, then the request');
+    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, /^Implement GY-42: /);
     const optOutCalls: string[][] = [];
     await dispatchWork(root, ready(), { ...profile, approvals: 'prompt', agentName: 'eng-cursor-2' }, [], (_command, args) => { optOutCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 5, path: join(root, 'assigned-2'), base: 'd'.repeat(40) }));
-    assert.match(optOutCalls[1][3], /'--' 'cursor' 'Implement GY-42: [^']*'$/, 'an opted-out profile starts exactly as the operator configured it, plus the request');
+    assert.match(optOutCalls[1][3], / -- cursor "\$\(cat "\$GY\.request"\)"$/, 'an opted-out profile starts exactly as the operator configured it, plus the request');
+    assert.match(expandTypedCommand(optOutCalls[1][3]).args.at(-1)!, /^Implement GY-42: /);
     const opencodeCalls: string[][] = [];
     await dispatchWork(root, ready(), { ...profile, kind: 'opencode', agentName: 'eng-opencode-1' }, [], (_command, args) => { opencodeCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 6, path: join(root, 'assigned-3'), base: 'e'.repeat(40) }));
     assert.ok(opencodeCalls[0].some(value => value.startsWith('OPENCODE_PERMISSION=')), 'runtimes configured by environment get their contract in the tab environment');
