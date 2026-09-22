@@ -911,6 +911,30 @@ closed, and nothing revisits a settled record — so while a request for that ex
 a closed session carrying the approval the control plane is waiting for is re-read, and a dismissal
 reopens it unanswered the same way.
 
+**A session is answered only by a review it could have collected.** A review GitHub dismissed
+*before* a session was launched is never that session's verdict. GitHub keeps a dismissed review
+listed under the reviewer's own identity, on the same commit, with the moment it was originally
+submitted — a verdict withdrawn from an earlier session, a carried approval `master merge`
+re-posted through the same reviewer App, a dismissal by hand — so matching one recorded every new
+session unanswered the moment it started: the request burned all four attempts on a verdict GitHub
+had already taken back, and the commit could never be reviewed again. Nothing is weakened by
+refusing it, because a dismissal satisfies no gate: a session that finds no verdict of its own
+stays pending until its reviewer posts, or fails on its own terms as any session that stops without
+one. An `APPROVED` or `CHANGES_REQUESTED` review of the exact head answers the request whichever
+session collected it, and the one review a record already names as its verdict is re-read whatever
+its timestamp — that is how an approval GitHub withdraws after the session closed is still found.
+
+**An item that cannot obtain a review is not an ordinary review wait.** When every session of a
+commit settled on a review GitHub had dismissed, `master status` says so instead of showing the
+review gate's `approval is required` climbing past the hour: `GY-N cannot obtain a review of <sha>:
+3 reviewer sessions settled on review #11, which GitHub dismissed, so no verdict has ever been
+obtained on that commit in 1h15m over 3 attempts — …; this is not a review in progress`. Such items
+are counted in `counts.dispatchUnobtainableReview` and listed under `unobtainableReviews` with the
+commit, the dismissed review ids and the sessions that settled on them, apart from the requests
+whose review is genuinely running (`counts.dispatchRunning`). The recovery is the same
+`master review GY-N [PROFILE]`: it launches the open request's next attempt on the same commit, and
+the withdrawn verdict no longer settles it.
+
 **A request whose session settled without satisfying its gate is attention, not silence.** An
 `APPROVED` or `CHANGES_REQUESTED` verdict answers the request — the control plane resolves it on its
 next observation — but no attempt follows a settled session, so a request whose session ended with
@@ -1290,7 +1314,7 @@ The real-base rule: every one of those checks reads the base branch's head from 
 
 Entries behind the head are re-based by Graphyard, not by the worker. Do not request rework, reassign, or ask an agent to rebase a queued candidate because its position or predicted tip changed; check `queue` and the entry's refusal reason first. An entry that fails its speculative validation is ejected with a recorded reason and must be repaired and re-queued — there is no command to reinsert or reorder it. The mechanism and its invariants are in [GitHub enforcement](github.md#merge-queue).
 
-A follower whose predecessor merges keeps its tip and bindings: the base branch advanced only by a commit tree-identical to the tip it was validated on, and the row's `binding.base.carriedTo` names that advance. When Graphyard replaces an approved head with its own authored tip, the approval and the scope-disjoint proofs carry to it under the rule in [binding carry](github.md#binding-carry-across-a-graphyard-authored-tip); a `required` binding in the row names exactly what the predecessor touched and what must be produced afresh. Launch a review or a proof only for a `required` binding, never because a tip's sha changed. GitHub dismisses reviews on Graphyard's own tip push; `master merge` re-posts a carried approval through the bound reviewer App before it acquires authority, and the result reports it under `carriedApproval`. A carried approval given by a human reviewer cannot be re-posted: the provider may then still require a fresh native approval, which the row and the merge result say.
+A follower whose predecessor merges keeps its tip and bindings: the base branch advanced only by a commit tree-identical to the tip it was validated on, and the row's `binding.base.carriedTo` names that advance. When Graphyard replaces an approved head with its own authored tip, the approval and the scope-disjoint proofs carry to it under the rule in [binding carry](github.md#binding-carry-across-a-graphyard-authored-tip); a `required` binding in the row names exactly what the predecessor touched and what must be produced afresh. Launch a review or a proof only for a `required` binding, never because a tip's sha changed. A tip is never republished onto a prediction whose tree it already lands: when the entry ahead republishes its own tip, or the base branch advances, to a commit carrying the tree the tip was validated on, the advance is recorded (`binding.base.carriedTo`, and the placement binds `tree-equivalent`) and nothing is pushed — a tip push would replace the head GitHub bound the approval to and dismiss it for content nobody changed. GitHub dismisses reviews on Graphyard's own tip push; `master merge` re-posts a carried approval through the bound reviewer App before it acquires authority, and the result reports it under `carriedApproval`. A carried approval given by a human reviewer cannot be re-posted: the provider may then still require a fresh native approval, which the row and the merge result say.
 
 For the full correctness model, see [GitHub enforcement](github.md) and [architecture](architecture.md).
 

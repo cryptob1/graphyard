@@ -8,7 +8,7 @@ import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, typ
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
-import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
+import { nameUnobtainableReviews, unansweredRequests, unobtainableReview, unobtainableReviewLine, type RequestProgress, type SettledReviewSession, type UnansweredRequest, type UnobtainableReview } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 
@@ -73,13 +73,26 @@ export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequ
  * stood, and the command that gets it answered, and counted apart from the requests with a
  * session actually running (`counts.dispatchRunning`).
  */
-export function unansweredRequestAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[]): AttentionItem[] {
+export function unansweredRequestAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[]): (AttentionItem & { requestId: string })[] {
   return rows.flatMap(row => unansweredRequests(row.dispatch).map(request => {
     const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
     const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
-    return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
+    return { subject: row.key, requestId: request.requestId, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
       ...unansweredRequestOwner(row.key, request) };
   }));
+}
+
+/**
+ * One attention item per candidate that cannot obtain a review of its commit (`unobtainableReview`
+ * decides which; GY-100): the review GitHub dismissed, how many sessions settled on it, the commit
+ * no verdict was ever obtained on, and the command that launches the next attempt. Counted in
+ * `counts.dispatchUnobtainableReview`, apart from the reviews genuinely running.
+ */
+export function unobtainableReviewAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[], settled: SettledReviewSession[]): (AttentionItem & { review: UnobtainableReview })[] {
+  return rows.flatMap(row => {
+    const review = unobtainableReview(row.dispatch?.review, settled);
+    return review ? [{ subject: row.key, review, text: unobtainableReviewLine(row.key, review, elapsed), ...unansweredRequestOwner(row.key, { kind: 'review' }) }] : [];
+  });
 }
 
 /**
@@ -218,6 +231,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
+  // A review every session settled on a dismissal for is the stronger statement of the same
+  // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
+  const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
@@ -241,10 +257,12 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   }
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
-  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length,
+  return { ...status, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
+    // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
+    unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,

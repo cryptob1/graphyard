@@ -7,7 +7,7 @@ import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, type BaseRefresh, type CarriedCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery } from './merge-queue.js';
+import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, treeIdenticalPrediction, type BaseRefresh, type CarriedCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -557,6 +557,16 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     demand(comment.performed_via_github_app?.id === this.config.appId && comment.user?.type === 'Bot' && comment.body === body && Number.isSafeInteger(comment.id) && Number.isFinite(Date.parse(comment.created_at)), 'Review dispatch did not return an authenticated Graphyard comment', 502);
     return { commentId: comment.id, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, body, createdAt: comment.created_at };
   }
+  /**
+   * The published tip's own tree, or undefined when it could not be read. Read after the tip is
+   * published and never allowed to fail it: the tree is what lets the entry behind this one tell a
+   * prediction that moved only in sha from one that brings content (GY-100), and an entry that
+   * cannot be told either way is republished as it was before, which costs a review round rather
+   * than a delivery.
+   */
+  private async tipTree(tip: string): Promise<string | undefined> {
+    return this.commitTree(tip).catch(() => undefined);
+  }
   async commitTree(sha: string): Promise<string> {
     const commit = await this.request(`/commits/${sha}`);
     const tree = commit?.commit?.tree?.sha;
@@ -630,6 +640,16 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * branch plus every entry ahead of it) with this candidate merged in. The result is published
    * under a Graphyard-owned ref and pushed onto the candidate branch, so the PR head, the
    * required checks, the review, and every proof all bind to that one exact commit.
+   *
+   * A published tip is never republished onto a predicted base whose tree it already lands
+   * (GY-100). A tip push replaces the head, so GitHub dismisses its approval and withdraws every
+   * verdict bound to it; when the predicted base moved only to a tree-identical commit — an entry
+   * ahead republishing its own tip, a queue merge on the base branch — the merge would produce
+   * the same tree under a new sha and cost a review round for content nobody changed. The advance
+   * is recorded on the speculation instead (`carriedBase`, as the control plane already records a
+   * tree-identical base-branch advance) and nothing is written: `predictQueue` binds the tip to
+   * that prediction, and the approval, the proofs and the checks stand on the commit they were
+   * given for.
    */
   async publishSpeculativeTip(work: Work, placement: QueuePlacement, beforeWrite: () => Promise<void> = async () => {}): Promise<QueueSpeculation> {
     demand(work.candidate && work.queue && placement.predictedBase, 'A queued candidate with a predicted base is required');
@@ -642,15 +662,20 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const branch = await this.baseBranch();
     requireCurrent(!!placement.base && (branch.tip === placement.base.sha || branch.tree === placement.base.tree), `Base branch ${this.config.base} moved before speculative prediction; retry`);
     const baseTree = await this.commitTree(placement.predictedBase!);
+    const ref = queueRef(work.key);
+    // Re-binding a published tip to a tree-identical prediction: recorded, never republished.
+    const rebound = treeIdenticalPrediction(work, placement.predictedBase!, baseTree);
+    if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() } };
     await beforeWrite();
     const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
     const tip = merged ?? pr.head.sha;
-    const ref = queueRef(work.key);
     await this.publishRef(ref, tip);
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
     const merge = merged ? await this.describeMerge(pr.head.sha, merged, work.candidate!.baseSha, placement.predictedBase!) : null;
-    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge };
+    // The tip's own tree is what the entry behind this one is predicted to land on, so that entry
+    // can tell a prediction that moved only in sha from one that brings content (GY-100).
+    return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge };
   }
   /**
    * Brings one in-flight candidate onto a base branch that moved under it, without a rework round.
