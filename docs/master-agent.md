@@ -111,6 +111,36 @@ The launch check reads an account before a session starts. An account that runs 
 
 Each failover is one `failover` action in `daemon.actions`, and `master status` shows the item's recent exhaustions under `work[].capacity`.
 
+### A worker killed outright
+
+A worker that dies without submitting — its agent process OOM-killed, its supervisor's tree stopped,
+the host rebooted — keeps its partial work exactly as an exhausted one does (GY-105). The loop
+recognises three states of a dead worker, each on this host and each before the item can be
+dispatched again:
+
+- **its supervisor has already exited.** When the agent dies under a healthy supervisor, the
+  supervisor stops, settles its own containment fence and exits, but releases nothing: the lease
+  stays live until it lapses. A live lease on a launch profile whose session Herdr no longer reports,
+  with no fence standing, more than two minutes after its claim (a launching session has that long
+  to appear in Herdr), is that state;
+- **its supervisor is still renewing the lease** while Herdr no longer reports the agent — the
+  orphaned supervisor of [the durable loop](#durable-loop), stopped through its containment scope;
+- **its supervisor is verified gone after the lease lapsed** — the whole tree died, and the fence is
+  settled by the loop in step 4.
+
+In each case, before anything else, uncommitted changes in the attempt worktree are committed on
+the attempt's own branch as `WIP: GY-N attempt E interrupted before it could submit` (unpushed,
+never stashed; `discarded` when they cannot be committed, and the record says so), and the result is
+written onto the item through the same `POST /api/work/GY-N/capacity` record as an exhaustion, with
+`cause: "interrupted"`: a `capacity.interrupted` history entry rather than `capacity.exhausted`,
+no account held, and the attempt ended as `released` in the same transaction. The item is claimable
+only once that record exists, so the next attempt's request always names the commit, branch and
+worktree — *"The previous attempt (epoch 1) ended without submitting: its agent session … is gone
+from Herdr …; its work is kept as commit … on local branch … Read it with git log and git show, and
+bring what is sound into your branch with git cherry-pick or git merge instead of redoing it."* — or
+says the changes were discarded. Each preservation is one `preserve` action in `daemon.actions`,
+made once per attempt.
+
 ### When a role has no account left
 
 When **every** launch profile of a role is unavailable for the same reason — each of its accounts is spent — that is capacity, not a launch failure. A logged-out account, an unreadable credential, or an `accounts:` name that is not a configured environment is something a master can fix in one command, so it is never capacity: the account selector carries *why* it passed each account over, and only a profile every one of whose accounts was passed over as spent reports itself out of capacity. The daemon and the automatic reviewer/producer dispatcher both key on that, so a role whose accounts are merely logged out keeps its counted launch refusal, its widening retry and its `launch-review` / `launch-producer` attention item addressed to the master, rather than reading as a wait for a provider reset that would never come.
@@ -204,9 +234,10 @@ Each cycle:
    unit, and that fence outlives the session, so a dead worker's item cannot be claimed again until
    somebody settles the quarantine. Once the lease has lapsed and the grace window has run, the
    loop verifies on the registered host that the supervisor is gone — the same probe
-   `master settle-containment` runs, re-evaluated by the control plane — and settles it, so the
-   next step can offer the item again. A signal it cannot verify is an escalation, never a
-   settlement (see [containment quarantines](#containment-quarantines));
+   `master settle-containment` runs, re-evaluated by the control plane — keeps what the dead
+   attempt left uncommitted in its worktree (see [a worker killed outright](#a-worker-killed-outright)),
+   and settles it, so the next step can offer the item again. A signal it cannot verify is an
+   escalation, never a settlement (see [containment quarantines](#containment-quarantines));
 5. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
@@ -641,8 +672,9 @@ node scripts/graphyard-executor.mjs --kinds merge,resync  # a narrower one; run 
 It reads this host's `.graphyard/master.json` for the launch profiles the dispatching actions need
 and authenticates with the coordinator credential named there — the same credential `master run`
 uses, and nothing broader. Run as many as you like, on as many hosts; none of them is a master, and
-stopping any of them costs the one claim it held. The routes underneath, for an executor written
-elsewhere:
+stopping any of them costs the one claim it held. In production they run as supervised slots, not
+from a terminal: see [running executors under supervision](#running-executors-under-supervision).
+The routes underneath, for an executor written elsewhere:
 
 ```sh
 POST /api/actions/claim   {"host": "runner-3", "kinds": ["dispatch", "merge", "resync"]}
@@ -703,6 +735,78 @@ inside what an action starts — implementing, reviewing, producing evidence, ap
 decision, resolving an escalation — and never in the loop that starts it. That is what the master
 session is now for: the escalations, the findings and the two-party decisions, outside the
 critical path.
+
+### Running executors under supervision
+
+Nothing about an executor keeps it running: it is a process, and a reboot, an OOM kill or a
+closed terminal ends it. Until GY-105 executors were started with `nohup` from a master session,
+and when every one of them died the fleet stopped until a person typed the command again. Executors
+now run the way the loop does — under a supervisor that restarts them — and a host says how many it
+runs and of which kinds.
+
+**The declaration.** A host declares its executors in `.graphyard/executors.json`, beside the
+`master.json` that holds the coordinator credential, host name and server every executor needs:
+
+```json
+{ "version": 1, "count": 2, "kinds": null, "intervalSeconds": 5 }
+```
+
+`count` is how many executor slots the host runs; `kinds` narrows what every slot on the host
+claims (`null` is every kind an executor has a handler for — `escalate` and `request-rework` can
+never be among them); `intervalSeconds` is the poll interval, at most 60 so a live slot is always
+inside the presence window below. A slot runs as `node scripts/graphyard-executor.mjs --slot N` and
+takes its kinds and interval from the declaration, so a change to the file reaches every slot on
+the host at its next restart; a slot above the count exits with status 78 and stays down instead
+of flapping.
+
+**The unit.** Graphyard ships [`examples/master/graphyard-executor@.service`](../examples/master/graphyard-executor@.service),
+a systemd user template with `Restart=always`, `StartLimitIntervalSec=0`, `RestartSec=10`,
+`RestartPreventExitStatus=78` and a 180-second watchdog: the executor tells systemd it is ready
+at start and sends a keep-alive on every poll and every claim renewal, so a process whose event
+loop wedged is restarted while a slow handler that still renews its claim is left alone. Restarting
+an executor costs the one claim it held: nothing is renewed, the claim lapses within two minutes,
+and the restarted slot — it claims under the stable name `PRINCIPAL@HOST/N` — or any other
+executor takes the row as a further attempt. The dead executor's late settlement is refused, so
+nothing runs twice.
+
+**Installing it is part of connecting the host.** `graphyard init` on a coordinator host — one whose
+checkout `master init` configured — writes the declaration if there is none (one slot, every kind),
+binds the template to that checkout under `~/.config/systemd/user/`, runs `daemon-reload`, enables
+and starts one instance per declared slot, and disables any instance enabled under a larger earlier
+declaration. A new installation therefore has running executors without a hand-typed command. To
+change what a host runs:
+
+```sh
+node scripts/graphyard-executor.mjs --install --count 2                 # two slots, every kind
+node scripts/graphyard-executor.mjs --install --kinds dispatch,merge    # narrow every slot
+journalctl --user -u 'graphyard-executor@*' -f                          # follow them
+```
+
+A host without a systemd user manager keeps its declaration and is told what to copy by hand;
+`master status` reports what this host declared and what systemd says of each slot under
+`executors.supervision`, and raises a line for every declared slot that is not active, with
+`systemctl --user start graphyard-executor@N` as the next command.
+
+**An action nobody can claim is visible as that.** An executor is invisible between claims, so a
+queue with nothing claimed looks the same whether every executor is busy or every executor is dead.
+The control plane now keeps *presence*: every claim poll names the executor, its host and the kinds
+it can run, and `GET /api/actions` reports under `executors` every executor seen inside the
+two-minute presence window (`live`), the kinds they serve (`served`), and every pending row whose
+kind none of them serves (`unserved`) — with how long it has waited and what to start. Presence is
+kept in memory beside the engine, never in the ledger: a poll that claims nothing writes nothing,
+and after a server restart the fleet reappears on its next poll. `master status` reports the same
+under `executors.presence`, and raises one attention item per unserved kind:
+
+```
+Nothing can run dispatch: GY-105 has waited 7m for an executor that serves it, and no executor is
+alive. It is not queued behind other work — start an executor that serves dispatch: …
+```
+
+addressed to the master with this host's own unit to start. The dashboard shows the same fact: the
+home page raises an alert per unserved kind, and an item's drawer says its action cannot be claimed
+— naming the kind and the wait — rather than that it is waiting for an executor. A row a live
+executor of its kind could take is not unserved however long it has waited; that is the queue's own
+idle report (`actions.idle`), which names a different failure.
 
 ### Workers pull their own work
 

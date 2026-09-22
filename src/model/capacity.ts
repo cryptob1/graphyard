@@ -131,8 +131,15 @@ export const partialWorkSchema = z.object({
 export type PartialWork = z.infer<typeof partialWorkSchema>;
 
 const instant = z.iso.datetime();
+/**
+ * Why an attempt ended early. `quota` (the default) is the provider limit notice the record was
+ * made for; `interrupted` is a worker killed outright or gone without submitting (GY-105), which
+ * keeps its partial work the same way and is written to history as `capacity.interrupted`.
+ */
+export const attemptEndCauses = ['quota', 'interrupted'] as const;
 export const exhaustionReportSchema = z.object({
   event: z.literal('exhausted'),
+  cause: z.enum(attemptEndCauses).optional(),
   role: z.enum(capacityRoles),
   /** The worker attempt the exhausted session held; a reviewer or producer session holds none. */
   epoch: z.number().int().positive().optional(),

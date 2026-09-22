@@ -138,7 +138,9 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
       }
       const record: ExhaustionRecord = { ...report, at: now.toISOString(), owner, recordedBy: actor.id };
       work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
-      return commit(services, db, now, work!, all, actor, 'capacity.exhausted', { exhaustion: record, requeued: report.role === 'worker' ? 'the attempt ended as released; the item is claimable on another account once its containment settles' : 'the request is launched again on another account' }, key, fingerprint);
+      // A worker that died is not a spent account: the same record, its own history entry.
+      const interrupted = report.cause === 'interrupted';
+      return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable once its containment settles' : 'the attempt ended as released; the item is claimable on another account once its containment settles') : 'the request is launched again on another account' }, key, fingerprint);
     }
     const standing = capacity.escalations.find(entry => entry.role === data.role);
     if (data.event === 'escalated') {

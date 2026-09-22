@@ -1,0 +1,53 @@
+# Supervised Graphyard executor: one instance per slot this host serves (GY-105).
+#
+# `graphyard init` on a coordinator host installs and enables this template for every slot that
+# .graphyard/executors.json declares, and `node scripts/graphyard-executor.mjs --install --count N`
+# changes the declaration and re-applies it. By hand, as a systemd *user* unit:
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/master/graphyard-executor@.service ~/.config/systemd/user/
+#   # edit WorkingDirectory and ExecStart to your checkout and node path
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now graphyard-executor@1 graphyard-executor@2
+#   journalctl --user -u 'graphyard-executor@*' -f
+#
+# An executor authenticates with the coordinator credential this checkout's .graphyard/master.json
+# names and claims under the host name recorded there; which kinds it serves and how many slots
+# the host runs come from .graphyard/executors.json in the same directory. Do not add a worker,
+# producer or operator credential: an executor launches sessions, re-reads pull requests and
+# brokers the guarded merge, and must never be able to satisfy a gate itself.
+[Unit]
+Description=Graphyard executor slot %i
+After=network-online.target
+Wants=network-online.target
+# Never give up: under the default start limit an executor that crashed five times inside ten
+# seconds would be left dead, and a dead executor means every action of its kinds waits for a
+# person to notice — the failure this unit exists to prevent.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/graphyard
+ExecStart=/usr/bin/node %h/code/graphyard/scripts/graphyard-executor.mjs --slot %i
+# An executor keeps nothing between claims, so restarting it costs the one claim it held, which
+# expires within two minutes and is taken by the next executor as a further attempt.
+Restart=always
+RestartSec=10
+# A slot above the declared count exits 78 (configuration) and stays down until the declaration
+# grows, rather than flapping every ten seconds.
+RestartPreventExitStatus=78
+# The executor sends a keep-alive on every poll and every claim renewal, so a process whose event
+# loop wedged is restarted while a slow handler that still renews its claim is left alone. The
+# window must stay above the executor's own synchronous command timeout (90s).
+WatchdogSec=180
+NotifyAccess=all
+TimeoutStopSec=120
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+# No PrivateTmp: worker, reviewer and producer checkouts live under the shared /tmp and the
+# managed worktree root, and a dispatch handler has to see them.
+PrivateTmp=no
+
+[Install]
+WantedBy=default.target

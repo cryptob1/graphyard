@@ -110,6 +110,31 @@ Supply the coordinator token. Use `master start claude` if preferred. Commit the
 
 The master reads Graphyard truth, watches runtime health, routes work, requests guarded merges, and administers GitHub for the managed repository. It does not implement work or submit evidence.
 
+### Executors, supervised
+
+After the cutover to typed actions the executors are the only thing that moves work: they claim each item's next action from the control plane and run it. They must outlive a reboot, a crash and a closed terminal, so they run under systemd, and connecting the coordinator host installs that supervision. From the same coordinator checkout, after `master init`:
+
+```sh
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST
+```
+
+`init` takes a worker credential or none — never the coordinator token, which it refuses — and a checkout already connected as a worker keeps that connection. On a host that `master init` configured it writes `.graphyard/executors.json`, installs the shipped template [`examples/master/graphyard-executor@.service`](../examples/master/graphyard-executor@.service) as a systemd user unit bound to this checkout, and enables and starts one instance per declared slot. A new installation therefore has running executors without a hand-typed command; `master status` lists them under `executors`, and `journalctl --user -u 'graphyard-executor@*' -f` follows them.
+
+**How a host declares how many executors it runs and of which kinds** is that one file:
+
+```json
+{ "version": 1, "count": 2, "kinds": null, "intervalSeconds": 5 }
+```
+
+`count` is the number of slots (`graphyard-executor@1` … `graphyard-executor@N`); `kinds` is the action kinds every slot on this host claims — `null` for every kind an executor can run, or a list such as `["dispatch", "request-review", "merge"]` to split kinds across hosts; `intervalSeconds` is the poll interval (at most 60). Change it with the installer, which rewrites the declaration and reconciles the units — enabling new slots, disabling the ones above the count:
+
+```sh
+node scripts/graphyard-executor.mjs --install --count 2
+node scripts/graphyard-executor.mjs --install --kinds dispatch,request-review,merge
+```
+
+Each slot authenticates with the coordinator credential `master init` stored and claims under `master@HOST/N`; it never holds a worker, producer or operator credential. Every unit restarts its executor after any exit and answers systemd's watchdog on every poll, so a killed executor loses only the one claim it held, which another executor takes within two minutes. A host without a systemd user manager (macOS, a container without one) keeps its declaration, and the installer prints the unit to install by hand. The full account — the unit's policy, the presence the control plane keeps, and how an action nobody can claim is reported — is in [running executors under supervision](master-agent.md#running-executors-under-supervision).
+
 `master start claude` also writes the master's own harness permissions to `.claude/settings.local.json` before the session starts, so routine master commands do not stop for an approval keypress and the auto-mode classifier does not refuse the GitHub administration flows as permission grants or CI bypasses. Review them with `master harness claude`; every rule is printed with the reason it exists. The generated rules grant no merge path and no credential read, and no direct edit of `.graphyard/master.json`: the master tunes the settings it owns (loop and dispatch cadence, proof and smoke workflows, deployment URL and SHA field, reviewer profile, producer timeout, quota ceiling, and a profile's account order) through `master config FIELD=VALUE…`, while `autoMerge`, the merge method, and every credential and identity path stay operator-only. For Codex, `master harness codex` prints the `trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit that shared user file for you.
 
 ## 5. Register the reviewer identity
@@ -254,6 +279,6 @@ Before adding more workers, stop one worker, let its lease expire, reclaim with 
 
 ## Current manual steps
 
-Version 0.1 still requires the human operator to deploy the server, provision principals, log each agent environment in to its provider once, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E execution covers the [packaged Playwright runner](runner-setup.md) and the [report adapters](report-adapters.md) it accepts.
+Version 0.1 still requires the human operator to deploy the server, provision principals, log each agent environment in to its provider once, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Starting executors is not among them: connecting the coordinator host installs them under systemd, and they come back on their own after a reboot or a crash. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E execution covers the [packaged Playwright runner](runner-setup.md) and the [report adapters](report-adapters.md) it accepts.
 
 Use the [documentation index](README.md) for deeper setup, operations, and protocol details.
