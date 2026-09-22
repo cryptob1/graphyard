@@ -111,6 +111,8 @@ The launch check reads an account before a session starts. An account that runs 
 
 Each failover is one `failover` action in `daemon.actions`, and `master status` shows the item's recent exhaustions under `work[].capacity`.
 
+A session that exits **at launch** on the same notice — the account was spent before its session started, and the launch check did not see it — is classified by the automatic dispatcher from what its pane printed and failed over the same three ways (hold, record, relaunch on the next account) without a ledger record to end; see [a session that exits at launch](#the-dispatchers-own-state).
+
 ### When a role has no account left
 
 When **every** launch profile of a role is unavailable for the same reason — each of its accounts is spent — that is capacity, not a launch failure. A logged-out account, an unreadable credential, or an `accounts:` name that is not a configured environment is something a master can fix in one command, so it is never capacity: the account selector carries *why* it passed each account over, and only a profile every one of whose accounts was passed over as spent reports itself out of capacity. The daemon and the automatic reviewer/producer dispatcher both key on that, so a role whose accounts are merely logged out keeps its counted launch refusal, its widening retry and its `launch-review` / `launch-producer` attention item addressed to the master, rather than reading as a wait for a provider reset that would never come.
@@ -1026,6 +1028,61 @@ A tick whose snapshot read fails or times out is retried promptly with a widenin
 each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…), up to the
 dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
 later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
+
+### The dispatcher's own state
+
+The dispatch cursor (`*.dispatch.json` beside the coordinator credential) is the dispatcher's
+memory: its tick count, the last tick's counts and the reasons nothing launched, every refused
+launch with its widening retry, and each role's capacity hold. Every string in it has a cap, and
+until GY-120 the cap was checked only when the cursor was persisted: a refusal whose error text
+reached the failure reason's cap (a Herdr JSON error, for one) was wrapped in a longer wait
+sentence on the next tick, the sentence failed the cursor's schema, the tick failed, and the
+dispatcher retried the identical tick forever — no reviewer or producer launched for *any* item,
+while the tick count and the cursor's timestamp made it look alive. Three rules now hold:
+
+- **The dispatcher bounds its own state where it composes it.** Every string it writes into the
+  cursor — a tick reason, a failure reason, a capacity reason, a session resolution it wraps — is
+  bounded before it is stored, and each cut is marked with an ellipsis rather than hidden. The
+  bounds nest: a stored failure reason (300 characters) leaves room for the wait sentence that
+  wraps it (`launch refused 12 time(s): …; no further automatic attempt`), and that sentence is
+  bounded again (500) before it becomes a tick reason, so a failure reason at its cap still
+  yields a valid tick. A launch that fails with a 2,000-character error is a refusal whose
+  reason ends in `…`, not a tick that cannot persist.
+- **A cursor that fails its schema is repaired, not fatal.** On load and again before every
+  persist, a string past its cap is truncated in place and the repair is logged once with the
+  path that failed (`[graphyard-dispatch] repaired the dispatch cursor while persisting it:
+  lastTick.reasons[1] — 612 characters exceeded its cap of 500 and it was truncated`). A defect
+  of this class degrades one reason string; it never takes launching away from the other items.
+  Anything else the schema refuses — a count out of range, a missing field — is still refused,
+  naming its path, and `master status` reports a cursor it cannot read as one attention item
+  rather than a dispatcher silently absent.
+- **A tick failure is attributed and surfaced.** A tick that cannot persist names the field it
+  could not write and the request and item that field was composed for: `master status` shows it
+  under `dispatch.lastFailure` (`field`, `kind`, `request`, `work`) beside `consecutiveFailures`
+  and `lastSuccessAt`. Three consecutive failures raise one attention item, addressed to the
+  master, saying that no reviewer or producer session is being launched for any item and why —
+  the reason, and for a persist failure the field and the request behind it — with the repair
+  path (`graphyard master restart` re-reads and repairs the cursor) or the fault to fix (the
+  control plane, its credential, Herdr). Every request keeps reading as `waiting` meanwhile, so
+  the dispatcher's own health is named before the requests it is not launching.
+
+**A session that exits at launch is classified from its pane.** The launcher's first read of a
+session it just started — `herdr agent get` after `agent start` timed out on readiness, or a
+start that failed for anything but that timeout — answers `agent_not_found` when the runtime has
+already exited, and Herdr's JSON error says nothing about why. The dispatcher reads what the pane
+last printed (`herdr pane read`, the last 40 lines) before the tab is closed:
+
+- a **provider limit notice** (the same notices [mid-session detection](#exhaustion-in-the-middle-of-a-session)
+  matches) records the exit as account exhaustion for the account the launcher selected —
+  `profile:NAME` for a profile that names no `accounts` — and fails over exactly as a mid-session
+  exhaustion does: the account is held until the reset the notice named, `capacity.exhausted` is
+  recorded on the item with `requestId`, profile, account and runtime, and the same profile
+  launches again at once on its next account; a profile with no account left fails over to the
+  next profile, or the role waits for capacity. The tick's launch entry lists each account passed
+  over this way under `failover`, and `master status` shows the hold under `dispatch.accounts`;
+- **any other cause** is recorded as the refusal it was, with the pane's last words as the reason
+  (`the session exited within seconds of its launch; its pane last printed: "…"`) rather than the
+  CLI's error, and retried on the usual widening schedule.
 
 ### Managing profiles
 

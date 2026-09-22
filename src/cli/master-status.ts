@@ -7,7 +7,7 @@ import { actionReport, agentRequestAttention, agentRequestReport, sessionReport 
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
-import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
@@ -183,8 +183,12 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const reviewerBinding = await reviewerBindingHealth(master);
   const workspace = herdrWorkspaceHealth(master);
   const setup = { reviewer: reviewerBinding, herdrWorkspace: workspace, attention: [...reviewerBinding.attention, ...(workspace.exists === false ? [workspace.reason!] : [])] };
-  const dispatchCursor = await readDispatchCursor(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
+  // Status reads the cursor as the loop would, repairing an over-long string in memory; the loop
+  // is what logs and persists that repair, so status reports the cursor rather than announcing it.
+  const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000);
+  // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
+  const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
   // filling is exactly the condition that stops it. The plan behind the number is the same one the
@@ -228,8 +232,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const stalled = stalledActionAttention(snapshot);
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...stalled, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
-  // The loop's own health goes in front of all of it (see loopItems above).
-  attentionItems.unshift(...loopItems);
+  // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's.
+  attentionItems.unshift(...loopItems, ...dispatchItems);
   // Setup that stops every launch is the master's to repair.
   for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
@@ -250,7 +254,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, stalledActions: stalled.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
