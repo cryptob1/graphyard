@@ -76,7 +76,7 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
         <span className="danger-text">{card.missing} — stuck at “{phaseLabel[phaseOf(card.item, now)]}” for {formatDuration((now - Date.parse(card.heldSince)) / 60000)} with nothing to do next</span>
       </li>)}</ul>
     </section>}
-    {work.length === 0 ?<div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>Create the first work item</button>}</div>
+    {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>Create the first work item</button>}</div>
       : board ? <div className="board">{openPhases.map(p => <div className="column" key={p}><h3>{phaseLabel[p]}</h3>{open.filter(w => phaseOf(w, now) === p).map(card)}</div>)}</div>
       : <>{list('Stuck', stuck, undefined, true)}{list('In progress', inProgress)}{list('Needs a worker', waiting)}
         {notStarted.length > 0 && <details className="work-list"><summary>Not started</summary><div className="cards">{notStarted.map(card)}</div></details>}
