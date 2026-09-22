@@ -431,8 +431,13 @@ The six add up to a little under `durationMs`; the remainder is the cursor write
 measurement itself, which belong to no step. `master status` reads the last cycle's breakdown as
 `daemon.cost`: `durationMs` against `intervalMs` and the two-interval `stalledAfterMs` it is judged
 on, `withinInterval` and `withinLivenessBound`, the `steps`, the `slowest` of them, and `breakdown`,
-the same figures as one sentence, longest step first (`deployment 80.2s, dispatch 3.1s, …`); the
-full record of every retained cycle, `steps` included, is `daemon.metrics`.
+the same figures as one sentence, longest step first (`deployment 80.2s, dispatch 3.1s, …`).
+`daemon.metrics` is that same last cycle's raw record as the cursor keeps it — `cycle`, `at`,
+`durationMs`, `steps` and the counts the cycle logged — not the history: the cursor retains the
+last hundred cycles, and `master status` reads them only in summary, as `daemon.cycleBudget`
+(`measured`, the `p95Ms` duration, the `overruns` past the interval and the `lastOverrun`). An
+earlier cycle's own `steps` are in the cursor file beside the coordinator credential, not in the
+status output.
 
 A cycle that did not fit its interval is an attention item whatever the liveness says, because the
 loop looks healthy the instant a long cycle ends and the cost is the only reading that names what
