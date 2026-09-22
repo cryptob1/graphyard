@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -36,7 +36,8 @@ export const producerRecordSchema = z.object({
   key: z.string().min(1).max(40), pr: z.number().int().positive(),
   sha: sha40, baseSha: sha40, policyRevision: z.number().int().nonnegative(),
   group: z.string().min(1).max(40), proofs: z.array(z.string().min(1).max(200)).min(1).max(50),
-  profile: z.string().min(1).max(80), principal: z.string().min(1).max(200), agentName: z.string().min(1).max(100),
+  /** `agentName` is the Herdr session name: the profile's fixed agent name, or one derived per request when the profile runs several sessions (GY-107, sessionAgentName). */
+  profile: z.string().min(1).max(80), principal: z.string().min(1).max(200), agentName: z.string().min(1).max(120),
   pane: z.string().min(1).max(200).nullable(),
   requestedAt: z.string().min(1).max(40), expiresAt: z.string().min(1).max(40),
   state: z.enum(['pending', 'completed', 'cancelled', 'expired', 'failed']),
@@ -173,7 +174,13 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const prior = ledger.producers.filter(record => record.requestId === request.id);
   if (prior.some(record => !retriedStates.includes(record.state))) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
   if (prior.length >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions fail or expire; no further automatic attempt`);
-  if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`Producer agent ${profile.agentName} is already visible in Herdr`);
+  // The profile's room (GY-107): one session per name, and no more sessions than it declares.
+  // A name this session would take that Herdr already shows is the same launch twice.
+  const id = randomUUID();
+  const agentName = sessionAgentName(profile, { id, requestId: request.id, attempt: prior.length + 1 });
+  if (agents.some(agent => agent.name === agentName)) throw new Error(`Producer agent ${agentName} is already visible in Herdr`);
+  const sessions = profileSessions(profile, agents, ledger.producers);
+  if (!sessions.free) throw new Error(profileAtLimit('Producer', profile, sessions));
   await readProducerCredential(root, profile.credentialFile);
   // The group is part of the request: a producer session answers one proof group of one item, so a
   // relaunch for that group replaces its own predecessor instead of being refused by it.
@@ -183,7 +190,6 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     // A producer builds in a detached worktree that commits into the repository's Git directory. Its
     // session directory is allocated under the managed worktree root — durable storage with room
     // left, outside every worktree — and is the only place beside the Git directory it may write.
-    const id = randomUUID();
     const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, id, dependencies.filesystem);
     const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, sharedGitDirectory(root)].filter((path): path is string => !!path) });
     // The producer loads its own role rules, never the master's. The harness follows the account's
@@ -193,10 +199,10 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
       const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
       const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
-        '--label', `${binding.key} ${binding.group} proofs · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
+        '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
       pane = created.pane; tabId = created.tab;
       // The request is the session's own first message, on the runtime's command line (GY-93).
-      ({ delivery } = startAgentSession(profile.agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, dependencies.prompt));
+      ({ delivery } = startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, dependencies.prompt));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
@@ -208,11 +214,11 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     }
     const requestedAt = now();
     const record: ProducerRecord = producerRecordSchema.parse({ id, requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
-      group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: pane ?? null,
+      group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName, pane: pane ?? null,
       requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), delivery, checkout: checkout.directory });
     await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] });
     return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
-      profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: record.pane, checkout: checkout.directory, expiresAt: record.expiresAt, approvals: launch.plan.approvals, delivery,
+      profile: profile.name, principal: profile.principal, agentName, pane: record.pane, checkout: checkout.directory, expiresAt: record.expiresAt, approvals: launch.plan.approvals, delivery,
       account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
       recorded: 'the launch is recorded; master status reconciles the evidence and closes the session' };
   });

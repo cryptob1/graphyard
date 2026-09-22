@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
+import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
@@ -24,6 +24,32 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
     const request = work.scopeRequest;
     const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
     return live ? [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}`, ...agentOwner('master', `graphyard master scope ${work.key}`) }] : [];
+  });
+}
+
+/**
+ * One attention item per requested decision whose approver could not be launched (GY-101). A
+ * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
+ * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
+ * standing with a session that never started. `master status` used to show that as a decision
+ * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
+ * named here as what it is, with the loop's own refusal and the command that launches it again.
+ */
+export function approverLaunchAttention(daemon: {
+  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
+  actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
+}): AttentionItem[] {
+  const actions = daemon.actions ?? [];
+  return (daemon.approvals ?? []).flatMap(watch => {
+    if (watch.settledAt) return [];
+    // The loop records a refused launch under the decision it was requested for (the request that
+    // could not reach an approver) or under that launch's own key (a replacement that could not).
+    const since = Date.parse(watch.launchedAt ?? watch.requestedAt);
+    const refusal = actions.find(action => action.state === 'failed' && action.kind === 'decision'
+      && (action.key === watch.key || action.key.startsWith(`approver:${watch.decision}:launch:`))
+      && (!Number.isFinite(since) || Date.parse(action.at) >= since));
+    return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
+      ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
   });
 }
 
@@ -175,14 +201,16 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // The loop's own health comes before every work item: a coordinator that is absent or stalled is
   // why nothing else on this list is moving, and no other attention item would say so.
   const loopItems: AttentionItem[] = cycling
-    ? loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget })
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget }), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
-  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
+  // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
+  // role, the sessions running against the declared limit and the longest wait for a slot.
+  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
   // A required check that failed on the clock says so, with the measurement against its budget.
   const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
@@ -221,8 +249,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
-    reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
-    producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName })),
+    reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
+      concurrency: master.reviewers.map(profile => ({ name: profile.name, agentName: profile.agentName, concurrency: profileConcurrency(profile) })) } : null,
+    producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName, concurrency: profileConcurrency(profile) })),
     setup, administration, daemon, dispatch,
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.

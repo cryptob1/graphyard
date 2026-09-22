@@ -236,6 +236,53 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 Every worker dispatch, reviewer, producer and approver launch then runs on the first account of its role that is placed on the executor's host, logged in, within quota, under its own session limit, with the role under its concurrency limit. The control plane makes the choice, and records it with its reason and every account it passed over; `master registry` and the Agent fleet page show each account's runtime, model, roles, live sessions, quota, reset time and — when it cannot launch — exactly why. Removing capacity is the same kind of change: `master registry account remove NAME --reason …` takes the account out of every role, and `master registry runtime remove NAME --reason …` removes the runtime with its accounts, so each role falls back to the accounts that remain, in the order they held. A role the registry does not define yet keeps launching from its local profile, so an existing installation moves onto the registry one role at a time. See [the agent registry](master-agent.md#the-agent-registry).
 
+### Size review and proof capacity
+
+Workers scale horizontally, but every candidate they produce must then pass one review and one
+producer session per proof group, and those gates run only as many sessions at once as the fleet
+declares. Each reviewer and producer profile carries `"concurrency"` (1–20; absent means 1): how
+many sessions it runs at the same time. A profile that runs one session keeps its fixed Herdr
+name; one that runs more names each session for the request it answers, so reviews of different
+items run side by side. Set it in the profile file `master reviewer add` or `master producer add`
+reads, or edit `.graphyard/master.json` while the loop runs: the next dispatch tick honours the
+new limit without a restart, and lowering it lets the running sessions drain rather than stopping
+one. Concurrency is declared per role — the reviewer profiles together bound the review lane, the
+producer profiles the proof lane — and `master environments --apply` generates every profile at
+one, so an installation sizes the gates itself, against its worker count, before it adds workers:
+
+```json
+"reviewers": [{ "name": "claude-reviewer", "agentName": "review-claude", "kind": "claude", "accounts": ["claude-a", "claude-b"], "concurrency": 3 }],
+"producers": [{ "name": "producer-a", "principal": "proof-runner", "agentName": "produce-a", "kind": "claude", "credentialFile": "/home/me/.config/graphyard/producers/proof-runner.token", "concurrency": 2 }]
+```
+
+The rule of thumb, for `W` workers and `G` proof groups a typical item needs (`unit` and
+`integration`; `manual` too when items list `producerProofs`): a build occupies a worker for hours
+while a review occupies a reviewer for minutes, and a proof group for tens of minutes, so about
+half the workers can have a candidate at the gates at once.
+
+- Review slots, summed over every reviewer profile: at least `⌈W / 2⌉`, and at least 2 once
+  there is more than one worker, so a second candidate is never queued behind the one under
+  review.
+- Producer slots, summed over every producer profile: at least `G × ⌈W / 2⌉`, spread over at
+  least two producer principals, so that an item its implementer's principal is barred from still
+  has an independent producer; a principal that held an assignment on an item is refused that
+  item's evidence however many slots its profile has.
+- One logged-in agent environment per two or three slots, listed in the profiles' `accounts`:
+  every session draws on the provider quota of the account it runs on, so two sessions on one
+  account share its rate limits and spend it twice as fast. Add environments with
+  `master environments --create … --apply` and log each one in.
+
+So an operator adding workers adds, with them: one review slot per two workers, `G` producer
+slots per two workers, and the accounts to carry them. Then read `master status`: `concurrency`
+lists, per role, `running` against `limit`, `waiting`, and `longestWaitMs` — how long the longest
+request has waited for a slot. A role whose `running` sits at `limit` while `waiting` is above zero
+and `longestWaitMs` keeps climbing is starving; after ten minutes `master status` raises it as
+`reviewer concurrency` or `producer concurrency` in `attentionItems`, addressed to the master with
+the remedy, and counts it in `counts.concurrencyStarved`. Raise `concurrency` on a profile whose
+accounts have quota left, or add a profile on another account. See
+[per-role concurrency](master-agent.md#automatic-dispatch-at-submit) for what the dispatcher does
+with the limit.
+
 ### Profiles by hand
 
 For a trusted worker on the coordinator host, start from a template:
