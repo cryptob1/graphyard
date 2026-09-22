@@ -72,6 +72,24 @@ export const mergePathReserve = (() => {
  */
 export const steadyStateShare = 0.4;
 /**
+ * What the bound is computed from before GitHub has said otherwise: the smallest hourly limit an
+ * installation gets, and roughly what one full observation costs in requests.
+ */
+export const defaultHourlyLimit = 5000, assumedObservationRequests = 10;
+/**
+ * The steady-state poll interval the fleet can afford: never under the steady cadence, and
+ * stretched so that every open candidate polling at it for an hour costs at most the steady-state
+ * share of the limit. Every request is counted, a conditional read GitHub answered with a free
+ * 304 included, so the bound holds even where a 304 is charged; one hour is the ceiling, since
+ * the budget itself resets by then.
+ */
+export function steadyStateInterval(openCandidates: number, meanRequests: number | null, limit: number | null) {
+  const perObservation = meanRequests && meanRequests > 0 ? meanRequests : assumedObservationRequests;
+  const share = Math.max(1, (limit ?? defaultHourlyLimit) * steadyStateShare);
+  const affordable = Math.ceil(Math.max(1, openCandidates) * perObservation * 3600_000 / share);
+  return Math.min(3600_000, Math.max(observationCadenceMs.steady, affordable));
+}
+/**
  * The observation schedule, by what an observation of an item in that state can change.
  *
  * - `merge` — at the merge gate with every other gate passing. The merge executor refuses an
@@ -120,8 +138,9 @@ export interface GitHubBudget {
   projectedExhaustionAt: string | null; exhaustsBeforeReset: boolean;
   /** The merge-path reserve and whether the budget has fallen below it. */
   reserve: number; belowReserve: boolean;
-  /** The steady-state share of the hourly limit, and the request count it works out to. */
+  /** The steady-state share of the hourly limit, the request count it works out to, and the interval that keeps the fleet inside it. */
   steadyStateShare: number; steadyStateBudget: number | null;
+  steadyState: { openCandidates: number; meanRequests: number; intervalMs: number };
   /** The pause in force, when a refusal stopped every request until the reset. */
   paused: { since: string; until: string; reason: string } | null;
   /** What the last hour was spent on, which is what a pause incident names. */
@@ -170,13 +189,15 @@ export function observationBand(work: Work, all: Work[], now: Date): { band: Exc
  * an active candidate that came back saying exactly what it said last time settles to the
  * steady-state interval, because the webhook is what will tell Graphyard that it stopped.
  */
-export function observationCadence(work: Work, all: Work[], now: Date, previous?: Observation | null): { band: CadenceBand; ms: number; reason: string } {
+export function observationCadence(work: Work, all: Work[], now: Date, previous?: Observation | null, steadyMs: number = observationCadenceMs.steady): { band: CadenceBand; ms: number; reason: string } {
   const state = observationBand(work, all, now);
   if (state.band === 'active' && previous && observationFingerprint(previous) === observationFingerprint(work.observation))
-    return { band: 'steady', ms: observationCadenceMs.steady,
+    return { band: 'steady', ms: Math.max(observationCadenceMs.steady, steadyMs),
       reason: `${work.key} came back with its head, base tip, check state and review state unchanged; polling settles to the steady-state interval and the webhook wakes it the moment any of that moves` };
   return { band: state.band, ms: observationCadenceMs[state.band], reason: state.reason };
 }
+/** The open candidates the steady-state bound is sized for: submitted, observed open, not delivered. */
+export const openCandidates = (all: Work[]) => all.filter(work => work.stage !== 'done' && !!work.submission && !!work.observation && !work.observation.merged && work.observation.prState !== 'closed').length;
 
 /**
  * Whether this observation may spend from a budget that has fallen below the merge-path reserve.
@@ -253,6 +274,8 @@ export class GitHub {
   private deferred = new Map<string, { until: string; reason: string }>();
   private pausedSince = 0;
   private pauseReason = '';
+  /** The open candidates the last reconciliation pass counted, which sizes the steady-state bound. */
+  private fleet = 0;
   /** Counts the requests one measured stretch of work makes, and the ones that cost budget. */
   private readonly meter = new AsyncLocalStorage<{ requests: number; uncached: number }>();
   constructor(public config: GitHubConfig) {}
@@ -273,7 +296,7 @@ export class GitHub {
    * Only installation requests report the budget this class is spending; App-level calls
    * (`/app`, token refresh) are counted as requests against a different allowance.
    */
-  private record(path: string, response: Response, tracked: boolean, now = Date.now()) {
+  private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true) {
     const resource = response.headers.get('x-ratelimit-resource');
     const number = (name: string) => { const value = Number(response.headers.get(name)); return Number.isFinite(value) ? value : null; };
     const remaining = number('x-ratelimit-remaining');
@@ -284,7 +307,7 @@ export class GitHub {
     }
     const meter = this.meter.getStore();
     if (meter) { meter.requests++; if (response.status !== 304) meter.uncached++; }
-    if (response.status === 304) return;
+    if (response.status === 304 || !charged) return;
     this.charges.push({ at: now, kind: requestKind(path) });
     if (this.charges.length > 8192) this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
   }
@@ -305,6 +328,19 @@ export class GitHub {
   }
   /** Record an observation the reserve held back, so the deferral is readable as a decision. */
   recordDeferral(work: string, deferral: { until: string; reason: string }) { this.deferred.set(work, deferral); }
+  /** The open candidates the steady-state bound is sized for, as the last pass counted them. */
+  noteFleet(openCandidates: number) { this.fleet = Math.max(0, Math.floor(openCandidates)); }
+  /** The steady-state poll interval the fleet can afford right now (see `steadyStateInterval`). */
+  steadyStateMs(now = Date.now()) { const budget = this.budget(now); return budget.steadyState.intervalMs; }
+  /**
+   * The App's settings page, where its webhook URL, secret and recent deliveries live. The slug
+   * is known once the preflight has read the installation; before that the App list is named.
+   * An App owned by an organization lives under that organization's settings instead.
+   */
+  webhookSettingsUrl() {
+    const slug = this.preflightState?.verifiedAt && this.preflightState.app !== String(this.config.appId) ? this.preflightState.app : this.appSlug;
+    return slug ? `https://github.com/settings/apps/${encodeURIComponent(slug)}` : 'https://github.com/settings/apps';
+  }
   /** The live budget: what is left, how fast it is going, and what the control plane is doing about it. */
   budget(now = Date.now()): GitHubBudget {
     this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
@@ -324,7 +360,8 @@ export class GitHub {
       projectedExhaustionAt: exhaustion === null ? null : new Date(exhaustion).toISOString(),
       exhaustsBeforeReset: exhaustion !== null && resetAt !== null && exhaustion < resetAt,
       reserve: mergePathReserve, belowReserve: remaining !== null && remaining < mergePathReserve,
-      steadyStateShare, steadyStateBudget: limit === null ? null : Math.floor(limit * steadyStateShare),
+      steadyStateShare, steadyStateBudget: Math.floor((limit ?? defaultHourlyLimit) * steadyStateShare),
+      steadyState: { openCandidates: this.fleet, meanRequests: mean(samples.map(sample => sample.requests)) ?? assumedObservationRequests, intervalMs: steadyStateInterval(this.fleet, mean(samples.map(sample => sample.requests)), limit) },
       paused: this.blockedUntil > now ? { since: new Date(this.pausedSince || now).toISOString(), until: new Date(this.blockedUntil).toISOString(),
         reason: this.pauseReason || 'GitHub refused a request for rate limiting' } : null,
       lastHour: { requests: this.charges.length, byKind: [...counts].map(([kind, requests]) => ({ kind, requests })).sort((a, b) => b.requests - a.requests || a.kind.localeCompare(b.kind)) },
@@ -761,7 +798,7 @@ export class GitHub {
     await this.authenticate();
     const response = await fetch('https://api.github.com/rate_limit', { headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15_000) });
     const time = Date.parse(response.headers.get('date') ?? '');
-    this.record('/rate_limit', response, false);
+    this.record('/rate_limit', response, true, Date.now(), false);
     const refused = await this.refusal(response, 'GET /rate_limit');
     if (refused) throw refused;
     demand(Number.isFinite(time), 'GitHub server time is unavailable', 502);
@@ -1037,21 +1074,40 @@ export async function processJob(engine: Engine, github: GitHub) {
   // it only when the installation actually changed (see Store.releaseHeldJobs).
   const heldOn = () => installationFingerprint(github.permissionReport?.() ?? null);
   let held: string | null = null;
+  // What this job's observation cost and when the next one is due (GY-117). The reserve is decided
+  // before the observation, from the state the item starts in; the cadence after it, from the
+  // state it produced. The meter counts every request the job makes, the check publication and
+  // queue reads included, so the recorded cost is what one cycle of this item really costs.
+  // Adapters without a budget (test doubles) schedule at the old twenty-second cadence.
+  const schedule: { cadence: { band: CadenceBand; ms: number; reason: string } | null } = { cadence: null };
+  const metered = <T>(fn: () => Promise<T>) => github.measured ? github.measured(fn) : fn().then(value => ({ value, requests: 0, uncached: 0 }));
   try {
     const all = await engine.store.list();
     work = all.find(w => w.id === job.work_id);
-    if (work?.submission && work.stage !== 'done') {
+    // `settled` is true when the job already scheduled itself: held, deferred, or requeued onto a
+    // freshly published head. The measured cost is recorded either way.
+    const { value: settled, requests, uncached } = await metered(async (): Promise<boolean> => {
+      if (!work?.submission || work.stage === 'done') return false;
       held = hold('observation');
-      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return; }
+      if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return true; }
+      const now = new Date();
+      github.noteFleet?.(openCandidates(all));
+      // Below the merge-path reserve, an observation that is neither a merge-gate candidate's nor
+      // a webhook wake is rescheduled past the reset rather than spent.
+      const budget = github.budget?.(now.getTime());
+      const deferral = budget ? reserveDecision(observationBand(work, all, now).band, budget, !!job.woken, now) : null;
+      if (deferral) { github.recordDeferral(work.id, deferral); await engine.store.deferJob(job.work_id, job.token, deferral.until); return true; }
+      const previous = work.observation ?? null;
       const observation = await github.observe(work, all);
       work = await engine.observe(work.id, work.revision, observation, job.token);
+      schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A base branch that moved under this candidate is Graphyard's to absorb, not the worker's.
       // The republished head is what the review, the checks and the proofs then bind to, so the
       // refresh runs before any review is dispatched and the job requeues onto the new head.
       if (baseRefreshNeeded(work)) {
         const refreshed = await refreshBase(engine, github, work, job, guard, hold);
         work = refreshed.work; held ??= refreshed.held;
-        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return; }
+        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
       }
       const provider = reviewProviderOf(work.policy);
       // A head that does not contain the base tip is not reviewed: the request is deferred, and
@@ -1092,19 +1148,27 @@ export async function processJob(engine: Engine, github: GitHub) {
         const advanced = await advanceQueue(engine, github, work, job, guard, hold);
         work = advanced.work; held ??= advanced.held;
         // A freshly published tip replaces the PR head; the next observation binds the gates to it.
-        if (advanced.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return; }
+        if (advanced.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
       }
       if (!observation.merged) {
         const unpublishable = hold('check');
         if (unpublishable) held ??= unpublishable;
         else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
       }
-    }
+      return false;
+    });
+    const cadence = schedule.cadence;
+    if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
+    if (settled) return;
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
-    else await engine.store.finishJob(job.work_id, job.token);
+    else await engine.store.finishJob(job.work_id, job.token, undefined, false, cadence?.ms);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
+    // A rate-limit pause is one incident, not a retry every 45 seconds into the same refusal:
+    // the job keeps the error and comes back when the pause lifts (a webhook still wakes it).
+    const paused = github.budget?.().paused;
+    if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000)); return; }
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
     const latest = current?.document as Work | undefined;
     const execution = latest?.mergeExecution;
