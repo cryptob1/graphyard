@@ -472,11 +472,16 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     assert.ok(master_ts.includes('input.installSupervisor === true ? await installLoopSupervisor('), 'setupMaster installs only on the explicit option');
     assert.doesNotMatch(master_ts, /credentialDirectory === undefined/, 'no other argument stands in for the option');
     assert.equal((master_ts.match(/installLoopSupervisor\(/g) ?? []).length, 1, 'one call site in setupMaster');
-    const cli = source('cli/master.ts');
-    assert.equal((cli.match(/installSupervisor: true/g) ?? []).length, 1, 'master init is the one command that passes it');
-    assert.ok(cli.includes("'replace-supervisor': { type: 'boolean' }") && cli.includes("replaceSupervisor: !!values['replace-supervisor']"), 'and --replace-supervisor is the explicit replace flag');
     const sources = readdirSync(fileURLToPath(new URL('../src', import.meta.url)), { recursive: true, withFileTypes: true })
       .filter(entry => entry.isFile() && entry.name.endsWith('.ts')).map(entry => resolve(entry.parentPath, entry.name));
+    // The option is passed as a literal property in one place in the whole tree: the `master init`
+    // handler, which lives in its own module so the master command file stays within its budget.
+    const passers = sources.filter(file => /installSupervisor: true,/.test(readFileSync(file, 'utf8'))).map(file => file.slice(file.indexOf('/src/') + 5));
+    assert.deepEqual(passers, ['cli/master-init.ts'], 'master init is the one command that passes it');
+    const init = source('cli/master-init.ts');
+    assert.equal((init.match(/installSupervisor: true/g) ?? []).length, 1, 'and passes it once');
+    assert.ok(init.includes("'replace-supervisor': { type: 'boolean' }") && init.includes("replaceSupervisor: !!values['replace-supervisor']"), 'and --replace-supervisor is the explicit replace flag');
+    assert.match(source('cli/master.ts'), /if \(id === 'init'\) return masterInit\(context, root\);/, 'master init reaches the handler and nothing else in the command file passes the option');
     const callers = sources.filter(file => /(?<![.\w])installLoopSupervisor\(/.test(readFileSync(file, 'utf8'))).map(file => file.slice(file.indexOf('/src/') + 5));
     assert.deepEqual(callers.sort(), ['master.ts', 'supervisor.ts'], 'no other source reaches the installer');
     const supervisor_ts = source('supervisor.ts');
