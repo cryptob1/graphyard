@@ -3,7 +3,8 @@ import type { Command } from '../../engine.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
 import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
-import { approveDecision, listDecisions, requestDecision } from '../decisions.js';
+import { approveDecision, requestDecision } from '../decisions.js';
+import { listDecisions } from '../decision-ledger.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 import { readEscalationContext } from '../escalation-context.js';
 

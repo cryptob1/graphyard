@@ -6,6 +6,8 @@ import { delegationSnapshot } from '../../delegation.js';
 import { installationSettingsUrl } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
+import { openHumanOnly } from '../../model/human-request.js';
+import { humanOnlySubjects } from '../waits.js';
 import { defineRoutes } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 
@@ -24,7 +26,12 @@ export const statusRoutes = defineRoutes('status', [
       const appPermissions = github ? github.permissionReport() ?? { appId: github.config.appId, installationId: github.config.installationId, app: String(github.config.appId), account: null, installationUrl: installationSettingsUrl(github.config.installationId), observedAt: null, verifiedAt: null, error: 'Permission preflight has not run yet', suspended: false, required: requiredPermissions(controlPlanePermissions), granted: null, missing: [], blockedFeatures: [], attention: ['GitHub App permissions have not been verified yet; the preflight runs at startup and every five minutes'] } : null;
       const heldJobs = actor.role === 'operator-agent' ? 0 : (await engine.store.heldJobs()).length;
       const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-      return { actor, delegation: delegationSnapshot(principals.map(p => p.actor), operatorVisible(await engine.store.list()), observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, jobs,
+      const visible = operatorVisible(await engine.store.list());
+      // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
+      // and carried on the read every client already polls, so the dashboard's Needs you page is
+      // a renderer of that table rather than a second opinion about it (GY-102).
+      const humanOnly = openHumanOnly(await humanOnlySubjects(services, visible), observedAt.getTime());
+      return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visible, observedAt.getTime(), limits), repository: repository || null, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, jobs,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work

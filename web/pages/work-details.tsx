@@ -1,6 +1,7 @@
 import { deliveryState, deploySmokeRequired, type Work } from '../../src/model';
 import { sessionSummary } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
+import type { HumanRequestRow } from '../../src/model/human-request';
 import { diagnose, fileConflicts, obligationLedger, proofPreview } from '../../src/coordination';
 import Dialog from '../dialog';
 import History from '../history';
@@ -28,7 +29,7 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
  * and each criterion once. Everything else (later steps, evidence, history, raw gate reasons)
  * is under "More details", and policy-changing actions are in the admin-only Edit menu.
  */
-export default function WorkDetails({ item, work, status, token, observedAt, jobs, queue, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, sessionEpoch }: Dashboard & { item: Work }) {
+export default function WorkDetails({ item, work, status, token, observedAt, jobs, queue, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
   const owner = assignment(item, now);
@@ -45,6 +46,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const sessions = sessionSummary(item, new Date(now));
   const running = sessions.filter(handle => handle.state === 'running');
   const requests = openAgentRequests(item, new Date(now));
+  // What this item needs from the operator themselves, from the same human-only rule table the
+  // Needs you page renders: it is answered there, in this session, never on a command line.
+  const waitingOnYou: HumanRequestRow[] = (status?.humanOnly ?? []).filter((row: HumanRequestRow) => row.id === item.id);
   const actions = item.actionQueue?.actions ?? [];
   return <Dialog onClose={() => setSelected(null)}><section role="dialog" aria-modal="true" aria-label={item.title} className="drawer" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close details" onClick={() => setSelected(null)}>×</button>
     <div className="drawer-key">{item.key}</div><h2>{item.title}</h2>
@@ -56,6 +60,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
     {requests.length > 0 && <div className="notice"><strong>{requests.length === 1 ? 'An agent is waiting' : `${requests.length} agents are waiting`} on a decision</strong>
       <ul>{requests.map(r => <li key={r.id}>{r.requestedBy} recorded a {r.type} {age(r.at)} ago and released its lease: {r.reason} — decided by {r.decider.who}{r.decider.command ? <> (<code>{r.decider.command}</code>)</> : ''}</li>)}</ul></div>}
+    {waitingOnYou.length > 0 && <div className="notice"><strong>{waitingOnYou.length === 1 ? 'This waits on you' : `${waitingOnYou.length} things wait on you`}</strong>
+      <ul>{waitingOnYou.map(row => <li key={row.request.id}>{row.request.needed} — {row.decision}, asked by {row.request.requestedBy} {age(row.request.at)} ago. No agent may take it — {row.refusal} — so answer it yourself on <button className="text-button" onClick={() => { setSelected(null); setView('needs-you'); }}>Work → Needs you</button>.</li>)}</ul></div>}
     {running.length > 0 && <><h3>Sessions running now</h3><ul className="sessions">{running.map(handle => <li key={handle.id}>
       <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {handle.subject} · {age(handle.startedAt)}<br/><code>{handle.attach}</code></li>)}</ul></>}
     {item.violations.map(v => <div className="notice danger" key={v}>{v}</div>)}

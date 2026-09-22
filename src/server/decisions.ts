@@ -4,47 +4,13 @@ import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, requiredDecisionCapabilities, type Decision, type DecisionState } from '../model/approval.js';
+import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 
 type Db = pg.PoolClient;
-/**
- * Terminal states only this module records: a decision overtaken by a revision race ('stale')
- * and one its requester took back ('withdrawn'). The model's fold predates them, so they are
- * folded on top of it from the same ledger.
- */
-type TerminalState = 'stale' | 'withdrawn';
-/**
- * What a resolve decision is pinned to: the state its resolver's judgement rests on. A
- * heartbeat, a workspace registration or a dispatch moves the item revision without touching
- * any of it; a second narrowing, a replacement claim, a new candidate head, or the incident's
- * own clearing or replacement moves exactly one field. `raiseEscalation` never records a
- * repeat of a standing trigger, so the raised set — not the trigger slot — is what tells the
- * incident the requester saw from whatever stands there later.
- */
-interface ResolvePin { policyRevision: number; sha: string | null; baseSha: string | null; epoch: number; escalations: { trigger: string; at: string }[] }
-const resolvePin = (work: Work): ResolvePin => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
-// jsonb does not keep object key order, so the recorded pin compares in a canonical form.
-const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
-  : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : 1).map(([key, entry]) => [key, canonical(entry)]))
-  : value;
-const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) => !!pinned && JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
-export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | null };
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
   (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1 FOR UPDATE', [id])).rows[0]?.document;
-async function readDecisions(db: { query: Db['query'] }, work: Work): Promise<DecisionRecord[]> {
-  const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows;
-  const events = rows.map(row => ({ kind: row.kind as string, actor: row.actor as string, at: new Date(row.created_at).toISOString(), payload: row.payload }));
-  const decisions: DecisionRecord[] = foldDecisions(work.id, events).map(decision => ({ ...decision, race: null, pin: null }));
-  for (const event of events) {
-    const decision = decisions.find(entry => entry.id === event.payload?.id);
-    if (!decision) continue;
-    if (event.kind === 'decision.requested') Object.assign(decision, { pin: event.payload.pin ?? null });
-    if (event.kind === 'decision.stale') Object.assign(decision, { state: 'stale', outcome: event.payload.reason ?? null, race: { expected: event.payload.expected ?? null, current: event.payload.current ?? null } });
-    if (event.kind === 'decision.withdrawn') Object.assign(decision, { state: 'withdrawn', outcome: event.payload.reason ?? null });
-  }
-  return decisions;
-}
 const record = (db: Db, work: Work, actor: string, kind: string, payload: unknown) =>
   db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor, kind, JSON.stringify(payload)]);
 async function authenticated(services: Services, db: Db, now: Date, actor: Principal) {
@@ -71,14 +37,6 @@ async function requesterAuthority(services: Services, db: Db, decision: Pick<Dec
     requester = { id: agent.id, role: 'operator-agent', capabilities: agent.capabilities, scope: agent.scope };
   }
   for (const capability of requiredDecisionCapabilities(decision.action, decision.input, work)) assertDecisionAuthority(requester!, capability, work, services.repository);
-}
-
-export async function listDecisions(services: Services, actor: Principal, id: string) {
-  demand(['admin', 'coordinator', 'operator-agent', 'reader'].includes(actor.role), 'Decision history is not available to this role', 403);
-  const work = (await services.engine.store.list()).find(item => item.id === id || item.key === id);
-  demand(work, 'Work item not found', 404);
-  demand(actor.role !== 'operator-agent' || actor.scope?.workItems.some(entry => entry === '*' || entry === work!.id || entry === work!.key), 'Work item is outside this operator-agent scope', 403);
-  return { key: work!.key, decisions: await readDecisions(services.engine.store.pool, work!) };
 }
 
 /**
@@ -154,35 +112,6 @@ export async function withdrawDecision(services: Services, caller: Principal, id
 async function recordRefusal(services: Services, actor: Principal, workId: string, decision: string, conflict: string) {
   await services.engine.store.transaction(db => db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
     [workId, actor.id, 'decision.refused', JSON.stringify({ id: decision, conflict, approver: { id: actor.id, role: actor.role } })]));
-}
-
-/** The pinned target a revision race moved away, with both sides; null when no pin was hit. */
-interface StaleRace { expected: unknown; current: unknown }
-/**
- * Whether approval failed on a pin that can never match again: the item revision, the policy
- * revision or the candidate moved past the one the decision was requested against, and
- * revisions never move back; or the resolve's pin moved — the incident cleared, a second
- * narrowing or a replacement claim behind it, or a new candidate head — where every mover
- * moves a field revisions never move back either.
- */
-function decisionRace(decision: DecisionRecord, work: Work): StaleRace | null {
-  if (decision.action === 'requirements' && decision.input.expectedPolicyRevision !== work.policyRevision)
-    return { expected: { policyRevision: decision.input.expectedPolicyRevision }, current: { policyRevision: work.policyRevision } };
-  if ((decision.action === 'attest' || decision.action === 'merge') && (!work.candidate || work.candidate.sha !== decision.input.sha
-    || work.candidate.baseSha !== decision.input.baseSha || work.policyRevision !== decision.input.policyRevision))
-    return { expected: { sha: decision.input.sha, baseSha: decision.input.baseSha, policyRevision: decision.input.policyRevision },
-      current: { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, policyRevision: work.policyRevision } };
-  if ((decision.action === 'release' || decision.action === 'unblock') && decision.input.expectedRevision !== work.revision)
-    return { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } };
-  if (decision.action === 'resolve') {
-    // A decision requested before the pin existed falls back to the revision it named:
-    // revisions never move back, so a refused request can never become applicable either.
-    if (!decision.pin) return decision.input.expectedRevision !== work.revision
-      ? { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } } : null;
-    const current = resolvePin(work);
-    return samePin(current, decision.pin) ? null : { expected: decision.pin, current };
-  }
-  return null;
 }
 
 /** A decision a race made permanently unappliable is settled as 'stale' in its own transaction. */

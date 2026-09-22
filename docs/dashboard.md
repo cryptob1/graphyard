@@ -9,7 +9,7 @@ The sidebar has at most four entries.
 
 | Entry | What it holds |
 | --- | --- |
-| **Work** | The home page: open items, grouped by what needs attention; and **Needs you**, the requests only a human may answer, as a tab. |
+| **Work** | The home page: open items, grouped by what needs attention; and **Needs you**, everything only you may answer, as a tab. |
 | **Shipped** | Every delivered item, newest first, with its pull request and whether the deployment serves it. |
 | **Insights** | Shipping pulse, Flow analytics, Validation and Releases, as tabs. |
 | **Settings** | Test cases, Proof authority and Operator automation, as tabs. |
@@ -18,9 +18,16 @@ A page is hidden when nothing is configured for it. An empty list and a failed r
 
 ## Needs you
 
-**Work → Needs you** lists every open human-only request — a decision about goals and priorities, spending money or opening a third-party account, or issuing a credential to a person — longest wait first. Each card shows the item, the exact thing needed, which of the three decisions it is, who asked and why, how long it has waited, and the terminal command that answers it (`graphyard answer GY-N REQUEST ANSWER`). An item listed here holds no worker and delays nothing else.
+**Work → Needs you** lists every open action the control plane will take from your own credential alone, longest wait first. Each card shows the item, the exact thing needed, which decision it is, who asked and why, how long it has waited, and the equivalent terminal command — shown for the record, never as the way to answer.
 
-A declared human `admin` session gets an answer box on the card. **Answer and resume** posts `work/GY-N/answer`; the item returns to the master loop, which dispatches it on its next cycle with the answer in the new worker's prompt — no master session is involved. **Decline** keeps it parked with your words as its blocker. Agent sessions see the requests but never the form, and the server refuses their answers. Recently answered requests stay listed underneath with the answer and how long it waited. On the home page a parked item reads `Stuck: Waiting on a human-only decision (…): NEEDED`.
+Two kinds of action are listed today, and the list is not a fixed set of two:
+
+- **A decision only a human may make** — goals and priorities, spending money or opening a third-party account, issuing a credential to a person. A worker that reaches one records it with `graphyard park` and ends its attempt, so an item listed here holds no worker and delays nothing else. **Answer and resume** posts `work/GY-N/answer`; the item returns to the master loop, which dispatches it on its next cycle with the answer in the new worker's prompt — no master session is involved. **Decline** keeps it parked with your words as its blocker.
+- **An approval no agent identity may give** — a merge decision that overrides a reconciliation the record refused, which the control plane delivers only with an admin credential on one side of it. **Approve and deliver** posts `work/GY-N/approve`, recording exactly the decision, attribution and reason the equivalent command would; the next observation delivers the merge as operator-authorized. Approved by the master's own agent pair instead, it applies and then delivers nothing, which is why it waits for you.
+
+Both are the same shape because the page renders one table of human-only rules (`src/model/human-request.ts`). The server derives the list from that table and serves it on `GET /api/status` and `GET /api/human-requests`; the page holds no list of its own, so a rule added to the table is listed here without a change to the page, and a human-only action can never be silently missing from it.
+
+Answering happens in your signed-in session, so no credential is ever handled on a command line. A session the rule refuses — an agent identity, or an `admin` credential that declared an `ai` session — sees the request and the refusal it would get, never the form. Recently answered requests stay listed underneath with the answer and how long it waited. On the home page a parked item reads `Stuck: Waiting on a human-only decision (…): NEEDED`, and an item's own view names what of it waits on you with a link to this tab.
 
 ## The status sentence
 
