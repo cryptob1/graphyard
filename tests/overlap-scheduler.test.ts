@@ -43,13 +43,15 @@ test('unit:overlap-detection — planned-file overlap holds an item behind claim
   const ahead = dispatchOverlap(item, all, clock);
   assert.deepEqual(ahead.map(entry => [entry.key, entry.state, entry.paths, entry.theirs]), [
     ['GY-2', 'claimed', ['src/cli/'], ['src/cli/master.ts']],
-    ['GY-3', 'submitted', ['docs/coordination.md'], ['docs/', 'docs/coordination.md']],
+    ['GY-3', 'submitted', ['docs/coordination.md'], ['docs/coordination.md']],
     ['GY-8', 'claimed', ['docs/coordination.md'], ['docs/coordination.md']],
-  ], 'a ready peer, an expired lease, delivered work and a disjoint scope are not ahead of the item');
+  ], 'a ready peer, an expired lease, delivered work and a disjoint scope are not ahead of the item; a submitted item is judged by the files its candidate changed, not the docs/ it declared');
   assert.deepEqual(dispatchOverlap(ready, [ready, item], clock), [], 'two ready items hold nothing; dispatchOrder decides between them');
   assert.deepEqual(dispatchOverlap(work('GY-9'), all, clock), [], 'an item with no planned files overlaps nothing');
   const rework = submitted('GY-10', ['src/cli/'], 'd'.repeat(40), { reworkRequested: true, observation: { files: ['src/cli/index.ts'] } as any });
-  assert.deepEqual(dispatchOverlap(rework, [rework, live], clock).map(entry => entry.key), ['GY-2'], 'rework is judged by its planned scope and its observed diff');
+  assert.deepEqual(dispatchOverlap(rework, [rework, live], clock), [], 'rework is judged by the files its candidate changed, not the src/cli/ it declared: GY-2 on src/cli/master.ts is no conflict');
+  assert.deepEqual(dispatchOverlap(rework, [rework, claimed('GY-11', ['src/cli/index.ts'])], clock).map(entry => entry.key), ['GY-11'], 'the same file changed on both sides still holds');
+  assert.deepEqual(dispatchOverlap(work('GY-12', { plannedFiles: ['src/cli/index.ts'] }), [rework], clock), [], 'a reworked candidate nobody has claimed is a peer waiting for a worker, not an item ahead');
 });
 
 test('unit:overlap-detection — scope breadth flags root-level directories and orders smallest scope first within a priority', () => {

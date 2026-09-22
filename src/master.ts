@@ -9,7 +9,7 @@ import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, ses
 export { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, sessionNameRule, suffixedSessionName } from './session-name.js';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { launchAuthorization, loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
-import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
+import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, dispatchOrder, dispatchOverlap, dispatchable, effectiveConcurrency, inFlight, resourceConflicts, scopeBreadth, type DispatchHold } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
@@ -1492,7 +1492,7 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'hold-overdue' | 'gate'): AttentionOwner {
   const key = work.key;
   // The one attention item no agent may clear: the three human decisions, answered by the human.
   if (cause === 'human-request') {
@@ -1522,6 +1522,7 @@ export function workAttentionOwner(work: Work, cause: 'human-request' | 'contain
   if (cause === 'containment-grace') return agentOwner('master', `Wait out the grace window, then graphyard master status verifies the host and graphyard master settle-containment ${key} REASON once settleable`);
   if (cause === 'containment') return agentOwner('master', `Stop the recorded supervisor on its host, then graphyard master decide ${key} ${work.stage === 'done' ? 'recover' : 'rework'} REASON and graphyard master approver ${key} DECISION`, 'approver');
   if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, graphyard master dispatch ${key} PROFILE`);
+  if (cause === 'hold-overdue') return agentOwner('master', `Nothing to decide: the loop dispatches ${key} over the overlap on its next cycle with a free worker; graphyard master dispatch ${key} PROFILE does it now`);
   if (cause === 'proof-gap') return agentOwner('master', `graphyard master decide ${key} grant '{"principal":"PRODUCER","patterns":["${(work.proofGaps ?? [])[0] ?? 'PROOF'}"]}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then graphyard master review ${key}`);
   if (cause === 'launch-review') return agentOwner('master', `Fix the refusal reason, then graphyard master review ${key}`);
@@ -1919,6 +1920,8 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
   return { review: state.review ? describe(state.review, reviewRecords) : null, producers: state.producers.map(request => describe(request, producerRecords)),
     recent: state.history.slice(-5).map(request => ({ kind: request.kind, ...(request.group ? { group: request.group } : {}), sha: request.sha, state: request.state, resolution: request.resolution ?? null, resolvedAt: request.resolvedAt ?? null })) };
 }
+/** Hold ages and bounds read in hours to one decimal: `1.5h`, `2h`. */
+const hours = (ms: number) => `${Math.round(ms / 360_000) / 10}h`;
 export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }) {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
@@ -1968,7 +1971,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
       : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];
-    const held = scheduling.held.find(entry => entry.key === work.key) ?? null;
+    const held = scheduling.held.find(entry => entry.key === work.key) ?? null, overdueHold = scheduling.overdue.find(entry => entry.key === work.key) ?? null;
+    // An item in flight beside another it overlaps — dispatched over a hold, past the bound or by
+    // --allow-overlap — shows what it runs concurrently with, so the overlap stays recorded.
+    const concurrent = !held && !overdueHold && (active || work.submission) ? dispatchOverlap(work, snapshot.work, now) : [];
     const conflictReport = candidateConflicts.report[work.key];
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
@@ -2012,6 +2018,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // used to be the commonest attention line on this list — one per open candidate, every
       // merge — and answering it cost a rework round for a change that was a clean fast-forward.
       : baseRefresh && !work.blocker ? [null, null]
+      // A hold past its bound is no longer holding: the loop offers the item over the overlap on its
+      // next cycle, so it is raised only while nothing has taken it, naming the chain it waited behind.
+      : overdueHold ? [`${work.key} has been held ${hours(overdueHold.hold.ageMs)} behind ${describeChain(overdueHold.hold.chain)}, past the ${hours(overdueHold.hold.boundMs)} bound; it is offered over the overlap and waits only for a free worker`, 'hold-overdue']
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
@@ -2028,7 +2037,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         refreshed: refreshCarry ? { from: refreshCarry.from.sha, head: refreshCarry.to.sha, base: refreshCarry.to.baseSha,
           approval: { carried: refreshCarry.approval.carried, reason: refreshCarry.approval.reason },
           evidence: refreshCarry.evidence.map(entry => ({ proof: entry.proof, carried: entry.carried, reason: entry.reason })) } : null } : null,
-      scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason } : { held: false, ahead: [], reason: null }, conflicts,
+      scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason, hold: held.hold, concurrent: [] } : overdueHold ? { held: false, ahead: overdueHold.ahead, reason: overdueHold.reason, hold: overdueHold.hold, concurrent: [] } : { held: false, ahead: [], reason: null, hold: null, concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now) };
   });
@@ -2054,6 +2063,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
+  // The fleet's effective concurrency beside its idle workers: how many items the overlap graph
+  // lets run at once, so eleven free workers and a concurrency of one is read as serialization,
+  // not as a shortage of anything.
+  const graph = effectiveConcurrency(snapshot.work, now);
+  const idle = workerSessions.filter(session => session.mode === 'launch' && session.credential.available && (session.state === 'offline' || session.state === 'idle') && !rows.some(row => row.owner === session.principal));
+  const concurrency = { ...graph, inFlight: snapshot.work.filter(work => inFlight(work, now)).length, dispatchable: scheduling.order.length, held: scheduling.held.length, overdue: scheduling.overdue.length,
+    idleWorkers: idle.length, workers: workerSessions.filter(session => session.mode === 'launch').length, boundMs: scheduling.boundMs,
+    statement: `${graph.effective} item${graph.effective === 1 ? '' : 's'} could be in flight at once over ${graph.nodes} open item${graph.nodes === 1 ? '' : 's'} (${graph.edges} overlap${graph.edges === 1 ? '' : 's'}${graph.exact ? '' : ', greedy estimate'}); ${idle.length} of ${workerSessions.filter(session => session.mode === 'launch').length} launch profile${workerSessions.filter(session => session.mode === 'launch').length === 1 ? '' : 's'} idle; ${scheduling.held.length} held, ${scheduling.overdue.length} past the ${hours(scheduling.boundMs)} hold bound` };
   return { observedAt: snapshot.now,
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
@@ -2064,27 +2081,36 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length },
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, effectiveConcurrency: graph.effective, idleWorkers: idle.length, held: scheduling.held.length, holdsOverdue: scheduling.overdue.length },
     // Every attention item with the role that resolves it and the next command, work items first.
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...installation.attentionItems] as AttentionItem[],
     // What waits on the human, longest first, with how to answer; and the roles out of capacity.
     humanRequests, capacity,
-    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation,
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, concurrency,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
 
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
  * would be offered (smallest planned scope first within a priority), the ones held behind a
- * claimed or unmerged item whose planned files they overlap, and the broad scopes that will
- * overlap nearly everything.
+ * claimed or unmerged item whose changed files (or, before a candidate, planned files) they
+ * overlap, with the age of each hold and the chain it waits behind, the holds past the bound —
+ * offered over the overlap — and the broad scopes that will overlap nearly everything.
  */
-export function dispatchSchedule(work: Work[], now: number) {
-  const ready = work.filter(item => item.stage !== 'done' && item.ready && !item.blocker && !item.containmentQuarantine && !(item.lease && Date.parse(item.lease.expiresAt) > now) && (!item.submission || item.reworkRequested)).sort(dispatchOrder);
-  const held = ready.flatMap(item => { const ahead = dispatchOverlap(item, work, now); return ahead.length ? [{ key: item.key, ahead, reason: `Held by planned-file overlap with ${describeOverlap(ahead)}; dispatch with --allow-overlap to override` }] : []; });
-  const heldKeys = new Set(held.map(entry => entry.key));
-  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles), held: heldKeys.has(item.key) })), held,
-    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })) };
+export function dispatchSchedule(work: Work[], now: number, boundMs = dispatchHoldBoundMs) {
+  const ready = work.filter(item => dispatchable(item, now)).sort(dispatchOrder);
+  const holds = ready.flatMap(item => { const hold = dispatchHold(item, work, now, boundMs); return hold ? [{ key: item.key, ahead: hold.ahead, hold, reason: holdReason(hold) }] : []; });
+  const held = holds.filter(entry => !entry.hold.overdue), overdue = holds.filter(entry => entry.hold.overdue);
+  const heldKeys = new Set(held.map(entry => entry.key)), overdueKeys = new Set(overdue.map(entry => entry.key));
+  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles), held: heldKeys.has(item.key), overdue: overdueKeys.has(item.key) })), held, overdue,
+    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })), boundMs };
+}
+/** The one sentence a hold reads as, before and after the bound: who is ahead, on which files, since when, and what lifts it. */
+export function holdReason(hold: DispatchHold) {
+  const chain = hold.chain.length > hold.ahead.length ? `; the chain it waits behind: ${describeChain(hold.chain)}` : '';
+  return hold.overdue
+    ? `Held by planned-file overlap with ${describeOverlap(hold.ahead)} since ${hold.since} (${hours(hold.ageMs)}), past the ${hours(hold.boundMs)} bound${chain}; dispatched over the overlap: whichever lands second re-integrates the other`
+    : `Held by planned-file overlap with ${describeOverlap(hold.ahead)} since ${hold.since} (${hours(hold.ageMs)} of the ${hours(hold.boundMs)} bound)${chain}; dispatch with --allow-overlap to override, or the bound lifts it`;
 }
 /** Fewest conflicts first: the order that forces the fewest re-integration rounds on the rest. */
 export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[]) {
@@ -2387,24 +2413,25 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
 type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies };
 
-export interface DispatchOptions { allowOverlap?: boolean; probe?: EnvironmentProbe; prompt?: PromptDelivery }
+export interface DispatchOptions { allowOverlap?: boolean; holdBoundMs?: number; probe?: EnvironmentProbe; prompt?: PromptDelivery }
 export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
-  const hold = containmentHold(work, now);
-  if (hold) throw new Error(hold);
+  const fenced = containmentHold(work, now);
+  if (fenced) throw new Error(fenced);
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
   if (unfinished.length) throw new Error(`Dispatch blocked by unfinished dependencies: ${unfinished.map(dependency => dependency?.key ?? 'unknown').join(', ')}`);
   if (work.lease && Date.parse(work.lease.expiresAt) > now) throw new Error(`Dispatch blocked by active owner ${work.lease.owner}`);
   if (work.submission && !work.reworkRequested) throw new Error('Dispatch requires operator-authorized rework for a submitted item');
   const conflicts = resourceConflicts(work, allWork, now);
   if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map(conflict => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
-  // Planned-file overlap is a soft exclusive resource: advisory, with an operator override.
-  const overlap = dispatchOverlap(work, allWork, now);
-  if (overlap.length && !options.allowOverlap) throw new Error(`Dispatch held by planned-file overlap with ${describeOverlap(overlap)}; whichever lands second re-integrates the other. Wait for it to merge, or pass --allow-overlap to dispatch anyway`);
+  // Overlap is a soft exclusive resource: advisory, bounded in time, with an operator override.
+  const hold = dispatchHold(work, allWork, now, options.holdBoundMs);
+  if (hold && !hold.overdue && !options.allowOverlap) throw new Error(`Dispatch held by planned-file overlap with ${describeOverlap(hold.ahead)}; whichever lands second re-integrates the other. Held since ${hold.since} (${hours(hold.ageMs)} of the ${hours(hold.boundMs)} bound)${hold.chain.length > hold.ahead.length ? `; the chain it waits behind: ${describeChain(hold.chain)}` : ''}. Wait for it to merge, or pass --allow-overlap to dispatch anyway`);
+  return hold;
 }
 
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, allWork: Work[] = [work], prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker> = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
@@ -2433,11 +2460,13 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       catch (error) { if (!(error instanceof PromptNotAcceptedError) || attempt >= 2) throw error; relaunched++; }
     }
   }
-  const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
+  const hold = dispatchHold(work, allWork, Date.parse(observedAt), options.holdBoundMs);
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery,
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
-    overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
+    // The overlap a dispatch went over is recorded with the dispatch: by operator override, or
+    // because the hold outlived its bound — the note says which, and the chain the item waited behind.
+    overlap: hold ? { allowed: true, ahead: hold.ahead, hold, note: `Dispatched over a planned-file overlap with ${describeOverlap(hold.ahead)}${hold.overdue ? ` after a hold of ${hours(hold.ageMs)}, past the ${hours(hold.boundMs)} bound${hold.chain.length > hold.ahead.length ? `, behind ${describeChain(hold.chain)}` : ''}` : ' by operator override'}; expect a sync → review → proof round for whichever lands second` } : null };
 }
 
 async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery) {
@@ -3149,6 +3178,20 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false };
 }
 
+export const broadScopeFlag = '--allow-broad-scope';
+/**
+ * Where planned files are set — `master create`, `master requirements`, `master scope` — a
+ * root-level directory scope is refused with the narrower paths it should name (AC-2 of GY-112),
+ * unless the command carries --allow-broad-scope: the exception is then written into the audited
+ * reason, naming the scopes, so it is explicit and attributable to the identity that set it. A
+ * revision is judged on the scopes it introduces; one the item already carries is not re-refused.
+ */
+export function guardBroadScope(input: { plannedFiles?: string[]; title?: string; description?: string; criteria?: { text: string }[] }, reason: string, options: { allow: boolean; command: string; existing?: string[] }) {
+  const refusals = broadScopeRefusals(input.plannedFiles ?? [], [input.title ?? '', input.description ?? '', ...(input.criteria ?? []).map(criterion => criterion.text)]).filter(refusal => !options.existing?.includes(refusal.scope));
+  if (!refusals.length) return reason;
+  if (!options.allow) throw new Error(`${options.command} refused a high-conflict scope: ${refusals.map(refusal => refusal.reason).join('; ')}. Pass ${broadScopeFlag} to record the exception in the audited reason instead`);
+  return `Broad scope exception (${refusals.map(refusal => refusal.scope).join(', ')}) recorded with ${broadScopeFlag}: ${reason}`;
+}
 export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
@@ -3192,17 +3235,20 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     if (apply && !args.includes('--admin-token-stdin')) throw new Error('Use master autonomy --admin-token-stdin --apply so the admin credential is not stored in shell history');
     return setupAutonomy(root, { apply, adminToken: apply ? await deps.readSecret() : undefined, ...(args.includes('--harness') ? { harness } : {}) }, fetcher);
   }
+  const allowBroad = args.includes(broadScopeFlag); args = args.filter(argument => argument !== broadScopeFlag);
   if (id === 'create') {
-    if (!args[0]) throw new Error('Use master create FILE REASON');
-    return call(await operator(), 'work', { ...await jsonArgument(`@${args[0]}`), reason: reason(args.slice(1)) });
+    if (!args[0]) throw new Error(`Use master create FILE [${broadScopeFlag}] REASON`);
+    const input = await jsonArgument(`@${args[0]}`);
+    return call(await operator(), 'work', { ...input, reason: guardBroadScope(input, reason(args.slice(1)), { allow: allowBroad, command: 'master create' }) });
   }
   if (id === 'release' || id === 'unblock') {
     const work = await item(args[0]);
     return call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: reason(args.slice(1)) });
   }
   if (id === 'requirements') {
-    const work = await item(args[0]); if (!args[1]) throw new Error('Use master requirements GY-N FILE REASON');
-    return call(await operator(), `work/${work.id}/requirements`, { ...decisionInput('requirements', work, await jsonArgument(`@${args[1]}`)), reason: reason(args.slice(2)) });
+    const work = await item(args[0]); if (!args[1]) throw new Error(`Use master requirements GY-N FILE [${broadScopeFlag}] REASON`);
+    const input = decisionInput('requirements', work, await jsonArgument(`@${args[1]}`)) as { plannedFiles?: string[]; criteria?: { text: string }[] };
+    return call(await operator(), `work/${work.id}/requirements`, { ...input, reason: guardBroadScope({ ...input, title: work.title, description: work.description }, reason(args.slice(2)), { allow: allowBroad, command: 'master requirements', existing: work.plannedFiles }) });
   }
   if (id === 'decide') {
     const work = await item(args[0]); const action = args[1];
