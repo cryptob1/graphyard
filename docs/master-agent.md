@@ -125,15 +125,36 @@ When **every** launch profile of a role is unavailable for the same reason — e
 
 Every session Graphyard launches — a worker under `watch`, the reviewer and producer sessions the loop starts, the approver, the master itself — receives its instruction as the session's own first request, on the runtime's command line: Claude Code, Codex and Cursor take it as the positional prompt after their flags, OpenCode through `--prompt`. It is never typed into the running session. `herdr agent prompt` delivers text through bracketed paste, and a coding agent treats pasted text as untrusted data rather than as a request from its operator — correctly, against prompt injection — so a session launched that way often ended its first turn having refused to act, and the loop recorded it as failed with `finished (done) without trusted evidence` and spent a retry on work that was never attempted (GY-93). `master status` shows `delivery: request` on the session, or `paste` for a runtime Graphyard has no request contract for, which is still prompted after it starts.
 
-A runtime busy on its request may not show Herdr a prompt-ready session within the start bound; a start that times out on a pane where Herdr sees the expected runtime acting is a session that started, and the launcher names it rather than closing it. A worker is likewise accepted as started when the supervisor's session is first seen `working`.
+#### How the request reaches the runtime
+
+The request is not typed into the pane. Herdr types a launch command into an interactive shell keystroke by keystroke, and the shell redraws the line as it grows, so a request of several kilobytes took the whole start bound just to echo on a loaded host and the runtime was declared dead before it existed (GY-121). The launcher writes the request and, for a Claude Code session under a [role file](#session-harness-rules), the launch authorization to files inside the session's own checkout directory — `.graphyard/launch/NAME.request` and `NAME.role`, mode 0600, under the worker's assigned worktree, the reviewer's or producer's session checkout, or the repository root for the master, an approver and an escalation handler — and types a short command line that references them through their shared stem:
+
+```
+GY=/path/to/checkout/.graphyard/launch/NAME; claude --permission-mode bypassPermissions --setting-sources user --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
+```
+
+The pane's shell (a POSIX shell: bash or zsh) expands `"$(cat "$GY.request")"` before the runtime starts, so the request is still the runtime's own first argument — the positional prompt for Claude Code, Codex and Cursor, `--prompt` for OpenCode — and never a paste; a worker's line carries the same references after `node CLI watch GY-N EPOCH -- KIND`. What is typed holds only the runtime, its flags and one path, and is bounded at **512 bytes** whatever the request is: a line that would exceed it is refused before anything is typed, naming its length, which only a very long repository path, managed worktree root or `agentArgs` can cause. The files are replaced on every launch under the same name and removed with the checkout; those in the repository root stay under `.graphyard/launch/` (ignored by Git) until the next launch under that name overwrites them.
 
 The positional request follows the profile's `agentArgs` and the role harness on the command line. A runtime that takes a variadic flag (Claude Code's `--add-dir` and `--allowedTools`, for example) would read the request as one more value of that flag if it were the last thing before the request, so `agentArgs` must not end in such a flag: put its values first and a single-valued flag (`--model …`) or nothing after it. When the launcher passes a [role file](#session-harness-rules), its flags come between the profile's arguments and the request; otherwise the request follows `agentArgs` directly.
+
+#### The start bound reads the pane
+
+The start bound is not a guess against a clock. The producers this was filed for died with Claude Code on screen — the request under its own `∙` spinner — while Herdr still reported the pane's runtime `unknown` at 30 seconds, and the launcher, which adopted a timed-out start only on Herdr's `working`, `idle` or `done`, closed a live session. After typing the command the launcher now reads the pane every half second — `herdr agent get` for the runtime Herdr sees occupying it and its state, `herdr pane read` for the terminal text — and distinguishes these cases. The runtime is **ready** once Herdr reports the expected kind `idle`, `done` or `working` (already at work on its request), or once Herdr reports the runtime under the pane in any state and the runtime's own screen is showing — its banner, its status line, or its spinner (`∙ ✻ ✶ ✳ ✢`) at the start of a line; the launch is reported started and Herdr's record of the pane takes the session's name (`started.detail` says which sighting it was, `the claude runtime is on screen while Herdr reports it unknown` for the case above). A runtime Graphyard has no request contract for, which is prompted after it starts, is ready only on Herdr's `idle` or `done`. It is **starting** when the launch command has been accepted and the runtime's process exists under the pane but nothing of it is drawn yet, or the runtime's banner is on screen before Herdr sees a process. It is **blocked** when Herdr reports it at a dialog before it was ever ready — the folder-trust question, an approval — which no launcher answers: refused at once, with the dialog as the pane's last line. It is **absent** when none of these holds: the command is still echoing, the shell is back at its prompt after an error, or the pane holds something else.
+
+A runtime ready within **30 seconds** has started. One that is *starting* at 30 seconds is given more time, up to a ceiling of **120 seconds**, and the launch result says so (`started.extended`); one that is *absent* at 30 seconds, or still starting at the ceiling, is refused. The refusal names which case was seen and the pane's last non-empty line (bounded to 200 characters), never Herdr's own `agent_not_found`:
+
+- `the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing); the pane last showed: "… ❯ GY=…; claude --permission-mode …"` — the shell had not finished taking the command: the host is overloaded, or the pane was not at a prompt.
+- `the claude runtime never started within 30 s in pane w1V:pR6 (no runtime under the pane); the pane last showed: "claude: command not found"` — the runtime's own error, or the shell's: the last line is what to fix.
+- `the claude runtime was still starting after 120 s in pane w1V:pR6 (the claude runtime process exists under the pane, Herdr reports it unknown); the pane last showed: "…"` — the runtime's process exists but nothing of it ever reached the screen.
+- `the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"` — a dialog the runtime raised before taking its request; what it asks is the last line.
+
+A refused start is recorded with that reason wherever launches are recorded: the dispatcher's `failures` for a reviewer or producer request, the row's `attention` in `master status` (`Automatic producer launch for GY-N refused 1 time(s): the claude runtime never started …`), and a worker dispatch's error. The tab is closed and, for a reviewer or producer, the session checkout removed; the loop retries on its widening schedule.
 
 #### Confirmed prompt delivery
 
 The paste path remains for the three messages that are typed into a running session: the request of a runtime without a request contract, the loop's one re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged. Each is recorded only once its runtime visibly accepted it: Herdr submits the text and waits for the agent to leave `idle`. A runtime that reports ready before its input is (OpenCode does while its UI loads) drops the text and stays idle, which Herdr reports as a stalled prompt. A stalled prompt is delivered again, up to three times; a session that still has not taken its request is closed — for a worker, the claim is released too — and launched once more from scratch before the launch is reported refused. A session is never left idle until a timeout.
 
-The generated `AGENTS.md` section ([onboarding](onboarding.md#3-connect-a-worker-and-herdr)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher passes the same authorization on its command line (`--append-system-prompt`).
+The generated `AGENTS.md` section ([onboarding](onboarding.md#3-connect-a-worker-and-herdr)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher writes the same authorization to the session's role file and loads it on the command line (`--append-system-prompt-file`, see [how the request reaches the runtime](#how-the-request-reaches-the-runtime)).
 
 ### Acknowledgement, the one re-prompt, and never started
 
@@ -893,6 +914,74 @@ retires finished handles first and never evicts a running one to make room.
 A session Herdr reports blocked is waiting on input, not gone: the attempt is recorded as failed
 with that reason, and the handle stays `running` carrying why, so the attach command still works
 at the one moment somebody needs it.
+
+### Session liveness is reconciled, not trusted
+
+**The control plane reconciles session liveness; closing finished sessions is not the master's
+manual duty.** A handle used to say `running` until a session, its launcher or an admin said
+otherwise, and a session that died said nothing — so a crashed, killed or vanished session stayed
+recorded as running for good, and every reader believed it, including the launcher's own busy check.
+That is what made a dead session hold its role slot until a person noticed.
+
+**On what interval.** The liveness sweep runs on every automatic-dispatch tick — `run.dispatchIntervalSeconds`
+in `.graphyard/master.json`, 10 seconds by default and 30 at most. It is a sweep, not a reaction to
+something reporting in, because a session that died reports nothing. A handle whose session the
+runtime no longer reports is left alone for a 60-second grace first, counted from the first sweep
+that missed it and never shorter than the handle's own age, since a session recorded at launch
+appears in its runtime's listing a moment later and one listing that comes back short is not a
+death. So a vanished session's record is closed within 90 seconds of the runtime dropping it, and a
+session the runtime reports again in the meantime starts the grace over. `master status` reports the
+bound, the closures the last tick made, how many handles are inside their grace, and any closure it
+could not write back, under `dispatch.sessionReconcile`.
+
+The sweep judges what this host's runtime answers for. A handle another host launched is left to
+that host's loop — this inventory was never asked about it — and holds its slot until then, exactly
+as an unreadable runtime does.
+
+**What it closes, and with which reason.**
+
+- **Vanished** — the runtime has not reported the pane or the session name its launcher recorded
+  for the whole grace. This is how a coding session that exited is recognised: it is simply absent
+  from the runtime's listing. The outcome names that it vanished, from which runtime and host, how
+  long the runtime has not reported it, and how long after its last observed activity.
+- **Ended** — the runtime still lists it and reports one of that runtime's terminal states
+  (`src/harness.ts`), which today only Muse has (`exited-error`, `terminated`). `idle`, `done` and
+  `blocked` are deliberately not terminal anywhere: each is a live session waiting at its prompt —
+  Herdr reports `done` for one that finished work nobody has looked at yet, the same underlying
+  state as `idle` — and that is the one moment somebody needs its attach command.
+- **Superseded** — a review or proof session bound to something the item has moved past: a candidate
+  that merged, an item already delivered, a head the item no longer has, or an item returned to a
+  worker for rework. The outcome names which of those it was. A delivered item is closed the same
+  way as any other: delivery makes an item's decisions immutable, and ending a handle it still
+  carries decides nothing. An implementation session is never closed this way; its lease decides
+  what it may still do.
+- **Duplicate** — two live review or proof sessions for one role and head cannot both stand, so the
+  older is closed naming the session that holds the slot. One item holds one live review of a head
+  and one producer session per proof group of it. Implementation handles are left alone here too.
+
+A closure is a record, never authority: it decides no gate, ends no lease, and stops no process —
+the runtime already did, or the session is stalled rather than gone.
+
+**The role slot follows the reconciled record.** A profile's concurrency is counted against live
+sessions only: the runtime's own listing, plus every recorded handle the sweep has not judged over.
+So a handle holds its profile's slot even before the runtime lists the session and across a restart
+of the loop, and a name is busy only while a live session has it. A launcher still refuses a name
+the runtime lists in any state — a name in use cannot be taken again, whatever state it is in.
+
+**A session that is running and making no progress** is not closed, because only a reader can tell
+whether it is working. It is surfaced instead: `master status` raises one attention item per session
+past its role's maximum — 4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer
+session, 12h coordination — naming the item, the role, how long it has run, when it was last
+observed doing anything, and whether the runtime still reports it live. A session that died is as
+visible as one that is stuck, and neither needs a person to go looking.
+
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died — the sweep closes its record and frees its slot on the next tick, and
+`graphyard master run --once` does one sweep when the loop is stopped. For a session the attention
+item names as live but overlong, attach to it with the command on the handle and see what it is
+doing; stop it there if it is stuck, and the record closes within the bound on its own. Never mark
+another session's handle finished to free a slot: the handle belongs to the session it names, its
+launcher or an admin, and the slot was never held by anything but a live session.
 
 ## Automatic dispatch at submit
 

@@ -8,11 +8,12 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, buildMasterStatus, defaultAcknowledgementSeconds, dispatchWork, launchApprover, launchRequest, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, buildMasterStatus, defaultAcknowledgementSeconds, dispatchWork, launchApprover, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization, managedInstructions } from '../src/repository-setup.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 
 // GY-93: a launched session receives its instruction as its own first request, never as pasted
 // content; the loop tells a session that never started from one that did the work and failed;
@@ -70,27 +71,17 @@ async function installed() {
  * A Herdr whose runtimes behave like the real ones (GY-93): a session starts its first tool call
  * only when its instruction arrives as its own request — on the command line, under the runtime's
  * contract — and refuses anything typed in as a paste, which is what `agent prompt` delivers.
+ * The pane's shell expands the launch line the launcher types (GY-121): the request and the role
+ * authorization come from the files it references, never from the line itself.
  */
 class FakeHerdr {
   calls: string[][] = [];
-  sessions = new Map<string, { name: string | null; kind: string; request: string | null; toolCalls: string[]; pasted: string[]; status: string; screen: string }>();
+  sessions = new Map<string, { name: string | null; kind: string; request: string | null; role: string | null; args: string[]; toolCalls: string[]; pasted: string[]; status: string; screen: string }>();
   private panes = 0;
-  constructor(private options: { startTimeout?: (kind: string) => boolean } = {}) {}
-  /** The instruction the runtime would read from its own arguments, per the real CLI contracts. */
-  static requestOf(kind: string, args: string[]) {
-    if (kind === 'opencode') { const index = args.indexOf('--prompt'); return index >= 0 ? args[index + 1] ?? null : null; }
-    if (!['claude', 'codex', 'cursor'].includes(kind)) return null;
-    // Positional: the one argument that is neither a flag nor a flag's value.
-    const valued = new Set(['--permission-mode', '--setting-sources', '--settings', '--append-system-prompt', '--ask-for-approval', '--sandbox', '-c', '--add-dir', '--model']);
-    for (let index = 0; index < args.length; index++) {
-      if (valued.has(args[index])) { index++; continue; }
-      if (!args[index].startsWith('-')) return args[index];
-    }
-    return null;
-  }
+  constructor(private options: { occupant?: (kind: string) => string | null } = {}) {}
   private start(pane: string, kind: string, args: string[], name: string | null) {
-    const request = FakeHerdr.requestOf(kind, args);
-    const session = { name, kind, request, toolCalls: [] as string[], pasted: [] as string[], status: request ? 'working' : 'idle', screen: `${kind} ready\n` };
+    const request = requestOf(kind, args);
+    const session = { name, kind: this.options.occupant?.(kind) ?? kind, request, role: roleOf(args), args, toolCalls: [] as string[], pasted: [] as string[], status: request ? 'working' : 'idle', screen: `${kind} ready\n` };
     // The runtime acts on its own request at once: its first tool call, before any further input.
     if (request) { session.toolCalls.push(`first tool call on request: ${request.slice(0, 60)}`); session.screen += `❯ ${request}\n  Ran 1 shell command\n`; }
     this.sessions.set(pane, session);
@@ -102,21 +93,14 @@ class FakeHerdr {
     const json = (result: unknown) => JSON.stringify({ result });
     if (args[0] === 'tab' && args[1] === 'create') { const pane = `pane-${++this.panes}`; return json({ root_pane: { pane_id: pane, tab_id: `tab-${this.panes}` } }); }
     if (args[0] === 'pane' && args[1] === 'run') {
-      // The supervised worker command: `... 'watch' KEY EPOCH '--' KIND ARGS…`, shell-quoted.
-      const words = [...args[3].matchAll(/'((?:[^']|'\\'')*)'/g)].map(match => match[1].replaceAll("'\\''", "'"));
-      const separator = words.indexOf('--');
-      this.start(args[2], words[separator + 1], words.slice(separator + 2), null);
-      return json({});
+      // The typed launch line, as the shell runs it: `GY=STEM; [node CLI watch KEY EPOCH --] KIND ARGS…`.
+      const launch = expandTypedCommand(args[3]);
+      this.start(args[2], launch.kind, launch.args, null);
+      return '';
     }
+    if (args[0] === 'pane' && args[1] === 'read') return this.sessions.get(args[2])?.screen ?? '';
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     if (args[0] === 'pane' && args[1] === 'close') { this.sessions.delete(args[2]); return json({}); }
-    if (args[0] === 'agent' && args[1] === 'start') {
-      const kind = args[args.indexOf('--kind') + 1], pane = args[args.indexOf('--pane') + 1];
-      const session = this.start(pane, kind, args.slice(args.indexOf('--') + 1), args[2]);
-      // A runtime busy on its request: Herdr's start bound expires before it looks prompt-ready.
-      if (this.options.startTimeout?.(kind)) { session.name = null; throw Object.assign(new Error('Command failed: herdr agent start'), { stdout: JSON.stringify({ error: { code: 'timeout', message: 'timed out waiting for agent startup' } }) }); }
-      return json({ agent: { agent: kind, agent_status: session.status, pane_id: pane, name: args[2] } });
-    }
     if (args[0] === 'agent' && args[1] === 'get') { const session = this.find(args[2]); return session ? json({ agent: { agent: session.kind, agent_status: session.status, pane_id: args[2], name: session.name } }) : JSON.stringify({ error: { code: 'agent_not_found', message: 'not found' } }); }
     if (args[0] === 'agent' && args[1] === 'rename') { const session = this.find(args[2])!; session.name = args[3]; return json({ agent: { agent: session.kind, agent_status: session.status } }); }
     if (args[0] === 'agent' && args[1] === 'prompt') {
@@ -135,12 +119,9 @@ class FakeHerdr {
 test('integration:launch-prompt-is-a-request — a producer, a reviewer, an approver and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
   // The request contracts: a positional prompt after the flags, or --prompt for OpenCode; a runtime
   // without a contract keeps the paste, and says so.
-  assert.deepEqual(launchRequest('claude', 'Review #93'), { args: ['Review #93'], delivery: 'request' });
-  assert.deepEqual(launchRequest('codex', 'Review #93'), { args: ['Review #93'], delivery: 'request' });
-  assert.deepEqual(launchRequest('cursor', 'Review #93'), { args: ['Review #93'], delivery: 'request' });
-  assert.deepEqual(launchRequest('opencode', 'Review #93'), { args: ['--prompt', 'Review #93'], delivery: 'request' });
-  assert.deepEqual(launchRequest('muse', 'Review #93'), { args: [], delivery: 'paste' });
-  assert.deepEqual(launchRequest(undefined, 'Review #93'), { args: [], delivery: 'paste' });
+  for (const kind of ['claude', 'codex', 'cursor', 'opencode']) assert.equal(launchDelivery(kind), 'request');
+  assert.equal(launchDelivery('muse'), 'paste'); assert.equal(launchDelivery(undefined), 'paste');
+  const typedLaunches = (herdr: FakeHerdr) => herdr.calls.filter(call => call[0] === 'pane' && call[1] === 'run').map(call => expandTypedCommand(call[3]));
 
   const { root, token, cleanup } = await installed();
   try {
@@ -153,9 +134,10 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     assert.match(reviewer.request!, /pull request #93 at head a1f+ against base b1f+/);
     assert.equal(reviewer.toolCalls.length, 1, 'the reviewer began its first tool call on its request');
     assert.deepEqual(reviewer.pasted, [], 'nothing was pasted into the reviewer');
-    const reviewStart = herdr.calls.find(call => call[0] === 'agent' && call[1] === 'start')!;
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--') + 1, reviewStart.indexOf('--') + 3), ['--permission-mode', 'bypassPermissions'], 'the non-interactive contract still leads the arguments');
-    assert.equal(reviewStart.at(-1), reviewer.request, 'the request is the last argument, the positional prompt');
+    const reviewStart = typedLaunches(herdr)[0];
+    assert.equal(reviewStart.kind, 'claude');
+    assert.deepEqual(reviewStart.args.slice(0, 2), ['--permission-mode', 'bypassPermissions'], 'the non-interactive contract still leads the arguments');
+    assert.equal(reviewStart.args.at(-1), reviewer.request, 'the request is the last argument, the positional prompt, read from the request file');
     assert.equal((await readReviewLedger(root)).reviews[0].delivery, 'request');
 
     // Producer on Codex: the request comes after the sandbox flags and their values.
@@ -170,8 +152,8 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     // GY-88: the request names the session directory the launch allocated under the managed worktree root.
     assert.equal(producer.request, producerPrompt(config, { key: 'GY-93', pr: 93, sha: H, baseSha: B, policyRevision: 1, group: request.group!, proofs: request.proofs!, checkout: produced.checkout }, { principal: 'proof-runner' }));
     assert.equal(producer.toolCalls.length, 1); assert.deepEqual(producer.pasted, []);
-    const produceStart = herdr.calls.filter(call => call[0] === 'agent' && call[1] === 'start').at(-1)!;
-    assert.ok(produceStart.includes('--ask-for-approval') && produceStart.includes('--add-dir'), 'the Codex sandbox flags are kept');
+    const produceStart = typedLaunches(herdr).at(-1)!;
+    assert.ok(produceStart.args.includes('--ask-for-approval') && produceStart.args.includes('--add-dir'), 'the Codex sandbox flags are kept');
     assert.equal((await readProducerLedger(root)).producers[0].delivery, 'request');
 
     // Approver on Cursor: the same, for the decision it judges.
@@ -199,16 +181,16 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     assert.equal(approvedMuse.delivery, 'paste');
     assert.equal(herdr.named(approvedMuse.agentName).pasted.length, 1);
 
-    // Herdr's start bound can expire while the runtime is busy on its request: the session is
-    // adopted by the name it was started under, never closed.
-    const busy = new FakeHerdr({ startTimeout: kind => kind === 'claude' });
-    const adopted = startAgentSession('review-busy', 'claude', 'pane-x', ['--permission-mode', 'bypassPermissions'], 'Review #93 now', busy.run);
-    assert.equal(adopted.delivery, 'request');
-    assert.deepEqual(busy.calls.slice(-2).map(call => call.slice(0, 2)), [['agent', 'get'], ['agent', 'rename']]);
+    // A runtime already busy on its request is a session that started: it is seen `working`,
+    // named at once, never closed (GY-121: the start bound reads the pane).
+    const busy = new FakeHerdr();
+    const adopted = startAgentSession('review-busy', 'claude', 'pane-x', ['--permission-mode', 'bypassPermissions'], 'Review #93 now', busy.run, { directory: root });
+    assert.equal(adopted.delivery, 'request'); assert.equal(adopted.started.detail, 'Herdr reports the claude runtime working');
+    assert.deepEqual(busy.calls.slice(-3).map(call => call.slice(0, 2)), [['pane', 'run'], ['agent', 'get'], ['agent', 'rename']]);
     assert.equal(busy.named('review-busy').toolCalls.length, 1);
-    const stranger = new FakeHerdr({ startTimeout: () => true });
-    stranger.run = ((run: typeof stranger.run) => (command: string, args: string[]) => args[0] === 'agent' && args[1] === 'get' ? JSON.stringify({ result: { agent: { agent: 'codex', agent_status: 'idle' } } }) : run(command, args))(stranger.run);
-    assert.throws(() => startAgentSession('review-other', 'claude', 'pane-y', [], 'Review', stranger.run), /Command failed: herdr agent start/, 'a pane that does not hold the expected runtime is not adopted; the start failure stands');
+    const stranger = new FakeHerdr({ occupant: () => 'codex' });
+    const bounds = { clock: () => stranger.calls.length * 1000, wait: () => {} };
+    assert.throws(() => startAgentSession('review-other', 'claude', 'pane-y', [], 'Review', stranger.run, { directory: root, ...bounds }), (error: unknown) => error instanceof SessionStartError && error.startCase === 'never started' && /the pane holds codex, not claude/.test(error.message), 'a pane that does not hold the expected runtime never started; the refusal says what it holds');
   } finally { await cleanup(); }
 });
 
@@ -237,7 +219,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
       };
       return (await reconcileProducers(root, config, [item], agents, { run, now: () => new Date(clock + offsetMs) })).producers.at(-1)!;
     };
-    const launch = () => launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: (_command, args) => JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : {} }), now: () => new Date(clock) });
+    const launch = () => launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : {} }), now: () => new Date(clock) });
 
     // A session that refused: one short turn, then a screen that never changes.
     await launch();
@@ -313,7 +295,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     // The reviewer ledger judges the same way: its one reminder carries the request, and a
     // session that never took it up settles as never started.
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request', now: () => new Date(clock) });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request', now: () => new Date(clock) });
     const reviewPrompts: string[] = [];
     const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
     let reviewRecord = await review('done', `● ${words}\n`, 10_000);
@@ -375,7 +357,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     const slowReviews = await readReviewLedger(root);
     slowReviews.reviews = slowReviews.reviews.filter(entry => entry.state !== 'failed');
     await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), slowReviews);
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request-slow', now: () => new Date(clock) });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request-slow', now: () => new Date(clock) });
     reviewPrompts.length = 0;
     const slowReview = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, slow, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews.at(-1)!;
     reviewRecord = await slowReview('done', `● ${words}\n`, 10_000);
@@ -390,7 +372,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     const acknowledgedReviews = await readReviewLedger(root);
     acknowledgedReviews.reviews = acknowledgedReviews.reviews.filter(entry => entry.state !== 'failed');
     await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), acknowledgedReviews);
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request-worked', now: () => new Date(clock) });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request-worked', now: () => new Date(clock) });
     reviewRecord = await slowReview('working', '', 5_000);
     reviewRecord = await slowReview('working', '', 5_000 + sustainedActivityMs);
     assert.equal(reviewRecord.acknowledgedAt, iso(5_000 + sustainedActivityMs));
@@ -515,9 +497,16 @@ test('manual:launch-authorization-onboarding-review — repository setup writes 
     await mkdir(join(root, '.claude'), { recursive: true });
     await writeFile(join(root, '.claude/settings.local.json'), '{}\n');
     const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: 'claude', profile: 'r', pr: 93 });
-    assert.deepEqual(harness.args.slice(0, 3), ['--setting-sources', 'user', '--settings']);
-    assert.equal(harness.args[4], '--append-system-prompt');
-    assert.equal(harness.args[5], launchAuthorization.replace(/\s+/g, ' '));
-    assert.deepEqual((await prepareSessionHarness(root, config, { role: 'reviewer', kind: 'codex', profile: 'r', pr: 93 })).args, [], 'Codex reads AGENTS.md from the repository; no Claude flag rides its command line');
+    assert.deepEqual(harness.args, ['--setting-sources', 'user', '--settings', harness.file]);
+    assert.equal(harness.role, launchAuthorization.replace(/\s+/g, ' '), 'the authorization is the session\'s role text, written to its role file rather than typed (GY-121)');
+    const codex = await prepareSessionHarness(root, config, { role: 'reviewer', kind: 'codex', profile: 'r', pr: 93 });
+    assert.deepEqual([codex.args, codex.role], [[], null], 'Codex reads AGENTS.md from the repository; no Claude flag rides its command line');
+    // Launched under the role file, a Claude session loads the authorization from that file.
+    const herdr = new FakeHerdr();
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, mint, requestId: 'review-request' });
+    const launched = herdr.named('review-claude-1');
+    assert.equal(launched.role, launchAuthorization.replace(/\s+/g, ' '));
+    assert.ok(launched.args.includes('--append-system-prompt-file') && !launched.args.includes('--append-system-prompt'), 'the role rides as a file, never as text');
   } finally { await cleanup(); }
 });
