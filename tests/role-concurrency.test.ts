@@ -45,7 +45,7 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
 }
 
 /**
- * A master bound to a reviewer App with a stubbed Herdr: every `agent start` becomes a visible
+ * A master bound to a reviewer App with a stubbed Herdr: every typed launch becomes a visible
  * agent, every `pane close` removes one, and each tab gets its own pane, so what the launchers
  * count against a profile's limit is exactly what they started.
  */
@@ -69,7 +69,11 @@ async function fleet(profiles: { reviewers: unknown[]; producers: { name: string
   const run = (_command: string, args: string[]) => {
     calls.push(args);
     if (args[0] === 'tab' && args[1] === 'create') { panes++; return JSON.stringify({ result: { root_pane: { pane_id: `pane-${panes}`, tab_id: `tab-${panes}` } } }); }
-    if (args[0] === 'agent' && args[1] === 'start') { seen[args[2]] = agents.map(agent => agent.name!); agents.push({ name: args[2], pane_id: args[6], agent_status: 'working' }); return JSON.stringify({ result: {} }); }
+    // The typed launch starts its runtime at once; the session is named when Herdr sees it started (GY-121).
+    if (args[0] === 'pane' && args[1] === 'run') return '';
+    if (args[0] === 'pane' && args[1] === 'read') return '';
+    if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { agent: 'claude', agent_status: 'working', pane_id: args[2] } } });
+    if (args[0] === 'agent' && args[1] === 'rename') { seen[args[3]] = agents.map(agent => agent.name!); agents.push({ name: args[3], pane_id: args[2], agent_status: 'working' }); return JSON.stringify({ result: {} }); }
     if (args[0] === 'pane' && args[1] === 'close') { const index = agents.findIndex(agent => agent.pane_id === args[2]); if (index >= 0) agents.splice(index, 1); return JSON.stringify({ result: {} }); }
     if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
     return JSON.stringify({ result: {} });
@@ -89,7 +93,7 @@ async function fleet(profiles: { reviewers: unknown[]; producers: { name: string
   const cleanup = async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); };
   return { root, credentialDirectory, agents, calls, seen, run, mint, effects, cleanup };
 }
-const starts = (calls: string[][]) => calls.filter(call => call[0] === 'agent' && call[1] === 'start').map(call => call[2]);
+const starts = (calls: string[][]) => calls.filter(call => call[0] === 'agent' && call[1] === 'rename').map(call => call[3]);
 const tag = (requestId: string) => requestId.slice(0, 8);
 
 test('integration:concurrent-reviews — a reviewer profile with concurrency 3 runs three reviews at once, each session named for its request, and the second launches while the first runs', async () => {
