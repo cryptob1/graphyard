@@ -593,17 +593,24 @@ const within = (path: string, parent: string) => path === parent || path.startsW
  */
 export const temporaryDirectories = () => [...new Set([tmpdir(), '/tmp', '/var/tmp'].map(canonical))];
 
-/** Node's test runner marks every process it runs a test file in; the guard below keys on that mark. */
-export const underTestRunner = (env: NodeJS.ProcessEnv = process.env, execArgv: string[] = process.execArgv) => !!env.NODE_TEST_CONTEXT || execArgv.includes('--test');
+/**
+ * Whether this process is the test suite. Node's test runner marks every process it runs a test
+ * file in (`NODE_TEST_CONTEXT` in the children `--test` spawns, `--test` itself on the runner), and
+ * `npm test` marks everything it starts with its lifecycle event. The marks are read from the real
+ * process only: a `LoopSupervisorHost.env` says where a unit goes, never whether this is a test, so
+ * no argument a test passes — or forgets — can switch the guard below off.
+ */
+export const underTestRunner = () => !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
 /**
  * The one guard the test suite shares. Under the test runner the loop's unit directory must be
  * rooted in the system temporary directory, so a test that reaches `setupMaster` or
  * `installLoopSupervisor` runs against a temp-rooted home or is refused here, before anything is
  * written — enforced once, at the only place that writes the unit, rather than by each test
- * remembering to redirect its host's home.
+ * remembering to redirect its host's home. It takes only the directory: the test-runner mark comes
+ * from this process, not from the host the caller built.
  */
-export function testSuiteHomeGuard(unitDirectory: string, env: NodeJS.ProcessEnv = process.env, execArgv: string[] = process.execArgv) {
-  if (!underTestRunner(env, execArgv)) return;
+export function testSuiteHomeGuard(unitDirectory: string) {
+  if (!underTestRunner()) return;
   const temporary = canonical(tmpdir());
   if (within(canonical(unitDirectory), temporary)) return;
   throw new LoopSupervisorRefusal(`the test suite may not write ${unitDirectory}: under the test runner the loop's unit directory must be rooted in ${temporary}`,
@@ -765,13 +772,15 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
   const performed: string[] = [];
   let existing: string | null = null;
   const refused = (refusal: LoopSupervisorRefusal): LoopSupervisorInstallation => {
-    // Nothing was written; what is there is reported as observed, so setup never claims a state.
+    // Nothing was written; what is there is reported as observed, so setup never claims a state. A
+    // refusal raised before the unit was read still reports the unit that exists, not `installed: false`.
+    const present = existing !== null || existsSync(unitPath);
     const observed = observeUnit(run);
-    return { supported: true, unit: loopUnitName, unitPath, installed: existing !== null, enabled: existing === null ? false : observed.enabled, active: existing === null ? false : observed.active,
+    return { supported: true, unit: loopUnitName, unitPath, installed: present, enabled: present ? observed.enabled : false, active: present ? observed.active : false,
       linger: null, wrote: 'refused', refused: refusal.message, performed: [], reason: `Installing the loop's supervisor was refused: ${refusal.message}`, instruction: refusal.instruction };
   };
   try {
-    testSuiteHomeGuard(unitDirectory, host.env);
+    testSuiteHomeGuard(unitDirectory);
     assertCoordinatorCheckout(input.root, host);
   } catch (error) { if (error instanceof LoopSupervisorRefusal) return refused(error); throw error; }
   try { existing = await readFile(unitPath, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }

@@ -430,16 +430,40 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     // 5. The shared test guard: under the test runner, a home outside the system temporary
     //    directory is refused at the installer, whatever the test passed and before it reads or
     //    writes anything — the real user home included, which this proof leaves exactly as found.
-    assert.throws(() => testSuiteHomeGuard(join(homedir(), '.config/systemd/user')), (error: unknown) => error instanceof LoopSupervisorRefusal && /test suite may not write/.test(error.message));
+    const realDirectory = join(homedir(), '.config/systemd/user');
+    assert.throws(() => testSuiteHomeGuard(realDirectory), (error: unknown) => error instanceof LoopSupervisorRefusal && /test suite may not write/.test(error.message));
     assert.doesNotThrow(() => testSuiteHomeGuard(join(home, '.config/systemd/user')), 'a temp-rooted home passes');
-    assert.doesNotThrow(() => testSuiteHomeGuard(join(homedir(), '.config/systemd/user'), {}, []), 'outside the test runner the guard is not a test guard');
-    const real = stub();
-    const guarded = await installLoopSupervisor(unit(coordinator), { ...real.host, home: homedir() });
-    assert.equal(guarded.wrote, 'refused');
-    assert.match(guarded.refused!, /test suite may not write/);
-    assert.match(guarded.instruction!, /home under the system temporary directory/);
-    assert.deepEqual(changes(real.calls), []);
-    assert.deepEqual(await fileState(realUnit), realBefore, 'the unit under the real user home is exactly as it was');
+    // The test-runner mark is this process's own, so the host's `env` — the documented way a test
+    // redirects HOME, and the argument a test that "forgot" leaves empty — cannot switch the guard
+    // off: every host below resolves the unit directory to the real user home and every one is refused.
+    const hosts: Record<string, Partial<Parameters<typeof installLoopSupervisor>[1]>> = {
+      'home: real': { home: homedir() },
+      'env: {}': { env: {} },
+      'env: { HOME: real }': { env: { HOME: homedir() } },
+      'env: { PATH }': { env: { PATH: process.env.PATH } },
+      'env: { XDG_CONFIG_HOME: real }': { env: { XDG_CONFIG_HOME: join(homedir(), '.config') } },
+    };
+    for (const [name, override] of Object.entries(hosts)) {
+      const real = hostStub();
+      const host = { ...real.host, temporaryDirectories: [volatile], ...override };
+      assert.equal(loopUnitDirectory(host), realDirectory, `${name} resolves to the real unit directory`);
+      const guarded = await installLoopSupervisor(unit(coordinator), host);
+      assert.equal(guarded.wrote, 'refused', `${name}: ${JSON.stringify(guarded)}`);
+      assert.match(guarded.refused!, /test suite may not write/, name);
+      assert.match(guarded.instruction!, /home under the system temporary directory/, name);
+      assert.deepEqual(changes(real.calls), [], `${name}: nothing was reloaded, enabled, started or restarted`);
+      assert.deepEqual(guarded.performed, [], name);
+      assert.equal(guarded.installed, realBefore !== null, `${name}: a refusal reports the unit that exists under the real home, not a state it never read`);
+      assert.deepEqual(await fileState(realUnit), realBefore, `${name}: the unit under the real user home is exactly as it was`);
+    }
+    // Outside the test runner — the operator's `master init` — the guard is not a test guard. That
+    // is shown by a process without the runner's marks, since nothing in-process can drop them.
+    const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
+    const bare = Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_TEST_CONTEXT' && key !== 'npm_lifecycle_event' && !key.startsWith('NODE_OPTIONS')));
+    const outside = execFileSync(process.execPath, ['--import', 'tsx', '-e',
+      "import('./src/supervisor.ts').then(m => { m.testSuiteHomeGuard(process.env.GUARDED_DIRECTORY); console.log(JSON.stringify({ underTestRunner: m.underTestRunner() })); })"],
+      { cwd: repositoryRoot, encoding: 'utf8', env: { ...bare, GUARDED_DIRECTORY: realDirectory }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+    assert.deepEqual(JSON.parse(outside.trim().split(/\r?\n/).at(-1)!), { underTestRunner: false }, 'without the marks the real home is not refused');
 
     // 6. Structurally: the install is reached from setupMaster only through the explicit option,
     //    which master init alone passes; nothing derives it from another argument; and the guard
@@ -457,7 +481,9 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     assert.deepEqual(callers.sort(), ['master.ts', 'supervisor.ts'], 'no other source reaches the installer');
     const supervisor_ts = source('supervisor.ts');
     const installer = supervisor_ts.slice(supervisor_ts.indexOf('export async function installLoopSupervisor('));
-    assert.ok(installer.indexOf('testSuiteHomeGuard(unitDirectory') > 0 && installer.indexOf('testSuiteHomeGuard(unitDirectory') < installer.indexOf('await mkdir('), 'the guard runs before the installer writes');
+    assert.ok(installer.indexOf('testSuiteHomeGuard(unitDirectory);') > 0 && installer.indexOf('testSuiteHomeGuard(unitDirectory);') < installer.indexOf('await mkdir('), 'the guard runs before the installer writes, given the directory and nothing the caller built');
+    assert.match(supervisor_ts, /^export function testSuiteHomeGuard\(unitDirectory: string\) \{$/m, 'the guard takes no env or argv override');
+    assert.match(supervisor_ts, /^export const underTestRunner = \(\) =>/m, 'the runner mark is read from the real process only');
     assert.ok(installer.indexOf('assertCoordinatorCheckout(input.root') < installer.indexOf('await readFile('), 'and the WorkingDirectory is judged before the existing unit is read');
     assert.equal((await readdir(join(home, '.config/systemd/user'))).filter(name => name.endsWith('.tmp')).length, 0, 'no temporary unit file is left behind');
   } finally {
