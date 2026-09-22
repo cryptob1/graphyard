@@ -9,7 +9,7 @@ import type { SessionHandleInput } from './model/sessions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
-import { agentOwner, assertOutsideWorktrees, herdrErrorCode, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, selectionKey, sessionAgentName, sessionWords, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { launchReview, reconcileReviews, type ReviewRecord } from './reviewer.js';
 import { independentProducerProfiles, launchProducer, reconcileProducers, sessionRetry, type ProducerRecord } from './producer.js';
@@ -211,48 +211,59 @@ export interface DispatchEffects {
 }
 
 /**
- * A launched session Herdr cannot find within seconds of its launch. The launcher's first read of
- * the pane — `agent get` after `agent start` timed out on readiness, or a start that failed for
- * something other than that timeout — answers `agent_not_found` when the runtime already exited,
- * and Herdr's JSON error says nothing about why. The pane still holds what the runtime printed
- * last, and that is the classification (GY-120): a provider limit notice is account exhaustion,
- * anything else is recorded with the pane's last words rather than the CLI's error.
+ * A launched session Herdr cannot find within seconds of its launch. The launcher types the
+ * launch into the pane and reads it until the runtime is ready (master.ts, `awaitRuntimeStart`):
+ * `herdr agent get` answers `agent_not_found` while the runtime is not there, which says nothing
+ * about why, and `herdr pane read` shows what the runtime printed. A runtime that printed its
+ * provider's limit notice and exited leaves the notice under its banner, and the banner alone
+ * would hold the launcher's start bound to its ceiling before the refusal. The dispatcher watches
+ * each launch's reads of its own pane (GY-120): a provider limit notice on the pane is account
+ * exhaustion — the launch is refused at the next pause between the launcher's polls, the account
+ * is held and the request launches on the profile's next account exactly as a mid-session
+ * exhaustion does — and any other refusal is the launcher's own, which names the case it saw and
+ * the pane's last words rather than the CLI's JSON error.
  */
-export interface InstantExit { pane: string; words: string; notice: ExhaustionSignal | null }
+export interface InstantExit { pane: string; words: string; notice: ExhaustionSignal }
 export class InstantExitError extends Error {
   constructor(readonly instantExit: InstantExit, override readonly cause: unknown) {
-    super(instantExit.notice ? `the session exited within seconds of its launch on its provider's limit notice: ${instantExit.notice.reason}`
-      : `the session exited within seconds of its launch; its pane last printed: ${instantExit.words ? `"${instantExit.words}"` : 'nothing'}`);
+    super(`the session exited within seconds of its launch on its provider's limit notice: ${instantExit.notice.reason}`);
   }
 }
-export const instantExitTailLines = 40;
 /** How many times one profile launches again on its next account within a single tick after such exits. */
 export const instantExitRelaunchLimit = 4;
 export type HerdrRun = (command: string, args: string[]) => string;
+export interface InstantExitWatch {
+  /** The launcher's Herdr calls, with each read of the pane it typed the launch into remembered. */
+  run: HerdrRun;
+  /** The launcher's pause between polls of that pane: a pane already showing the notice is refused here, never waited out. */
+  start: StartBounds;
+  /** A refusal the launcher raised at its bound, classified from the pane's last read; any other error as it came. */
+  classify: (error: unknown) => unknown;
+}
 /**
- * The launcher's Herdr calls, with the first failed read of the pane it just started classified
- * from that pane's own output. One wrapper per launch: it remembers the pane `agent start` named
- * and touches nothing else the launcher runs.
+ * One watch per launch: it remembers the pane `pane run` typed the launch into and that pane's
+ * last screen, and touches nothing else the launcher runs. The screen is read from the launcher's
+ * own `pane read`, so the pane is read no more often than the launcher reads it and never after
+ * the launcher closed it.
  */
-export function classifyInstantExit(run: HerdrRun, now: () => number = Date.now): HerdrRun {
-  let pane: string | null = null;
-  const tail = (target: string) => { try { return String(run('herdr', ['pane', 'read', target, '--source', 'recent-unwrapped', '--lines', String(instantExitTailLines), '--format', 'text'])); } catch { return null; } };
-  const gone = (target: string) => { try { run('herdr', ['agent', 'get', target]); return false; } catch (error) { return herdrErrorCode(error) === 'agent_not_found'; } };
-  return (command, args) => {
-    const start = command === 'herdr' && args[0] === 'agent' && args[1] === 'start';
-    if (start) { const flag = args.indexOf('--pane'); pane = flag >= 0 ? args[flag + 1] ?? null : null; }
-    try { return run(command, args); }
-    catch (error) {
-      if (command !== 'herdr' || !pane || args[0] !== 'agent') throw error;
-      const code = herdrErrorCode(error);
-      // A readiness timeout is followed by the launcher's own `agent get`, which is the read
-      // classified below; any other start failure is checked here for a session already gone.
-      const exited = args[1] === 'get' && args[2] === pane ? code === 'agent_not_found' : start && code !== 'timeout' && gone(pane);
-      if (!exited) throw error;
-      const text = tail(pane);
-      if (text === null) throw error;
-      throw new InstantExitError({ pane, words: sessionWords(text), notice: detectExhaustion(text, now()) }, error);
-    }
+export function watchInstantExit(run: HerdrRun, now: () => number = Date.now): InstantExitWatch {
+  let pane: string | null = null, screen: string | null = null, missing: unknown = null;
+  const exit = () => { const notice = pane && screen !== null ? detectExhaustion(screen, now()) : null; return notice ? new InstantExitError({ pane: pane!, words: sessionWords(screen), notice }, missing) : null; };
+  return {
+    run: (command, args) => {
+      const herdr = command === 'herdr';
+      if (herdr && args[0] === 'pane' && args[1] === 'run') { pane = args[2] ?? null; screen = null; missing = null; }
+      try {
+        const result = run(command, args);
+        if (herdr && pane && args[0] === 'pane' && args[1] === 'read' && args[2] === pane) screen = String(result);
+        return result;
+      } catch (error) {
+        if (herdr && pane && args[0] === 'agent' && args[1] === 'get' && args[2] === pane && herdrErrorCode(error) === 'agent_not_found') missing = error;
+        throw error;
+      }
+    },
+    start: { wait: ms => { const exited = exit(); if (exited) throw exited; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } },
+    classify: error => error instanceof SessionStartError && error.pane === pane && error.startCase !== 'blocked' ? exit() ?? error : error,
   };
 }
 
@@ -571,9 +582,10 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
-    // Each launch's first failed read of its own pane is classified from what the pane printed.
-    launchReview: (work, request, profile, agents, observedAt) => launchReview(root, work, profile.name, agents, observedAt, { run: classifyInstantExit(run, deps.now), requestId: request.id }),
-    launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run: classifyInstantExit(run, deps.now) }),
+    // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
+    // limit notice is failed over below rather than counted as a refusal.
+    launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id }).catch(error => { throw watch.classify(error); }); },
+    launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start }).catch(error => { throw watch.classify(error); }); },
     // The handle goes where every Graphyard reader already looks, so watching a reviewer or
     // producer session the loop launched never means reading this host's own ledger.
     recordSession: (work: Work, handle: SessionHandleInput) => mutate(`work/${work.id}/session`, handle, randomUUID()),

@@ -11,10 +11,11 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { createSchema, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { automatableOutcomes, automatableProof, dispatchIneligibility, dispatchRequestsFor, reconcileAutoDispatch, reviewNeed, type DispatchRequest } from '../src/model/dispatch.js';
-import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, observedExhaustions, producerProfileSchema, readEnvironmentLog, saveProducerProfile, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
+import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, observedExhaustions, paneLastLine, producerProfileSchema, readEnvironmentLog, saveProducerProfile, SessionStartError, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
 import { assertProducerCandidate, independentProducerProfiles, launchProducer, producerIdleGraceMs, producerPrompt, proofOutcome, readProducerLedger, reconcileProducers, summarizeProducers, type ProducerRecord } from '../src/producer.js';
-import { attributePersistFailure, bounded, capacityReasonLimit, classifyInstantExit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
+import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, watchInstantExit, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { exhaustionReportSchema } from '../src/model/capacity.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
@@ -242,16 +243,17 @@ test('integration:auto-dispatch-review — a pending reviewer session for a repl
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
     const config = await loadMasterConfig(root);
     const calls: string[][] = [];
-    const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
+    const run = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
     const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
     const item = work({ observation: observation({ sha: H, baseSha: B }, { at: new Date().toISOString() }) });
     reconcileAutoDispatch(item, [item], new Date());
     const request = item.autoDispatch!.review!;
     const launched = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint, requestId: request.id });
     assert.equal(launched.requestId, request.id);
-    // GY-93: the request is the last argument of the start, the runtime's positional prompt.
-    assert.deepEqual(calls[1].slice(0, 2), ['agent', 'start']);
-    assert.match(calls[1].at(-1)!, /repeat it every 5 seconds until mergeable is no longer UNKNOWN/, 'the reviewer polls mergeability before posting');
+    // GY-93: the request is the last argument of the runtime's command line, its positional
+    // prompt, which the shell reads from the request file the typed line references (GY-121).
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'pane-review']);
+    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, /repeat it every 5 seconds until mergeable is no longer UNKNOWN/, 'the reviewer polls mergeability before posting');
     const ledger = await readReviewLedger(root);
     assert.equal(ledger.reviews[0].requestId, request.id); assert.equal(ledger.reviews[0].state, 'pending');
     const sessionDirectory = ledger.reviews[0].sessionDirectory;
@@ -434,17 +436,21 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
     for (const fragment of ['GY-64', '#64', H, B, 'policy revision 1', 'integration:auto-dispatch-review', 'integration:auto-dispatch-producers', 'never print, copy, cat, or echo', 'git worktree add --detach', '"result":"pass"|"fail"', `node ${config.cliPath} evidence GY-64`, 'never weaken, skip or narrow a test']) assert.ok(prompt.includes(fragment), `the producer prompt must state ${fragment}`);
     assert.equal(prompt.includes('producer-token-'), false, 'the credential value never reaches the prompt');
     const calls: string[][] = [];
-    const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-produce', tab_id: 'tab-produce' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
+    const run = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-produce', tab_id: 'tab-produce' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
     const launched = await launchProducer(root, item, request, profile, [], new Date().toISOString(), { run });
     assert.deepEqual([launched.work, launched.sha, launched.group, launched.pane, launched.principal, launched.requestId], ['GY-64', H, 'integration', 'pane-produce', 'proof-runner', request.id]);
     const tab = calls[0];
     assert.ok(tab.includes(`GRAPHYARD_TOKEN_FILE=${credential}`), 'the session receives the credential path, not the value');
     assert.equal(JSON.stringify(calls).includes('producer-token-'), false);
     assert.ok(tab.includes('GRAPHYARD_URL=https://graphyard.example') && tab.includes(`GRAPHYARD_PRODUCER=GY-64@${H}`));
-    assert.deepEqual(calls[1].slice(0, 6), ['agent', 'start', 'produce-a', '--kind', 'claude', '--pane']);
-    // GY-93: the request rides the start as the positional prompt; nothing is pasted afterwards.
+    assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'pane-produce']);
+    const typed = expandTypedCommand(calls[1][3]);
+    assert.equal(typed.kind, 'claude'); assert.deepEqual(calls.find(call => call[0] === 'agent' && call[1] === 'rename')?.slice(2), ['pane-produce', 'produce-a']);
+    // GY-93: the request is the runtime's positional prompt; nothing is pasted afterwards. GY-121:
+    // the shell reads it from the request file in the session checkout, never from the typed line.
     // GY-88: it names the session directory the launch allocated under the managed worktree root.
-    assert.equal(calls[1].at(-1), producerPrompt(config, { ...binding, checkout: launched.checkout }, profile)); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
+    assert.equal(typed.args.at(-1), producerPrompt(config, { ...binding, checkout: launched.checkout }, profile)); assert.equal(typed.stem, join(launched.checkout, '.graphyard/launch/produce-a'));
+    assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readProducerLedger(root);
     assert.equal(ledger.producers.length, 1); assert.equal(ledger.producers[0].state, 'pending'); assert.deepEqual(ledger.producers[0].outcome, { 'integration:auto-dispatch-review': 'missing', 'integration:auto-dispatch-producers': 'missing' });
     assert.equal((await stat(join(root, '.graphyard/producers.json'))).mode & 0o777, 0o600);
@@ -681,19 +687,22 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     const config = await loadMasterConfig(root);
     const item = requestedWork();
     const resetsAt = '2026-09-26T07:00:00Z';
-    // The stub runtime under a stub Herdr: on env-a it prints the weekly-limit notice and exits before `agent get` can
-    // read it (a readiness timeout, then agent_not_found with a long JSON body); on env-b it starts.
+    // The stub runtime under a stub Herdr: on env-a it prints the weekly-limit notice and exits before Herdr ever
+    // sees it (`agent get` answers agent_not_found with a long JSON body on every read, the pane holds the notice
+    // under the banner); on env-b it starts at once.
     const calls: string[][] = []; let account = '';
     const herdrFailure = (code: string, detail: unknown) => Object.assign(new Error(`Command failed: herdr (${code})`), { stdout: JSON.stringify({ error: { code, message: `${code}: ${JSON.stringify(detail)}` } }) });
     const run = (_command: string, args: string[]) => {
       calls.push(args);
       if (args[0] === 'tab' && args[1] === 'create') { account = args.find(arg => arg.startsWith('CLAUDE_CONFIG_DIR='))!.split('/').at(-1)!; return JSON.stringify({ result: { root_pane: { pane_id: `pane-${account}`, tab_id: `tab-${account}` } } }); }
-      if (args[0] === 'agent' && args[1] === 'start') { if (account === 'env-a') throw herdrFailure('timeout', 'the agent did not become ready within 30000ms'); return JSON.stringify({ result: {} }); }
-      if (args[0] === 'agent' && args[1] === 'get') throw herdrFailure('agent_not_found', { pane: args[2], panes: Array.from({ length: 30 }, (_, index) => ({ pane_id: `pane-${index}`, agent: null, cwd: root })) });
-      if (args[0] === 'pane' && args[1] === 'read') return `╭─ Claude Code ─╮\n● Starting…\n  ⎿ You've hit your weekly limit · resets ${resetsAt}\n`;
+      if (account === 'env-a') {
+        if (args[0] === 'pane' && args[1] === 'run') return '';
+        if (args[0] === 'agent' && args[1] === 'get') throw herdrFailure('agent_not_found', { pane: args[2], panes: Array.from({ length: 30 }, (_, index) => ({ pane_id: `pane-${index}`, agent: null, cwd: root })) });
+        if (args[0] === 'pane' && args[1] === 'read') return `╭─ Claude Code ─╮\n● Starting…\n  ⎿ You've hit your weekly limit · resets ${resetsAt}\n`;
+      }
       if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
       if (args[0] === 'agent' && args[1] === 'list') return JSON.stringify({ result: { agents: [] } });
-      return JSON.stringify({ result: {} });
+      return startedAtOnce(args) ?? JSON.stringify({ result: {} });
     };
     const mutations: { path: string; body: any }[] = [], log: string[] = [];
     const effects = dispatchEffects(root, config, { snapshot: async () => ({ work: [item], now: new Date().toISOString() }), mutate: async (path, body) => { mutations.push({ path, body }); return {}; }, run, log: line => log.push(line) });
@@ -710,7 +719,8 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     assert.equal(held['env-a'].reason, `You've hit your weekly limit · resets ${resetsAt}`);
     const tabs = calls.filter(args => args[0] === 'tab' && args[1] === 'create').map(args => args.find(arg => arg.startsWith('CLAUDE_CONFIG_DIR='))!.split('/').at(-1));
     assert.deepEqual(tabs, ['env-a', 'env-b']);
-    assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'read').map(args => args[2]), ['pane-env-a'], 'the pane is read once, before its tab is closed');
+    assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'read').map(args => args[2]), ['pane-env-a'], 'the pane is read once, at the first observation and before its tab is closed: the notice is never waited out against the start bound');
+    assert.equal(calls.some(args => args[0] === 'agent' && args[1] === 'rename' && args[2] === 'pane-env-a'), false, 'nothing is named on the exited pane');
     assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'close').map(args => args[2]), ['pane-env-a'], 'the exited session\'s tab is closed; the running one stays');
     const skipped = (await readEnvironmentLog(config)).skipped.at(-1)!;
     assert.deepEqual([skipped.environment, skipped.cause, skipped.profile], ['env-a', 'exhausted', 'producer-a']); assert.match(skipped.reason, /env-a exhausted its quota mid-session/);
@@ -722,28 +732,45 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     assert.deepEqual(exhaustionReportSchema.parse(capacity.body), { event: 'exhausted', role: 'producer', requestId: launched.requestId, profile: 'producer-a', account: 'env-a', runtime: 'claude', reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z',
       partialWork: { state: 'not-applicable', detail: 'the session exited at launch on the provider limit notice: it read nothing and edited nothing' } });
     assert.ok(mutations.some(entry => entry.path === `work/${item.id}/session`), 'the launched session records its handle');
-    // Any other cause is the refusal it was, with the pane's last words rather than the CLI's JSON error; the
-    // classification covers a start that failed for anything but the readiness timeout, and touches no other read.
-    const crashedRun = (_command: string, args: string[]) => {
-      if (args[0] === 'agent' && args[1] === 'start') throw herdrFailure('agent_exited', 'the runtime exited with status 1');
-      if (args[0] === 'agent' && args[1] === 'get') throw herdrFailure('agent_not_found', { pane: args[2] });
-      if (args[0] === 'pane' && args[1] === 'read') return "$ claude --permission-mode bypassPermissions\nError: ENOENT: no such file or directory, open '/nope/.claude.json'\n$ \n";
-      return '{"result":{}}';
-    };
-    const crashed = classifyInstantExit(crashedRun, () => clock);
-    const start = ['agent', 'start', 'produce-a', '--kind', 'claude', '--pane', 'pane-9', '--timeout', '30000', '--', 'claude'];
-    let failure: any; try { crashed('herdr', start); } catch (error) { failure = error; }
-    assert.ok(failure instanceof InstantExitError); assert.equal(failure.instantExit.notice, null); assert.equal(failure.instantExit.pane, 'pane-9');
-    assert.equal(failure.message, 'the session exited within seconds of its launch; its pane last printed: "$ claude --permission-mode bypassPermissions Error: ENOENT: no such file or directory, open \'/nope/.claude.json\' $"');
-    assert.equal(failure.message.includes('agent_not_found'), false); assert.match((failure.cause as { stdout: string }).stdout, /agent_exited/);
-    let other: any; try { crashed('herdr', ['agent', 'get', 'pane-other']); } catch (error) { other = error; }
-    assert.equal(other instanceof InstantExitError, false, 'a read of another pane is not the launch\'s first read');
-    const unreadable = classifyInstantExit((_command, args) => { if (args[0] === 'pane' && args[1] === 'read') throw new Error('pane gone'); return crashedRun(_command, args); }, () => clock);
-    let bare: any; try { unreadable('herdr', start); } catch (error) { bare = error; }
-    assert.equal(bare instanceof InstantExitError, false); assert.match(bare.stdout, /agent_exited/);
+    // Any other cause is the refusal the launcher worded — the case it saw and the pane's last words, never the
+    // CLI's JSON error — and the watch leaves it exactly as it came: a start refused for a runtime that crashed,
+    // one whose pane could not be read, and an error that is no start refusal at all.
+    const typed = (watch: ReturnType<typeof watchInstantExit>, pane: string) => { watch.run('herdr', ['pane', 'run', pane, 'GY=/s; claude']); try { watch.run('herdr', ['agent', 'get', pane]); } catch { /* not found */ } };
+    const crashedScreen = "$ claude --permission-mode bypassPermissions\nError: ENOENT: no such file or directory, open '/nope/.claude.json'\n";
+    const crashedRun = (_command: string, args: string[]) => { if (args[0] === 'agent' && args[1] === 'get') throw herdrFailure('agent_not_found', { pane: args[2] }); if (args[0] === 'pane' && args[1] === 'read') return crashedScreen; return '{"result":{}}'; };
+    const crashed = watchInstantExit(crashedRun, () => clock);
+    typed(crashed, 'pane-9'); assert.equal(crashed.run('herdr', ['pane', 'read', 'pane-9', '--source', 'recent-unwrapped', '--lines', '40']), crashedScreen);
+    const waited = Date.now(); crashed.start.wait!(1); assert.ok(Date.now() - waited < 1000, 'a pane without the notice is waited on, as the launcher asked');
+    const refusal = new SessionStartError('never started', 'pane-9', paneLastLine(crashedScreen), 30_000, `the claude runtime never started within 30 s in pane pane-9 (no runtime under the pane); the pane last showed: "${paneLastLine(crashedScreen)}"`);
+    assert.equal(crashed.classify(refusal), refusal);
+    assert.equal(refusal.message.includes('agent_not_found'), false); assert.match(refusal.message, /Error: ENOENT: no such file or directory/);
+    const unreadable = watchInstantExit((_command, args) => { if (args[0] === 'pane' && args[1] === 'read') throw new Error('pane gone'); return crashedRun(_command, args); }, () => clock);
+    typed(unreadable, 'pane-9'); assert.throws(() => unreadable.run('herdr', ['pane', 'read', 'pane-9']), /pane gone/);
+    assert.equal(unreadable.classify(refusal), refusal);
+    const other = herdrFailure('agent_exited', 'the runtime exited with status 1');
+    assert.equal(crashed.classify(other), other, 'an error that is no start refusal is not classified');
+    // The pane that shows the notice: the launcher's next pause is the refusal, with the notice and the session's
+    // last words, and Herdr's agent_not_found as its cause; a refusal the launcher raised at its bound with the
+    // notice on the pane is classified the same way. A read of another pane is not the launch's pane.
+    const noticeScreen = `╭─ Claude Code ─╮\n● Starting…\n  ⎿ You've hit your weekly limit · resets ${resetsAt}\n`;
+    const noticed = watchInstantExit((_command, args) => { if (args[0] === 'agent' && args[1] === 'get') throw herdrFailure('agent_not_found', { pane: args[2] }); if (args[0] === 'pane' && args[1] === 'read') return noticeScreen; return '{"result":{}}'; }, () => clock);
+    typed(noticed, 'pane-1'); noticed.run('herdr', ['pane', 'read', 'pane-other']);
+    noticed.start.wait!(1);
+    noticed.run('herdr', ['pane', 'read', 'pane-1']);
+    let exited: any; try { noticed.start.wait!(500); } catch (error) { exited = error; }
+    assert.ok(exited instanceof InstantExitError, 'the pause between polls refuses the launch rather than waiting out the bound');
+    assert.equal(exited.message, `the session exited within seconds of its launch on its provider's limit notice: You've hit your weekly limit · resets ${resetsAt}`);
+    assert.deepEqual(exited.instantExit, { pane: 'pane-1', words: `╭─ Claude Code ─╮ ● Starting… ⎿ You've hit your weekly limit · resets ${resetsAt}`, notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z' } });
+    assert.match((exited.cause as { stdout: string }).stdout, /agent_not_found/); assert.equal(exited.message.includes('agent_not_found'), false);
+    const atBound = new SessionStartError('still starting', 'pane-1', paneLastLine(noticeScreen), 120_000, 'the claude runtime was still starting after 120 s in pane pane-1 (the claude banner is on screen)');
+    assert.deepEqual((noticed.classify(atBound) as InstantExitError).instantExit, exited.instantExit);
+    const elsewhere = new SessionStartError('never started', 'pane-2', '', 30_000, 'the claude runtime never started within 30 s in pane pane-2 (no runtime under the pane); the pane showed nothing');
+    assert.equal(noticed.classify(elsewhere), elsewhere, 'a refusal for another pane is not this launch\'s exit');
+    const dialog = new SessionStartError('blocked', 'pane-1', 'Yes, I trust this folder', 0, 'the claude runtime is blocked before it is ready in pane pane-1 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"');
+    assert.equal(noticed.classify(dialog), dialog, 'a runtime Herdr found at a dialog did not exit');
     // A dispatcher wired without an account hold records the notice itself as the refusal, bounded, never the JSON.
-    const noticed = new InstantExitError({ pane: 'pane-1', words: '', notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z' } }, herdrFailure('agent_not_found', { pane: 'pane-1' }));
-    const bareTick = await runDispatchTick(masterConfig(join(credentialDirectory, 'coordinator.token')), emptyDispatchCursor(config), stubEffects(() => [item], [], { launchProducer: async () => { throw noticed; } }), () => clock);
+    const bareNotice = new InstantExitError({ pane: 'pane-1', words: '', notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z' } }, exited.cause);
+    const bareTick = await runDispatchTick(masterConfig(join(credentialDirectory, 'coordinator.token')), emptyDispatchCursor(config), stubEffects(() => [item], [], { launchProducer: async () => { throw bareNotice; } }), () => clock);
     assert.equal(bareTick.refused.length, 2); assert.equal(bareTick.refused[0].reason, `the session exited within seconds of its launch on its provider's limit notice: You've hit your weekly limit · resets ${resetsAt}`);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(homes, { recursive: true, force: true }); }
 });

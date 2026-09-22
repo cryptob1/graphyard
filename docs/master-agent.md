@@ -127,15 +127,36 @@ When **every** launch profile of a role is unavailable for the same reason — e
 
 Every session Graphyard launches — a worker under `watch`, the reviewer and producer sessions the loop starts, the approver, the master itself — receives its instruction as the session's own first request, on the runtime's command line: Claude Code, Codex and Cursor take it as the positional prompt after their flags, OpenCode through `--prompt`. It is never typed into the running session. `herdr agent prompt` delivers text through bracketed paste, and a coding agent treats pasted text as untrusted data rather than as a request from its operator — correctly, against prompt injection — so a session launched that way often ended its first turn having refused to act, and the loop recorded it as failed with `finished (done) without trusted evidence` and spent a retry on work that was never attempted (GY-93). `master status` shows `delivery: request` on the session, or `paste` for a runtime Graphyard has no request contract for, which is still prompted after it starts.
 
-A runtime busy on its request may not show Herdr a prompt-ready session within the start bound; a start that times out on a pane where Herdr sees the expected runtime acting is a session that started, and the launcher names it rather than closing it. A worker is likewise accepted as started when the supervisor's session is first seen `working`.
+#### How the request reaches the runtime
+
+The request is not typed into the pane. Herdr types a launch command into an interactive shell keystroke by keystroke, and the shell redraws the line as it grows, so a request of several kilobytes took the whole start bound just to echo on a loaded host and the runtime was declared dead before it existed (GY-121). The launcher writes the request and, for a Claude Code session under a [role file](#session-harness-rules), the launch authorization to files inside the session's own checkout directory — `.graphyard/launch/NAME.request` and `NAME.role`, mode 0600, under the worker's assigned worktree, the reviewer's or producer's session checkout, or the repository root for the master, an approver and an escalation handler — and types a short command line that references them through their shared stem:
+
+```
+GY=/path/to/checkout/.graphyard/launch/NAME; claude --permission-mode bypassPermissions --setting-sources user --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
+```
+
+The pane's shell (a POSIX shell: bash or zsh) expands `"$(cat "$GY.request")"` before the runtime starts, so the request is still the runtime's own first argument — the positional prompt for Claude Code, Codex and Cursor, `--prompt` for OpenCode — and never a paste; a worker's line carries the same references after `node CLI watch GY-N EPOCH -- KIND`. What is typed holds only the runtime, its flags and one path, and is bounded at **512 bytes** whatever the request is: a line that would exceed it is refused before anything is typed, naming its length, which only a very long repository path, managed worktree root or `agentArgs` can cause. The files are replaced on every launch under the same name and removed with the checkout; those in the repository root stay under `.graphyard/launch/` (ignored by Git) until the next launch under that name overwrites them.
 
 The positional request follows the profile's `agentArgs` and the role harness on the command line. A runtime that takes a variadic flag (Claude Code's `--add-dir` and `--allowedTools`, for example) would read the request as one more value of that flag if it were the last thing before the request, so `agentArgs` must not end in such a flag: put its values first and a single-valued flag (`--model …`) or nothing after it. When the launcher passes a [role file](#session-harness-rules), its flags come between the profile's arguments and the request; otherwise the request follows `agentArgs` directly.
+
+#### The start bound reads the pane
+
+The start bound is not a guess against a clock. The producers this was filed for died with Claude Code on screen — the request under its own `∙` spinner — while Herdr still reported the pane's runtime `unknown` at 30 seconds, and the launcher, which adopted a timed-out start only on Herdr's `working`, `idle` or `done`, closed a live session. After typing the command the launcher now reads the pane every half second — `herdr agent get` for the runtime Herdr sees occupying it and its state, `herdr pane read` for the terminal text — and distinguishes these cases. The runtime is **ready** once Herdr reports the expected kind `idle`, `done` or `working` (already at work on its request), or once Herdr reports the runtime under the pane in any state and the runtime's own screen is showing — its banner, its status line, or its spinner (`∙ ✻ ✶ ✳ ✢`) at the start of a line; the launch is reported started and Herdr's record of the pane takes the session's name (`started.detail` says which sighting it was, `the claude runtime is on screen while Herdr reports it unknown` for the case above). A runtime Graphyard has no request contract for, which is prompted after it starts, is ready only on Herdr's `idle` or `done`. It is **starting** when the launch command has been accepted and the runtime's process exists under the pane but nothing of it is drawn yet, or the runtime's banner is on screen before Herdr sees a process. It is **blocked** when Herdr reports it at a dialog before it was ever ready — the folder-trust question, an approval — which no launcher answers: refused at once, with the dialog as the pane's last line. It is **absent** when none of these holds: the command is still echoing, the shell is back at its prompt after an error, or the pane holds something else.
+
+A runtime ready within **30 seconds** has started. One that is *starting* at 30 seconds is given more time, up to a ceiling of **120 seconds**, and the launch result says so (`started.extended`); one that is *absent* at 30 seconds, or still starting at the ceiling, is refused. The refusal names which case was seen and the pane's last non-empty line (bounded to 200 characters), never Herdr's own `agent_not_found`:
+
+- `the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing); the pane last showed: "… ❯ GY=…; claude --permission-mode …"` — the shell had not finished taking the command: the host is overloaded, or the pane was not at a prompt.
+- `the claude runtime never started within 30 s in pane w1V:pR6 (no runtime under the pane); the pane last showed: "claude: command not found"` — the runtime's own error, or the shell's: the last line is what to fix.
+- `the claude runtime was still starting after 120 s in pane w1V:pR6 (the claude runtime process exists under the pane, Herdr reports it unknown); the pane last showed: "…"` — the runtime's process exists but nothing of it ever reached the screen.
+- `the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"` — a dialog the runtime raised before taking its request; what it asks is the last line.
+
+A refused start is recorded with that reason wherever launches are recorded: the dispatcher's `failures` for a reviewer or producer request, the row's `attention` in `master status` (`Automatic producer launch for GY-N refused 1 time(s): the claude runtime never started …`), and a worker dispatch's error. The tab is closed and, for a reviewer or producer, the session checkout removed; the loop retries on its widening schedule. One case is not a refusal: a reviewer or producer runtime whose pane shows its provider's limit notice exited on it, and the automatic dispatcher fails the launch over to the next account instead, without waiting for the bound — see [a session that exits at launch](#the-dispatchers-own-state).
 
 #### Confirmed prompt delivery
 
 The paste path remains for the three messages that are typed into a running session: the request of a runtime without a request contract, the loop's one re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged. Each is recorded only once its runtime visibly accepted it: Herdr submits the text and waits for the agent to leave `idle`. A runtime that reports ready before its input is (OpenCode does while its UI loads) drops the text and stays idle, which Herdr reports as a stalled prompt. A stalled prompt is delivered again, up to three times; a session that still has not taken its request is closed — for a worker, the claim is released too — and launched once more from scratch before the launch is reported refused. A session is never left idle until a timeout.
 
-The generated `AGENTS.md` section ([onboarding](onboarding.md#3-connect-a-worker-and-herdr)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher passes the same authorization on its command line (`--append-system-prompt`).
+The generated `AGENTS.md` section ([onboarding](onboarding.md#3-connect-a-worker-and-herdr)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher writes the same authorization to the session's role file and loads it on the command line (`--append-system-prompt-file`, see [how the request reaches the runtime](#how-the-request-reaches-the-runtime)).
 
 ### Acknowledgement, the one re-prompt, and never started
 
@@ -1116,23 +1137,31 @@ while the tick count and the cursor's timestamp made it look alive. Three rules 
   control plane, its credential, Herdr). Every request keeps reading as `waiting` meanwhile, so
   the dispatcher's own health is named before the requests it is not launching.
 
-**A session that exits at launch is classified from its pane.** The launcher's first read of a
-session it just started — `herdr agent get` after `agent start` timed out on readiness, or a
-start that failed for anything but that timeout — answers `agent_not_found` when the runtime has
-already exited, and Herdr's JSON error says nothing about why. The dispatcher reads what the pane
-last printed (`herdr pane read`, the last 40 lines) before the tab is closed:
+**A session that exits at launch is classified from its pane.** The launcher types the launch
+into the pane and [reads the pane](#the-start-bound-reads-the-pane) until the runtime is ready:
+`herdr agent get` answers `agent_not_found` while the runtime is not there, which says nothing
+about why, and `herdr pane read` shows what the runtime printed. A runtime that printed its
+provider's limit notice and exited leaves the notice under its banner, and the banner alone would
+hold the start bound to its 120-second ceiling before the refusal. The dispatcher therefore
+watches each launch's own reads of the pane it typed into — the pane is read no more often than
+the launcher reads it, and never after the launcher closed it — and classifies from the last read:
 
 - a **provider limit notice** (the same notices [mid-session detection](#exhaustion-in-the-middle-of-a-session)
-  matches) records the exit as account exhaustion for the account the launcher selected —
-  `profile:NAME` for a profile that names no `accounts` — and fails over exactly as a mid-session
-  exhaustion does: the account is held until the reset the notice named, `capacity.exhausted` is
-  recorded on the item with `requestId`, profile, account and runtime, and the same profile
-  launches again at once on its next account; a profile with no account left fails over to the
-  next profile, or the role waits for capacity. The tick's launch entry lists each account passed
-  over this way under `failover`, and `master status` shows the hold under `dispatch.accounts`;
-- **any other cause** is recorded as the refusal it was, with the pane's last words as the reason
-  (`the session exited within seconds of its launch; its pane last printed: "…"`) rather than the
-  CLI's error, and retried on the usual widening schedule.
+  matches) is account exhaustion: the launch is refused at the launcher's next pause between
+  polls, within seconds rather than at the bound, and the exit is recorded for the account the
+  launcher selected — `profile:NAME` for a profile that names no `accounts` — and it
+  fails over exactly as a mid-session exhaustion does: the account is held until the reset the notice named,
+  `capacity.exhausted` is recorded on the item with `requestId`, profile, account and runtime, and
+  the same profile launches again at once on its next account; a profile with no account left
+  fails over to the next profile, or the role waits for capacity. The tick's launch entry lists
+  each account passed over this way under `failover`, and `master status` shows the hold under
+  `dispatch.accounts`. A refusal the launcher raised at its bound while the notice was on the pane
+  is classified the same way; a runtime Herdr found at a dialog (`blocked`) did not exit and is not;
+- **any other cause** is the refusal the launcher worded — which case it saw (`no runtime under
+  the pane`, `command still echoing`, the dialog) and the pane's last words as the reason — rather
+  than the CLI's error, and it is retried on the usual widening schedule. A dispatcher wired
+  without an account hold records the notice itself as the refusal
+  (`the session exited within seconds of its launch on its provider's limit notice: …`).
 
 ### Managing profiles
 
