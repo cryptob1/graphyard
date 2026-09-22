@@ -4,7 +4,7 @@ import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPress
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
+import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type CycleMetrics, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -165,7 +165,7 @@ async function terminalDecisions(masterApi: (path: string) => Promise<any>, work
  * overlap holds, and the conflict set of every open candidate probed over the fetched PR heads.
  */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }) {
-  const runtime = observeHerdrAgents();
+  const runtime = await observeHerdrAgents();
   const credentials = await inspectWorkerCredentials(root, master.workers);
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
   const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
@@ -181,11 +181,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // Setup that silently stops every launch: an App registered but never bound, a bound App whose
   // credential is gone, a Herdr workspace that no longer exists.
   const reviewerBinding = await reviewerBindingHealth(master);
-  const workspace = herdrWorkspaceHealth(master);
+  const workspace = await herdrWorkspaceHealth(master);
   const setup = { reviewer: reviewerBinding, herdrWorkspace: workspace, attention: [...reviewerBinding.attention, ...(workspace.exists === false ? [workspace.reason!] : [])] };
   const dispatchCursor = await readDispatchCursor(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000);
-  const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
+  const containment = await assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
   // filling is exactly the condition that stops it. The plan behind the number is the same one the
   // loop and `master reclaim` compute, so the attention item never promises room reclaiming cannot give.
@@ -201,9 +201,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
   // The loop's own health comes before every work item: a coordinator that is absent or stalled is
-  // why nothing else on this list is moving, and no other attention item would say so.
+  // why nothing else on this list is moving, and no other attention item would say so. A cycle
+  // whose own work outgrew its interval is raised here too, naming the step (`daemon.cost`) that
+  // took the time and whether it was computing or waiting on a child, so neither reads as a stall.
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures }), ...approverLaunchAttention(cycling)]
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
@@ -278,10 +280,13 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
   const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
   const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
   const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
+  // Each cycle beside its child waits: a cycle that overran while waiting on gh and one that
+  // overran computing are told apart here (GY-125), and `daemon.cost` names the step behind each.
+  const describe = (metric: CycleMetrics) => ({ cycle: metric.cycle, at: metric.at, durationMs: metric.durationMs, childWaitMs: metric.childWaitMs ?? null, workMs: metric.workMs ?? null });
   return {
-    intervalMs, measured: metrics.length, lastCycle: last ? { cycle: last.cycle, at: last.at, durationMs: last.durationMs } : null,
+    intervalMs, measured: metrics.length, lastCycle: last ? describe(last) : null,
     withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
-    lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
+    lastOverrun: overruns.length ? describe(overruns.at(-1)!) : null,
   };
 }
 

@@ -409,7 +409,7 @@ test('integration:unattended-full-cycle — with no master session and no human 
   await assert.rejects(launchApprover(host.root, item, requested[0].id, 'claude', lingering, simulation.sessions.run), /is already visible in Herdr; let it finish or close it first/);
   const beside = await launchApprover(host.root, item, requested[1].id, 'claude', lingering, simulation.sessions.run);
   assert.equal(beside.agentName, second);
-  assert.deepEqual(listHerdrAgents(simulation.sessions.run).map(agent => [agent.name, agent.agent_status]), [[second, 'working']]);
+  assert.deepEqual((await listHerdrAgents(simulation.sessions.run)).map(agent => [agent.name, agent.agent_status]), [[second, 'working']]);
 
   const kinds = steps(performed);
   const order = (needle: string) => kinds.findIndex(entry => entry === needle);
@@ -700,7 +700,7 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
     environment: { NOTIFY_SOCKET: '/run/user/1000/systemd/notify', WATCHDOG_USEC: String(180 * 1_000_000) },
   });
   assert.deepEqual(notified, ['ready', 'alive']);
-  assert.match(log.join('\n'), /cycle 0 complete in \d+ms; 1 open, 1 actionable, \d+ action\(s\)/, 'the cycle log carries both halves');
+  assert.match(log.join('\n'), /cycle 0 complete in \d+ms \(\d+ms waiting on child processes\); 1 open, 1 actionable, \d+ action\(s\)/, 'the cycle log carries both halves');
   const unsupervised: string[] = [];
   await runDaemon(master, emptyDaemonState(master), simulation.effects({ notify: signal => { unsupervised.push(signal); } }), {
     once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: simulation.now, log: () => {}, signals: [], environment: {},

@@ -1,9 +1,9 @@
-import { execFileSync } from 'node:child_process';
 import { createSign, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
+import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type EnvironmentProbe, type HerdrAgent, type PromptDelivery, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import type { Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -239,7 +239,7 @@ async function writeReviewerSession(directory: string, token: string) {
 }
 
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
-  run?: (command: string, args: string[]) => string;
+  run?: ChildRun;
   mint?: (credential: ReviewerCredential, repository: string) => Promise<{ token: string; expiresAt: string }>;
   now?: () => Date;
   /** The control-plane review request this launch answers; recorded so the request is never launched twice. */
@@ -292,23 +292,23 @@ export async function launchReview(root: string, work: Work, profileName: string
   const sessionDirectory = resolve(dirname(config.reviewer.credentialFile), 'sessions', id);
   try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
   catch (error) { await discard(); throw error; }
-  const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, sharedGitDirectory(root)].filter((path): path is string => !!path) });
+  const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
     // The reviewer loads its own role rules, never the master's: it may post this one verdict.
     // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
     const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
     const environment = { ...launch.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
-    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
       '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
     pane = created.pane; tabId = created.tab;
     // The request is the session's own first message, on the runtime's command line (GY-93).
-    ({ delivery } = startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, dependencies.prompt));
+    ({ delivery } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, dependencies.prompt));
   } catch (error) {
     // A launch that never became a session leaves no checkout behind.
     await discard();
     const malformedTab = (error as any)?.herdrTab as string | undefined;
-    if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
+    if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
       catch { await rm(sessionDirectory, { recursive: true, force: true }); throw new Error(`${error instanceof Error ? error.message : 'Reviewer launch failed'}; Herdr could not confirm cleanup, so the reviewer credential directory was removed and the token will expire at ${minted.expiresAt}`); }
     await rm(sessionDirectory, { recursive: true, force: true });
     // A launch that failed for want of room says so, with the path and the reclaim command.
@@ -348,8 +348,8 @@ const reviewStates = ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'];
  * would read the dismissed review back as its own answer the moment it started and burn every
  * remaining attempt on a verdict GitHub had already withdrawn.
  */
-export function observeReviewVerdict(repository: string, record: ReviewRecord, reviewer: string, run: (command: string, args: string[]) => string, answered: Set<number> = new Set()) {
-  const reviews = JSON.parse(run('gh', ['api', '--paginate', `repos/${repository}/pulls/${record.pr}/reviews`]));
+export async function observeReviewVerdict(repository: string, record: ReviewRecord, reviewer: string, run: ChildRun, answered: Set<number> = new Set()) {
+  const reviews = JSON.parse(await run('gh', ['api', '--paginate', `repos/${repository}/pulls/${record.pr}/reviews`]));
   if (!Array.isArray(reviews)) throw new Error('GitHub did not return a review list for the pending reviewer session');
   const match = reviews.filter((review: any) => review?.commit_id === record.sha && typeof review?.user?.login === 'string' && review.user.login.toLowerCase() === reviewer.toLowerCase() && reviewStates.includes(review?.state) && !answered.has(Number(review?.id))).at(-1);
   return match ? { state: String(match.state), reviewer, reviewId: Number(match.id), submittedAt: String(match.submitted_at ?? new Date().toISOString()) } : null;
@@ -401,9 +401,9 @@ export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'ba
  * path that settles the record: nothing revisits a settled record, so a session directory left
  * behind there would never be removed at all, while a record that stays pending is retried.
  */
-async function closeReviewSession(root: string, record: ReviewRecord, dependencies: { run?: (command: string, args: string[]) => string; now: () => Date }, options: { state: ReviewRecord['state']; resolution?: string; force?: boolean }) {
+async function closeReviewSession(root: string, record: ReviewRecord, dependencies: { run?: ChildRun; now: () => Date }, options: { state: ReviewRecord['state']; resolution?: string; force?: boolean }) {
   let closeFailure: string | undefined;
-  try { if (record.pane) closeHerdrPane(record.pane, dependencies.run); }
+  try { if (record.pane) await closeHerdrPane(record.pane, dependencies.run); }
   catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
   if (!closeFailure || options.force) {
     try { await rm(record.sessionDirectory, { recursive: true, force: true }); }
@@ -427,31 +427,32 @@ async function closeReviewSession(root: string, record: ReviewRecord, dependenci
 // credential directory is removed either way (see closeReviewSession). Given the current work
 // snapshot, a session whose head is no longer the candidate is cancelled the same way, with the
 // reason on the record.
+type ObservedVerdict = { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
 export async function reconcileReviews(root: string, config: MasterConfig, dependencies: {
-  run?: (command: string, args: string[]) => string;
+  run?: ChildRun;
   /** `answered` holds the verdict ids an earlier session of the same head already recorded. */
-  observe?: (record: ReviewRecord, reviewer: string, answered: Set<number>) => { state: string; reviewer: string; reviewId: number; submittedAt: string } | null;
+  observe?: (record: ReviewRecord, reviewer: string, answered: Set<number>) => ObservedVerdict | Promise<ObservedVerdict>;
   now?: () => Date;
   work?: Work[];
   /** Herdr's agent list; null when Herdr could not be read, when a session is never judged finished. */
   agents?: HerdrAgent[] | null;
   /** Retries a session that stopped without a verdict; the default prompts it in Herdr. */
-  retry?: (record: ReviewRecord, message: string) => void;
+  retry?: (record: ReviewRecord, message: string) => void | Promise<void>;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0 };
   const reviewer = `${config.reviewer.slug}[bot]`;
-  const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })), answered));
+  const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? defaultChildRun, answered));
   const now = (dependencies.now ?? (() => new Date()))();
   // The retry goes through the same confirmed delivery as the launch: a prompt the stopped
   // session never visibly accepts throws, and the grace period records it failed as before.
-  const retry = dependencies.retry ?? ((record: ReviewRecord, message: string) => { deliverPrompt(record.agentName, message, dependencies.run); });
+  const retry = dependencies.retry ?? (async (record: ReviewRecord, message: string) => { await deliverPrompt(record.agentName, message, dependencies.run); });
   const ackMs = acknowledgementMs(config);
   let changed = 0;
   for (const record of ledger.reviews) {
     if (record.state !== 'pending') continue;
     const answered = new Set(ledger.reviews.filter(entry => entry.id !== record.id && entry.key === record.key && entry.sha === record.sha && entry.verdict).map(entry => entry.verdict!.reviewId));
-    const verdict = record.verdict ?? observe(record, reviewer, answered) ?? undefined;
+    const verdict = record.verdict ?? await observe(record, reviewer, answered) ?? undefined;
     // A dismissed approval is not an answer: the session is recorded unanswered, with the
     // dismissal and its cause, so the request is relaunched exactly as any other unanswered
     // session is rather than settling a request the review gate still refuses.
@@ -470,16 +471,16 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     if (!verdict && !expired && !stale && dependencies.agents) {
       const agent = dependencies.agents.find(candidate => candidate.name === record.agentName);
       const screen = () => readSessionScreen(record.agentName, dependencies.run);
-      const judged = acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: false, screen });
+      const judged = await acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: false, screen });
       if (judged.changed) changed++;
       if (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? '')) {
         if (!record.idleSince) {
           record.idleSince = now.toISOString(); changed++;
           if (agent && !record.repromptedAt) markReprompted(record, now.getTime());
-          try { retry(record, reviewRetryPrompt(config.repository, record)); }
+          try { await retry(record, reviewRetryPrompt(config.repository, record)); }
           catch { /* the grace period records the session as failed when the prompt cannot reach it */ }
         }
-        else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
+        else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
           ? `the reviewer session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without a verdict on ${record.sha.slice(0, 12)}`
           : `the reviewer session finished (${agent?.agent_status ?? 'gone from Herdr'}) without posting a verdict on ${record.sha.slice(0, 12)}`);
       } else if (record.idleSince) { delete record.idleSince; changed++; }
@@ -502,7 +503,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     if (record.state !== 'completed' || record.verdict?.state !== 'APPROVED') continue;
     const request = dependencies.work?.find(item => item.key === record.key)?.autoDispatch?.review;
     if (!request || request.state !== 'requested' || request.sha !== record.sha || request.baseSha !== record.baseSha || request.policyRevision !== record.policyRevision) continue;
-    if (observe(record, reviewer, new Set())?.state !== 'DISMISSED') continue;
+    if ((await observe(record, reviewer, new Set()))?.state !== 'DISMISSED') continue;
     record.verdict = { ...record.verdict, state: 'DISMISSED' };
     record.state = 'failed'; record.resolution = dismissalResolution(record, dependencies.work); record.closedAt = now.toISOString();
     changed++;

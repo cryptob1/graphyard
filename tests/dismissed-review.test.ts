@@ -247,7 +247,7 @@ test('integration:master-review-forces-attempt — master review launches the op
     assert.equal(liveReviewRequest(work()), null);
     // `master review` is exactly this command, and it refuses the same way it always did.
     const cli = await readFile(new URL('../src/cli/master.ts', import.meta.url), 'utf8');
-    assert.match(cli, /if \(id === 'review'\) return print\(await reviewCommand\(root, args, await masterApi\('work-snapshot'\), listHerdrAgents\(\)\)\);/);
+    assert.match(cli, /if \(id === 'review'\) return print\(await reviewCommand\(root, args, await masterApi\('work-snapshot'\), await listHerdrAgents\(\)\)\);/);
     await assert.rejects(reviewCommand(root, [], { work: [item], now: new Date().toISOString() }, []), /Use master review GY-N/);
     await assert.rejects(reviewCommand(root, ['GY-9999'], { work: [item], now: new Date().toISOString() }, []), /Unknown work item GY-9999/);
   } finally { await cleanup(); }

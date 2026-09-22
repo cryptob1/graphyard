@@ -191,15 +191,15 @@ test('a reviewer launch leaves no credential or record behind when Herdr refuses
   } finally { await cleanup(); }
 });
 
-test('only the reviewer identity, on the exact head, settles a pending review', () => {
+test('only the reviewer identity, on the exact head, settles a pending review', async () => {
   const record = { id: '1', key: 'GY-42', pr: 42, sha: 'a'.repeat(40) } as any;
   const reviews = (values: any[]) => (_command: string, _args: string[]) => JSON.stringify(values);
-  assert.equal(observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', reviews([{ id: 1, state: 'APPROVED', commit_id: 'c'.repeat(40), user: { login: 'graphyard-reviewer[bot]' } }])), null);
-  assert.equal(observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', reviews([{ id: 2, state: 'APPROVED', commit_id: 'a'.repeat(40), user: { login: 'worker' } }])), null);
-  assert.equal(observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', reviews([{ id: 3, state: 'COMMENTED', commit_id: 'a'.repeat(40), user: { login: 'graphyard-reviewer[bot]' } }])), null);
-  const verdict = observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', reviews([{ id: 4, state: 'CHANGES_REQUESTED', commit_id: 'a'.repeat(40), user: { login: 'Graphyard-Reviewer[bot]' }, submitted_at: '2026-09-18T00:00:00Z' }]));
+  assert.equal(await observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', reviews([{ id: 1, state: 'APPROVED', commit_id: 'c'.repeat(40), user: { login: 'graphyard-reviewer[bot]' } }])), null);
+  assert.equal(await observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', reviews([{ id: 2, state: 'APPROVED', commit_id: 'a'.repeat(40), user: { login: 'worker' } }])), null);
+  assert.equal(await observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', reviews([{ id: 3, state: 'COMMENTED', commit_id: 'a'.repeat(40), user: { login: 'graphyard-reviewer[bot]' } }])), null);
+  const verdict = await observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', reviews([{ id: 4, state: 'CHANGES_REQUESTED', commit_id: 'a'.repeat(40), user: { login: 'Graphyard-Reviewer[bot]' }, submitted_at: '2026-09-18T00:00:00Z' }]));
   assert.deepEqual(verdict, { state: 'CHANGES_REQUESTED', reviewer: 'graphyard-reviewer[bot]', reviewId: 4, submittedAt: '2026-09-18T00:00:00Z' });
-  assert.throws(() => observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', () => '{}'), /did not return a review list/);
+  await assert.rejects(observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', () => '{}'), /did not return a review list/);
 });
 
 test('launched profiles carry each runtime non-interactive contract and honour a per-profile opt-out', () => {

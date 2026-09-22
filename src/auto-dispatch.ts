@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { childRunner, type ChildRun } from './child-runner.js';
 import type { Work } from './model.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -133,8 +133,8 @@ export function selectReviewerProfile(config: MasterConfig): { profile: Reviewer
 
 export interface DispatchEffects {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
-  /** Herdr's agent list, or null when Herdr could not be read. */
-  agents: () => HerdrAgent[] | null;
+  /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
+  agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
@@ -217,7 +217,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0 };
-  const herdr = effects.agents();
+  const herdr = await effects.agents();
   const { reviews } = await effects.reconcileReviews(snapshot.work, herdr);
   const { producers } = await effects.reconcileProducers(snapshot.work, herdr);
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
@@ -389,8 +389,10 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
-export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: (command: string, args: string[]) => string }): DispatchEffects {
-  const run = deps.run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }));
+export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun }): DispatchEffects {
+  // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
+  // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
+  const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
   const current = typeof config === 'function' ? config : () => config;
   // The coordinator mutation this loop records handles with. It is built from the same
   // configuration the loop already runs on — the credential the dispatcher authenticates every
@@ -405,7 +407,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   });
   return {
     snapshot: deps.snapshot,
-    agents: () => { try { return listHerdrAgents(run); } catch { return null; } },
+    agents: () => listHerdrAgents(run).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),

@@ -311,11 +311,11 @@ test('integration:master-profile-management — producer profiles can be replace
 
     // The configured Herdr workspace is checked against Herdr's own inventory.
     const workspaces = (ids: string[]) => (_command: string, args: string[]) => { assert.deepEqual(args, ['workspace', 'list']); return JSON.stringify({ result: { workspaces: ids.map(id => ({ workspace_id: id })) } }); };
-    assert.deepEqual(herdrWorkspaceHealth(master, workspaces(['w1V', 'w3'])), { workspace: 'w1V', exists: true, reason: null });
-    const gone = herdrWorkspaceHealth(master, workspaces(['w3', 'w5']));
+    assert.deepEqual(await herdrWorkspaceHealth(master, workspaces(['w1V', 'w3'])), { workspace: 'w1V', exists: true, reason: null });
+    const gone = await herdrWorkspaceHealth(master, workspaces(['w3', 'w5']));
     assert.equal(gone.exists, false); assert.match(gone.reason!, /Herdr workspace w1V configured in \.graphyard\/master\.json no longer exists \(Herdr lists w3, w5\)/);
-    assert.equal(herdrWorkspaceHealth(master, () => { throw new Error('no socket'); }).exists, null, 'an unreadable Herdr leaves the workspace unverified, not missing');
-    assert.equal(herdrWorkspaceHealth({ herdrWorkspace: undefined }).exists, null);
+    assert.equal((await herdrWorkspaceHealth(master, () => { throw new Error('no socket'); })).exists, null, 'an unreadable Herdr leaves the workspace unverified, not missing');
+    assert.equal((await herdrWorkspaceHealth({ herdrWorkspace: undefined })).exists, null);
     // The commands are part of the CLI and the guide.
     const help = await readFile(new URL('../src/cli/master.ts', import.meta.url), 'utf8');
     for (const command of ['master producer add FILE | replace FILE | remove NAME', 'master reviewer add FILE | remove NAME']) assert.ok(help.includes(command), `${command} is in CLI help`);

@@ -202,13 +202,13 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     // Herdr's start bound can expire while the runtime is busy on its request: the session is
     // adopted by the name it was started under, never closed.
     const busy = new FakeHerdr({ startTimeout: kind => kind === 'claude' });
-    const adopted = startAgentSession('review-busy', 'claude', 'pane-x', ['--permission-mode', 'bypassPermissions'], 'Review #93 now', busy.run);
+    const adopted = await startAgentSession('review-busy', 'claude', 'pane-x', ['--permission-mode', 'bypassPermissions'], 'Review #93 now', busy.run);
     assert.equal(adopted.delivery, 'request');
     assert.deepEqual(busy.calls.slice(-2).map(call => call.slice(0, 2)), [['agent', 'get'], ['agent', 'rename']]);
     assert.equal(busy.named('review-busy').toolCalls.length, 1);
     const stranger = new FakeHerdr({ startTimeout: () => true });
     stranger.run = ((run: typeof stranger.run) => (command: string, args: string[]) => args[0] === 'agent' && args[1] === 'get' ? JSON.stringify({ result: { agent: { agent: 'codex', agent_status: 'idle' } } }) : run(command, args))(stranger.run);
-    assert.throws(() => startAgentSession('review-other', 'claude', 'pane-y', [], 'Review', stranger.run), /Command failed: herdr agent start/, 'a pane that does not hold the expected runtime is not adopted; the start failure stands');
+    await assert.rejects(startAgentSession('review-other', 'claude', 'pane-y', [], 'Review', stranger.run), /Command failed: herdr agent start/, 'a pane that does not hold the expected runtime is not adopted; the start failure stands');
   } finally { await cleanup(); }
 });
 
@@ -406,29 +406,29 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
   // activity, or a result, means acknowledged; a second refusal after the re-prompt means neither.
   const record = { requestedAt: iso(0) } as { requestedAt: string; acknowledgedAt?: string; repromptedAt?: string; activeSince?: string; screen?: string };
   const screen = (text: string) => () => text;
-  assert.deepEqual(acknowledgeLaunch(record, { agent_status: 'done' }, { now: clock + 10_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: true, reprompt: false });
-  assert.deepEqual(acknowledgeLaunch(record, { agent_status: 'done' }, { now: clock + 90_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: false, reprompt: true });
-  assert.deepEqual(acknowledgeLaunch(record, undefined, { now: clock + 90_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: false, reprompt: false }, 'a session gone from Herdr cannot be re-prompted');
-  assert.deepEqual(acknowledgeLaunch({ ...record }, { agent_status: 'done' }, { now: clock + 90_000, ackMs: 90_000, result: true, screen: screen('a') }).changed, true, 'a result acknowledges at once');
+  assert.deepEqual(await acknowledgeLaunch(record, { agent_status: 'done' }, { now: clock + 10_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: true, reprompt: false });
+  assert.deepEqual(await acknowledgeLaunch(record, { agent_status: 'done' }, { now: clock + 90_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: false, reprompt: true });
+  assert.deepEqual(await acknowledgeLaunch(record, undefined, { now: clock + 90_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: false, reprompt: false }, 'a session gone from Herdr cannot be re-prompted');
+  assert.deepEqual((await acknowledgeLaunch({ ...record }, { agent_status: 'done' }, { now: clock + 90_000, ackMs: 90_000, result: true, screen: screen('a') })).changed, true, 'a result acknowledges at once');
   const active = { requestedAt: iso(0) } as typeof record;
-  acknowledgeLaunch(active, { agent_status: 'working' }, { now: clock + 5_000, ackMs: 90_000, result: false, screen: screen('') });
+  await acknowledgeLaunch(active, { agent_status: 'working' }, { now: clock + 5_000, ackMs: 90_000, result: false, screen: screen('') });
   assert.equal(active.activeSince, iso(5_000)); assert.equal(active.acknowledgedAt, undefined);
-  acknowledgeLaunch(active, { agent_status: 'working' }, { now: clock + 5_000 + sustainedActivityMs - 1, ackMs: 90_000, result: false, screen: screen('') });
+  await acknowledgeLaunch(active, { agent_status: 'working' }, { now: clock + 5_000 + sustainedActivityMs - 1, ackMs: 90_000, result: false, screen: screen('') });
   assert.equal(active.acknowledgedAt, undefined);
-  acknowledgeLaunch(active, { agent_status: 'blocked' }, { now: clock + 5_000 + sustainedActivityMs, ackMs: 90_000, result: false, screen: screen('') });
+  await acknowledgeLaunch(active, { agent_status: 'blocked' }, { now: clock + 5_000 + sustainedActivityMs, ackMs: 90_000, result: false, screen: screen('') });
   assert.equal(active.acknowledgedAt, iso(5_000 + sustainedActivityMs));
   // A refusal caught working, then quiet, then one late screen change: two active sightings far
   // apart are not activity sustained across thirty seconds, because the quiet sighting between
   // them closed the window.
   const flicker = { requestedAt: iso(0) } as typeof record;
-  acknowledgeLaunch(flicker, { agent_status: 'working' }, { now: clock + 5_000, ackMs: 90_000, result: false, screen: screen('a') });
+  await acknowledgeLaunch(flicker, { agent_status: 'working' }, { now: clock + 5_000, ackMs: 90_000, result: false, screen: screen('a') });
   assert.equal(flicker.activeSince, iso(5_000));
-  assert.deepEqual(acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 35_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: true, reprompt: false });
+  assert.deepEqual(await acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 35_000, ackMs: 90_000, result: false, screen: screen('a') }), { changed: true, reprompt: false });
   assert.equal(flicker.activeSince, undefined, 'a sighting that is not active closes the activity window, the first screen read among them');
-  acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 65_000, ackMs: 90_000, result: false, screen: screen('b') });
+  await acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 65_000, ackMs: 90_000, result: false, screen: screen('b') });
   assert.equal(flicker.acknowledgedAt, undefined, 'one later screen change starts a window, it does not complete one');
   assert.equal(flicker.activeSince, iso(65_000));
-  assert.deepEqual(acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 95_000, ackMs: 90_000, result: false, screen: screen('b') }), { changed: true, reprompt: true });
+  assert.deepEqual(await acknowledgeLaunch(flicker, { agent_status: 'done' }, { now: clock + 95_000, ackMs: 90_000, result: false, screen: screen('b') }), { changed: true, reprompt: true });
   assert.equal(flicker.activeSince, undefined, 'quiet again: the window closes and the re-prompt is due');
 
   const { root, token, cleanup } = await installed();
