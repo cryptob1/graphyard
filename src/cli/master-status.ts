@@ -11,6 +11,7 @@ import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
+import { loopSupervision, loopSupervisionAttention, type LoopSupervisorHost } from '../supervisor.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 
@@ -162,7 +163,7 @@ async function terminalDecisions(masterApi: (path: string) => Promise<any>, work
  * review, producer, dispatch, daemon and administration ledgers, the dispatch schedule with its
  * overlap holds, and the conflict set of every open candidate probed over the fetched PR heads.
  */
-export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }) {
+export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost } = {}) {
   const runtime = observeHerdrAgents();
   const credentials = await inspectWorkerCredentials(root, master.workers);
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
@@ -180,7 +181,12 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // credential is gone, a Herdr workspace that no longer exists.
   const reviewerBinding = await reviewerBindingHealth(master);
   const workspace = herdrWorkspaceHealth(master);
-  const setup = { reviewer: reviewerBinding, herdrWorkspace: workspace, attention: [...reviewerBinding.attention, ...(workspace.exists === false ? [workspace.reason!] : [])] };
+  // Supervision verified, not assumed (GY-114): GY-84's automatic restart held only where somebody
+  // had installed and enabled a supervisor, which nothing checked. Read from the host, every run.
+  const supervisor = await loopSupervision({ root, cliPath: master.cliPath }, dependencies.supervisorHost);
+  const supervisorAttention = loopSupervisionAttention(supervisor);
+  const setup = { reviewer: reviewerBinding, supervisor, herdrWorkspace: workspace,
+    attention: [...reviewerBinding.attention, ...supervisorAttention.map(item => item.text), ...(workspace.exists === false ? [workspace.reason!] : [])] };
   const dispatchCursor = await readDispatchCursor(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000);
   const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
@@ -225,6 +231,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above).
   attentionItems.unshift(...loopItems);
+  // An unsupervised loop is why a stopped loop stays stopped; each state names what repairs it.
+  for (const item of supervisorAttention) attentionItems.push({ subject: 'setup', text: item.text, ...agentOwner('master', item.next) });
   // Setup that stops every launch is the master's to repair.
   for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
