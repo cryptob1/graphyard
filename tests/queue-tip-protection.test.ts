@@ -46,14 +46,21 @@ class Repo {
   contains(ancestor: string, head: string) { return this.ancestry(head).has(ancestor); }
   /** Commits a branch holds that the base branch does not: what a reviewer would read as "this branch". */
   unlanded(branch: string) { return [...this.ancestry(this.refs.get(`heads/${branch}`)!)].filter(sha => !this.ancestry(this.refs.get('heads/main')!).has(sha)); }
-  approve(pr: number, sha: string) { const id = ++this.reviewIds; this.reviews.set(pr, [...(this.reviews.get(pr) ?? []), { id, user: { login: REVIEWER }, commit_id: sha, state: 'APPROVED', submitted_at: new Date().toISOString() }]); return id; }
-  /** GitHub dismissing every approval of a pull request, with the message it gives and the commit it attributes it to. */
-  dismiss(pr: number, message: string, commit: string | null, by = 'owner') {
+  review(pr: number, sha: string, state: 'APPROVED' | 'CHANGES_REQUESTED') { const id = ++this.reviewIds; this.reviews.set(pr, [...(this.reviews.get(pr) ?? []), { id, user: { login: REVIEWER }, commit_id: sha, state, submitted_at: new Date().toISOString() }]); return id; }
+  approve(pr: number, sha: string) { return this.review(pr, sha, 'APPROVED'); }
+  requestChanges(pr: number, sha: string) { return this.review(pr, sha, 'CHANGES_REQUESTED'); }
+  /**
+   * Dismissing every live verdict of a pull request, with the message given and the commit it is
+   * attributed to. The review list then shows `DISMISSED` whatever the verdict was, as GitHub's
+   * does; only the timeline event keeps the dismissed verdict (`dismissed_review.state`).
+   */
+  dismiss(pr: number, message: string, commit: string | null, by = 'owner', verdicts: string[] = ['APPROVED', 'CHANGES_REQUESTED']) {
     for (const review of this.reviews.get(pr) ?? []) {
-      if (review.state !== 'APPROVED') continue;
+      if (!verdicts.includes(review.state)) continue;
+      const state = review.state.toLowerCase();
       review.state = 'DISMISSED';
       this.timeline.set(pr, [...(this.timeline.get(pr) ?? []), { event: 'review_dismissed', actor: { login: by }, created_at: new Date().toISOString(),
-        dismissed_review: { state: 'approved', review_id: review.id, dismissal_message: message, ...(commit ? { dismissal_commit_id: commit } : {}) } }]);
+        dismissed_review: { state, review_id: review.id, dismissal_message: message, ...(commit ? { dismissal_commit_id: commit } : {}) } }]);
     }
   }
   pull(pr: number) {
@@ -211,7 +218,7 @@ test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unch
   work = await cycle(github, work);
   assert.equal(work.candidate!.sha, head, 'the head is unchanged');
   const review = dismissedReview(work), dismissal = reviewDismissal(review)!;
-  assert.deepEqual([review.sha, review.id, dismissal.reason, dismissal.mergeBase, dismissal.by], [head, reviewId, mergeBaseMessage, true, 'owner']);
+  assert.deepEqual([review.sha, review.id, dismissal.reason, dismissal.mergeBase, dismissal.verdict, dismissal.by], [head, reviewId, mergeBaseMessage, true, 'approved', 'owner']);
   assert.equal(exactApproval(work), null, 'the exact approval is gone from GitHub');
   assert.ok(gate(work, 'review').passed, gate(work, 'review').reasons.join('; '));
   assert.equal(gate(work, 'review').reasons.includes('Outstanding change requests must be resolved through a new review'), false, 'a dismissal is not a change request');
@@ -241,12 +248,62 @@ test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unch
   assert.ok(gate(withdrawn, 'review').passed);
   repo.dismiss(withdrawn.submission!.pr, 'Please re-check the migration before this lands.', null, 'alice');
   withdrawn = await cycle(github, withdrawn);
-  assert.equal(reviewDismissal(dismissedReview(withdrawn))!.mergeBase, false);
+  assert.deepEqual([reviewDismissal(dismissedReview(withdrawn))!.mergeBase, reviewDismissal(dismissedReview(withdrawn))!.verdict], [false, 'approved']);
   assert.equal(dismissedApproval(withdrawn), null);
   assert.equal(gate(withdrawn, 'review').passed, false);
   assert.equal(withdrawn.autoDispatch!.review?.state, 'requested', 'a withdrawn verdict is answered by a fresh review');
   assert.equal(restoredApproval(withdrawn), null);
   assert.equal(buildMasterStatus({ work: [withdrawn], now: new Date().toISOString() }, [], []).work[0].restoredApproval, null);
+
+  // A person withdrawing an approval with a message that merely mentions the merge base is still
+  // a person withdrawing it: only GitHub's exact message is GitHub's dismissal, and nothing is restored.
+  let mentioned = await submitted(repo, 'Merge base mentioned', () => repo.commit([main], 'feat: mentioned'));
+  repo.approve(mentioned.submission!.pr, repo.refs.get(`heads/${branchOf(mentioned)}`)!);
+  mentioned = await cycle(github, mentioned);
+  assert.ok(gate(mentioned, 'review').passed);
+  repo.dismiss(mentioned.submission!.pr, 'merge base moved, will re-review after rebase', null, 'alice');
+  mentioned = await cycle(github, mentioned);
+  assert.deepEqual([reviewDismissal(dismissedReview(mentioned))!.mergeBase, reviewDismissal(dismissedReview(mentioned))!.verdict], [false, 'approved']);
+  assert.equal(dismissedApproval(mentioned), null);
+  assert.equal(gate(mentioned, 'review').passed, false);
+  assert.equal(restoredApproval(mentioned), null);
+  assert.equal(mentioned.autoDispatch!.review?.state, 'requested');
+  assert.equal((await events(mentioned, 'review.restored')).length, 0);
+
+  // A dismissed change request is not an approval, whatever message dismissed it: GitHub lists it
+  // as DISMISSED like a dismissed approval, but the verdict the reviewer gave asked for changes, so
+  // even GitHub's own merge-base message restores nothing and the head is reviewed afresh.
+  let changes = await submitted(repo, 'Change request dismissed', () => repo.commit([main], 'feat: changes'));
+  const changesHead = repo.refs.get(`heads/${branchOf(changes)}`)!;
+  const changesId = repo.requestChanges(changes.submission!.pr, changesHead);
+  changes = await cycle(github, changes);
+  assert.equal(gate(changes, 'review').passed, false);
+  assert.ok(gate(changes, 'review').reasons.includes('Outstanding change requests must be resolved through a new review'));
+  repo.dismiss(changes.submission!.pr, mergeBaseMessage, null, 'owner');
+  changes = await cycle(github, changes);
+  assert.equal(changes.candidate!.sha, changesHead, 'the head is unchanged');
+  const changesReview = dismissedReview(changes), changesDismissal = reviewDismissal(changesReview)!;
+  assert.deepEqual([changesReview.id, changesDismissal.reason, changesDismissal.mergeBase, changesDismissal.verdict], [changesId, mergeBaseMessage, true, 'changes_requested']);
+  assert.equal(dismissedApproval(changes), null, 'a dismissed change request is never restored as an approval');
+  assert.equal(exactApproval(changes), null); assert.equal(carriedApproval(changes), null);
+  assert.equal(gate(changes, 'review').passed, false);
+  assert.equal(restoredApproval(changes), null);
+  assert.equal((await events(changes, 'review.restored')).length, 0);
+  assert.equal(buildMasterStatus({ work: [changes], now: new Date().toISOString() }, [], []).work[0].restoredApproval, null);
+  assert.equal(changes.autoDispatch!.review?.state, 'requested', 'the head is reviewed afresh');
+
+  // A dismissal whose timeline event names no verdict restores nothing either: without the
+  // dismissed verdict on the record, nobody can say an approval was ever given.
+  let unnamed = await submitted(repo, 'Verdict unnamed', () => repo.commit([main], 'feat: unnamed'));
+  repo.approve(unnamed.submission!.pr, repo.refs.get(`heads/${branchOf(unnamed)}`)!);
+  unnamed = await cycle(github, unnamed);
+  repo.dismiss(unnamed.submission!.pr, mergeBaseMessage, null, 'owner');
+  for (const event of repo.timeline.get(unnamed.submission!.pr)!) delete event.dismissed_review.state;
+  unnamed = await cycle(github, unnamed);
+  assert.deepEqual([reviewDismissal(dismissedReview(unnamed))!.mergeBase, reviewDismissal(dismissedReview(unnamed))!.verdict], [true, null]);
+  assert.equal(dismissedApproval(unnamed), null);
+  assert.equal(gate(unnamed, 'review').passed, false);
+  assert.equal(restoredApproval(unnamed), null);
 
   // A timeline GitHub will not serve leaves the dismissal recorded as unread, and restores nothing.
   const request = github.request.bind(github);

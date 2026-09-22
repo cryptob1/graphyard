@@ -7,7 +7,7 @@ import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal } from './merge-queue.js';
+import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -297,7 +297,7 @@ export class GitHub {
     // given on (GY-127): the review list alone cannot tell a reviewer withdrawing a verdict from
     // GitHub withdrawing an approval because the merge base moved under an unchanged head.
     const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null };
-    const dismissalOf = (id: number): ReviewDismissal | undefined => dismissals.read.get(id) ?? (dismissals.unread ? { reason: null, mergeBase: false, commit: null, at: null, by: null, unread: dismissals.unread } : undefined);
+    const dismissalOf = (id: number): ReviewDismissal | undefined => dismissals.read.get(id) ?? (dismissals.unread ? { reason: null, mergeBase: false, verdict: null, commit: null, at: null, by: null, unread: dismissals.unread } : undefined);
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges. A
     // head that already contains the branch tip is up to date and binds to it, as it always did.
@@ -572,9 +572,12 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   /**
    * Why GitHub dismissed each dismissed review of a pull request, from the issue timeline's
-   * `review_dismissed` events, keyed by review id. A timeline that cannot be read leaves the
-   * dismissal recorded as unread rather than failing the observation: the review gate already
-   * refuses a dismissed approval, and nothing is inferred from a reason nobody could read.
+   * `review_dismissed` events, keyed by review id. The verdict the dismissed review carried is
+   * read from the event too (`dismissed_review.state`): the review list reports a dismissed
+   * change request and a dismissed approval with the same `DISMISSED` state, and only the latter
+   * is an approval anyone can restore. A timeline that cannot be read leaves the dismissal
+   * recorded as unread rather than failing the observation: the review gate already refuses a
+   * dismissed approval, and nothing is inferred from a reason nobody could read.
    */
   async reviewDismissals(pr: number): Promise<{ read: Map<number, ReviewDismissal>; unread: string | null }> {
     const read = new Map<number, ReviewDismissal>();
@@ -582,7 +585,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       for (const event of await this.pages(`/issues/${pr}/timeline`)) {
         if (event?.event !== 'review_dismissed' || !Number.isSafeInteger(event?.dismissed_review?.review_id)) continue;
         const reason = typeof event.dismissed_review.dismissal_message === 'string' ? event.dismissed_review.dismissal_message : null;
-        read.set(event.dismissed_review.review_id, { reason, mergeBase: !!reason && mergeBaseDismissalPattern.test(reason),
+        read.set(event.dismissed_review.review_id, { reason, mergeBase: !!reason && mergeBaseDismissalPattern.test(reason), verdict: dismissedVerdict(event.dismissed_review.state),
           commit: typeof event.dismissed_review.dismissal_commit_id === 'string' ? event.dismissed_review.dismissal_commit_id : null,
           at: typeof event.created_at === 'string' ? event.created_at : null, by: typeof event.actor?.login === 'string' ? event.actor.login : null });
       }
@@ -719,6 +722,11 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const baseTree = await this.commitTree(placement.predictedBase!);
     const reviewedHead = await this.ownReviewedHead(work, pr.head.sha);
     await beforeWrite();
+    // The branch is moved by a forced ref update after the head was read above, not compared and
+    // swapped in one request. A worker push landing in that window is overwritten; the window is
+    // one request wide, the item is queued (a worker push at that point is a new head the queue
+    // would eject for anyway), and the next observation reads the branch afresh, so the worker's
+    // head is at worst reported as replaced rather than silently kept. Narrow, and accepted.
     if (reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
     const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
     const tip = merged ?? reviewedHead;
@@ -751,6 +759,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // pushed, or under nothing the record can name: nothing is moved, and the item says so.
     if (own === pr.head.sha) return record({}, 'unrepairable', null);
     await beforeWrite();
+    // The same one-request window as in publishSpeculativeTip: a worker push between the head
+    // check above and this forced update is overwritten by the restore. The head being restored
+    // is one no worker may push over (a contaminated tip), the record names the head it moved
+    // from, and the next observation reads the branch afresh.
     await this.updateBranch(pr.head.ref, own);
     let merged: string | null;
     try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }

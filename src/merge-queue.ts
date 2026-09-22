@@ -42,20 +42,32 @@ export interface QueueHistoryEntry {
  * itself withdrawing an approval because the pull request's merge base moved — which is what
  * every push to the base branch does to a branch that carries a queued predecessor, and what the
  * control plane's own tip publication does to the branch it publishes on. `mergeBase` is the
- * second kind, recognised from GitHub's message (`The merge-base changed after approval`).
+ * second kind, recognised from GitHub's exact message (`The merge-base changed after approval.`),
+ * never from a message that merely mentions the merge base: a person dismissing a verdict with
+ * "merge base moved, will re-review after rebase" withdrew it, and GitHub did not. The verdict
+ * that was dismissed is recorded too (`verdict`, from the timeline's `dismissed_review.state`),
+ * because GitHub lists a dismissed change request with the same `DISMISSED` state as a dismissed
+ * approval, and only a dismissed *approval* is one the reviewer ever gave.
  */
 export interface ReviewDismissal {
   /** GitHub's dismissal message, or null when the timeline could not be read (`unread` says why). */
   reason: string | null;
-  /** The message names the merge base: GitHub withdrew the approval, nobody did. */
+  /** The message is exactly GitHub's merge-base dismissal: GitHub withdrew the review, nobody did. */
   mergeBase: boolean;
+  /** The verdict the dismissed review carried, as the timeline reports it; null when unread or unnamed. */
+  verdict: 'approved' | 'changes_requested' | 'commented' | null;
   /** The commit GitHub attributed the dismissal to, when it named one. */
   commit: string | null;
   at: string | null; by: string | null; unread?: string;
 }
 /** The record of an approval the control plane restored after GitHub dismissed it for a merge-base change on an unchanged head. */
 export interface RestoredApproval { reviewer: string; reviewId?: number; sha: string; dismissal: ReviewDismissal; at: string }
-export const mergeBaseDismissalPattern = /merge[\s-]*base/i;
+/** GitHub's own dismissal message when `dismiss_stale_reviews` fires on a merge-base change, and nothing looser. */
+export const mergeBaseDismissalPattern = /^\s*the merge-base changed after approval\.?\s*$/i;
+/** The verdict a timeline `review_dismissed` event names, when it is one GitHub reports. */
+export function dismissedVerdict(state: unknown): ReviewDismissal['verdict'] {
+  return state === 'approved' || state === 'changes_requested' || state === 'commented' ? state : null;
+}
 /** The dismissal recorded on a review, when the observation carried one. */
 export function reviewDismissal(review: Observation['reviews'][number]): ReviewDismissal | null {
   const dismissal = (review as { dismissal?: ReviewDismissal }).dismissal;
@@ -64,9 +76,12 @@ export function reviewDismissal(review: Observation['reviews'][number]): ReviewD
 /**
  * An approval of exactly the current head that GitHub dismissed with its merge-base reason: the
  * head the reviewer approved is the head the branch still has, so nothing the reviewer judged has
- * changed. It is distinguished from a withdrawn verdict by the recorded reason, never inferred
- * from timing, and only a formal GitHub approval from someone other than the author qualifies —
- * the same identity rule `exactApproval` applies, baseline included. The engine restores such an
+ * changed. It is distinguished from a withdrawn verdict by the recorded reason and the recorded
+ * verdict, never inferred from timing: the reason must be GitHub's exact merge-base message, and
+ * the dismissed review must have been an approval — a dismissed change request is a change
+ * request the reviewer gave and never an approval, whatever message its dismissal carried. Only a
+ * formal GitHub approval from someone other than the author qualifies — the same identity rule
+ * `exactApproval` applies, baseline included. The engine restores such an
  * approval as the binding one (see `Engine.observe`) so no review round and no attempt is spent on
  * a commit the reviewer already approved; the reviewer App re-posts it before the merge.
  */
@@ -78,7 +93,7 @@ export function dismissedApproval(work: Work): { reviewer: string; reviewId?: nu
   for (const review of observation.reviews) {
     if (review.state !== 'DISMISSED' || review.sha !== candidate.sha || review.reviewer === candidate.author) continue;
     const dismissal = reviewDismissal(review);
-    if (!dismissal?.mergeBase) continue;
+    if (!dismissal?.mergeBase || dismissal.verdict !== 'approved') continue;
     if (work.formalReviewResetRequired && !(baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(review.id) && review.id! > 0 && !baseline.reviewIds.includes(review.id!))) continue;
     return { reviewer: review.reviewer, ...(review.id !== undefined ? { reviewId: review.id } : {}), sha: candidate.sha, dismissal };
   }
