@@ -692,6 +692,37 @@ row. An executor that dies mid-action renews nothing, its claim expires, another
 a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
 handler that throws returns its row to the queue with the reason and a widening backoff.
 
+### A row that keeps failing for the same reason
+
+A retry is a bet that something about the next attempt can change, and three identical failures say
+it cannot. Three consecutive failures with an unchanged reason classify the row as **stalled**
+rather than retrying: it is not waiting out a transient fault, it is re-running an impossibility.
+One reason that differs from the last ends the run, and the widening backoff comes back with it.
+
+A stall is the signal for a fleet that reads as idle and is not. A row inside its backoff can be
+claimed by nobody, so before this it appeared in no count and no list: on 21 September 2026 three
+items each held a `request-review` action failing for the identical reason — one reviewer profile,
+one fixed session name, so the second and third reviews could never be launched while the first
+ran — and for ninety-seven minutes `master status` reported eight pending actions, none of them
+those three, while the board showed the items at review. Where a stall is now visible:
+
+- `master status` → `actions.stalled`, one entry per stalled row with the reason it keeps failing,
+  the failures that shared it, every attempt it has made and when it is offered again;
+  `actions.backoff` lists the rows waiting out a backoff and `actions.open` counts every open row,
+  so `pending + claimed + settling + backingOff` accounts for all of them;
+- one attention item per stall, naming the item, the action kind, the unchanged reason and the
+  master as the agent that resolves it — raised as soon as the row is classified, which is inside
+  the five-minute idle bound a row nobody is acting on has;
+- the dashboard, on the item's own card: the step that keeps failing, how many times, and for how
+  long, in place of the gate sentence the stalled action was going to clear.
+
+Clearing the condition the reason names is the whole of the fix — reviewer or producer capacity, an
+overlap ahead of a dispatch, a credential, a provider — and nothing needs a forced retry
+afterwards. A stalled row rechecks once a minute whatever its attempt count, rather than waiting
+out the ten-minute ceiling its attempts against the impossibility would have earned, so a condition
+that clears is acted on within a minute. Backoff earned while a blocking condition stood never
+outlives it.
+
 A claim is a two-minute lease, and the handlers are not two-minute operations: a dispatch prepares
 a worktree and waits on a runtime, and a guarded merge chains provider calls that each have their
 own timeout. An executor that is still inside a handler says so every thirty seconds and keeps the
