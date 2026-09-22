@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, reconcilePendingActions, routineDecision, runCycle, runDaemon, silenceBudgetMs, standingVerdict, trackSilence, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { approverSessionName, decisionInput, launchApprover, listHerdrAgents, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
+import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { containmentGraceMs } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
 import { decideScopeRequest } from '../src/model/scope.js';
@@ -78,6 +79,8 @@ function herdr() {
   const sessions = new Map<string, { name: string; pane: string; status: string; prompt: string; judgement: Judgement }>();
   const panes = new Set<string>(), log: string[] = [], judgements: Judgement[] = [];
   const control = { available: true, closable: true };
+  /** What each pane runs, from the typed launch until Herdr names it. */
+  const occupants = new Map<string, { kind: string; request: string }>();
   let created = 0;
   const ok = (result: unknown = {}) => JSON.stringify({ result });
   const run = (command: string, args: string[]) => {
@@ -85,20 +88,29 @@ function herdr() {
     if (!control.available) throw new Error('herdr: the server socket is unreachable');
     const [noun, verb] = args;
     if (noun === 'tab' && verb === 'create') { const pane = `pane-${++created}`; panes.add(pane); return ok({ root_pane: { pane_id: pane, tab_id: `tab-${created}` } }); }
-    if (noun === 'agent' && verb === 'start') {
-      const name = args[2], pane = args[args.indexOf('--pane') + 1];
-      assert.ok(!sessions.has(name), `Herdr refuses a second agent named ${name}`);
+    if (noun === 'pane' && verb === 'run') {
       // A runtime with a request contract starts on its instruction (GY-93): it arrives on the
-      // command line after the runtime's own flags, never as a later paste, and the session is at work on it at once.
-      const runtime = args.slice(args.indexOf('--') + 1), request = args.includes('--') && runtime.at(-1)?.includes(' ') ? runtime.at(-1)! : '';
-      sessions.set(name, { name, pane, status: request ? 'working' : 'idle', prompt: request, judgement: judgements.shift() ?? 'approve' }); log.push(`launch:${name}`); return ok();
+      // command line after the runtime's own flags, never as a later paste, and the session is at
+      // work on it at once. The typed line references the request file (GY-121); the shell reads it.
+      const launch = expandTypedCommand(args[3]);
+      occupants.set(args[2], { kind: launch.kind, request: requestOf(launch.kind, launch.args) ?? '' }); return '';
+    }
+    if (noun === 'pane' && verb === 'read') return '';
+    if (noun === 'agent' && verb === 'get') {
+      const occupant = occupants.get(args[2]);
+      return occupant ? ok({ agent: { agent: occupant.kind, agent_status: occupant.request ? 'working' : 'idle', pane_id: args[2] } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
+    }
+    if (noun === 'agent' && verb === 'rename') {
+      const name = args[3], pane = args[2], occupant = occupants.get(pane)!;
+      assert.ok(!sessions.has(name), `Herdr refuses a second agent named ${name}`);
+      sessions.set(name, { name, pane, status: occupant.request ? 'working' : 'idle', prompt: occupant.request, judgement: judgements.shift() ?? 'approve' }); log.push(`launch:${name}`); return ok();
     }
     if (noun === 'agent' && verb === 'prompt') { Object.assign(sessions.get(args[2])!, { status: 'working', prompt: args[3] }); return ok(); }
     if (noun === 'agent' && verb === 'list') return ok({ agents: [...sessions.values()].map(session => ({ name: session.name, pane_id: session.pane, agent_status: session.status })) });
     if (noun === 'pane' && verb === 'close') {
       if (!control.closable) return JSON.stringify({ error: { code: 'pane_busy', message: 'the pane could not be closed' } });
       for (const session of [...sessions.values()].filter(entry => entry.pane === args[2])) { sessions.delete(session.name); log.push(`close:${session.name}`); }
-      panes.delete(args[2]); return ok();
+      panes.delete(args[2]); occupants.delete(args[2]); return ok();
     }
     if (noun === 'pane' && verb === 'list') return ok({ panes: [...panes].map(pane_id => ({ pane_id })) });
     throw new Error(`The simulated Herdr has no ${args.slice(0, 2).join(' ')}`);
