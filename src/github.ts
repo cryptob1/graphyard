@@ -1,11 +1,13 @@
 import { MergeExecutionInProgress, ReconciliationRetry, Refusal, SpeculativeConflict, requireCurrent } from './model.js';
 import { createSign, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
+import { nextAction } from './model/next-action.js';
 export { CHECK_NAME };
 import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, type BaseRefresh, type CarriedCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
@@ -17,6 +19,177 @@ export const scopeLookupBudget = 200;
  * so a list this long may be truncated: it is treated as incomplete and nothing is carried.
  */
 export const compareFileCap = 300;
+/**
+ * Conditional-read cache entries kept. One observation reads about ten paths and the fleet holds
+ * tens of open candidates at once; an entry evicted between two observations of the same
+ * unchanged candidate turns a free 304 back into a charged read.
+ */
+export const cacheEntries = 4096;
+
+/**
+ * The App's request budget, and what Graphyard is allowed to spend it on.
+ *
+ * GitHub gives an installation a fixed number of requests an hour and reports what is left of it
+ * on every response. Observation used to ignore that entirely: every open candidate was observed
+ * again twenty seconds after its last observation, whatever state it was in, and one observation
+ * costs on the order of ten requests. Twenty candidates spent the hour in about forty minutes, and
+ * the remaining twenty were a blackout in which every gate read stale — including the merge gate of
+ * a candidate that had nothing left to prove.
+ *
+ * So the budget is read from every response and three rules spend it:
+ *
+ * - **Cadence by state** (`observationBand`). What an observation can change decides how often one
+ *   is made. A candidate at the merge gate is observed every 20 seconds, because its freshness is
+ *   exactly what the merge executor spends. A candidate whose next action is a dispatch, a rework
+ *   or an escalation is observed every five minutes, because nothing on GitHub can move it.
+ *   Everything else sits between, and a candidate that came back unchanged settles to two minutes.
+ * - **The merge-path reserve** (`reserveDecision`). Below `mergePathReserve` requests remaining,
+ *   non-merge observations are rescheduled past the reset rather than spent. The merge path,
+ *   webhook wakes and merge verification keep what is left.
+ * - **Conditional reads.** Every read carries its ETag and GitHub charges nothing for the 304 it
+ *   answers with, so observing an unchanged candidate costs at most a couple of charged requests.
+ *
+ * The webhook is the mechanism and polling is the safety net: a woken job never yields, whatever
+ * cadence its state earned and whatever is left of the budget.
+ */
+/** How far back the spend rate is measured. */
+export const budgetWindowMs = 10 * 60_000;
+/** How far back the per-kind spend a pause incident reports is measured. */
+export const budgetLedgerMs = 60 * 60_000;
+/**
+ * Requests held back for the merge path: the observations, the verification read and the merge
+ * itself that a landing candidate needs, plus the webhook wakes that arrive while the budget is
+ * low. Below it, every other observation waits for the reset. `GRAPHYARD_GITHUB_RESERVE` sizes it
+ * for an installation with a different limit.
+ */
+export const mergePathReserve = (() => {
+  const configured = Number(process.env.GRAPHYARD_GITHUB_RESERVE);
+  return Number.isFinite(configured) && configured >= 0 ? Math.floor(configured) : 500;
+})();
+/**
+ * The share of the hourly limit steady-state observation polling may spend. The rest is headroom
+ * for the merge path, for webhook wakes, and for the master session's own reads.
+ */
+export const steadyStateShare = 0.4;
+/**
+ * The observation schedule, by what an observation of an item in that state can change.
+ *
+ * - `merge` — at the merge gate with every other gate passing. The merge executor refuses an
+ *   observation older than two minutes and spends most of that on its own critical path, so this
+ *   candidate is observed every 20 seconds. It is never in steady state: it is the moment of
+ *   landing, and its cadence is paid for out of the merge-path reserve rather than the
+ *   steady-state share.
+ * - `active` — waiting on something GitHub can still deliver: a check, a review, a base refresh.
+ * - `steady` — `active`, and the last observation came back with its head, base tip, check state
+ *   and review state unchanged. The webhook wakes it the moment any of that moves.
+ * - `idle` — the next action is a dispatch, a rework or an escalation. Nothing on GitHub can move
+ *   it, so polling is pure safety net.
+ */
+export const observationCadenceMs = { merge: 20_000, active: 60_000, steady: 120_000, idle: 300_000 } as const;
+export type CadenceBand = keyof typeof observationCadenceMs;
+
+/** The endpoint family a path spends on, for the per-kind spend a pause incident reports. */
+const requestKinds: [RegExp, string][] = [
+  [/^\/repos\/[^/]+\/[^/]+\/pulls\/\d+\/files/, 'pull-files'],
+  [/^\/repos\/[^/]+\/[^/]+\/pulls\/\d+\/reviews/, 'pull-reviews'],
+  [/^\/repos\/[^/]+\/[^/]+\/pulls(\/|\?|$)/, 'pulls'],
+  [/^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+\/check-runs/, 'check-runs'],
+  [/^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+\/pulls/, 'commit-pulls'],
+  [/^\/repos\/[^/]+\/[^/]+\/check-runs/, 'check-publication'],
+  [/^\/repos\/[^/]+\/[^/]+\/compare\//, 'compare'],
+  [/^\/repos\/[^/]+\/[^/]+\/contents\//, 'contents'],
+  [/^\/repos\/[^/]+\/[^/]+\/git\//, 'git-refs'],
+  [/^\/repos\/[^/]+\/[^/]+\/commits/, 'commits'],
+  [/^\/repos\/[^/]+\/[^/]+\/branches\/.+\/protection/, 'protection'],
+  [/^\/repos\/[^/]+\/[^/]+\/issues\/\d+\/comments/, 'comments'],
+  [/^\/repos\/[^/]+\/[^/]+\/merges/, 'merges'],
+  [/^\/installation\/repositories/, 'installation'],
+  [/^\/app(\/|$)/, 'app'],
+  [/^\/rate_limit/, 'rate-limit'],
+];
+export const requestKind = (path: string) => requestKinds.find(([pattern]) => pattern.test(path))?.[1] ?? 'other';
+
+/** The live budget, the rate it is being spent at, and what the control plane is doing about it. */
+export interface GitHubBudget {
+  /** The installation's hourly limit and what is left of it, as the last response reported them. */
+  limit: number | null; remaining: number | null; used: number | null;
+  resetAt: string | null; observedAt: string | null;
+  /** Requests that cost budget in the last `windowMs`, and that rate per minute. */
+  windowMs: number; spentInWindow: number; perMinute: number;
+  /** When the current rate reaches zero, and whether that lands before the reset. */
+  projectedExhaustionAt: string | null; exhaustsBeforeReset: boolean;
+  /** The merge-path reserve and whether the budget has fallen below it. */
+  reserve: number; belowReserve: boolean;
+  /** The steady-state share of the hourly limit, and the request count it works out to. */
+  steadyStateShare: number; steadyStateBudget: number | null;
+  /** The pause in force, when a refusal stopped every request until the reset. */
+  paused: { since: string; until: string; reason: string } | null;
+  /** What the last hour was spent on, which is what a pause incident names. */
+  lastHour: { requests: number; byKind: { kind: string; requests: number }[] };
+  /** The schedule in force, and what each observation cost the job that made it. */
+  cadence: Record<CadenceBand, number>;
+  observations: { count: number; meanRequests: number | null; meanUncached: number | null;
+    jobs: { work: string; at: string; requests: number; uncached: number; band: CadenceBand; cadenceMs: number }[] };
+  /** Observations the reserve is holding back, until when and why. */
+  deferrals: { work: string; until: string; reason: string }[];
+}
+
+/**
+ * The state an observation is compared on: head, base tip, check state and review state. Two
+ * observations with the same fingerprint told the control plane the same thing, which is what
+ * makes the second one — and the next one — worth making less often.
+ */
+export function observationFingerprint(observation: Observation | null | undefined): string | null {
+  if (!observation) return null;
+  return JSON.stringify({
+    sha: observation.candidate.sha, baseSha: observation.candidate.baseSha, baseTip: observation.baseTip,
+    prState: observation.prState, draft: observation.draft, merged: observation.merged, mergeable: observation.mergeable,
+    checks: observation.checks.map(check => [check.name, check.result, check.appId, check.id ?? null, check.attempt ?? null]),
+    reviews: observation.reviews.map(review => [review.id, review.reviewer, review.sha, review.state]),
+    agentReview: observation.agentReview ? [observation.agentReview.sha, observation.agentReview.approved, observation.agentReview.reason ?? null] : null,
+  });
+}
+
+/**
+ * What an observation of this item could still change, from the item's state alone. `nextAction`
+ * is the classification the whole control plane already uses for what an item needs next, so the
+ * cadence follows it rather than inventing a second reading of the same state.
+ */
+export function observationBand(work: Work, all: Work[], now: Date): { band: Exclude<CadenceBand, 'steady'>; reason: string } {
+  const next = nextAction(work, all, now);
+  const open = !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
+  if (next?.kind === 'merge' || open && work.gates.every(gate => gate.name === 'merge' || gate.passed))
+    return { band: 'merge', reason: `${work.key} is at the merge gate with every other gate passing; the merge executor spends its observation's freshness` };
+  if (!next || next.kind === 'dispatch' || next.kind === 'request-rework' || next.kind === 'escalate')
+    return { band: 'idle', reason: `${work.key} needs ${next ? `a ${next.kind}` : 'nothing an observation can supply'}; nothing on GitHub can move it, so the webhook wakes it and polling is the safety net` };
+  return { band: 'active', reason: `${work.key} needs ${next.kind}; GitHub can still change what it is waiting for` };
+}
+
+/**
+ * When to observe this item again. `previous` is the observation the one just recorded replaced:
+ * an active candidate that came back saying exactly what it said last time settles to the
+ * steady-state interval, because the webhook is what will tell Graphyard that it stopped.
+ */
+export function observationCadence(work: Work, all: Work[], now: Date, previous?: Observation | null): { band: CadenceBand; ms: number; reason: string } {
+  const state = observationBand(work, all, now);
+  if (state.band === 'active' && previous && observationFingerprint(previous) === observationFingerprint(work.observation))
+    return { band: 'steady', ms: observationCadenceMs.steady,
+      reason: `${work.key} came back with its head, base tip, check state and review state unchanged; polling settles to the steady-state interval and the webhook wakes it the moment any of that moves` };
+  return { band: state.band, ms: observationCadenceMs[state.band], reason: state.reason };
+}
+
+/**
+ * Whether this observation may spend from a budget that has fallen below the merge-path reserve.
+ * A merge-gate candidate and a job the webhook woke always may; everything else is rescheduled
+ * past the reset with the reason, rather than spending the requests the merge path is owed.
+ */
+export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'remaining' | 'resetAt' | 'reserve'>, woken: boolean, now: Date): { until: string; reason: string } | null {
+  if (band === 'merge' || woken) return null;
+  if (budget.remaining === null || budget.remaining >= budget.reserve) return null;
+  const reset = budget.resetAt ? Date.parse(budget.resetAt) : NaN;
+  const until = new Date(Number.isFinite(reset) && reset > now.getTime() ? reset + 2000 : now.getTime() + observationCadenceMs.idle).toISOString();
+  return { until, reason: `GitHub budget is below the ${budget.reserve}-request merge-path reserve (${budget.remaining} remaining, reset ${budget.resetAt ?? 'unknown'}); this ${band}-cadence observation is rescheduled to ${until} rather than spent, so the merge path, webhook wakes and merge verification keep the reserve` };
+}
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 /**
  * A 401 or a non-rate-limit 403. Retrying it does not help: the credentials or the installed
@@ -67,12 +240,99 @@ export class GitHub {
   private authenticationRefusal: { until: number; error: GitHubPermissionRefusal } | null = null;
   /** How often the installed permissions are re-read when nothing has gone wrong. */
   preflightIntervalMs = 5 * 60_000;
+  // ---- The request budget (see `GitHubBudget` above) ----------------------------------------
+  /** The limit, what is left of it and when it resets, as the last installation response said. */
+  private rate: { limit: number | null; remaining: number | null; used: number | null; resetAt: number | null; observedAt: number | null } = { limit: null, remaining: null, used: null, resetAt: null, observedAt: null };
+  /** Every request that cost budget in the last hour, with the endpoint family it spent on. */
+  private charges: { at: number; kind: string }[] = [];
+  /** What each item's last observation cost, against the job that made it. */
+  private costs = new Map<string, { at: number; requests: number; uncached: number; band: CadenceBand; cadenceMs: number }>();
+  /** The same costs as a fleet sample, for the mean an operator reads. */
+  private samples: { at: number; requests: number; uncached: number }[] = [];
+  /** Observations the reserve is holding back, until when and why. */
+  private deferred = new Map<string, { until: string; reason: string }>();
+  private pausedSince = 0;
+  private pauseReason = '';
+  /** Counts the requests one measured stretch of work makes, and the ones that cost budget. */
+  private readonly meter = new AsyncLocalStorage<{ requests: number; uncached: number }>();
   constructor(public config: GitHubConfig) {}
-  private backoff(response: Response) {
+  private backoff(response: Response, context: string) {
     const retry = Number(response.headers.get('retry-after'));
     const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+    const before = this.blockedUntil;
     this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
       response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
+    // One pause is one incident: the first refusal that raised it is what it is dated from, and
+    // every job that runs into it afterwards reports the same instant rather than a new one.
+    if (before <= Date.now()) { this.pausedSince = Date.now(); this.pauseReason = `GitHub answered ${response.status} for ${context} with ${response.headers.get('x-ratelimit-remaining') ?? 'no'} requests remaining`; }
+  }
+  /**
+   * What one provider response says about the budget. A 304 costs nothing — GitHub does not charge
+   * a conditional read it answers from the caller's own ETag — so it is counted as a request made
+   * and not as budget spent, which is the whole reason an unchanged candidate is cheap to observe.
+   * Only installation requests report the budget this class is spending; App-level calls
+   * (`/app`, token refresh) are counted as requests against a different allowance.
+   */
+  private record(path: string, response: Response, tracked: boolean, now = Date.now()) {
+    const resource = response.headers.get('x-ratelimit-resource');
+    const number = (name: string) => { const value = Number(response.headers.get(name)); return Number.isFinite(value) ? value : null; };
+    const remaining = number('x-ratelimit-remaining');
+    if (tracked && remaining !== null && (!resource || resource === 'core')) {
+      const reset = number('x-ratelimit-reset');
+      this.rate = { limit: number('x-ratelimit-limit') ?? this.rate.limit, remaining, used: number('x-ratelimit-used') ?? this.rate.used,
+        resetAt: reset === null ? this.rate.resetAt : reset * 1000, observedAt: now };
+    }
+    const meter = this.meter.getStore();
+    if (meter) { meter.requests++; if (response.status !== 304) meter.uncached++; }
+    if (response.status === 304) return;
+    this.charges.push({ at: now, kind: requestKind(path) });
+    if (this.charges.length > 8192) this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
+  }
+  /** Run `fn` counting the requests it makes and the ones that actually cost budget. */
+  async measured<T>(fn: () => Promise<T>): Promise<{ value: T; requests: number; uncached: number }> {
+    const meter = { requests: 0, uncached: 0 };
+    const value = await this.meter.run(meter, fn);
+    return { value, requests: meter.requests, uncached: meter.uncached };
+  }
+  /** Record what one item's observation cost, against the job that made it. */
+  recordObservation(work: string, cost: { requests: number; uncached: number; band: CadenceBand; cadenceMs: number }, now = Date.now()) {
+    this.costs.set(work, { at: now, ...cost });
+    // A long-lived process observes far more items than it holds open; the ledger keeps the
+    // most recent so it stays a reading of the fleet rather than of its whole history.
+    if (this.costs.size > 500) for (const [key] of [...this.costs].sort((a, b) => a[1].at - b[1].at).slice(0, this.costs.size - 500)) this.costs.delete(key);
+    this.samples = [...this.samples, { at: now, requests: cost.requests, uncached: cost.uncached }].filter(sample => now - sample.at <= budgetLedgerMs);
+    this.deferred.delete(work);
+  }
+  /** Record an observation the reserve held back, so the deferral is readable as a decision. */
+  recordDeferral(work: string, deferral: { until: string; reason: string }) { this.deferred.set(work, deferral); }
+  /** The live budget: what is left, how fast it is going, and what the control plane is doing about it. */
+  budget(now = Date.now()): GitHubBudget {
+    this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
+    const spentInWindow = this.charges.filter(charge => now - charge.at <= budgetWindowMs).length;
+    const perMinute = spentInWindow / (budgetWindowMs / 60_000);
+    const { limit, remaining, used, resetAt, observedAt } = this.rate;
+    const exhaustion = remaining !== null && perMinute > 0 ? now + (remaining / perMinute) * 60_000 : null;
+    const counts = new Map<string, number>();
+    for (const charge of this.charges) counts.set(charge.kind, (counts.get(charge.kind) ?? 0) + 1);
+    const samples = this.samples.filter(sample => now - sample.at <= budgetLedgerMs);
+    const mean = (values: number[]) => values.length ? Math.round(values.reduce((total, value) => total + value, 0) / values.length * 100) / 100 : null;
+    return {
+      limit, remaining, used,
+      resetAt: resetAt === null ? null : new Date(resetAt).toISOString(),
+      observedAt: observedAt === null ? null : new Date(observedAt).toISOString(),
+      windowMs: budgetWindowMs, spentInWindow, perMinute: Math.round(perMinute * 100) / 100,
+      projectedExhaustionAt: exhaustion === null ? null : new Date(exhaustion).toISOString(),
+      exhaustsBeforeReset: exhaustion !== null && resetAt !== null && exhaustion < resetAt,
+      reserve: mergePathReserve, belowReserve: remaining !== null && remaining < mergePathReserve,
+      steadyStateShare, steadyStateBudget: limit === null ? null : Math.floor(limit * steadyStateShare),
+      paused: this.blockedUntil > now ? { since: new Date(this.pausedSince || now).toISOString(), until: new Date(this.blockedUntil).toISOString(),
+        reason: this.pauseReason || 'GitHub refused a request for rate limiting' } : null,
+      lastHour: { requests: this.charges.length, byKind: [...counts].map(([kind, requests]) => ({ kind, requests })).sort((a, b) => b.requests - a.requests || a.kind.localeCompare(b.kind)) },
+      cadence: { ...observationCadenceMs },
+      observations: { count: samples.length, meanRequests: mean(samples.map(sample => sample.requests)), meanUncached: mean(samples.map(sample => sample.uncached)),
+        jobs: [...this.costs].map(([work, cost]) => ({ work, at: new Date(cost.at).toISOString(), requests: cost.requests, uncached: cost.uncached, band: cost.band, cadenceMs: cost.cadenceMs })) },
+      deferrals: [...this.deferred].flatMap(([work, entry]) => Date.parse(entry.until) > now ? [{ work, until: entry.until, reason: entry.reason }] : []),
+    };
   }
   /**
    * Turns a failed response into the right refusal. Only a rate limit pauses the client; an
@@ -85,7 +345,7 @@ export class GitHub {
     try { text = (await response.text()).slice(0, 2000); } catch { /* The status alone is classified. */ }
     const rateLimited = response.status === 429 || response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || !!response.headers.get('retry-after') || /rate limit/i.test(text));
     if (rateLimited) {
-      this.backoff(response);
+      this.backoff(response, context);
       return new Refusal(`GitHub ${context} failed (${response.status}): rate limited; requests paused until ${new Date(this.blockedUntil).toISOString()}`, 502);
     }
     if (response.status === 401) return new GitHubPermissionRefusal(`GitHub ${context} failed (401): the App credentials were rejected; check GITHUB_APP_ID, GITHUB_INSTALLATION_ID and the private key`, 'authentication');
@@ -117,6 +377,7 @@ export class GitHub {
     try {
       demand(now >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit`, 502);
       const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+      this.record('/app/installations', response, false);
       const refused = await this.refusal(response, 'GET /app/installations');
       if (refused) throw refused;
       const installation: any = await response.json();
@@ -157,6 +418,7 @@ export class GitHub {
       const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
         method: 'POST', headers: this.appHeaders(), signal: AbortSignal.timeout(15_000),
       });
+      this.record('/app/installations/access_tokens', response, false);
       const refused = await this.refusal(response, 'installation authentication');
       if (refused instanceof GitHubPermissionRefusal) this.authenticationRefusal = { until: Date.now() + 60_000, error: refused };
       if (refused) throw refused;
@@ -188,7 +450,14 @@ export class GitHub {
       method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     });
-    if (response.status === 304 && cached) { this.rateFailures = 0; return structuredClone(cached.value); }
+    this.record(path, response, true);
+    if (response.status === 304 && cached) {
+      // A conditional read GitHub answered from the caller's ETag costs no budget, and the entry
+      // that answered it is the freshest thing in the cache: it keeps its place rather than
+      // ageing out from under the endpoints an observation reads on every cycle.
+      this.cache.delete(path); this.cache.set(path, cached);
+      this.rateFailures = 0; return structuredClone(cached.value);
+    }
     const refused = await this.refusal(response, `${method} ${path}`);
     if (refused) throw refused;
     this.rateFailures = 0;
@@ -198,7 +467,9 @@ export class GitHub {
       this.cache.delete(path);
       if (etag) {
         this.cache.set(path, { etag, value: structuredClone(value) });
-        if (this.cache.size > 256) this.cache.delete(this.cache.keys().next().value!);
+        // An observation reads about ten paths, and the fleet holds tens of open candidates:
+        // a cache that cannot hold all of them turns every cycle back into charged reads.
+        if (this.cache.size > cacheEntries) this.cache.delete(this.cache.keys().next().value!);
       }
     }
     return value;
@@ -490,6 +761,7 @@ export class GitHub {
     await this.authenticate();
     const response = await fetch('https://api.github.com/rate_limit', { headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15_000) });
     const time = Date.parse(response.headers.get('date') ?? '');
+    this.record('/rate_limit', response, false);
     const refused = await this.refusal(response, 'GET /rate_limit');
     if (refused) throw refused;
     demand(Number.isFinite(time), 'GitHub server time is unavailable', 502);
@@ -573,6 +845,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   private async appSlugFromApi(): Promise<string> {
     const response = await fetch('https://api.github.com/app', { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    this.record('/app', response, false);
     const refused = await this.refusal(response, 'GET /app');
     if (refused) throw refused;
     const app: any = await response.json();
