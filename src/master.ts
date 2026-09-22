@@ -137,12 +137,25 @@ export function sessionAgentName(profile: { agentName: string; concurrency?: num
   const tag = (session.requestId ?? session.id).toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 8).padEnd(8, '0');
   return derivedSessionName(profile, tag, session.attempt ?? 1);
 }
-/** Whether a Herdr agent name is one of the profile's sessions: its fixed name, or a name this launcher derived from it. */
+/**
+ * Whether a Herdr agent name is one of the profile's sessions: its fixed name, or a name this
+ * launcher derived from it. The tail is read from the end of the name and anchored there
+ * (GY-122): a name that ends in eight hex characters ends in its tag, with no attempt; only a
+ * name that does not is read as a tag and an attempt. One pattern with an optional attempt used
+ * to match from the first eight hex characters it found, so an all-digit tag (12345678,
+ * 00000000) after a digest or any other hex run was read as that run's attempt and the session
+ * went uncounted — one more than the limit could launch on the account. A tag is never read as
+ * an attempt: an attempt is a small count (the ledgers cap it at 50), never eight digits. The
+ * reading is the profile's when rebuilding the name from it gives the name back; a tail that
+ * cannot be rebuilt into a launchable name is nobody's session.
+ */
 export function isProfileSession(profile: { agentName: string }, name: string | undefined) {
   if (!name) return false;
   if (name === profile.agentName) return true;
-  const derived = /-([0-9a-f]{8})(?:-(\d+))?$/.exec(name);
-  return !!derived && derivedSessionName(profile, derived[1], Number(derived[2] ?? 1)) === name;
+  const reading = /-([0-9a-f]{8})$/.exec(name) ?? /-([0-9a-f]{8})-([1-9]\d*)$/.exec(name);
+  if (!reading) return false;
+  try { return derivedSessionName(profile, reading[1], Number(reading[2] ?? 1)) === name; }
+  catch (error) { if (error instanceof SessionNameRefusedError) return false; throw error; }
 }
 /**
  * The sessions a profile is running, counted against its limit: every Herdr agent that carries
