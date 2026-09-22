@@ -3,9 +3,10 @@ import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
-import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
+import { humanNeededActions } from '../model/next-action.js';
 import { decideScopeRequest } from '../model/scope.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+import { elapsed, humanNeededAttention, needsHumanActions } from './owed-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -15,6 +16,7 @@ import { readAdministrationLedger, readSudoState, summarizeAdministration } from
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+export { humanNeededAttention, needsHumanActions } from './owed-report.js';
 
 /**
  * One attention item per open worker scope request that somebody actually has to decide.
@@ -39,34 +41,32 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
 }
 
 /**
- * One attention item per action nobody in the executor loop may run (`model/concerns.ts`): it is
- * never claimed, never fails and never shows as a refused launch, so without a line of its own it
- * was one more unclaimed row in the queue. Each names what is waiting, how long it has waited and
- * the command that answers it; `counts.needsHuman` counts them apart from what is merely queued.
+ * One attention item per requested decision whose approver could not be launched (GY-101). A
+ * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
+ * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
+ * standing with a session that never started. `master status` used to show that as a decision
+ * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
+ * named here as what it is, with the loop's own refusal and the command that launches it again.
  */
-export function humanNeededAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
-  return humanNeededActions(snapshot.work, new Date(snapshot.now)).map(row => ({
-    subject: row.key,
-    text: `${row.reason} — no executor may run it; ${row.decision} has been owed for ${elapsed(row.waitedMs)}`,
-    ...agentOwner('master', row.resolve, 'approver'),
-  }));
+export function approverLaunchAttention(daemon: {
+  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
+  actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
+}): AttentionItem[] {
+  const actions = daemon.actions ?? [];
+  return (daemon.approvals ?? []).flatMap(watch => {
+    if (watch.settledAt) return [];
+    // The loop records a refused launch under the decision it was requested for (the request that
+    // could not reach an approver) or under that launch's own key (a replacement that could not).
+    const since = Date.parse(watch.launchedAt ?? watch.requestedAt);
+    const refusal = actions.find(action => action.state === 'failed' && action.kind === 'decision'
+      && (action.key === watch.key || action.key.startsWith(`approver:${watch.decision}:launch:`))
+      && (!Number.isFinite(since) || Date.parse(action.at) >= since));
+    return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
+      ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
+  });
 }
 
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
-
-/**
- * The action report with the two populations separated: rows an executor will take, and rows only
- * a judgment settles. `waiting` and `idle` are what the queue offers executors, so a row nobody
- * may claim is taken out of both — it would otherwise age into the idle list as though an
- * executor were late to it.
- */
-export function needsHumanActions<T extends { waiting: { id: string }[]; idle: { id: string }[] }>(report: T, owed: HumanNeededRow[]) {
-  const rows = new Set(owed.map(entry => entry.action).filter((id): id is string => !!id));
-  return { ...report, needsHuman: owed, waiting: report.waiting.filter(entry => !rows.has(entry.id)), idle: report.idle.filter(entry => !rows.has(entry.id)) };
-}
-
-/** Long waits read in the unit the reader thinks in; a request measured in seconds is still young. */
-const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
 
 /** Who answers a request whose session settled unanswered, and with which command. */
 export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
@@ -211,7 +211,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // The loop's own health comes before every work item: a coordinator that is absent or stalled is
   // why nothing else on this list is moving, and no other attention item would say so.
   const loopItems: AttentionItem[] = cycling
-    ? loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget })
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget }), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
