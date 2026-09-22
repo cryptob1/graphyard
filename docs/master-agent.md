@@ -873,8 +873,10 @@ review lane, the producer profiles the proof lane — never implied by a profile
 name, which is what once serialised every review and every proof run across the whole
 installation. A profile that runs one session keeps its fixed `agentName`; one that runs more
 gives each session a name unique to its request (`<agentName>-<first 8 hex of the request id>`,
-with the attempt appended after the first), so a second review on another item launches while the
-first runs and the two never share a Herdr name, a tab label or a session directory. The
+with the attempt appended after the first, composed inside Herdr's 32-character limit so a long
+profile name gives way to a digest while the tail stays whole), so a second review on another
+item launches while the first runs and the two never share a Herdr name, a tab label or a
+session directory. The
 dispatcher counts a profile's running sessions from Herdr's inventory on every tick — every agent
 carrying one of its names, and every agent a pending ledger record of the profile names — and
 launches on the first profile with a slot left; a request no profile has room for waits, and the

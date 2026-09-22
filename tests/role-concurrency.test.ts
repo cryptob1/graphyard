@@ -11,7 +11,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { buildMasterStatus, concurrencyAttention, concurrencyStarvedMs, isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, roleConcurrency, sessionAgentName, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { buildMasterStatus, concurrencyAttention, concurrencyStarvedMs, isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, roleConcurrency, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reconcileProducers, summarizeProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -253,6 +253,12 @@ test('integration:role-concurrency-configured — concurrency is declared per ro
     assert.deepEqual(starts(host.calls).slice(1), items.slice(1).map(item => `review-claude-${tag(item.autoDispatch!.review!.id)}`), 'sessions beyond the first slot are named for their request');
     assert.ok(isProfileSession(three.reviewers[0], 'review-claude') && starts(host.calls).slice(1).every(name => isProfileSession(three.reviewers[0], name)));
     assert.equal(isProfileSession(three.reviewers[0], 'review-claude-10'), false, 'another profile whose name extends this one is not counted as its session');
+    // A profile name near the runtime's 32-character limit still gets a distinct, launchable name per request, recognised as its own.
+    const long = { name: 'long', agentName: 'review-claude-on-the-second-acct', concurrency: 2 };
+    const derived = sessionAgentName(long, { id: randomUUID(), requestId: items[1].autoDispatch!.review!.id });
+    assert.ok(derived.length <= sessionNameLimit && derived.endsWith(`-${tag(items[1].autoDispatch!.review!.id)}`) && derived !== long.agentName, derived);
+    assert.ok(isProfileSession(long, derived) && !isProfileSession(three.reviewers[0], derived));
+    assert.equal(sessionAgentName(long, { id: randomUUID(), requestId: items[1].autoDispatch!.review!.id, attempt: 3 }).length <= sessionNameLimit, true);
     // Lowered to 1 while three run: nothing is stopped, nothing new launches until the sessions drain.
     await write(1);
     const fourth = requested(4);

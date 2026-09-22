@@ -5,7 +5,7 @@ import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, statfs, sym
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
-import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameField, sessionNameRefusal, SessionNameRefusedError } from './session-name.js';
+import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameField, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError } from './session-name.js';
 export { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, sessionNameRule, suffixedSessionName } from './session-name.js';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { launchAuthorization, loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
@@ -115,21 +115,34 @@ export type ProducerProfile = z.infer<typeof producerProfileSchema>;
  * while that name was visible. A profile now runs `concurrency` sessions at once (default 1).
  * A profile that runs one session keeps its fixed name, which every existing ledger, tab label
  * and failover path expects; one that runs more names each session for the request it answers
- * — `<agentName>-<first 8 hex of the request id>`, with the attempt appended after the first,
- * or the session's own id for a launch by hand — so a second review on another item starts
- * while the first runs and the two never share a name.
+ * — the profile's name and the first 8 hex of the request id, with the attempt appended after
+ * the first, or the session's own id for a launch by hand — so a second review on another item
+ * starts while the first runs and the two never share a name. The name is composed inside the
+ * runtime's limit (session-name.ts): the tail that tells the sessions apart is kept whole and a
+ * profile name too long for it gives way to a digest, so a session is recognised as the
+ * profile's by rebuilding its name from that tail rather than by prefix.
  */
 export const profileConcurrency = (profile: { concurrency?: number }) => Math.max(1, profile.concurrency ?? 1);
+function derivedSessionName(profile: { agentName: string }, tag: string, attempt: number) {
+  // As suffixedSessionName composes a name, with the tail kept verbatim: it is hex and digits,
+  // and the name starts with the profile's own (already launchable) name, so it needs no slug.
+  const tail = `${tag}${attempt > 1 ? `-${attempt}` : ''}`, head = profile.agentName;
+  if (head.length + tail.length + 1 <= sessionNameLimit) return assertSessionName(`${head}-${tail}`);
+  const digest = createHash('sha256').update([head, tail].join('\u0000')).digest('hex').slice(0, sessionNameDigestLength);
+  const shortened = head.slice(0, Math.max(1, sessionNameLimit - tail.length - sessionNameDigestLength - 2)).replace(/-+$/, '');
+  return assertSessionName(`${shortened}-${digest}-${tail}`);
+}
 export function sessionAgentName(profile: { agentName: string; concurrency?: number }, session: { id: string; requestId?: string; attempt?: number }) {
   if (profileConcurrency(profile) === 1) return profile.agentName;
   const tag = (session.requestId ?? session.id).toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 8).padEnd(8, '0');
-  return `${profile.agentName}-${tag}${(session.attempt ?? 1) > 1 ? `-${session.attempt}` : ''}`;
+  return derivedSessionName(profile, tag, session.attempt ?? 1);
 }
 /** Whether a Herdr agent name is one of the profile's sessions: its fixed name, or a name this launcher derived from it. */
 export function isProfileSession(profile: { agentName: string }, name: string | undefined) {
   if (!name) return false;
   if (name === profile.agentName) return true;
-  return name.startsWith(`${profile.agentName}-`) && /^[0-9a-f]{8}(?:-\d+)?$/.test(name.slice(profile.agentName.length + 1));
+  const derived = /-([0-9a-f]{8})(?:-(\d+))?$/.exec(name);
+  return !!derived && derivedSessionName(profile, derived[1], Number(derived[2] ?? 1)) === name;
 }
 /**
  * The sessions a profile is running, counted against its limit: every Herdr agent that carries
