@@ -5,7 +5,7 @@ import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, statfs, sym
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { z } from 'zod';
-import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameField, sessionNameRefusal, SessionNameRefusedError } from './session-name.js';
+import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameField, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError } from './session-name.js';
 export { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, sessionNameRule, suffixedSessionName } from './session-name.js';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { launchAuthorization, loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
@@ -15,7 +15,7 @@ import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
-import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
+import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, refusedReconciliation, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
@@ -52,6 +52,10 @@ export const agentEnvironmentSchema = z.object({
 }).strict();
 export type AgentEnvironment = z.infer<typeof agentEnvironmentSchema>;
 const accountList = z.array(profileName).min(1).max(20).optional();
+// How many sessions a reviewer or producer profile runs at once (GY-107): the fleet's review and
+// proof capacity is declared here, per role, never implied by the one agent name a profile has.
+// Absent means one, which keeps the profile's fixed session name; see profileConcurrency.
+const sessionConcurrency = z.number().int().min(1).max(20).optional();
 
 export const workerProfileSchema = z.object({
   name: profileName,
@@ -81,6 +85,7 @@ export const reviewerProfileSchema = z.object({
   approvals: approvalMode,
   environment: safeEnvironment,
   accounts: accountList,
+  concurrency: sessionConcurrency,
 }).strict();
 export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
 
@@ -98,10 +103,65 @@ export const producerProfileSchema = z.object({
   approvals: approvalMode,
   environment: safeEnvironment,
   accounts: accountList,
+  concurrency: sessionConcurrency,
 }).strict().superRefine((profile, context) => {
   if (!isAbsolute(profile.credentialFile)) context.addIssue({ code: 'custom', message: 'credentialFile must be absolute', path: ['credentialFile'] });
 });
 export type ProducerProfile = z.infer<typeof producerProfileSchema>;
+
+/**
+ * Per-role concurrency (GY-107). Reviews and proofs used to serialise across the installation
+ * because each role's profile had one fixed Herdr agent name, and a second launch was refused
+ * while that name was visible. A profile now runs `concurrency` sessions at once (default 1).
+ * A profile that runs one session keeps its fixed name, which every existing ledger, tab label
+ * and failover path expects; one that runs more names each session for the request it answers
+ * — the profile's name and the first 8 hex of the request id, with the attempt appended after
+ * the first, or the session's own id for a launch by hand — so a second review on another item
+ * starts while the first runs and the two never share a name. The name is composed inside the
+ * runtime's limit (session-name.ts): the tail that tells the sessions apart is kept whole and a
+ * profile name too long for it gives way to a digest, so a session is recognised as the
+ * profile's by rebuilding its name from that tail rather than by prefix.
+ */
+export const profileConcurrency = (profile: { concurrency?: number }) => Math.max(1, profile.concurrency ?? 1);
+function derivedSessionName(profile: { agentName: string }, tag: string, attempt: number) {
+  // As suffixedSessionName composes a name, with the tail kept verbatim: it is hex and digits,
+  // and the name starts with the profile's own (already launchable) name, so it needs no slug.
+  const tail = `${tag}${attempt > 1 ? `-${attempt}` : ''}`, head = profile.agentName;
+  if (head.length + tail.length + 1 <= sessionNameLimit) return assertSessionName(`${head}-${tail}`);
+  const digest = createHash('sha256').update([head, tail].join('\u0000')).digest('hex').slice(0, sessionNameDigestLength);
+  const shortened = head.slice(0, Math.max(1, sessionNameLimit - tail.length - sessionNameDigestLength - 2)).replace(/-+$/, '');
+  return assertSessionName(`${shortened}-${digest}-${tail}`);
+}
+export function sessionAgentName(profile: { agentName: string; concurrency?: number }, session: { id: string; requestId?: string; attempt?: number }) {
+  if (profileConcurrency(profile) === 1) return profile.agentName;
+  const tag = (session.requestId ?? session.id).toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 8).padEnd(8, '0');
+  return derivedSessionName(profile, tag, session.attempt ?? 1);
+}
+/** Whether a Herdr agent name is one of the profile's sessions: its fixed name, or a name this launcher derived from it. */
+export function isProfileSession(profile: { agentName: string }, name: string | undefined) {
+  if (!name) return false;
+  if (name === profile.agentName) return true;
+  const derived = /-([0-9a-f]{8})(?:-(\d+))?$/.exec(name);
+  return !!derived && derivedSessionName(profile, derived[1], Number(derived[2] ?? 1)) === name;
+}
+/**
+ * The sessions a profile is running, counted against its limit: every Herdr agent that carries
+ * one of its names, and every agent a pending ledger record of the profile names — the same
+ * inventory the one-session rule read, so a session Herdr no longer lists frees its slot as it
+ * did before, and the ledger's grace settles the record. `free` is how many more may launch.
+ */
+export function profileSessions(profile: { name: string; agentName: string; concurrency?: number }, agents: { name?: string }[], records: { profile: string; agentName: string; state: string }[] = []) {
+  const pending = new Set(records.filter(record => record.state === 'pending' && record.profile === profile.name).map(record => record.agentName));
+  const running = [...new Set(agents.map(agent => agent.name).filter((name): name is string => !!name && (isProfileSession(profile, name) || pending.has(name))))];
+  const limit = profileConcurrency(profile);
+  return { running, limit, free: Math.max(0, limit - running.length) };
+}
+/** The refusal a launch raises for a profile with no slot left; the one-session case reads as it always did. */
+export function profileAtLimit(role: 'Reviewer' | 'Producer', profile: { name: string; agentName: string; concurrency?: number }, sessions: { running: string[]; limit: number }) {
+  return sessions.limit === 1
+    ? `${role} agent ${sessions.running[0] ?? profile.agentName} is already visible in Herdr; profile ${profile.name} runs one session at a time (concurrency 1)`
+    : `${role} profile ${profile.name} is at its concurrency limit (${sessions.running.length} running, limit ${sessions.limit}: ${sessions.running.join(', ')}); raise concurrency in .graphyard/master.json or add a ${role.toLowerCase()} profile`;
+}
 
 export const reviewerIdentitySchema = z.object({
   appId: z.number().int().positive(),
@@ -1919,10 +1979,54 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
   return { review: state.review ? describe(state.review, reviewRecords) : null, producers: state.producers.map(request => describe(request, producerRecords)),
     recent: state.history.slice(-5).map(request => ({ kind: request.kind, ...(request.group ? { group: request.group } : {}), sha: request.sha, state: request.state, resolution: request.resolution ?? null, resolvedAt: request.resolvedAt ?? null })) };
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }) {
+/**
+ * Queueing at the gates, per role (GY-107): how many sessions run against the limit the fleet
+ * declares, and how long the longest request has waited for a slot. A request waits for a slot
+ * when it is open, has no session, and nothing else holds it — no launch refused, no retry
+ * pending, no settled session that no attempt follows — and, for a producer request, when some
+ * profile is independent of the item at all. A fleet starving on review capacity reads here as
+ * `running` at `limit` with `waiting` above zero and `longestWaitMs` climbing, without a session list.
+ */
+export interface RoleConcurrencyProfile { profile: string; agentName: string; limit: number; running: number; sessions: string[] }
+export interface RoleConcurrencyReport { role: 'reviewer' | 'producer'; limit: number; running: number; free: number; waiting: number; longestWaitMs: number | null; longest: { work: string; requestId: string; group: string | null; waitedMs: number } | null; starved: boolean; profiles: RoleConcurrencyProfile[] }
+export interface RoleProfiles { reviewers: { name: string; agentName: string; concurrency?: number }[]; producers: { name: string; agentName: string; principal: string; concurrency?: number }[] }
+export function roleConcurrency(role: 'reviewer' | 'producer', profiles: RoleProfiles['reviewers'] | RoleProfiles['producers'], work: Work[], agents: { name?: string }[], records: { pending: any[]; completed: any[] }, sessions: Pick<DispatchSessions, 'failures' | 'retries'>, now: number): RoleConcurrencyReport {
+  const all = [...records.completed, ...records.pending];
+  const perProfile = profiles.map(profile => { const counted = profileSessions(profile, agents, all); return { profile: profile.name, agentName: profile.agentName, limit: counted.limit, running: counted.running.length, sessions: counted.running }; });
+  const limit = perProfile.reduce((total, entry) => total + entry.limit, 0), running = perProfile.reduce((total, entry) => total + entry.running, 0);
+  // How long an open request has waited for a slot, or null when something other than a slot holds it.
+  const slotWait = (request: { id: string; requestedAt: string }): number | null => {
+    const last = [...all].reverse().find(record => record.requestId === request.id);
+    if (last && last.state === 'pending') return null;
+    if (last && !['failed', 'expired'].includes(last.state)) return null;
+    if (sessions.failures.some(failure => failure.requestId === request.id)) return null;
+    const retry = sessions.retries?.find(entry => entry.requestId === request.id);
+    if (retry) return retry.exhausted || (retry.nextAt && Date.parse(retry.nextAt) > now) ? null : Math.max(0, now - Date.parse(retry.nextAt ?? last?.closedAt ?? request.requestedAt));
+    return last ? null : Math.max(0, now - Date.parse(request.requestedAt));
+  };
+  const waiting = work.filter(item => item.stage !== 'done' && item.autoDispatch).flatMap(item => {
+    if (role === 'reviewer') { const review = item.autoDispatch!.review; return review?.state === 'requested' && review.provider === 'github' ? [{ item, request: review }] : []; }
+    const implementers = new Set(implementerIdentities(item));
+    if (!(profiles as RoleProfiles['producers']).some(profile => !implementers.has(profile.principal))) return [];
+    return item.autoDispatch!.producers.filter(request => request.state === 'requested').map(request => ({ item, request }));
+  }).flatMap(({ item, request }) => { const waitedMs = slotWait(request); return waitedMs === null ? [] : [{ work: item.key, requestId: request.id, group: request.group ?? null, waitedMs }]; }).sort((a, b) => b.waitedMs - a.waitedMs);
+  const longest = waiting[0] ?? null;
+  return { role, limit, running, free: Math.max(0, limit - running), waiting: waiting.length, longestWaitMs: longest?.waitedMs ?? null, longest, starved: limit > 0 && running >= limit && waiting.length > 0, profiles: perProfile };
+}
+/** A starved role is attention for the master: the limit and the wait, with what raises the one. */
+export const concurrencyStarvedMs = 10 * 60_000;
+export function concurrencyAttention(reports: RoleConcurrencyReport[]): AttentionItem[] {
+  return reports.filter(report => report.starved && (report.longestWaitMs ?? 0) >= concurrencyStarvedMs).map(report => ({ subject: `${report.role} concurrency`,
+    text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
+    ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
+}
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles) {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane);
+  // Per-role concurrency (GY-107): sessions against the declared limit, and the queue at the gate.
+  const concurrency = roles ? [roleConcurrency('reviewer', roles.reviewers, snapshot.work, agents, reviews, sessions, now), roleConcurrency('producer', roles.producers, snapshot.work, agents, sessions.producers, sessions, now)] : [];
+  const concurrencyItems = concurrencyAttention(concurrency);
   const workerSessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
@@ -2055,7 +2159,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + concurrencyItems.length + installation.attention.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
@@ -2064,11 +2168,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length },
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...installation.attentionItems] as AttentionItem[],
-    // What waits on the human, longest first, with how to answer; and the roles out of capacity.
-    humanRequests, capacity,
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...concurrencyItems, ...installation.attentionItems] as AttentionItem[],
+    // What waits on the human, longest first, with how to answer; the roles out of capacity; and
+    // each role's sessions against its concurrency limit with the longest wait for a slot.
+    humanRequests, capacity, concurrency,
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }

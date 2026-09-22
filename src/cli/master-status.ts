@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
+import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
@@ -209,7 +209,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
-  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
+  // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
+  // role, the sessions running against the declared limit and the longest wait for a slot.
+  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
   // A required check that failed on the clock says so, with the measurement against its budget.
   const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
@@ -250,8 +252,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
-    reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
-    producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName })),
+    reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
+      concurrency: master.reviewers.map(profile => ({ name: profile.name, agentName: profile.agentName, concurrency: profileConcurrency(profile) })) } : null,
+    producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName, concurrency: profileConcurrency(profile) })),
     setup, administration, daemon, dispatch,
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
