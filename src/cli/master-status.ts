@@ -28,6 +28,32 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
   });
 }
 
+/**
+ * One attention item per requested decision whose approver could not be launched (GY-101). A
+ * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
+ * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
+ * standing with a session that never started. `master status` used to show that as a decision
+ * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
+ * named here as what it is, with the loop's own refusal and the command that launches it again.
+ */
+export function approverLaunchAttention(daemon: {
+  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
+  actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
+}): AttentionItem[] {
+  const actions = daemon.actions ?? [];
+  return (daemon.approvals ?? []).flatMap(watch => {
+    if (watch.settledAt) return [];
+    // The loop records a refused launch under the decision it was requested for (the request that
+    // could not reach an approver) or under that launch's own key (a replacement that could not).
+    const since = Date.parse(watch.launchedAt ?? watch.requestedAt);
+    const refusal = actions.find(action => action.state === 'failed' && action.kind === 'decision'
+      && (action.key === watch.key || action.key.startsWith(`approver:${watch.decision}:launch:`))
+      && (!Number.isFinite(since) || Date.parse(action.at) >= since));
+    return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
+      ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
+  });
+}
+
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
 
 /** Long waits read in the unit the reader thinks in; a request measured in seconds is still young. */
@@ -176,7 +202,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // The loop's own health comes before every work item: a coordinator that is absent or stalled is
   // why nothing else on this list is moving, and no other attention item would say so.
   const loopItems: AttentionItem[] = cycling
-    ? loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget })
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget }), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.

@@ -328,11 +328,28 @@ control plane and the session back from Herdr:
 | A decision it requested, still `requested`, that the item no longer calls for — the round was requested another way, a new head arrived | Withdraws it as its requester and closes its session, so it is never adopted for a later round on a reason that describes an older head. A decision the item still calls for but the loop cannot attest this cycle is left standing, and adopted once it can |
 | Herdr or the decision history cannot be read | Concludes nothing this cycle |
 
-Each decision's session has its own name, `graphyard-approver-<key>-<first eight characters of the
-decision id>`, so the finished tab of one decision can never refuse the launch of the next on the
-same item; a session a master started for the same decision with `master approver` is adopted
-rather than doubled. A decision stays on the [silence measure](#liveness-and-silence) from the
-moment the item needs it until it is applied: waiting on an approver is the pipeline waiting on its
+Each decision's session has its own name, `graphyard-approver-<key>-<start of the decision id>`, so
+the finished tab of one decision can never refuse the launch of the next on the same item; a session
+a master started for the same decision with `master approver` is adopted rather than doubled. The
+name is built inside the runtime's own limit — at most 32 characters, starting with a lowercase
+letter, made of lowercase letters, digits, `-` and `_` — and built so that what a human reads first
+survives it: the work key is kept whole and the decision id takes what the limit leaves, up to
+eight characters. A key long enough to crowd the decision id out shortens the role word instead
+(`gy-approver-<key>-<decision>`), because a cut-short key says less than an abbreviated role does;
+only a key too long for even that carries a digest of the whole identity, so a shortened name still
+names one decision only. Every other session name Graphyard generates (worker, reviewer, producer,
+master, escalation handler) is built and checked the same way, where it is constructed: a profile
+whose `agentName` Herdr could not launch is refused when the profile is read, not when its first
+pane has already been allocated — and a proposal `master init` writes is held to that same rule, so
+`master worker add` never fails on a name Graphyard itself produced. A proposed worker is named
+after its repository, its runtime and which of them it is (`owner-orders-api-claude-1`); where the
+repository is long enough to pass the limit the runtime and the ordinal are what stay whole, since
+they are what tells one proposed worker from the other, and the repository gives way to a digest of
+the whole identity (`kubernetes-sig-5fb19c57-claude-1`). A launch a runtime refuses for the name it
+was given is reported as that — the limit, the name attempted and the command that retries it — and
+`master status` shows the decision as awaiting an approver that could not start, with the loop's own
+refusal, rather than as a decision waiting for a session nobody can find. A decision stays on the
+[silence measure](#liveness-and-silence) from the moment the item needs it until it is applied: waiting on an approver is the pipeline waiting on its
 own agent, a replacement session restarts that wait, and a decision nobody judges reaches the
 twenty-minute attention item like any other silence. With automatic merging off the merge wait in
 `daemon.escalations` names the decision and the session it is with, so it is raised again whenever
