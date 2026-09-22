@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { demand } from './refusal.js';
+import { actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
 
@@ -26,6 +27,8 @@ import type { Work } from './work.js';
  *
  * Nothing here decides a gate. A row is a fact about what is outstanding.
  */
+
+export * from './action-progress.js';
 
 export const actionStates = ['pending', 'claimed', 'done'] as const;
 export type ActionState = typeof actionStates[number];
@@ -66,6 +69,13 @@ export interface ActionRow {
   state: ActionState; claim: ActionClaim | null; attempts: number;
   /** A failed attempt waits this long before the row is offered again. */
   retryAt?: string;
+  /**
+   * Set while the row's last attempts failed for one unchanged reason: it is stalling rather than
+   * retrying (`actionStall`). The row carries it so every reader of a row — the queue snapshot,
+   * `master status`, the dashboard card — says the same thing without re-deriving it, and
+   * `actionStall` recomputes it from the history so the two can never disagree.
+   */
+  stall?: ActionStall;
   resolvedAt?: string; result?: 'done' | 'failed'; resolution?: string;
   history: ActionRecord[];
 }
@@ -85,28 +95,14 @@ export const actionClaimMs = 120_000;
  * the next one still arrives in time — and one that stopped renews nothing and loses the row.
  */
 export const actionRenewIntervalMs = 30_000;
-/**
- * How long a completed action holds its situation before the row is offered again. An action's
- * effect is not instant — a launched session has to claim, a provider call has to be observed —
- * and re-running it inside that window would double the effect. After it, a situation that still
- * stands is a situation the action did not fix, and another attempt is owed.
- */
-export const actionSettleMs = 10 * 60_000;
-/** A failed attempt backs off on a widening interval, never below the first step or above the last. */
-export const actionRetryMinMs = 30_000, actionRetryMaxMs = 10 * 60_000;
-/** A row nobody has claimed for longer than this is idle while it is actionable; see `idleActionable`. */
-export const actionIdleMs = 5 * 60_000;
 
 export const actionId = (kind: NextActionKind, workId: string, binding: string) =>
   createHash('sha256').update(['action', kind, workId, binding].join('\0')).digest('hex').slice(0, 32);
-export const actionRetryDelay = (attempts: number) => Math.min(actionRetryMinMs * 2 ** Math.max(0, attempts - 1), actionRetryMaxMs);
+
+
+
 
 const record = (row: ActionRow, entry: ActionRecord) => { row.history = [...row.history, entry].slice(-actionRecordLimit); };
-const claimLive = (row: ActionRow, now: Date) => !!row.claim && Date.parse(row.claim.expiresAt) > now.getTime();
-const settling = (row: ActionRow, now: Date) => row.state === 'done' && !!row.resolvedAt && now.getTime() - Date.parse(row.resolvedAt) < actionSettleMs;
-const waitingToRetry = (row: ActionRow, now: Date) => !!row.retryAt && Date.parse(row.retryAt) > now.getTime();
-/** A row an executor may take now: open, out of backoff, and not inside a completed action's settle window. */
-export const claimable = (row: ActionRow, now: Date) => !settling(row, now) && !waitingToRetry(row, now) && (row.state === 'pending' || !claimLive(row, now));
 
 /** The queue as it stands, created on first use so legacy documents gain one at their next evaluation. */
 export function actionQueue(work: Work): ActionQueue {
@@ -165,7 +161,7 @@ export function reconcileActions(work: Work, all: Work[], now: Date, options: { 
     }
     // A completed action whose situation outlived its settle window did not fix it; owe another.
     if (row.state === 'done' && !settling(row, now)) {
-      row.state = 'pending'; row.claim = null; delete row.retryAt;
+      row.state = 'pending'; row.claim = null; delete row.retryAt; delete row.stall;
       const reason = `${row.kind} completed at ${row.resolvedAt} (${row.resolution ?? 'no result recorded'}) and ${work.key} still needs it`;
       record(row, { at, event: 'reopened', requester: row.requestedBy, executor: null, result: null, reason });
       transitions.push({ event: 'reopened', action: row });
@@ -262,56 +258,15 @@ export function settleAction(work: Work, id: string, settler: { executor: string
   row!.state = result === 'done' ? 'done' : 'pending';
   row!.claim = null;
   row!.resolvedAt = at; row!.result = result; row!.resolution = reason;
-  // A completed action holds its situation while its effect lands; a failed one backs off.
-  if (result === 'failed') row!.retryAt = new Date(now.getTime() + actionRetryDelay(row!.attempts)).toISOString();
-  else delete row!.retryAt;
+  // The attempt is on the history before the row is judged: what it failed with is part of what
+  // says whether this row is retrying or stalling.
   record(row!, { at, event, requester: row!.requestedBy, executor, result, reason });
+  // A completed action holds its situation while its effect lands; a failed one backs off — on a
+  // widening interval while its failures change, on a fixed recheck once they stop changing.
+  if (result === 'failed') {
+    const stall = actionStall(row!);
+    if (stall) row!.stall = stall; else delete row!.stall;
+    row!.retryAt = actionRetryAt(row!, now);
+  } else { delete row!.retryAt; delete row!.stall; }
   return { event, action: row! };
-}
-
-export interface QueueSnapshot {
-  pending: number; claimed: number; settling: number; completed: number;
-  byKind: Record<string, number>;
-  /** Rows nobody is running, oldest first, with how long they have waited. */
-  waiting: { key: string; work: string; id: string; kind: NextActionKind; reason: string; waitedMs: number; attempts: number; lastFailure: string | null }[];
-  /** The longest an open row has gone unclaimed; null when nothing is open. */
-  oldestPendingMs: number | null;
-  executors: { executor: string; host: string; actions: number }[];
-}
-
-/** What the queue holds right now, for master status and the dashboard. */
-export function queueSnapshot(all: Work[], now: Date): QueueSnapshot {
-  const rows = all.flatMap(work => (work.actionQueue?.actions ?? []).map(row => ({ work, row })));
-  const byKind: Record<string, number> = {};
-  for (const { row } of rows) byKind[row.kind] = (byKind[row.kind] ?? 0) + 1;
-  const waiting = rows.filter(({ row }) => claimable(row, now))
-    .map(({ row }) => ({ key: row.key, work: row.work, id: row.id, kind: row.kind, reason: row.reason, waitedMs: Math.max(0, now.getTime() - Date.parse(row.requestedAt)), attempts: row.attempts, lastFailure: row.result === 'failed' ? row.resolution ?? null : null }))
-    .sort((a, b) => b.waitedMs - a.waitedMs);
-  const executors = new Map<string, { executor: string; host: string; actions: number }>();
-  for (const { row } of rows) {
-    if (!claimLive(row, now)) continue;
-    const key = `${row.claim!.executor}@${row.claim!.host}`;
-    const entry = executors.get(key) ?? { executor: row.claim!.executor, host: row.claim!.host, actions: 0 };
-    entry.actions += 1; executors.set(key, entry);
-  }
-  return {
-    pending: waiting.length,
-    claimed: rows.filter(({ row }) => claimLive(row, now)).length,
-    settling: rows.filter(({ row }) => settling(row, now)).length,
-    completed: all.reduce((total, work) => total + (work.actionQueue?.history ?? []).filter(row => row.result === 'done').length, 0)
-      + rows.filter(({ row }) => row.state === 'done').length,
-    byKind, waiting, oldestPendingMs: waiting.length ? waiting[0].waitedMs : null,
-    executors: [...executors.values()].sort((a, b) => a.executor.localeCompare(b.executor)),
-  };
-}
-
-/**
- * Items that have something to do and nobody doing it, for longer than the bound.
- *
- * This is the measurement the inversion is for: under a master session an item sat idle whenever
- * the loop had no step for its situation. With the control plane naming the action, an idle item
- * is always an unclaimed row, and this reports exactly those.
- */
-export function idleActionable(all: Work[], now: Date, thresholdMs = actionIdleMs) {
-  return queueSnapshot(all, now).waiting.filter(entry => entry.waitedMs > thresholdMs);
 }

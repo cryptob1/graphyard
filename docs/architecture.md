@@ -108,6 +108,33 @@ next executor takes the row as a further attempt, and the dead one's late settle
 so an interrupted action is retried without being executed twice. Every transition records the
 requester, the executor, the result and the reason on the row.
 
+A failed attempt is retried, and a retry is a bet that something about the attempt can change. A
+row whose last three failures gave one identical reason is not taking that bet: it is re-running an
+impossibility, and every further attempt will produce the same line. Three consecutive failures
+with an unchanged reason therefore classify the row as **stalled** rather than retrying
+(`src/model/action-progress.ts`, which holds every reading of a row: its state, the wait a failed
+attempt earns, whether it is making progress, and what the queue holds), and the classification — the reason, the failures that shared it, the attempt
+count and, through the row's request time, how long it has been open — is written onto the row, so
+every reader says the same thing without deriving it again. One value decides it, for the
+classification, the counts, `master status` and the dashboard alike. A reason that differs from the
+last one ends the run: something moved, and the row is retrying again.
+
+The classification is what makes the state visible, and the visibility is the point. A row inside
+its backoff is claimable by nobody, so it appeared in no count and no list the control plane
+published: an item that owed a review nobody could launch read exactly like an item with nothing to
+do, which is the one failure typed actions exist to prevent, wearing the shape of a retry instead of
+a missing action. The queue snapshot now counts every open row — `pending + claimed + settling +
+backingOff` — and names the stalled ones out of that whole, `master status` raises one attention
+item per stall with the unchanged reason and who resolves it, and the dashboard puts it on the
+item's own card in place of the gate sentence the stall was going to clear.
+
+A stall also changes what the backoff means. A widening interval is the right answer to a fault
+that may pass, and the wrong answer to a condition that will not: the attempts a row made while it
+could not have succeeded are no reason for the next one to wait longer. A stalled row therefore
+rechecks on a fixed one-minute interval instead of the interval its attempt count would compute, so
+backoff earned while a blocking condition stood does not outlive it — the moment the condition
+clears, the row is claimed within a minute rather than waiting out a ten-minute ceiling.
+
 A claim is a bounded lease, not a bounded handler: an executor still inside one renews the claim
 while it runs, so a dispatch that waits on a runtime or a merge that chains provider calls keeps
 its row, and only an executor that stopped renewing loses it. A renewal carries no result and is
