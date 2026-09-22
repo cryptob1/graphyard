@@ -415,6 +415,14 @@ export class Engine {
       const postDeployment = command === 'deployment' || command === 'evidence' && data.proof === deploySmokeProof;
       const containmentCleanup = ['settle', 'recover', 'autosettle'];
       const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
+      // Ending a session handle an item still carries is the third thing a delivered item accepts,
+      // and only that: a review or proof session is often still running when its candidate merges,
+      // and the liveness sweep must be able to close its record (GY-113). A closure is a record of
+      // a runtime fact, never a decision — it decides no gate, ends no lease and binds no
+      // candidate — and this one may only finish a handle the item already carries, so nothing new
+      // is recorded on a delivered item and nothing it holds is reopened.
+      const deliveredSessionClosure = work.stage === 'done' && command === 'session' && data.state === 'finished'
+        && (work.sessions ?? []).some(handle => handle.id === data.id);
       preserveAssignment(work); retainQuarantineFence(work);
       if (!containmentCleanup.includes(command) && !postDeployment && work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
       // Revocation is the one mutation an in-flight merge execution cannot outrun: freezing it
@@ -423,7 +431,7 @@ export class Engine {
       // committed one outlives its expiry here until GitHub has answered for the provider call.
       demand(!work.mergeExecution || command === 'heartbeat' || command === 'revoke' || containmentCleanup.includes(command) || postDeployment,
         work.mergeExecution?.committingAt ? 'The merge broker committed this candidate to the provider; retry after GitHub reconciliation' : 'A merge execution is active; retry after it completes or expires');
-      if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
         demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
@@ -893,7 +901,7 @@ export class Engine {
       retainQuarantineFence(work);
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
       // append its audit/revision metadata, but stale inputs must not re-evaluate it.
-      if (!deliveredContainmentCleanup && !postDeployment) this.evaluate(work, all, now);
+      if (!deliveredContainmentCleanup && !postDeployment && !deliveredSessionClosure) this.evaluate(work, all, now);
       // A delivered item's gates are an immutable snapshot, but what it still owes — a deployment
       // carrying the merge — is not; its queue is reconciled without re-evaluating the delivery.
       else {
@@ -905,7 +913,7 @@ export class Engine {
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
         : command === 'autoscope' ? { ...data, decision, before: { plannedFiles: before?.plannedFiles ?? [], blocker: before?.blocker ?? null } }
         : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}) } : data);
-      if (work.submission && !postDeployment && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
+      if (work.submission && !postDeployment && !deliveredSessionClosure && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
     });
