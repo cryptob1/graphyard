@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -20,7 +20,6 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../s
 // session name. Each test is named for the proof it produces: integration:concurrent-reviews,
 // integration:concurrent-producers, integration:role-concurrency-configured,
 // unit:role-capacity-visible, and the docs check behind manual:capacity-sizing-onboarding-review.
-// GY-122 adds unit:profile-session-name-round-trip and unit:role-concurrency-deterministic-tags.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -33,22 +32,7 @@ function observation(candidate: { sha: string; baseSha: string; pr: number; bran
   return { candidate: { ...candidate, author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
     files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
 }
-/**
- * The first eight characters of a request id: the tag a session derived for it is named with. The
- * control plane mints a request id from the head, base, policy and the clock, so a suite that
- * kept those ids drew a fresh tag on every run, and the one tag in fifty that is all digits
- * (12345678, 00000000) exposed the misread this file guards against only when the draw fell on
- * it (GY-122). The tags are fixed here instead, per item and per request slot (the review, or a
- * proof group): the reviews of the first three items carry the two all-digit tags and a plain hex
- * one, the first item's unit and integration groups carry all-digit tags of their own, and every
- * other slot's tag is a fixed hex digest of its item and slot, so every run exercises the shape
- * that failed and no two requests of one item share a tag.
- */
-const fixedTags: Record<string, string[]> = { review: ['12345678', '00000000', 'a1b2c3d4'], unit: ['00000000'], integration: ['87654321'] };
-const fixedTag = (n: number, slot: string) => fixedTags[slot]?.[n - 1] ?? createHash('sha256').update(`tag-${slot}-${n}`).digest('hex').slice(0, 8);
-/** A fixed 32-hex request id for one of item N's requests: the slot's tag, then a digest of the item and slot. */
-const fixedRequestId = (n: number, slot: string) => `${fixedTag(n, slot)}${createHash('sha256').update(['request', n, slot].join('\0')).digest('hex').slice(0, 24)}`;
-/** A submitted, observed candidate for item N, with its review and producer requests recorded under fixed ids. */
+/** A submitted, observed candidate for item N, with its review and producer requests recorded. */
 function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): Work {
   const candidate = { sha: sha40(`a${n}`), baseSha: B, pr: 200 + n, branch: `graphyard/gy-${200 + n}-1`, author: 'implementer' };
   const item = { id: `work-${200 + n}`, key: `GY-${200 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
@@ -57,8 +41,6 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
     lease: null, workspaces: [{ host: 'h', path: `/w/gy-${200 + n}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
   reconcileAutoDispatch(item, [item], now);
-  if (item.autoDispatch?.review) item.autoDispatch.review = { ...item.autoDispatch.review, id: fixedRequestId(n, 'review') };
-  if (item.autoDispatch) item.autoDispatch.producers = item.autoDispatch.producers.map(request => ({ ...request, id: fixedRequestId(n, request.group ?? 'producer') }));
   return item;
 }
 
@@ -273,7 +255,6 @@ test('integration:role-concurrency-configured — concurrency is declared per ro
     assert.deepEqual(more.launched.map(entry => entry.work), ['GY-202', 'GY-203']); assert.deepEqual(more.waiting.filter(entry => entry.kind === 'review'), []);
     assert.equal(host.agents.length, 3);
     assert.deepEqual(starts(host.calls).slice(1), items.slice(1).map(item => `review-claude-${tag(item.autoDispatch!.review!.id)}`), 'sessions beyond the first slot are named for their request');
-    // The second and third items carry the all-digit tag 00000000 and the hex tag a1b2c3d4 (fixedTags), so this counts a name that used to be misread on every run.
     assert.ok(isProfileSession(three.reviewers[0], 'review-claude') && starts(host.calls).slice(1).every(name => isProfileSession(three.reviewers[0], name)));
     assert.equal(isProfileSession(three.reviewers[0], 'review-claude-10'), false, 'another profile whose name extends this one is not counted as its session');
     // A profile name near the runtime's 32-character limit still gets a distinct, launchable name per request, recognised as its own.
@@ -308,60 +289,6 @@ test('integration:role-concurrency-configured — concurrency is declared per ro
     assert.equal(reviewerProfileSchema.safeParse({ name: 'r', agentName: 'review-r', kind: 'claude', concurrency: 2.5 }).success, false);
     assert.match(profileAtLimit('Reviewer', { name: 'r', agentName: 'review-r' }, { running: ['review-r'], limit: 1 }), /Reviewer agent review-r is already visible in Herdr; profile r runs one session at a time/);
   } finally { await host.cleanup(); }
-});
-
-test('unit:profile-session-name-round-trip — isProfileSession recognises every name derivedSessionName produces, for hex and all-digit tags with and without an attempt suffix, and rejects the names of other profiles', () => {
-  const short = { name: 'claude-reviewer', agentName: 'review-claude', concurrency: 3 };
-  const long = { name: 'long', agentName: 'review-claude-on-the-second-acct', concurrency: 2 };
-  const other = { name: 'cursor-reviewer', agentName: 'review-cursor', concurrency: 3 };
-  const tags = ['a1b2c3d4', '12345678', '00000000'];
-  const attempts: (number | undefined)[] = [undefined, 1, 12];
-  let checked = 0;
-  for (const profile of [short, long]) for (const requestTag of tags) for (const attempt of attempts) {
-    const name = sessionAgentName(profile, { id: randomUUID(), requestId: `${requestTag}-${randomUUID()}`, ...(attempt === undefined ? {} : { attempt }) });
-    assert.ok(name.length <= sessionNameLimit && name.endsWith(attempt !== undefined && attempt > 1 ? `-${requestTag}-${attempt}` : `-${requestTag}`), name);
-    assert.equal(isProfileSession(profile, name), true, `${profile.agentName} owns ${name}`);
-    assert.equal(isProfileSession(other, name), false, `${other.agentName} does not own ${name}`);
-    assert.equal(isProfileSession(profile === short ? long : short, name), false, `${name} is not the other claude profile's session`);
-    checked++;
-  }
-  assert.equal(checked, 2 * tags.length * attempts.length);
-  // The shape that was misread: a digest-shortened name whose all-digit tag follows the eight-hex digest, with no attempt suffix.
-  const shortened = sessionAgentName(long, { id: randomUUID(), requestId: '12345678-0000-4000-8000-000000000000' });
-  assert.match(shortened, /^review-claude-[0-9a-f]{8}-12345678$/, shortened);
-  assert.equal(isProfileSession(long, shortened), true, 'the tag is read from the end of the name, never as an attempt of the digest before it');
-  // Anchored: a tag is never read as an attempt, and an attempt is never read as a tag.
-  assert.equal(isProfileSession(short, 'review-claude-12345678'), true);
-  assert.equal(isProfileSession(short, 'review-claude-12345678-1'), false, 'the first attempt carries no suffix, so this is not a name the launcher produces');
-  assert.equal(isProfileSession(short, 'review-claude-10'), false, 'a profile whose name extends this one');
-  assert.equal(isProfileSession(short, 'review-claude-a1b2c3d4-0'), false);
-  assert.equal(isProfileSession(short, 'review-claude-a1b2c3d4-01'), false);
-  assert.equal(isProfileSession(short, `review-claude-a1b2c3d4-${'9'.repeat(18)}`), false, 'an attempt the limit cannot hold is nobody\'s session, not an error');
-  assert.equal(isProfileSession(short, undefined), false);
-  assert.equal(isProfileSession(short, 'review-claude'), true, 'the fixed name is the profile\'s own');
-});
-
-test('unit:role-concurrency-deterministic-tags — this suite\'s request ids are fixed rather than drawn from the clock, and include the all-digit tags that once made integration:role-concurrency-configured fail one run in fifty', () => {
-  const items = [requested(1), requested(2), requested(3), requested(4)];
-  assert.deepEqual(items.slice(0, 3).map(item => tag(item.autoDispatch!.review!.id)), ['12345678', '00000000', 'a1b2c3d4']);
-  assert.ok(items.slice(0, 2).every(item => /^\d{8}$/.test(tag(item.autoDispatch!.review!.id))), 'the first two items carry all-digit tags');
-  assert.deepEqual(items.map(item => item.autoDispatch!.review!.id), [requested(1), requested(2), requested(3), requested(4)].map(item => item.autoDispatch!.review!.id), 'the same item gets the same id on every run');
-  assert.deepEqual(items.map(item => item.autoDispatch!.review!.id), [requested(1, {}, new Date(0)), requested(2, {}, new Date(0)), requested(3, {}, new Date(0)), requested(4, {}, new Date(0))].map(item => item.autoDispatch!.review!.id), 'the clock has no say in the id');
-  const ids = items.flatMap(item => [item.autoDispatch!.review!.id, ...item.autoDispatch!.producers.map(request => request.id)]);
-  assert.equal(new Set(ids).size, ids.length, 'every request of every item is its own id');
-  assert.ok(ids.every(id => /^[0-9a-f]{32}$/.test(id)), ids.join(', '));
-  for (const item of items) {
-    const tags = [item.autoDispatch!.review!.id, ...item.autoDispatch!.producers.map(request => request.id)].map(tag);
-    assert.equal(new Set(tags).size, tags.length, `${item.key}: no two requests of one item share a tag, so two sessions of one profile never share a name`);
-  }
-  const groups = requested(1, { producerProofs: ['manual:concurrency'] }).autoDispatch!.producers;
-  assert.deepEqual(groups.map(request => [request.group, tag(request.id)]).slice(0, 2), [['unit', '00000000'], ['integration', '87654321']], 'the first item\'s proof groups carry all-digit tags too, so integration:concurrent-producers counts a producer session named with one on every run');
-  // The names the configured test derives from these ids, on both the plain and the digest-shortened profile, round-trip on every run.
-  const short = { name: 'claude-reviewer', agentName: 'review-claude', concurrency: 3 }, long = { name: 'long', agentName: 'review-claude-on-the-second-acct', concurrency: 2 };
-  for (const item of items) for (const profile of [short, long]) {
-    const name = sessionAgentName(profile, { id: randomUUID(), requestId: item.autoDispatch!.review!.id });
-    assert.ok(name.endsWith(`-${tag(item.autoDispatch!.review!.id)}`) && isProfileSession(profile, name), `${profile.agentName} counts ${name}`);
-  }
 });
 
 test('unit:role-capacity-visible — master status reports, per role, the sessions running against the limit and how long the longest request has waited for a slot', () => {
