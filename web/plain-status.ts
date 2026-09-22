@@ -1,5 +1,7 @@
 import { deliveryState, type Gate, type Work } from '../src/model';
+import type { PipelineTimeline } from '../src/pipeline-speed';
 import { assignment } from './assignment';
+import { statusDuration, type StatusDuration } from './duration';
 
 /**
  * Plain-English status for people who have never read the Graphyard docs. Every sentence is
@@ -138,6 +140,39 @@ export function plainStatus(work: Work, now: number): PlainStatus {
     case 'merge': return make(first.some(r => r.raw.startsWith('Merge queue position')) ? `Queued to merge — ${next!.replace(/ to merge,/, ',')}` : `Ready to merge${on} — ${next ? lowerFirst(next) : 'waiting its turn'}`, 'waiting', next);
     default: return make(`Ready to merge${on}`, 'waiting', null);
   }
+}
+
+/** The phases an item is in once it has been handed in: the card names review, not building. */
+const handedInPhases: Phase[] = ['review', 'checks', 'proof', 'merging'];
+
+/**
+ * The instant the item entered the status its card names, from the control plane's own record.
+ *
+ * `stageEnteredAt` is the spine: the engine rewrites it when, and only when, the evaluated stage
+ * changes, so an observation, a heartbeat or a failed retry of the same action leaves it alone
+ * and a stalled item cannot appear fresh. Two moves the stage does not see get their own instant,
+ * because the card's sentence does see them: handing the work in, which the build gate keeps in
+ * the build stage until GitHub is observed, and a claim running out, which reads as nobody
+ * working on it before the next evaluation writes the ready stage. The latest instant wins, and
+ * one in the future — a clock that disagrees — is ignored rather than trusted.
+ */
+export function statusSince(work: Work, now: number): string {
+  const phase = phaseOf(work, now);
+  const pipeline = (work as Work & { pipeline?: PipelineTimeline }).pipeline;
+  const moves: (string | undefined | null)[] = [work.stageEnteredAt];
+  if (handedInPhases.includes(phase)) moves.push(pipeline?.resubmittedAt ?? pipeline?.submittedAt);
+  if (phase === 'needs-worker' && work.lease && Date.parse(work.lease.expiresAt) <= now) moves.push(work.lease.expiresAt);
+  const instants = moves.map(at => at ? Date.parse(at) : Number.NaN).filter(at => Number.isFinite(at) && at <= now);
+  return instants.length ? new Date(Math.max(...instants)).toISOString() : work.stageEnteredAt;
+}
+
+/**
+ * How long this item has held the status its card names, and whether that is past the one
+ * configured threshold. Every view — the list, the board, the item view — draws from this call,
+ * so the number and the verdict cannot differ between two places that show the same item.
+ */
+export function statusHeld(work: Work, now: number): StatusDuration {
+  return statusDuration(statusSince(work, now), now, phaseOf(work, now) === 'shipped');
 }
 
 /** Stuck items first, then the oldest in its phase; the order people should look at them. */
