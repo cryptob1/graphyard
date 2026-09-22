@@ -608,9 +608,47 @@ run them. The full model is in
 Nine kinds exist: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`,
 `reclaim`, `merge`, `verify-deployment` and `escalate`. `master status` reports them under
 `actions`: what each open item needs, which executor holds which row and since when, and every
-row that has waited past the five-minute idle bound. An item with nothing named needs nothing
-from anybody — it is delivered, or it is waiting on another item's action (an unfinished
-dependency, a predecessor's place in the merge queue).
+row that has waited past the five-minute idle bound.
+
+### An item with no action says which nothing it is
+
+An item with nothing named is not, on its own, an item that is fine. It may be delivered, waiting
+on an unfinished dependency, waiting behind a predecessor in the merge queue, or held by a live
+session already producing what its gate waits for — and it may equally be an item holding a
+failing gate that no rule named anything for, which is the one failure typed actions exist to
+prevent. Those read identically as an absence, so the control plane never leaves one: every item
+carries either an action or a named wait, and a state that produces neither is reported as a
+defect.
+
+`master status` reports all of it under `actionless`, with the gate each item holds, how long it
+has held it, what the gate says is missing, and the account:
+
+- `waiting-on` — another item's action moves it, or the session already holding it does. The key
+  or the session owner is on `waitingOn`. Counted under `counts.waitingOnAnother`, and nothing is
+  owed to anybody.
+- `human` — one of the three decisions the operator keeps (goals and priorities, spending money
+  or opening accounts, issuing credentials to people). Owned by the operator in the attention
+  list, never addressed to an agent.
+- `unaccounted` — no rule named an action, no dependency and no human need. **This is a defect in
+  the control plane, not in the item.** It is raised as master attention naming the gate, the
+  elapsed time and the refusal, and it is counted as an actionable subject by the loop, so the
+  wait accumulates against the silence bound instead of being absent from every measure. File it
+  with `graphyard master create`; no synthetic action is invented for it, because an action no
+  executor can complete is a row that fails forever, which is worse than the silence it replaces.
+
+Anything past the same five-minute bound with no action and nothing moving it is counted under
+`counts.stalled` and named on the dashboard's home page under **Nothing is happening**, apart from
+the items that are genuinely waiting on something else.
+
+The mapping from a gate refusal to an action is total by construction — `refusalRules` ends in a
+rule that matches everything — but that proves totality over *rules*, not over *outcomes*. Every
+refusal shape the gates can word is therefore declared in `gateRefusalCatalogue`
+(`src/model/refusal-catalogue.ts`, beside the mapping in `src/model/refusal-mapping.ts`) with
+the kinds the mapping may name for it, and
+`tests/action-totality.test.ts` drives the real evaluator over a battery of states and asserts
+that every refusal it produced is a declared shape, that every declared shape maps inside its
+declared kinds, and that every rule is reachable. A refusal added to a gate without an entry there
+fails that test rather than reaching production as a silent escalation.
 
 What an item needs is named per provider, never per gate sentence. Only a `github` approval is
 answered by a reviewer session an executor launches, so only that item is named `request-review`.

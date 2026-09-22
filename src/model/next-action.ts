@@ -1,16 +1,22 @@
 import { queueSequencingReason } from '../merge-queue.js';
 import { automatableOutcomes, dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
-import { leadHoldRefusal } from './delegation.js';
 import { deliveryState } from './delivery.js';
 import { openAgentRequests } from './agent-requests.js';
+import { refusalAction, reviewStandstill } from './refusal-mapping.js';
 import type { Work } from './work.js';
-import { nextActionKinds, nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
+import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
+import type { ActionAccount, ActionWait } from './action-account.js';
 
-// The vocabulary lives in `action-kinds.ts`; it is re-exported here so that what an item needs
-// next and the kinds it can need are still read from one place.
+// The vocabulary lives in `action-kinds.ts`, the classification in `refusal-mapping.ts`, the
+// declared refusals in `refusal-catalogue.ts` and the accounting vocabulary in
+// `action-account.ts`; each is re-exported here so what an item needs next is still read from
+// one place. `action-account.ts` is the one exception: it imports the computation below, so it
+// is imported from directly rather than re-exported through the module it depends on.
 export { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextActionKinds, nextActionLlmRoles } from './action-kinds.js';
 export type { LlmRole, NextAction, NextActionInputs, NextActionKind } from './action-kinds.js';
+export { refusalAction, refusalRuleFor, refusalRuleIndex, refusalRules, reviewStandstill } from './refusal-mapping.js';
+export { gateRefusalCatalogue, refusalShape, type RefusalShape } from './refusal-catalogue.js';
 
 /**
  * The typed next action.
@@ -20,17 +26,26 @@ export type { LlmRole, NextAction, NextActionInputs, NextActionKind } from './ac
  * the gates (model/gates.ts); this turns that evaluation into one typed instruction per open
  * item — what to do, and the exact inputs whoever runs it needs — so execution can be stateless.
  *
- * Two properties make that safe to build on:
+ * Three properties make that safe to build on:
  *
  * - **Totality.** Every refusal a gate can produce maps to exactly one action kind, or to
  *   `escalate`. `refusalAction` is that mapping, and nothing else classifies a refusal. A
- *   refusal nobody thought about becomes an escalation rather than silence.
+ *   refusal nobody thought about becomes an escalation rather than silence. `refusalRules` makes
+ *   that total over *rules*; `gateRefusalCatalogue` is what makes it provable over *outcomes*.
+ * - **Accountability.** An item that needs nothing says which nothing it is. `actionAccount`
+ *   answers for every item with an action, or a named wait — another item's action, a live
+ *   session, a decision reserved for a person — and, when neither could be produced, with the
+ *   defect that says so. Nothing is left as a bare `null` for a reader to guess at, because an
+ *   item holding a failing gate with no action and nobody told is the one failure typed actions
+ *   exist to prevent (GY-103, GY-106).
  * - **Purity.** `nextAction` is a function of the work item, its graph and the clock. The same
  *   snapshot always names the same action, so two executors reading it independently agree
  *   without talking to each other.
  *
  * Nothing here authorizes progression. An action says what is missing; the gates still decide
- * from evidence and verdicts alone.
+ * from evidence and verdicts alone. And nothing here invents an action to fill a gap: a
+ * synthesised action nobody can complete is a row that fails forever, which is worse than the
+ * silence it replaces — a state nobody wrote a rule for is reported, not answered.
  */
 
 
@@ -49,119 +64,6 @@ const canonical = (value: unknown) => JSON.stringify(value, (_key, entry) =>
  */
 export const sameAction = (left: NextAction | null | undefined, right: NextAction | null | undefined) => canonical(left ?? null) === canonical(right ?? null);
 
-/**
- * Every refusal maps to exactly one action kind. The rules are ordered and the first match wins,
- * so the mapping is a function; the last rule matches everything, so it is total. A refusal that
- * matches no earlier rule is an escalation by construction — the control plane never drops one on
- * the floor because nobody wrote a rule for it.
- */
-const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }[] = [
-  // ready
-  { gate: 'ready', match: /^Not released from backlog$/, kind: 'escalate' },
-  // An unfinished dependency is answered by dispatching that dependency, not by anything on this item.
-  { gate: 'ready', match: /^Dependency .+ is unfinished$/, kind: 'dispatch' },
-  // build
-  { gate: 'build', match: /^Worker has not submitted implementation for this attempt$/, kind: 'dispatch' },
-  { gate: 'build', match: /^No workspace registered$/, kind: 'dispatch' },
-  { gate: 'build', match: /^Pull request has not been independently observed$/, kind: 'resync' },
-  { gate: 'build', match: /has not been compared against the base branch tip/, kind: 'resync' },
-  { gate: 'build', match: /^(Candidate changes|Out-of-scope regression)/, kind: 'request-rework' },
-  // A base the control plane cannot merge in cleanly is the worker's to resolve, on a fresh head:
-  // the refusal itself says to run `graphyard sync`, resolve it and push, and that approval and
-  // proofs do not survive the resolution. Re-reading the pull request cannot produce that head, so
-  // a conflict is rework — the one kind that says a judgment owes this item a new commit.
-  { gate: 'build', match: /conflict/i, kind: 'request-rework' },
-  // review
-  { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
-  { gate: 'review', match: /.*/, kind: 'request-review' },
-  // test: a check that failed needs a new head; one that has not answered yet needs a fresh read.
-  { gate: 'test', match: /^Required CI check .+ has not passed on the current candidate$/, kind: 'resync' },
-  // acceptance
-  { gate: 'acceptance', match: /is no longer independent:/, kind: 'escalate' },
-  { gate: 'acceptance', match: /needs trusted passing evidence/, kind: 'dispatch' },
-  // merge
-  { gate: 'merge', match: /^GitHub observation missing or older than two minutes$/, kind: 'resync' },
-  { gate: 'merge', match: /^Pull request is not mergeable against the current base$/, kind: 'resync' },
-  { gate: 'merge', match: /branch protection have not been verified$/, kind: 'escalate' },
-  { gate: 'merge', match: /^Ejected from the merge queue:/, kind: 'request-rework' },
-  { gate: 'merge', match: /^Candidate has not entered the merge queue$/, kind: 'merge' },
-  { gate: null, match: /.*/, kind: 'escalate' },
-];
-
-/**
- * What a review-gate refusal is really waiting on, when the head's own record already answers it,
- * or null when a review an executor can ask for is genuinely what is missing.
- *
- * Whatever stands behind it, the review gate refuses with a sentence that reads as "a review is
- * required": an approval for `github`, a verified Codex review, a verdict from a reviewer profile.
- * But `reviewNeed` — the same function auto-dispatch uses to decide whether to raise a review
- * request — may already have answered that no *launched* review can be asked for this head, and
- * each of those answers is a different action:
- *
- * - a reviewer requested changes on exactly this head, so the item owes a new one;
- * - the head does not contain the base tip, so any approval would be dismissed;
- * - the provider's review is dispatched by the control plane's own observation job, which a fresh
- *   reading wakes (`Engine.resyncWork`): it posts the request the reviewer answers and reads the
- *   verdict back, and no session exists for an executor to launch;
- * - every configured reviewer profile is exhausted, so there is nobody left to ask and adding
- *   capacity or changing provider is the operator's call.
- *
- * Naming `request-review` for any of them asks for something no executor can ever complete: no
- * review request is raised (`reconcileAutoDispatch` opens one only while `reviewNeed().needed`),
- * the handler refuses for want of one, and the row fails, backs off to the retry cap and is
- * claimed again every tick forever, while the item is never shown as owing a judgment. That is
- * the silence AC-1 exists to end, and it has to end for every provider, not just the one whose
- * reviews a session answers — so this mapping is exhaustive over `ReviewState` and the only state
- * it leaves to `request-review` is the one a launched reviewer can actually answer.
- */
-export function reviewStandstill(work: Work): { kind: NextActionKind; reason: string } | null {
-  if (!work.candidate || !work.observation) return null;
-  const need = reviewNeed(work);
-  switch (need.state) {
-    // Changes requested on this exact head — as a GitHub review, or as the verdict an agent
-    // reviewer records — means the item needs a new commit, which is a judgment's to make.
-    case 'changes-requested': return { kind: 'request-rework', reason: need.reason };
-    // A head that does not contain the base tip is answered by a fresh reading and base refresh.
-    case 'base-not-contained': return { kind: 'resync', reason: need.reason };
-    // The control plane dispatches this provider's review itself: the fresh reading that wakes its
-    // observation job is both how the request is posted and how the verdict arrives.
-    case 'provider-dispatched': return { kind: 'resync', reason: need.reason };
-    // Nobody is left to ask. An executor cannot add reviewer capacity or change the provider.
-    case 'provider-exhausted': return { kind: 'escalate', reason: need.reason };
-    // `required` is the one state a launched reviewer answers, and the three remaining states
-    // raise no review refusal at all: without a review the policy requires, an approval or a
-    // carried approval, the gate passes (or refuses only its outstanding change requests).
-    case 'required': case 'not-required': case 'approved': case 'carried': return null;
-  }
-}
-
-/**
- * The single action kind a refusal maps to. `work` decides the three cases the refusal text cannot:
- * a CI check that reported a failure (rework) rather than one still to answer (re-read), a
- * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue, and a
- * review refusal standing over a head no review can be asked for (`reviewStandstill`).
- */
-export function refusalAction(work: Work, gate: string, refusal: string): NextActionKind {
-  if (gate === 'test' && /^Required CI check (.+) has not passed on the current candidate$/.test(refusal)) {
-    const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
-    const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
-    const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) ? 'request-rework' : 'resync';
-  }
-  if (gate === 'review') {
-    const standstill = reviewStandstill(work);
-    if (standstill) return standstill.kind;
-  }
-  if (gate === 'merge') {
-    if (standingEscalations(work).some(entry => refusal.includes(entry.reason)) || leadHoldRefusal(work) === refusal) return 'escalate';
-    // The queue's own sequencing — waiting a turn, waiting for a speculative tip — is the merge
-    // action making progress, not a refusal anyone acts on differently.
-    if (queueSequencingReason(refusal)) return 'merge';
-  }
-  const rule = refusalRules.find(candidate => (candidate.gate === null || candidate.gate === gate) && candidate.match.test(refusal));
-  return rule!.kind;
-}
-
 const dispatchInputs = (work: Work): NextActionInputs => ({ kind: 'dispatch', target: 'implementation', epoch: work.epoch, priority: work.priority, plannedFiles: [...(work.plannedFiles ?? [])] });
 
 /** The proof group the acceptance gate is waiting on, with the live producer request when one stands. */
@@ -176,10 +78,24 @@ function proofInputs(work: Work, all: Work[], now: Date): NextActionInputs | nul
 
 const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null });
 
+
+
+type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'defect'>;
+
 /**
- * What this item needs next, or null when it needs nothing from anybody: it is delivered and
- * verified, or every refusal standing against it belongs to another item (an unfinished
- * dependency is that other item's dispatch, not this one's).
+ * What this item needs next, or null when it needs nothing from anybody.
+ *
+ * This is `actionAccount` with everything but the action dropped, kept because every caller that
+ * only wants the instruction — the queue, the API, the executor — should not have to know about
+ * the accounting. A caller that has to tell an idle item from a stalled one calls `actionAccount`.
+ */
+export function nextAction(work: Work, all: Work[], now: Date): NextAction | null {
+  return computeAccount(work, all, now).action;
+}
+
+/**
+ * What this item needs next, or why it needs nothing — with the failing gate it answers and how
+ * long the item has held it.
  *
  * The order is the order a delivery actually unblocks in: a standing escalation first, because
  * nothing may deliver under one; then a typed request an agent left behind, because a session
@@ -187,14 +103,27 @@ const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: wo
  * an assignment nobody holds any more; then a live worker blocked on a scope answer; then the
  * first refusing gate; and finally the merge a fully proven candidate is authorized for.
  */
-export function nextAction(work: Work, all: Work[], now: Date): NextAction | null {
+export function actionAccount(work: Work, all: Work[], now: Date): ActionAccount {
+  const heldSince = work.stageEnteredAt ?? work.updatedAt ?? now.toISOString();
+  const held = Date.parse(heldSince);
+  return { work: work.id, key: work.key, ...computeAccount(work, all, now),
+    heldSince, heldMs: Number.isFinite(held) ? Math.max(0, now.getTime() - held) : 0 };
+}
+
+function computeAccount(work: Work, all: Work[], now: Date): Computed {
   const key = work.key, id = work.id;
+  const make = (kind: NextActionKind, reason: string, inputs: NextActionInputs, binding: string, gate: string | null = null, refusal: string | null = null): Computed =>
+    ({ gate, refusal, wait: null, defect: null,
+      action: { kind, work: id, key, gate, refusal, reason, inputs, llmRole: inputs.kind === 'dispatch' && inputs.target === 'proof' ? 'produce-evidence' : nextActionLlmRoles[kind], binding } });
+  const waits = (wait: ActionWait, gate: string | null = null, refusal: string | null = null): Computed => ({ gate, refusal, action: null, wait, defect: null });
+  /** No rule named anything for this state. Reported as the defect it is; never papered over with an action nobody can run. */
+  const unaccounted = (detail: string, gate: string | null = null, refusal: string | null = null): Computed => ({ gate, refusal, action: null, wait: null, defect: detail });
+
   // Backlog is not open work: an item nobody has released is waiting on the operator deciding it
   // is ready, which is a goal-setting call and not an action anyone runs. Its refusal still maps
   // (to `escalate`); the item simply raises none until it is released.
-  if (!work.ready) return null;
-  const make = (kind: NextActionKind, reason: string, inputs: NextActionInputs, binding: string, gate: string | null = null, refusal: string | null = null): NextAction =>
-    ({ kind, work: id, key, gate, refusal, reason, inputs, llmRole: inputs.kind === 'dispatch' && inputs.target === 'proof' ? 'produce-evidence' : nextActionLlmRoles[kind], binding });
+  if (!work.ready) return waits({ kind: 'human', on: 'operator', detail: `${key} has not been released from the backlog; releasing it is a goals-and-priorities decision, which is the operator's` },
+    'ready', 'Not released from backlog');
 
   const escalation = standingEscalations(work)[0];
   if (escalation) return make('escalate', `${key} has a standing ${escalation.trigger} escalation: ${escalation.reason}`,
@@ -211,7 +140,7 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
     const state = deliveryState(work);
     if (state === 'awaiting-deployment' && work.delivery) return make('verify-deployment', `${key} merged as ${short(work.delivery.mergeSha)} and no deployment carrying it has been observed`,
       { kind: 'verify-deployment', mergeSha: work.delivery.mergeSha, mergedAt: work.delivery.mergedAt, state }, `delivery:${work.delivery.mergeSha}`);
-    return null;
+    return waits({ kind: 'settled', on: null, detail: `${key} is delivered (${state}); its gates are history and no gate refuses it` });
   }
 
   const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
@@ -248,14 +177,25 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
 
   const failing = work.gates.find(gate => !gate.passed);
   if (failing) {
-    const refusal = failing.reasons[0];
-    if (refusal === undefined) return null;
+    // Which of the gate's refusals this item acts on. A refusal that belongs to another item — an
+    // unfinished dependency, a turn behind somebody else in the merge queue — answers this item
+    // only while it is the *only* thing the gate says: a blocker recorded beside a dependency used
+    // to disappear behind it until the dependency landed, which is this same silence in a smaller
+    // room. So the first refusal that is this item's own is the one acted on, and a gate that says
+    // nothing but deferred refusals is the wait it looks like.
+    const deferred = (entry: string) => /^Dependency .+ is unfinished$/.test(entry) || !!queueSequencingReason(entry);
+    const refusal = failing.reasons.find(entry => !deferred(entry)) ?? failing.reasons[0];
+    // A gate that refuses without saying why is the defect in its purest form: nothing can be
+    // computed from it, and before this it produced exactly no action and no word to anybody.
+    if (refusal === undefined) return unaccounted(`the ${failing.name} gate refuses with no reason recorded, so nothing can be computed from it`, failing.name, null);
     // A live lease is a session already doing exactly what the build gate is waiting for. Naming
     // a dispatch here would offer the item to a second worker while the first still holds it.
-    if (failing.name === 'build' && liveLease) return null;
-    const kind = refusalAction(work, failing.name, refusal);
+    if (failing.name === 'build' && liveLease) return waits({ kind: 'session', on: work.lease!.owner,
+      detail: `${work.lease!.owner} holds epoch ${work.lease!.epoch} until ${work.lease!.expiresAt} and is producing what the build gate waits for: ${refusal}` }, failing.name, refusal);
     // An unfinished dependency is the dependency's dispatch, not this item's; nothing waits here.
-    if (failing.name === 'ready' && /^Dependency .+ is unfinished$/.test(refusal)) return null;
+    const dependency = failing.name === 'ready' ? refusal.match(/^Dependency (.+) is unfinished$/) : null;
+    if (dependency) return waits({ kind: 'dependency', on: dependency[1], detail: `${key} waits on ${dependency[1]}: ${refusal}` }, failing.name, refusal);
+    const kind = refusalAction(work, failing.name, refusal);
     const binding = `${failing.name}:${work.policyRevision}:${short(work.candidate?.sha)}:${short(work.candidate?.baseSha)}:${refusal}`;
     if (kind === 'dispatch') {
       if (failing.name === 'acceptance') {
@@ -295,7 +235,10 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
     if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${detail}`, resyncInputs(work), binding, failing.name, refusal);
     // Waiting a turn in the merge queue is nobody's action: the predecessor's merge is the one
     // that moves this item, exactly as an unfinished dependency is that item's dispatch.
-    if (kind === 'merge' && failing.reasons.every(entry => queueSequencingReason(entry)) && /^Merge queue position /.test(refusal)) return null;
+    if (kind === 'merge' && failing.reasons.every(entry => queueSequencingReason(entry))) {
+      const ahead = refusal.match(/^Merge queue position \d+ of \d+: (\S+) is ahead$/);
+      if (ahead) return waits({ kind: 'queue', on: ahead[1], detail: `${key} waits behind ${ahead[1]} in the merge queue: ${refusal}` }, failing.name, refusal);
+    }
     if (kind === 'merge') return make('merge', `${key} is queued to merge: ${refusal}`,
       { kind: 'merge', pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null }, binding, failing.name, refusal);
     // `detail` again rather than the refusal: a review refusal standing over a spent reviewer
@@ -309,5 +252,10 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
   if (work.candidate && !work.observation?.merged) return make('merge', `${key} has passed every gate on ${short(work.candidate.sha)} and is authorized to merge`,
     { kind: 'merge', pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null },
     `merge:${work.candidate.sha}:${work.candidate.baseSha}:${work.policyRevision}`);
-  return null;
+  if (work.candidate) return waits({ kind: 'settled', on: null, detail: `${key} merged as ${short(work.observation?.mergeSha)} and no gate refuses it; the delivery record follows on the next reading` });
+  // Open, released, nothing refusing and no candidate: the gates have not been evaluated at all.
+  // Every other path above named something, so there is no rule left to reach — the item would
+  // simply sit here, which is precisely what must never happen quietly.
+  return unaccounted(`${key} is open with no gate refusing it and no candidate to merge: its gates (${work.gates.length}) name nothing to do and nothing to wait for`);
 }
+

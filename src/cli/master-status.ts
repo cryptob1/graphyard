@@ -9,6 +9,7 @@ import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeRev
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
+import { actionlessItems, stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 
@@ -54,6 +55,34 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
     return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
       ...unansweredRequestOwner(row.key, request) };
   }));
+}
+
+/**
+ * What an item with no action is missing, in one clause: the refusal its failing gate raised, or
+ * the account itself when no gate said anything.
+ */
+const missingFrom = (entry: ActionlessItem) => entry.refusal ?? entry.detail;
+
+/**
+ * One attention item per open item the control plane names no action for and nothing is moving.
+ *
+ * This is the state with no other reporter. An item waiting on a dependency, on the entry ahead
+ * of it in the merge queue, or on the session already building it has somewhere to be seen and
+ * something that will move it; `actionlessItems` counts those separately and they raise nothing
+ * here. What is left is an item holding a failing gate past the idle bound with no action, no
+ * dependency and no recorded human need — which was, until this, exactly as visible as an item
+ * that was fine. It is named with the gate, how long it has held it, what is missing, and who
+ * answers: the operator for a decision the project reserves for a person, and the master for the
+ * control-plane defect that a state produced no answer at all.
+ */
+export function stalledItemAttention(snapshot: { work: Work[]; now: string }, thresholdMs = stallBoundMs): AttentionItem[] {
+  return stalledItems(snapshot.work, new Date(snapshot.now), thresholdMs).map(entry => {
+    const held = `has held its ${entry.gate ?? 'unevaluated'} gate for ${elapsed(entry.heldMs)} with no action named and nothing moving it`;
+    return entry.outcome === 'human'
+      ? { subject: entry.key, text: `${entry.key} ${held}: ${missingFrom(entry)} — ${entry.detail}`, ...humanOwner('goals and priorities', entry.detail) }
+      : { subject: entry.key, text: `${entry.key} ${held}: ${missingFrom(entry)} — the control plane computed neither an action, a dependency nor a human need for this state, which is a defect in the control plane rather than in the item (${entry.detail})`,
+        ...agentOwner('master', `graphyard master create files the control-plane defect that left ${entry.key} without an action; until it is fixed, graphyard master status names no step for this item and nothing will claim it`) };
+  });
 }
 
 /**
@@ -193,7 +222,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
   const unanswered = unansweredRequestAttention(status.work);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  // An open item the control plane names no action for. Those waiting on another item or on a
+  // live session are accounted and raise nothing; what is left is named, with what is missing.
+  const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
+  const stalled = stalledItemAttention(snapshot);
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...stalled, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above).
   attentionItems.unshift(...loopItems);
@@ -217,7 +250,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      // Items with no action, split the way a reader has to read them: one waiting on another
+      // item is the pipeline working, one with nothing moving it is the pipeline stopped.
+      actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalled.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + loopItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    // Every open item the control plane names no action for, with the account it names instead
+    // and how long it has held its failing gate; the bound the stalled ones were judged against.
+    actionless: { bound: stallBoundMs, items: actionless },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
