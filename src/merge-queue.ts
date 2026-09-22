@@ -1,5 +1,6 @@
 import type { Observation, ScopeFile, Work } from './model.js';
 import { evidenceBindsCandidate, type QueueCarry, type TipMerge } from './model/carry.js';
+import { reviewProviderOf } from './model/review.js';
 import { queuedRegressions } from './regression-guard.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
@@ -15,10 +16,83 @@ export interface QueueSpeculation {
   carry?: QueueCarry | null;
   /** The base-branch commit the bound base was last found tree-identical to: the advance that carried the binding. */
   carriedBase?: { sha: string; tree: string; at: string } | null;
+  /**
+   * The item's own reviewed head the tip was built from: the last head a worker pushed, or the
+   * control plane brought onto the base branch — never an earlier speculative tip. Every tip is
+   * a merge of exactly this commit and its predicted base (GY-127), so a tip rebuilt behind a
+   * different predecessor carries nothing of the one it was built behind before. Equals `tip`
+   * when the head already contained its predicted base; absent on records that predate the rule.
+   */
+  reviewedHead?: string;
+  /** An approval GitHub dismissed for a merge-base change on this very tip, restored as the binding approval; see `restoredApproval`. */
+  restoredApproval?: RestoredApproval | null;
 }
 export interface QueueEntry { sequence: number; enqueuedAt: string; policyRevision: number; speculation: QueueSpeculation | null }
 export interface QueueEjection { at: string; sequence: number; reason: string; sha: string | null; policyRevision: number }
-export interface QueueHistoryEntry { at: string; event: 'enqueued' | 'predicted' | 'ejected'; sequence: number; reason?: string; tip?: string }
+export interface QueueHistoryEntry {
+  at: string; event: 'enqueued' | 'predicted' | 'ejected'; sequence: number; reason?: string; tip?: string;
+  /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. */
+  predecessors?: string[]; from?: string;
+}
+
+/**
+ * GitHub's own account of why it dismissed a review, read from the pull request timeline and
+ * recorded beside the review it withdrew. Two dismissals look alike on the review list and mean
+ * opposite things: a reviewer (or a person with the power to) withdrawing a verdict, and GitHub
+ * itself withdrawing an approval because the pull request's merge base moved — which is what
+ * every push to the base branch does to a branch that carries a queued predecessor, and what the
+ * control plane's own tip publication does to the branch it publishes on. `mergeBase` is the
+ * second kind, recognised from GitHub's message (`The merge-base changed after approval`).
+ */
+export interface ReviewDismissal {
+  /** GitHub's dismissal message, or null when the timeline could not be read (`unread` says why). */
+  reason: string | null;
+  /** The message names the merge base: GitHub withdrew the approval, nobody did. */
+  mergeBase: boolean;
+  /** The commit GitHub attributed the dismissal to, when it named one. */
+  commit: string | null;
+  at: string | null; by: string | null; unread?: string;
+}
+/** The record of an approval the control plane restored after GitHub dismissed it for a merge-base change on an unchanged head. */
+export interface RestoredApproval { reviewer: string; reviewId?: number; sha: string; dismissal: ReviewDismissal; at: string }
+export const mergeBaseDismissalPattern = /merge[\s-]*base/i;
+/** The dismissal recorded on a review, when the observation carried one. */
+export function reviewDismissal(review: Observation['reviews'][number]): ReviewDismissal | null {
+  const dismissal = (review as { dismissal?: ReviewDismissal }).dismissal;
+  return review.state === 'DISMISSED' && dismissal && typeof dismissal === 'object' ? dismissal : null;
+}
+/**
+ * An approval of exactly the current head that GitHub dismissed with its merge-base reason: the
+ * head the reviewer approved is the head the branch still has, so nothing the reviewer judged has
+ * changed. It is distinguished from a withdrawn verdict by the recorded reason, never inferred
+ * from timing, and only a formal GitHub approval from someone other than the author qualifies —
+ * the same identity rule `exactApproval` applies, baseline included. The engine restores such an
+ * approval as the binding one (see `Engine.observe`) so no review round and no attempt is spent on
+ * a commit the reviewer already approved; the reviewer App re-posts it before the merge.
+ */
+export function dismissedApproval(work: Work): { reviewer: string; reviewId?: number; sha: string; dismissal: ReviewDismissal } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha || observation.merged) return null;
+  if (!work.policy.review || reviewProviderOf(work.policy) !== 'github') return null;
+  const baseline = work.formalReviewBaseline;
+  for (const review of observation.reviews) {
+    if (review.state !== 'DISMISSED' || review.sha !== candidate.sha || review.reviewer === candidate.author) continue;
+    const dismissal = reviewDismissal(review);
+    if (!dismissal?.mergeBase) continue;
+    if (work.formalReviewResetRequired && !(baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(review.id) && review.id! > 0 && !baseline.reviewIds.includes(review.id!))) continue;
+    return { reviewer: review.reviewer, ...(review.id !== undefined ? { reviewId: review.id } : {}), sha: candidate.sha, dismissal };
+  }
+  return null;
+}
+/** The restored approval that binds the current candidate, for status and the merge broker's re-post; null when none does. */
+export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseRefresh' | 'policyRevision'>): RestoredApproval | null {
+  const candidate = work.candidate;
+  if (!candidate) return null;
+  const speculation = work.queue?.speculation;
+  if (speculation?.tip === candidate.sha && speculation.policyRevision === work.policyRevision && speculation.restoredApproval?.sha === candidate.sha) return speculation.restoredApproval;
+  const refresh = work.baseRefresh;
+  return refresh?.head === candidate.sha && refresh.policyRevision === work.policyRevision && refresh.restoredApproval?.sha === candidate.sha ? refresh.restoredApproval : null;
+}
 export interface QueuePlacement {
   id: string; key: string; position: number; size: number; sequence: number; enqueuedAt: string; waitMs: number;
   predecessors: string[]; predictedBase: string | null; tip: string | null;
@@ -56,6 +130,43 @@ export interface BaseRefresh {
   merge?: TipMerge | null;
   /** Which bindings of the replaced head carried onto it, decided once when the refresh was bound. */
   carry?: QueueCarry | null;
+  /**
+   * Set when this record is a branch restore rather than a refresh (GY-127): the branch was found
+   * carrying another item's unlanded commits and was reset to the item's own reviewed head, then
+   * brought onto the base. `head` is null while a requested repair has not run yet.
+   */
+  restore?: BranchRestore | null;
+  /** An approval GitHub dismissed for a merge-base change on this very head, restored as the binding approval. */
+  restoredApproval?: RestoredApproval | null;
+}
+/**
+ * A branch that carried another item's unlanded commits, and what the control plane did about it.
+ *
+ * A speculative tip is a merge of the item's own reviewed head and the tip of the entry ahead of
+ * it, published on the pull-request branch so the checks, the review and every proof bind one
+ * commit. While the entry is queued that is the queue's own construction. Once the entry leaves
+ * the queue — ejected, or behind an entry that was — the branch still carries the predecessor's
+ * commits: kept, the head is refused as an out-of-scope regression; landed, it would record the
+ * predecessor's pull request merged without its content. No head a worker may push can pass, and
+ * workers may not force-push. So the control plane restores the branch itself: reset to the
+ * item's own reviewed head (`own`), then merged onto the base branch exactly as a base refresh
+ * would. An ejection runs the restore on its own; a branch found contaminated any other way is
+ * repaired on the coordinator's request (`graphyard master repair GY-N`, the `repair` command).
+ */
+export interface BranchRestore {
+  /** The head found carrying another item's unlanded commits. */
+  contaminated: string;
+  /** The items whose unlanded commits it carried, as the record and the observation named them. */
+  foreign: string[];
+  /** The item's own reviewed head the branch was reset to; null when none could be determined. */
+  own: string | null;
+  cause: 'ejection' | 'repair';
+  /** The coordinator's request, for a repair; null for the restore an ejection runs on its own. */
+  requested: { by: string; at: string; reason: string } | null;
+  reason: string;
+  performedAt: string | null;
+  /** `restored`: the branch holds `own` merged onto the base; `conflict`: it holds `own`, and the merge is the worker's; `unrepairable`: no own head could be found under the foreign commits. */
+  outcome: 'restored' | 'conflict' | 'unrepairable' | null;
 }
 
 /**
@@ -148,11 +259,20 @@ export interface CarriedCandidate {
   /** The lookup budget ran out before every file was compared; never a pass, never an ejection. */
   unverified?: boolean;
 }
+/** Another item whose unlanded commits this head's history carries; see `LandingCheck.foreign`. */
+export interface ForeignCandidate { key: string; pr: number; head: string }
 export interface LandingCheck {
   base: string;
   files?: ScopeFile[];
   carried?: CarriedCandidate[];
-  /** The open candidates `carried` was decided against, as `KEY@head`, so an unchanged answer is not asked for again. */
+  /**
+   * Every open candidate — apart from the entries a predicted base is published behind — whose
+   * head, or whose own reviewed head under a tip of its own, is in this head's history (GY-127).
+   * `carried` above lists the ones whose content this head also drops; this lists them all, since
+   * a branch that holds a neighbour's unlanded commits at all can neither be kept nor landed.
+   */
+  foreign?: ForeignCandidate[];
+  /** The open candidates `carried` and `foreign` were decided against, as `KEY@heads`, so an unchanged answer is not asked for again. */
   examined?: string[];
 }
 /**
@@ -309,4 +429,63 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [])
   const revoked = work.evidence.find(item => item.trusted && !!item.revocation && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
   if (revoked) return `Proof ${revoked.proof} was revoked on speculative tip ${tip}: ${revoked.revocation!.reason}`;
   return null;
+}
+
+/** The shas that are an item's own: its head, and the reviewed head under any tip or restore of it. */
+export function ownHeads(work: Pick<Work, 'candidate' | 'queue' | 'baseRefresh'>): string[] {
+  const shas = [work.candidate?.sha, work.queue?.speculation?.reviewedHead, work.baseRefresh?.restore?.own, work.baseRefresh?.from.sha];
+  return [...new Set(shas.filter((sha): sha is string => typeof sha === 'string' && /^[a-f0-9]{40}$/.test(sha)))];
+}
+/** The restore recorded for exactly the current head, pending or performed, or null. */
+export function currentRestore(work: Pick<Work, 'candidate' | 'baseRefresh' | 'policyRevision'>): BaseRefresh | null {
+  const refresh = work.baseRefresh, candidate = work.candidate;
+  if (!refresh?.restore || !candidate || refresh.policyRevision !== work.policyRevision) return null;
+  // Pending: the contaminated head is still the candidate. Performed: the candidate is what the restore produced.
+  return refresh.restore.contaminated === candidate.sha || refresh.head === candidate.sha ? refresh : null;
+}
+/** A repair the coordinator requested for the current head that has not run yet. */
+export function pendingRestore(work: Work): BranchRestore | null {
+  const refresh = currentRestore(work);
+  return refresh && refresh.head === null && !refresh.restore!.performedAt && refresh.restore!.contaminated === work.candidate!.sha ? refresh.restore! : null;
+}
+export interface Contamination {
+  head: string;
+  /** The items whose unlanded commits the head carries. */
+  foreign: string[];
+  /** `ejection`: the head is a tip the queue ejected, built behind entries that have not landed; `observation`: GitHub shows another open candidate in its history. */
+  source: ('ejection' | 'observation')[];
+  /** The item's own reviewed head under it, when the record names one. */
+  own: string | null;
+}
+/**
+ * Whether the current head carries another item's unlanded commits, from the record and from the
+ * observation together. The record answers for a tip the queue ejected: it was built behind the
+ * entries the prediction named, and any of them not yet delivered is unlanded content on this
+ * branch. The observation answers for everything else: the landing check names every open
+ * candidate found in the head's history. A live queue entry is never contaminated by this rule —
+ * its tip holds its predecessors by construction and is rebuilt from its own head when they change.
+ */
+export function branchContamination(work: Work, all: Work[]): Contamination | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (work.queue || !candidate || !observation || observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed' || work.stage === 'done') return null;
+  const source: Contamination['source'] = [];
+  const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
+  const ejected = work.queueEjection?.sha === candidate.sha ? predicted : undefined;
+  const unlanded = (ejected?.predecessors ?? []).filter(key => all.find(item => item.key === key)?.stage !== 'done');
+  if (unlanded.length) source.push('ejection');
+  const observed = (observation.landing?.foreign ?? []).map(entry => entry.key);
+  if (observed.length) source.push('observation');
+  if (!source.length) return null;
+  return { head: candidate.sha, foreign: [...new Set([...unlanded, ...observed])], source, own: ejected?.from ?? null };
+}
+/**
+ * The restore an ejection owes: the ejected tip is still the branch head and carries entries that
+ * have not landed. Nothing is owed once a restore for that head is recorded, pending or performed.
+ */
+export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: string; foreign: string[]; own: string | null; reason: string } | null {
+  const ejection = work.queueEjection;
+  if (!ejection || ejection.sha !== work.candidate?.sha || currentRestore(work)) return null;
+  const contamination = branchContamination(work, all);
+  if (!contamination) return null;
+  return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
 }
