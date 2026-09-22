@@ -19,7 +19,8 @@ import { closureHandle, dispatchEffects, emptyDispatchCursor, launchedSessionHan
 import { stoppedStates } from '../src/master-daemon.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { masterConfigSchema, profileSessions } from '../src/master.js';
-import { overlongSessionAttention, sessionReport } from '../src/cli/master-status.js';
+import { sessionReport } from '../src/cli/master-status.js';
+import { overlongSessionAttention } from '../src/cli/overlong-sessions.js';
 
 /**
  * GY-113: a session was recorded as running until something ended it, so a session that crashed,

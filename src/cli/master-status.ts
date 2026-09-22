@@ -3,8 +3,7 @@ import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
-import { elapsed, overlongSessionLines, type SessionKind } from '../model/sessions.js';
-import { runtimeEndedStates } from '../harness.js';
+import { elapsed } from '../model/sessions.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
@@ -13,10 +12,12 @@ import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
+import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
+export { overlongSessionAttention } from './overlong-sessions.js';
 
 /**
  * One attention item per open worker scope request whose epoch still holds the lease: addressed
@@ -81,18 +82,6 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
     return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
       ...unansweredRequestOwner(row.key, request) };
   }));
-}
-
-/**
- * One attention item per running session past its role's maximum (`model/sessions.ts`), whether or
- * not it is still live: a session that died is closed by the liveness sweep and needs nobody, while
- * one that is running and making no progress holds its role slot, its provider seat and its item
- * while reporting nothing wrong. Nothing is closed from this line — only a reader can tell.
- */
-export function overlongSessionAttention(snapshot: { work: Work[]; now: string }, runtime: { agents: HerdrAgent[]; available: boolean; hostId?: string | null }, maximums?: Partial<Record<SessionKind, number>>): AttentionItem[] {
-  return overlongSessionLines(snapshot.work, runtime.available ? runtime.agents : null, new Date(snapshot.now),
-    { states: runtimeEndedStates, hostId: runtime.hostId ?? null, ...(maximums ? { maximums } : {}) })
-    .map(line => ({ subject: line.subject, text: line.text, ...agentOwner('master', line.next) }));
 }
 
 /**
