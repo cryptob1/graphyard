@@ -984,6 +984,74 @@ A session Herdr reports blocked is waiting on input, not gone: the attempt is re
 with that reason, and the handle stays `running` carrying why, so the attach command still works
 at the one moment somebody needs it.
 
+### Session liveness is reconciled, not trusted
+
+**The control plane reconciles session liveness; closing finished sessions is not the master's
+manual duty.** A handle used to say `running` until a session, its launcher or an admin said
+otherwise, and a session that died said nothing — so a crashed, killed or vanished session stayed
+recorded as running for good, and every reader believed it, including the launcher's own busy check.
+That is what made a dead session hold its role slot until a person noticed.
+
+**On what interval.** The liveness sweep runs on every automatic-dispatch tick — `run.dispatchIntervalSeconds`
+in `.graphyard/master.json`, 10 seconds by default and 30 at most. It is a sweep, not a reaction to
+something reporting in, because a session that died reports nothing. A handle whose session the
+runtime no longer reports is left alone for a 60-second grace first, counted from the first sweep
+that missed it and never shorter than the handle's own age, since a session recorded at launch
+appears in its runtime's listing a moment later and one listing that comes back short is not a
+death. So a vanished session's record is closed within 90 seconds of the runtime dropping it, and a
+session the runtime reports again in the meantime starts the grace over. `master status` reports the
+bound, the closures the last tick made, how many handles are inside their grace, and any closure it
+could not write back, under `dispatch.sessionReconcile`.
+
+The sweep judges what this host's runtime answers for. A handle another host launched is left to
+that host's loop — this inventory was never asked about it — and holds its slot until then, exactly
+as an unreadable runtime does.
+
+**What it closes, and with which reason.**
+
+- **Vanished** — the runtime has not reported the pane or the session name its launcher recorded
+  for the whole grace. This is how a coding session that exited is recognised: it is simply absent
+  from the runtime's listing. The outcome names that it vanished, from which runtime and host, how
+  long the runtime has not reported it, and how long after its last observed activity.
+- **Ended** — the runtime still lists it and reports one of that runtime's terminal states
+  (`src/harness.ts`), which today only Muse has (`exited-error`, `terminated`). `idle`, `done` and
+  `blocked` are deliberately not terminal anywhere: each is a live session waiting at its prompt —
+  Herdr reports `done` for one that finished work nobody has looked at yet, the same underlying
+  state as `idle` — and that is the one moment somebody needs its attach command.
+- **Superseded** — a review or proof session bound to something the item has moved past: a candidate
+  that merged, an item already delivered, a head the item no longer has, or an item returned to a
+  worker for rework. The outcome names which of those it was. A delivered item is closed the same
+  way as any other: delivery makes an item's decisions immutable, and ending a handle it still
+  carries decides nothing. An implementation session is never closed this way; its lease decides
+  what it may still do.
+- **Duplicate** — two live review or proof sessions for one role and head cannot both stand, so the
+  older is closed naming the session that holds the slot. One item holds one live review of a head
+  and one producer session per proof group of it. Implementation handles are left alone here too.
+
+A closure is a record, never authority: it decides no gate, ends no lease, and stops no process —
+the runtime already did, or the session is stalled rather than gone.
+
+**The role slot follows the reconciled record.** A profile's concurrency is counted against live
+sessions only: the runtime's own listing, plus every recorded handle the sweep has not judged over.
+So a handle holds its profile's slot even before the runtime lists the session and across a restart
+of the loop, and a name is busy only while a live session has it. A launcher still refuses a name
+the runtime lists in any state — a name in use cannot be taken again, whatever state it is in.
+
+**A session that is running and making no progress** is not closed, because only a reader can tell
+whether it is working. It is surfaced instead: `master status` raises one attention item per session
+past its role's maximum — 4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer
+session, 12h coordination — naming the item, the role, how long it has run, when it was last
+observed doing anything, and whether the runtime still reports it live. A session that died is as
+visible as one that is stuck, and neither needs a person to go looking.
+
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died — the sweep closes its record and frees its slot on the next tick, and
+`graphyard master run --once` does one sweep when the loop is stopped. For a session the attention
+item names as live but overlong, attach to it with the command on the handle and see what it is
+doing; stop it there if it is stuck, and the record closes within the bound on its own. Never mark
+another session's handle finished to free a slot: the handle belongs to the session it names, its
+launcher or an admin, and the slot was never held by anything but a live session.
+
 ## Automatic dispatch at submit
 
 Review and proof collection start the moment a candidate is ready for them, not when someone
