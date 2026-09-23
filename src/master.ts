@@ -2399,7 +2399,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
-  const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch });
+  const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
     ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
@@ -3259,24 +3259,25 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
 /**
  * A worker session's own rules, written into its assigned worktree: it runs its item's commands,
  * pushes its assigned branch and opens the pull request without a keypress, and can never push
- * the base branch, force-push unconditionally, rebase, merge, review, or read a credential.
+ * the base branch, force-push, delete a ref, rebase, merge, review, or read a credential.
  *
- * The one history rewrite it may make is `git push --force-with-lease origin BRANCH` on its own
- * assigned branch: the recovery of an ejected or contaminated tip resets that branch to the
- * item's reviewed head, syncs it onto the base and pushes, and the rework the control plane
- * authorizes must be executable by the session it dispatches (GY-128). The lease makes the push
- * conditional on the remote still holding the tip the worker last fetched, so it can replace only
- * what the worker saw, never a head somebody pushed since; a bare `--force` has no such check.
+ * The one history rewrite it may make goes through `restore-branch GY-N EPOCH`, never a raw push:
+ * the recovery of an ejected or contaminated tip resets the assigned branch to the item's reviewed
+ * head, syncs it onto the base and pushes, and the rework the control plane authorizes must be
+ * executable by the session it dispatches (GY-128). A permission glob cannot say "this ref and no
+ * other", and a Claude worker runs under bypassPermissions, where a command no rule matches runs.
+ * So every raw `--force*` push is denied, the lease push included, and the CLI makes the one lease
+ * push itself: to the branch registered for the caller's live lease, conditional on the tip it
+ * fetched (`--force-with-lease=refs/heads/BRANCH:TIP`), so it replaces only what it saw.
  */
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
-    ...['status', 'sync', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
+    ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
     { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
     { rule: `Bash(git push -u origin ${input.branch})`, why: 'Publish the assigned branch the first time.' },
     { rule: `Bash(git push origin HEAD:${input.branch})`, why: 'Push the current head to the assigned branch.' },
-    { rule: `Bash(git push --force-with-lease origin ${input.branch})`, why: 'Restore the assigned branch to the reviewed head after an ejected or contaminated tip. The lease refuses the push unless the remote still holds the tip this worker last fetched.' },
-    { rule: 'Bash(git fetch origin)', why: 'Read the remote tips the lease and sync compare against.' },
+    { rule: 'Bash(git fetch origin)', why: 'Read the remote tips restore-branch and sync compare against.' },
     { rule: 'Bash(git reset --hard *)', why: 'Move the assigned branch back to the reviewed head before sync; it changes only this worktree.' },
     { rule: 'Bash(gh pr create:*)', why: 'Open the pull request the worker submits with complete.' },
     { rule: 'Bash(gh pr view:*)', why: 'Read the pull request number and state before submitting.' },
@@ -3284,25 +3285,26 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: `Bash(git merge origin/${input.baseBranch})`, why: 'sync merges the base branch; the worker never rebases.' },
   ];
   const deny: HarnessRule[] = [
-    // `--force` as a whole word: `--force-with-lease` on the assigned branch stays permitted. Claude
-    // Code reads a trailing `:*` or ` *` as "this prefix, with or without more", so no rule here may
-    // end in one where the prefix alone would match the permitted lease push. A lease push to any
-    // other ref matches no allow rule instead: a glob cannot say "every ref but this one".
-    { rule: 'Bash(git push *--force)', why: 'An unconditional force push replaces whatever the remote holds, including a head pushed since the worker last fetched.' },
-    { rule: 'Bash(git push *--force *)', why: 'An unconditional force push replaces whatever the remote holds, including a head pushed since the worker last fetched.' },
-    { rule: 'Bash(git push -f*)', why: 'Short form of an unconditional force push.' },
-    { rule: 'Bash(git push * -f*)', why: 'Short form of an unconditional force push.' },
-    { rule: 'Bash(git push *+*)', why: 'A leading + refspec is an unconditional force push.' },
-    { rule: 'Bash(git push *--force-with-lease=*)', why: 'The explicit lease form names its own ref; the worker restores only its assigned branch, with the bare lease.' },
+    // Every rewrite, in every spelling: `--force`, `--force-with-lease` (bare or `=REF:SHA`) and
+    // `--force-if-includes` alike. The lease push of the assigned branch is restore-branch's, which
+    // checks the ref itself; no rule may end in `:*` or ` *` where the bare prefix would match an
+    // allowed push, because Claude Code reads both as "this prefix, with or without more".
+    { rule: 'Bash(git push *--force*)', why: 'A raw force push, the lease form included, could rewrite any ref: a glob cannot limit it to the assigned branch. The one restoration push is restore-branch.' },
+    { rule: 'Bash(git push -f*)', why: 'Short form of a force push.' },
+    { rule: 'Bash(git push * -f*)', why: 'Short form of a force push.' },
+    { rule: 'Bash(git push *+*)', why: 'A leading + refspec is a force push.' },
     { rule: 'Bash(git push *--mirror*)', why: 'Mirroring rewrites every ref on the remote.' },
     { rule: 'Bash(git push *--all*)', why: 'The worker pushes its assigned branch, never every branch.' },
     { rule: 'Bash(git push *--delete*)', why: 'Deleting a remote ref is never part of an attempt.' },
     { rule: 'Bash(git push -d *)', why: 'Short form of deleting a remote ref.' },
     { rule: 'Bash(git push * -d *)', why: 'Short form of deleting a remote ref.' },
+    { rule: 'Bash(git push * :*/*)', why: 'An empty source deletes the ref: every graphyard/… branch and every refs/… spelling.' },
+    { rule: 'Bash(git push * :*-*)', why: 'An empty source deletes the ref.' },
     { rule: `Bash(git push *:${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
     { rule: `Bash(git push origin ${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
     { rule: `Bash(git push * ${input.baseBranch})`, why: 'The base branch moves only through the guarded merge.' },
     { rule: `Bash(git push * ${input.baseBranch} *)`, why: 'The base branch moves only through the guarded merge.' },
+    { rule: `Bash(git push *refs/heads/${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge, in its full ref spelling too.' },
     { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
     { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },
@@ -3315,12 +3317,13 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
 /**
  * How a worker restores its assigned branch after an ejected or contaminated tip, as the exact
  * commands a rework reason carries: fetch, reset to the item's reviewed head, sync onto the base,
- * push with the lease, complete. Every one is permitted by the worker's own harness, so the rework
- * the control plane authorizes is carried out by the attempt it dispatches, with no human shell.
+ * restore-branch (the lease push of the leased branch), complete. Every one is permitted by the
+ * worker's own harness, so the rework the control plane authorizes is carried out by the attempt it
+ * dispatches, with no human shell.
  */
-export function branchRestoration(input: { cliPath: string; key: string; epoch: number; pr: number; branch: string; reviewedHead: string }) {
+export function branchRestoration(input: { cliPath: string; key: string; epoch: number; pr: number; reviewedHead: string }) {
   const cli = `node ${input.cliPath}`;
-  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `git push --force-with-lease origin ${input.branch}`, `${cli} complete ${input.key} ${input.epoch} ${input.pr}`];
+  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} ${input.pr}`];
 }
 /**
  * The shell commands a blocker names: each backtick-quoted command line, or, in a blocker that
@@ -3341,13 +3344,17 @@ export interface UnrunnableRemedy { key: string; epoch: number; command: string;
  * every one of them denies it, naming the command, the role that would need it (the worker that
  * raised the blocker) and the rule in that role's harness that denies it.
  */
-export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseBranch: string; repository?: string }): UnrunnableRemedy[] {
+export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseBranch: string; repository?: string; workerKinds?: string[] }): UnrunnableRemedy[] {
   const shared = { cliPath: input.cliPath, repository: input.repository ?? 'OWNER/REPOSITORY', baseBranch: input.baseBranch, credentialHome: '/graphyard-credentials', credentialDirectories: [] as string[] };
   const others = [
     { role: 'reviewer', plan: sessionHarnessPlan({ ...shared, role: 'reviewer', kind: 'claude' }) },
     { role: 'producer', plan: sessionHarnessPlan({ ...shared, role: 'producer', kind: 'claude' }) },
     { role: 'master', plan: masterHarnessPlan({ ...shared, harness: 'claude', root: '/repository' }) },
   ];
+  // A worker runtime other than Claude loads no generated rules, so a rework dispatched to it may
+  // run the command: only when every configured worker runtime denies it is the remedy unrunnable.
+  const workerKinds = [...new Set(input.workerKinds?.length ? input.workerKinds : ['claude'])];
+  if (workerKinds.some(kind => kind !== 'claude')) return [];
   return work.filter(item => item.stage !== 'done' && item.blocker).flatMap(item => {
     const epoch = item.workspaces.at(-1)?.epoch ?? item.epoch;
     const branch = item.workspaces.at(-1)?.branch ?? `graphyard/${item.key.toLowerCase()}-${epoch}`;

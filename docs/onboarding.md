@@ -354,7 +354,7 @@ node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 
 The worker pushes the assigned branch, opens a PR, and runs `node "$GRAPHYARD_CLI" complete GY-1 EPOCH PR_NUMBER`. Graphyard waits for current-head review, CI, and trusted acceptance evidence.
 
-The worker writes to its assigned branch only: plain pushes of that branch, `sync` to merge the base, and — to restore the branch after an ejected or contaminated tip — `git reset --hard REVIEWED_HEAD` followed by `git push --force-with-lease origin BRANCH`. An unconditional `--force`, a push to any other ref and a push to the base branch stay denied; the lease push succeeds only while the remote still holds the tip the worker last fetched. See [worker push rights](master-agent.md#worker-push-rights).
+A worker changes only its assigned branch. It makes plain pushes of that branch and runs `sync` to merge the base. To restore the branch after an ejected or contaminated tip, it runs `git reset --hard REVIEWED_HEAD`, `sync`, then `node "$GRAPHYARD_CLI" restore-branch GY-1 EPOCH`. That command makes the one lease push, to the branch of the worker's live lease only, and only while the remote still holds the tip it just fetched. Every raw `--force` or `--force-with-lease` push, every ref deletion and every push to the base branch is denied. See [worker push rights](master-agent.md#worker-push-rights).
 
 Launch the independent review from the master; it verifies the exact observed candidate first and binds the session to that head, base, and policy revision:
 

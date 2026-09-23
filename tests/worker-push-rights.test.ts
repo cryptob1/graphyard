@@ -25,38 +25,45 @@ const branch = 'graphyard/gy-9-4';
 const plan = workerHarnessPlan({ cliPath: launcher, branch, baseBranch: 'main', credentialHome: '/home/x/.config/graphyard' });
 const decision = (command: string, rules = plan) => harnessDecision(rules, command).decision;
 
-test('unit:worker-may-force-with-lease-its-own-branch — the worker harness permits a lease push to its assigned branch and still denies --force, other refs and the base branch', () => {
-  // The one rewrite the worker may make: its own branch, conditional on the tip it last fetched.
-  assert.equal(decision(`git push --force-with-lease origin ${branch}`), 'allow');
-  assert.ok(plan.allow.some(entry => entry.rule === `Bash(git push --force-with-lease origin ${branch})`));
+test('unit:worker-may-force-with-lease-its-own-branch — the worker restores its assigned branch with a lease push only through restore-branch; every raw force, lease, deletion and base-branch push is denied', () => {
+  const cli = `node ${launcher}`;
+  // The one rewrite the worker may make: restore-branch, the CLI's lease push of the branch
+  // registered for its live lease. A glob cannot limit a raw lease push to one ref, and a Claude
+  // worker runs under bypassPermissions, where anything not denied runs; so every raw one is denied.
+  assert.equal(decision(`${cli} restore-branch GY-9 4`), 'allow');
+  assert.ok(plan.allow.some(entry => entry.rule === `Bash(${cli} restore-branch:*)`));
+  assert.deepEqual(plan.allow.filter(entry => /--force/.test(entry.rule)), [], 'no raw force or lease push is allowed');
   // The ordinary pushes of its branch are unchanged.
   for (const command of [`git push origin ${branch}`, `git push -u origin ${branch}`, `git push origin HEAD:${branch}`]) assert.equal(decision(command), 'allow', command);
-  // An unconditional force push stays denied, in every spelling, on the assigned branch too.
+  // A force push in any spelling is denied, on the assigned branch too.
   for (const command of [`git push --force origin ${branch}`, `git push origin ${branch} --force`, `git push -f origin ${branch}`, `git push origin ${branch} -f`,
-    `git push origin +${branch}`, `git push origin +HEAD:${branch}`, `git push --force-with-lease --force origin ${branch}`, `git push --force --force-with-lease origin ${branch}`])
+    `git push origin +${branch}`, `git push origin +HEAD:${branch}`, `git push --force-with-lease --force origin ${branch}`, `git push --force-if-includes --force-with-lease origin ${branch}`])
     assert.equal(decision(command), 'deny', command);
-  // Any other ref: never permitted, and every form a glob can name is denied outright.
-  for (const command of [`git push --force-with-lease=graphyard/gy-7-1:abc origin graphyard/gy-7-1`, 'git push --mirror origin', 'git push --all origin', `git push origin --delete ${branch}`, `git push -d origin ${branch}`])
+  // A lease push of any ref, the assigned one included, is refused outright — never merely unmatched.
+  for (const command of [`git push --force-with-lease origin ${branch}`, 'git push --force-with-lease origin graphyard/gy-7-1', 'git push --force-with-lease origin HEAD:graphyard/gy-7-1',
+    `git push --force-with-lease origin ${branch}:graphyard/gy-7-1`, `git push --force-with-lease origin ${branch} graphyard/gy-7-1`, `git push origin ${branch} --force-with-lease`,
+    'git push --force-with-lease=graphyard/gy-7-1:abc origin graphyard/gy-7-1', `git push --force-with-lease=refs/heads/${branch}:abc origin HEAD:refs/heads/${branch}`])
     assert.equal(decision(command), 'deny', command);
-  // The rest are outside every allow rule: a glob cannot say "any ref but this one".
-  for (const command of ['git push --force-with-lease origin graphyard/gy-7-1', 'git push origin graphyard/gy-7-1', 'git push origin HEAD:graphyard/gy-7-1',
-    'git push --force-with-lease origin HEAD:graphyard/gy-7-1', `git push --force-with-lease origin ${branch}:graphyard/gy-7-1`, `git push --force-with-lease origin ${branch} graphyard/gy-7-1`,
-    `git push origin :${branch}`])
-    assert.notEqual(decision(command), 'allow', `${command} is not permitted`);
-  // The base branch: denied in every form, the lease included.
-  for (const command of ['git push origin main', 'git push --force-with-lease origin main', 'git push --force-with-lease origin HEAD:main', 'git push origin HEAD:main', 'git push -u origin main', `git push origin ${branch} main`])
+  // Deleting or mirroring refs: denied in every form, the empty-source refspec included.
+  for (const command of ['git push --mirror origin', 'git push --all origin', `git push origin --delete ${branch}`, `git push -d origin ${branch}`, `git push origin -d graphyard/gy-7-1`,
+    `git push origin :${branch}`, 'git push origin :graphyard/gy-7-1', 'git push origin :refs/heads/release', 'git push origin :hot-fix'])
+    assert.equal(decision(command), 'deny', command);
+  // The base branch: denied in every form, its full ref spelling and a lease push included.
+  for (const command of ['git push origin main', 'git push --force-with-lease origin main', 'git push --force-with-lease origin HEAD:main', 'git push origin HEAD:main', 'git push -u origin main',
+    `git push origin ${branch} main`, 'git push origin refs/heads/main', 'git push origin HEAD:refs/heads/main', 'git push --force-with-lease origin refs/heads/main', 'git push origin :main'])
     assert.equal(decision(command), 'deny', command);
   // A compound command is judged per part: a denied part denies the whole.
-  assert.equal(decision(`git fetch origin && git push --force-with-lease origin ${branch}`), 'allow');
-  assert.equal(decision(`git push --force-with-lease origin ${branch} && git push --force origin main`), 'deny');
+  assert.equal(decision(`git fetch origin && ${cli} restore-branch GY-9 4`), 'allow');
+  assert.equal(decision(`${cli} restore-branch GY-9 4 && git push --force origin main`), 'deny');
   // The launched worker session carries the same push rules as the worktree file.
   const session = sessionHarnessPlan({ role: 'worker', kind: 'claude', branch, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: '/home/x/.config/graphyard', credentialDirectories: ['/home/x/.config/graphyard'] });
-  assert.equal(decision(`git push --force-with-lease origin ${branch}`, session), 'allow');
-  assert.equal(decision(`git push --force origin ${branch}`, session), 'deny');
+  assert.equal(decision(`${cli} restore-branch GY-9 4`, session), 'allow');
+  for (const command of [`git push --force origin ${branch}`, 'git push --force-with-lease origin graphyard/gy-7-1', 'git push origin :graphyard/gy-7-1']) assert.equal(decision(command, session), 'deny', command);
   // The restoration the rework reason carries is permitted command by command, with no human shell.
-  const steps = branchRestoration({ cliPath: launcher, key: 'GY-9', epoch: 4, pr: 31, branch, reviewedHead: 'f'.repeat(40) });
+  const steps = branchRestoration({ cliPath: launcher, key: 'GY-9', epoch: 4, pr: 31, reviewedHead: 'f'.repeat(40) });
   assert.deepEqual(steps.map(step => decision(step)), steps.map(() => 'allow'), steps.join('\n'));
-  assert.ok(steps.some(step => step === `git push --force-with-lease origin ${branch}`));
+  assert.ok(steps.includes(`${cli} restore-branch GY-9 4`));
+  assert.ok(!steps.some(step => /^git push/.test(step)), 'no raw push in the restoration');
 });
 
 // ---- A contaminated branch, restored end to end by the attempt a rework dispatches ------------
@@ -156,16 +163,23 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
   Object.assign(env, identity, { GRAPHYARD_URL: url, GRAPHYARD_TOKEN: tokenOf(worker) });
   const run = (command: string) => exec('bash', ['-c', command], { cwd: attempt, env, encoding: 'utf8' });
 
-  // Without the lease push there is no way through: a plain push is refused as non-fast-forward,
-  // and the unconditional force is denied by the harness.
+  // Without restore-branch there is no way through: a plain push is refused as non-fast-forward,
+  // and every raw force or lease push is denied by the harness.
   git(attempt, 'reset', '-q', '--hard', reviewed);
   await assert.rejects(run(`git push origin ${itemBranch}`), /rejected|non-fast-forward|fetch first/);
-  assert.equal(harnessDecision(harness, `git push --force origin ${itemBranch}`).decision, 'deny');
+  for (const command of [`git push --force origin ${itemBranch}`, `git push --force-with-lease origin ${itemBranch}`]) assert.equal(harnessDecision(harness, command).decision, 'deny', command);
   git(attempt, 'reset', '-q', '--hard', ejectedTip);
+  // restore-branch pushes only the branch of the caller's live lease: from another branch, or for
+  // an epoch this worker does not hold, it refuses and the remote is untouched.
+  git(attempt, 'checkout', '-q', '-b', 'graphyard/elsewhere');
+  await assert.rejects(run(`node ${launcher} restore-branch ${work.key} 2`), /Run restore-branch on/);
+  git(attempt, 'checkout', '-q', itemBranch);
+  await assert.rejects(run(`node ${launcher} restore-branch ${work.key} 1`), /lease|epoch/i);
+  assert.equal(git(seed, 'ls-remote', origin, `refs/heads/${itemBranch}`).split('\t')[0], ejectedTip);
 
   // The restoration, exactly as the rework carries it: every step permitted by the worker's own
   // harness, run non-interactively in its worktree against the live control plane.
-  const steps = branchRestoration({ cliPath: launcher, key: work.key, epoch: 2, pr, branch: itemBranch, reviewedHead: reviewed });
+  const steps = branchRestoration({ cliPath: launcher, key: work.key, epoch: 2, pr, reviewedHead: reviewed });
   const outputs: string[] = [];
   for (const step of steps) {
     assert.equal(harnessDecision(harness, step).decision, 'allow', `${step} is permitted to the worker session`);
@@ -175,6 +189,8 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
   const synced = JSON.parse(outputs[steps.findIndex(step => / sync /.test(step))]);
   assert.equal(synced.ok, true, JSON.stringify(synced.refused));
   assert.equal(synced.baseTip, base);
+  const restored = JSON.parse(outputs[steps.findIndex(step => / restore-branch /.test(step))]);
+  assert.deepEqual({ branch: restored.branch, replaced: restored.replaced, head: restored.head }, { branch: itemBranch, replaced: ejectedTip, head: synced.head });
 
   // A submitted candidate whose head holds only the item's own change, on the current base.
   work = (await store.list()).find(item => item.id === work.id)!;
@@ -210,7 +226,7 @@ test('integration:unrunnable-remedy-reported — a blocker naming a command no l
     return { work: (await store.list()).find(item => item.id === work.id)!, branch: itemBranch };
   };
   const unrunnable = await blocked('force-refused', branch => `The command \`git push --force origin ${branch}\` was denied by the harness: Permission to use Bash has been denied`);
-  const runnable = await blocked('lease-available', branch => `\`git push --force-with-lease origin ${branch}\` failed: stale info; the remote moved`);
+  const runnable = await blocked('lease-available', () => `\`node ${launcher} restore-branch GY-1 2\` failed: stale info; the remote moved`);
   const unquoted = await blocked('mirror-refused', () => 'git push --mirror origin was denied by the harness; nothing else can replace the refs');
   assert.deepEqual(blockerCommands(unrunnable.work.blocker!), [`git push --force origin ${unrunnable.branch}`]);
   assert.deepEqual(blockerCommands(unquoted.work.blocker!), ['git push --mirror origin']);
@@ -222,7 +238,7 @@ test('integration:unrunnable-remedy-reported — a blocker naming a command no l
   const [defect] = reported;
   assert.equal(defect.command, `git push --force origin ${unrunnable.branch}`);
   assert.equal(defect.role, 'worker');
-  assert.equal(defect.rule, 'Bash(git push *--force *)');
+  assert.equal(defect.rule, 'Bash(git push *--force*)');
   assert.deepEqual(defect.deniedBy.map(entry => entry.role), ['reviewer', 'producer', 'master']);
   assert.ok(defect.deniedBy.every(entry => entry.rule === 'Bash(git push:*)'));
   assert.equal(reported[1].rule, 'Bash(git push *--mirror*)');
@@ -230,7 +246,7 @@ test('integration:unrunnable-remedy-reported — a blocker naming a command no l
   const item = status.attentionItems.find(entry => entry.subject === unrunnable.work.key && /no session Graphyard launches may run/.test(entry.text))!;
   assert.ok(item, JSON.stringify(status.attentionItems));
   assert.match(item.text, new RegExp(`git push --force origin ${unrunnable.branch.replace(/[/-]/g, '\\$&')}`));
-  assert.match(item.text, /worker .*Bash\(git push \*--force \*\)/);
+  assert.match(item.text, /worker .*Bash\(git push \*--force\*\)/);
   assert.match(item.text, /Graphyard defect, not a wait on a human shell/);
   assert.equal(item.human, false);
   assert.equal(item.role, 'master');
@@ -238,6 +254,9 @@ test('integration:unrunnable-remedy-reported — a blocker naming a command no l
   // The same judgement, pure: an unblocked or delivered item is never reported.
   assert.deepEqual(unrunnableRemedies([{ ...unrunnable.work, blocker: null }], { cliPath: launcher, baseBranch: 'main' }), []);
   assert.deepEqual(unrunnableRemedies([{ ...unrunnable.work, stage: 'done' }], { cliPath: launcher, baseBranch: 'main' }), []);
+  // A worker runtime that loads no generated rules could run it, so nothing is reported for it.
+  assert.equal(unrunnableRemedies([unrunnable.work], { cliPath: launcher, baseBranch: 'main', workerKinds: ['claude'] }).length, 1);
+  assert.deepEqual(unrunnableRemedies([unrunnable.work], { cliPath: launcher, baseBranch: 'main', workerKinds: ['claude', 'codex'] }), []);
   // Nothing in the report points at a human: the item is not parked and no human request stands.
   assert.ok(!status.humanRequests.some(request => request.work === unrunnable.work.key || request.work === unrunnable.work.id));
 });

@@ -1508,7 +1508,7 @@ A harness allowlist is a prompt policy, not an authority boundary. The enforced 
 
 Claude Code loads `.claude/settings.local.json` for every session started anywhere under the repository, assigned worktrees included, so the master's rules would otherwise bind the sessions it launches: its `git push` deny would refuse a worker's push to its own branch, and its review-call deny would refuse the reviewer's verdict. Worker, reviewer and producer sessions therefore never inherit them. When the repository carries Claude project or local settings, each Claude session is launched with `--setting-sources user --settings .graphyard/harness/ROLE-PROFILE.json`: the operator's user settings plus its own role file, and never the repository's project or local settings where the master's rules live.
 
-- **worker** — the same rules dispatch writes into the assigned worktree's own `.claude/settings.local.json`: it may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), restore that branch with `git push --force-with-lease origin BRANCH` ([worker push rights](#worker-push-rights)), fetch, reset its worktree, run its item's Graphyard commands and open its pull request; it may not force-push unconditionally, push or rewrite any other ref, push the base branch, rebase, merge, post a review or submit evidence. The worktree file alone is not enough — Claude Code still loads the repository's settings above it, master denies included — which is why the session is launched with its role file instead.
+- **worker** — the same rules dispatch writes into the assigned worktree's own `.claude/settings.local.json`: it may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), restore that branch through `graphyard restore-branch GY-N EPOCH` ([worker push rights](#worker-push-rights)), fetch, reset its worktree, run its item's Graphyard commands and open its pull request. It may not make any raw force or lease push, delete a ref, push the base branch, rebase, merge, post a review or submit evidence. The worktree file alone is not enough — Claude Code still loads the repository's settings above it, master denies included — which is why the session is launched with its role file instead.
 - **reviewer** — may read the diff and post the one verdict it was launched for (`gh api --method POST repos/OWNER/REPO/pulls/N/reviews`); may not push, commit, claim, submit evidence, or edit files.
 - **producer** — may fetch, add and remove its detached worktree under the managed worktree root and submit evidence; may not push, commit, claim or post a review.
 
@@ -1771,31 +1771,46 @@ On the next observation the item is delivered with `delivery.operatorAuthorizati
 
 ### Worker push rights
 
-A worker writes to exactly one remote ref: the branch of its assignment, `graphyard/<key>-<epoch>`, or the already linked PR branch a rework attempt is given. Its harness permits these git writes and no others:
+A worker may change one remote ref: its assigned branch, `graphyard/<key>-<epoch>`, or the already linked PR branch a rework attempt is given. It makes these git writes to that branch:
 
 | Write | Command | Why |
 | --- | --- | --- |
 | Publish or advance the branch | `git push origin BRANCH`, `git push -u origin BRANCH`, `git push origin HEAD:BRANCH` | A fast-forward of its own branch; Graphyard observes the new head as the candidate. |
 | Take the base | `git merge origin/BASE`, via `graphyard sync GY-N` | The base is merged, never rebased, so no file outside plannedFiles is re-resolved. |
-| Restore the branch | `git fetch origin`, `git reset --hard REVIEWED_HEAD`, `git push --force-with-lease origin BRANCH` | Replaces an ejected or contaminated tip with the item's own history; see below. |
+| Restore the branch | `git fetch origin`, `git reset --hard REVIEWED_HEAD`, then `graphyard restore-branch GY-N EPOCH` | Replaces an ejected or contaminated tip with the item's own history; see below. |
 
-Denied: `--force` and `-f` in any position, a `+` refspec, the explicit `--force-with-lease=REF:SHA` form, `--mirror`, `--all`, `--delete` and `-d`, and every push that names the base branch (`origin BASE`, `…:BASE`, a lease push included). A push to any other ref matches no allow rule. `rebase`, `gh pr merge` and `gh pr review` stay denied.
+The worker's harness denies every raw push that rewrites or deletes a ref, whichever ref it names: `--force` and `-f` in any position, every `--force-with-lease` push (bare, `=REF:SHA`, or with `--force-if-includes`), a `+` refspec, `--mirror`, `--all`, `--delete`, `-d`, and an empty-source refspec (`:graphyard/…`, `:refs/…`, any name with a `-`). It also denies every push that names the base branch: `origin BASE`, `…:BASE`, `refs/heads/BASE`, and the lease forms. `rebase`, `gh pr merge` and `gh pr review` stay denied too.
 
-**Why `--force-with-lease` and not `--force`.** Both replace the branch tip with one that does not descend from it; that is what a restoration is. `--force` replaces whatever the remote holds, including a head somebody pushed after the worker last looked. `--force-with-lease` is conditional: git sends the tip the worker last fetched (`refs/remotes/origin/BRANCH`) as the expected value, and the remote refuses the push unless the branch still points there. The worker can therefore replace only the tip it saw — the ejected one it is authorized to replace — and never a head it did not. The bare form is the only one permitted because it names no ref of its own; the explicit `=REF:SHA` form could lease any ref. Rewriting the branch does not rewrite what Graphyard bound: the review and every proof are bound to a head sha, and a new head is a new candidate that the build gate, review and proofs judge afresh.
+A plain push to some other ref, such as `git push origin other-branch`, matches no rule. A Claude worker runs under `bypassPermissions`, so it would run. It can only fast-forward that ref, though, and cannot drop a commit; a non-fast-forward push is rejected by the remote. Only the explicit allow rules above cover the worker's own branch. Branch protection, the lease and the merge gate remain the enforcement, because a harness rule is a prompt policy.
 
-**Restoring a contaminated branch.** A branch is contaminated when its tip carries content that is not the item's own — a queue tip that stacked another item's unlanded commit and was then ejected, or a merge that brought in another item's work. `git merge -s ours` of that tip is not a restoration: it keeps the other item's commit in the ancestry, so that item's own later merge silently drops its change. A new branch and pull request is refused (`A submitted task cannot switch pull requests`). The recovery is a two-party `rework` decision whose reason names the reviewed head, and the attempt it dispatches runs, with no human shell:
+**Why `--force-with-lease` and not `--force`.** Both replace the branch tip with one that does not descend from it; that is what a restoration is. `--force` replaces whatever the remote holds, including a head somebody pushed after the worker last looked. `--force-with-lease=refs/heads/BRANCH:TIP` is conditional: the remote refuses the push unless the branch still points at `TIP`, the tip just fetched. So the push can replace only the tip that was seen — the ejected one the rework authorizes replacing — and never a head pushed since.
+
+The lease limits *when* a push may replace a tip, not *which* ref it replaces. A permission glob cannot say "this ref and no other", and anything a glob leaves unmatched runs under `bypassPermissions`. So the worker gets no raw lease push at all. `restore-branch` makes the one lease push itself:
+
+1. The server confirms that the caller holds the live lease for `EPOCH` (a `heartbeat`).
+2. The worktree must be on the branch registered for that epoch, with no merge in progress and no uncommitted change.
+3. It fetches, then runs `git push --force-with-lease=refs/heads/BRANCH:TIP origin HEAD:refs/heads/BRANCH` and prints the tip it `replaced` and the new `head`.
+
+Rewriting the branch does not rewrite what Graphyard bound: the review and every proof are bound to a head sha, and a new head is a new candidate that the build gate, review and proofs judge afresh.
+
+**Restoring a contaminated branch.** A branch is contaminated when its tip carries content that is not the item's own: a queue tip that stacked another item's unlanded commit and was then ejected, or a merge that brought in another item's work. Two workarounds do not work:
+
+- `git merge -s ours` of that tip is not a restoration. It keeps the other item's commit in the ancestry, so that item's own later merge silently drops its change.
+- A new branch and pull request is refused (`A submitted task cannot switch pull requests`).
+
+The recovery is a two-party `rework` decision whose reason names the reviewed head. The attempt it dispatches runs these commands, with no human shell:
 
 ```sh
 git fetch origin
-git reset --hard REVIEWED_HEAD            # the head the approval and trusted proofs bind to
-node "$GRAPHYARD_CLI" sync GY-N          # merge origin/BASE; every file outside plannedFiles must match it
-git push --force-with-lease origin BRANCH
+git reset --hard REVIEWED_HEAD                    # the head the approval and trusted proofs bind to
+node "$GRAPHYARD_CLI" sync GY-N                  # merge origin/BASE; every file outside plannedFiles must match it
+node "$GRAPHYARD_CLI" restore-branch GY-N EPOCH  # the lease push of this attempt's branch
 node "$GRAPHYARD_CLI" complete GY-N EPOCH PR
 ```
 
-A plain push is refused here as non-fast-forward, which is why the lease push exists. If the lease push itself is refused (`stale info`), the branch moved after the fetch: fetch again and read what the new tip holds before replacing it. `branchRestoration` in `src/master.ts` renders exactly these commands, and a test drives them through a dispatched attempt against a real repository.
+A plain push is refused here as non-fast-forward, which is why the restoration exists. If `restore-branch` reports `stale info`, the branch moved between its fetch and its push: read what the new tip holds before running it again. `branchRestoration` in `src/master.ts` renders exactly these commands, and a test drives them through a dispatched attempt against a real repository.
 
-**A remedy no session may run is a defect.** When a blocker names a command that every session Graphyard launches — the item's worker, reviewer, producer and master — is denied by its harness, `master status` reports it under `unrunnableRemedies` (with `counts.unrunnableRemedies`) and as an attention item owned by the master: the item, the command, the role that would need it (the worker that raised the blocker), the rule in that role's harness that denies it, and the rule each other role is denied by. It reads as a Graphyard defect, not as a wait on a human shell: the answer is a work item that lets the role run the command, or has the control plane perform it, never an operator typing it.
+**A remedy no session may run is a defect.** When a blocker names a command that every session Graphyard launches — the item's worker, reviewer, producer and master — is denied by its harness, `master status` reports it under `unrunnableRemedies` (with `counts.unrunnableRemedies`) and as an attention item owned by the master: the item, the command, the role that would need it (the worker that raised the blocker), the rule in that role's harness that denies it, and the rule each other role is denied by. It reads as a Graphyard defect, not as a wait on a human shell: the answer is a work item that lets the role run the command, or has the control plane perform it, never an operator typing it. Only Claude sessions load generated rules. So when a launched worker profile runs another runtime, which could run the command under its own approval configuration, nothing is reported.
 
 ### Dead worker or provider change
 
