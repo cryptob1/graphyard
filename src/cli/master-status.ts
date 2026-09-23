@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
+import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
@@ -20,7 +20,9 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
+import { nameUnresolvedThreads } from '../merge-queue.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
+import { terminalDecisions } from './decision-report.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
@@ -64,33 +66,6 @@ export function approverLaunchAttention(daemon: {
     return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
       ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
   });
-}
-
-/**
- * Terminal decisions nothing waits on any more: a stale one — approval refused on a revision or
- * candidate race, so its pin can never hold again — and a withdrawn one the requester took back.
- * A stale decision raises master attention with the re-request command only while it is still the
- * latest decision for its action — a later decision of the same action supersedes it, whatever its
- * state; a withdrawn one is listed for the record and never raises attention.
- */
-async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string }[]) {
-  const listed: { work: string; id: string; action: string; state: string; reason: string | null; race?: unknown }[] = [];
-  const attentionItems: AttentionItem[] = [];
-  for (const item of work) {
-    if (item.stage === 'done') continue;
-    const history = await masterApi(`work/${item.id}/decisions`).catch(() => null);
-    const decisions = history?.decisions ?? [];
-    const latest = new Map<string, string>();
-    for (const decision of decisions) latest.set(decision.action, decision.id);
-    for (const decision of decisions) {
-      if (decision.state !== 'stale' && decision.state !== 'withdrawn') continue;
-      listed.push({ work: item.key, id: decision.id, action: decision.action, state: decision.state, reason: decision.outcome ?? null, ...(decision.race ? { race: decision.race } : {}) });
-      if (decision.state === 'stale' && latest.get(decision.action) === decision.id)
-        attentionItems.push({ subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
-          ...agentOwner('master', `graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION`, 'approver') });
-    }
-  }
-  return { listed, attentionItems };
 }
 
 /**
@@ -149,7 +124,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, the sessions running against the declared limit and the longest wait for a slot.
-  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath),
+  const sessions = nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
   // A required check that failed on the clock says so, with the measurement against its budget.
   const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
@@ -188,11 +163,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
   }
   attentionItems.push(...generatedFiles);
-  const decisions = await terminalDecisions(masterApi, snapshot.work);
+  const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
   return { ...status, ...ledgerRefusalAttention({ work: status.work, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length } }, snapshot.work),
-    terminalDecisions: decisions.listed,
+    terminalDecisions: decisions.listed, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
@@ -234,21 +209,20 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
 }
 
 /**
- * The one-command approval behind `master scope GY-N [REASON]`: read the item's open scope
- * request, verify the requesting epoch still holds the lease, and apply the purely additive
- * requirements revision that adds the requested paths — with the master's own operator-agent
- * identity, since widening planned files is non-weakening intent.
+ * `master scope`: apply an open scope request of the lease-holding epoch as an additive
+ * requirements revision; a root-level directory needs --allow-broad-scope.
  */
 export async function approveScopeRequest(root: string, config: MasterConfig, args: string[], deps: { coordinator: (path: string) => Promise<any>; fetcher?: typeof fetch; operatorToken?: () => Promise<string> }) {
-  if (!args[0]) throw new Error('Use master scope GY-N [REASON]');
+  const allowBroad = args.includes(broadScopeFlag); args = args.filter(flag => flag !== broadScopeFlag);
+  if (!args[0]) throw new Error(`Use master scope GY-N [${broadScopeFlag}] [REASON]`);
   const work = ((await deps.coordinator('work-snapshot')).work as Work[]).find(item => item.id === args[0] || item.key === args[0]);
   if (!work) throw new Error(`Unknown work item ${args[0]}`);
   const request = work.scopeRequest;
   if (!request) throw new Error(`${work.key} has no open scope request to approve`);
   if (!work.lease || work.lease.epoch !== request.epoch) throw new Error(`${work.key}'s scope request belongs to epoch ${request.epoch}, which no longer holds the lease; ask the live worker to request again`);
-  const token = await (deps.operatorToken ? deps.operatorToken() : agentToken(root, config, 'operatorAgent'));
-  const fetcher = deps.fetcher ?? fetch;
-  const reason = args.slice(1).join(' ').trim() || `Approve ${request.requestedBy}'s scope request: ${request.reason}`;
-  const response = await fetcher(`${config.url}/api/work/${work.id}/requirements`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': process.env.GRAPHYARD_REQUEST_ID ?? randomUUID() }, body: JSON.stringify({ expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: [...new Set([...work.plannedFiles, ...request.paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason }), signal: AbortSignal.timeout(30_000) });
+  const token = await (deps.operatorToken ? deps.operatorToken() : agentToken(root, config, 'operatorAgent')), fetcher = deps.fetcher ?? fetch;
+  const plannedFiles = [...new Set([...work.plannedFiles, ...request.paths])];
+  const reason = guardBroadScope({ ...work, plannedFiles }, args.slice(1).join(' ').trim() || `Approve ${request.requestedBy}'s scope request: ${request.reason}`, { allow: allowBroad, command: 'master scope', existing: work.plannedFiles });
+  const response = await fetcher(`${config.url}/api/work/${work.id}/requirements`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': process.env.GRAPHYARD_REQUEST_ID ?? randomUUID() }, body: JSON.stringify({ expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason }), signal: AbortSignal.timeout(30_000) });
   const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
 }

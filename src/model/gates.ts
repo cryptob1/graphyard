@@ -1,4 +1,4 @@
-import { baseRefreshConflict, latestCheck } from '../merge-queue.js';
+import { baseRefreshConflict, latestCheck, unresolvedThreadRefusal } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
@@ -76,9 +76,12 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   // is validated against the speculative tip it will actually land, and merges in order.
   // A standing escalation or lead hold is a refusal to deliver, so such an item never
   // becomes queue-eligible and its own reason is reported alongside the queue's.
+  // Unresolved review threads on a branch that requires conversation resolution are a merge the
+  // provider will refuse (GY-139): named here, thread by thread, and kept out of the queue.
   const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
-  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !!candidate && !obs?.merged);
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...delivery, ...queueState.reasons]);
+  const threads = current ? unresolvedThreadRefusal(work) : null;
+  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !threads && !!candidate && !obs?.merged);
+  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(!obs?.mergeable && !obs?.merged ? ['Pull request is not mergeable against the current base'] : []), ...(threads ? [threads] : []), ...delivery, ...queueState.reasons]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');

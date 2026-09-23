@@ -3,14 +3,15 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, requiredDecisionCapabilities, type Decision, type DecisionState } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, requiredDecisionCapabilities, unansweredRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import type { Services } from './routes.js';
+import { refuseDecision } from './decision-refusal.js';
 
 type Db = pg.PoolClient;
 /**
  * Terminal states only this module records: a decision overtaken by a revision race ('stale')
  * and one its requester took back ('withdrawn'). The model's fold predates them, so they are
- * folded on top of it from the same ledger.
+ * folded on top of it from the same ledger. An approver's refusal ('refused') is the model's own.
  */
 type TerminalState = 'stale' | 'withdrawn';
 /**
@@ -29,10 +30,10 @@ const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(
   : value;
 const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) => !!pinned && JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
 export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | null };
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
+export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
   (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1 FOR UPDATE', [id])).rows[0]?.document;
-async function readDecisions(db: { query: Db['query'] }, work: Work): Promise<DecisionRecord[]> {
+export async function readDecisions(db: { query: Db['query'] }, work: Work): Promise<DecisionRecord[]> {
   const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows;
   const events = rows.map(row => ({ kind: row.kind as string, actor: row.actor as string, at: new Date(row.created_at).toISOString(), payload: row.payload }));
   const decisions: DecisionRecord[] = foldDecisions(work.id, events).map(decision => ({ ...decision, race: null, pin: null }));
@@ -45,14 +46,14 @@ async function readDecisions(db: { query: Db['query'] }, work: Work): Promise<De
   }
   return decisions;
 }
-const record = (db: Db, work: Work, actor: string, kind: string, payload: unknown) =>
+export const record = (db: Db, work: Work, actor: string, kind: string, payload: unknown) =>
   db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor, kind, JSON.stringify(payload)]);
-async function authenticated(services: Services, db: Db, now: Date, actor: Principal) {
+export async function authenticated(services: Services, db: Db, now: Date, actor: Principal) {
   if (actor.role !== 'operator-agent') return actor;
   demand(services.engine.operatorAuthorizer, 'Operator-agent authorization is unavailable', 503);
   return services.engine.operatorAuthorizer!(db, now, actor);
 }
-async function receipt(db: Db, actor: Principal, key: string, fingerprint: string) {
+export async function receipt(db: Db, actor: Principal, key: string, fingerprint: string) {
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const row = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
   if (row) demand(row.fingerprint === fingerprint, 'Idempotency key reused with different input');
@@ -97,7 +98,11 @@ export async function requestDecision(services: Services, caller: Principal, id:
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
-    const pending = (await readDecisions(db, work!)).find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
+    const history = await readDecisions(db, work!);
+    // A refused decision is answered, never retried unchanged (GY-141).
+    const repeated = unansweredRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)));
+    demand(!repeated, repeated!, 409);
+    const pending = history.find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
     const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;
     // The ledger's "precedent it relied on" is only worth following if it names real decisions:
     // every cited id must be a recorded decision of this same action, on any item of the graph.
@@ -199,6 +204,7 @@ async function recordStale(services: Services, stale: { actor: Principal; workId
  * outcome is appended to the ledger. A crash between the two replays the same engine call.
  */
 export async function approveDecision(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  if ((body as any)?.action === 'refuse') return refuseDecision(services, caller, id, body, key);
   const data = decisionApprovalSchema.parse(body);
   const fingerprint = digest({ id, ...data });
   const refusal: { value?: { actor: Principal; workId: string; conflict: string } } = {};
