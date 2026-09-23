@@ -39,8 +39,10 @@ export interface QueueSpeculation {
  * One unresolved review thread on a candidate's pull request: who opened it (the author of its
  * first comment), and the path and line it is anchored to. `line` is null for a thread on a file
  * rather than a line; `outdated` threads sit on code the head has since changed and still block.
+ * `id` is the thread's GraphQL node id — what `scripts/resolve-thread.mjs` takes — so whoever may
+ * resolve it can do so without a raw GraphQL read to rediscover it.
  */
-export interface ReviewThread { author: string; path: string; line: number | null; outdated: boolean; url?: string }
+export interface ReviewThread { id?: string; author: string; path: string; line: number | null; outdated: boolean; url?: string }
 /**
  * Review conversations as a gate input (GY-139). `required` is the managed branch's
  * `required_conversation_resolution`; `unresolved` is read only when it is set, since a thread
@@ -49,6 +51,8 @@ export interface ReviewThread { author: string; path: string; line: number | nul
 export interface ConversationResolution { required: boolean; unresolved: ReviewThread[] }
 declare module './model/work.js' { interface Observation { conversations?: ConversationResolution } }
 
+/** One single-quoted shell argument: nothing inside it is expanded, whatever a contributor named a file. */
+const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 /** `author on path:line`, the way every refusal and attention line names a thread. */
 export const describeThread = (thread: ReviewThread) => `${thread.author} on ${thread.path}${thread.line === null ? '' : `:${thread.line}`}${thread.outdated ? ' (outdated)' : ''}`;
 /**
@@ -82,7 +86,10 @@ export function nameUnresolvedThreads<S extends { work: { key: string; mergeable
     const threads = item ? blockingThreads(item) : [];
     if (!threads.length) return { ...row, reviewThreads: [] as ReviewThread[] };
     const text = unresolvedThreadRefusal(item!)!;
-    const attentionOwner = owner('master', `graphyard master decide ${row.key} rework "Address the unresolved review threads: ${threads.map(describeThread).join('; ')}"; resolving or dismissing a thread the master did not write is not the master's call`, 'approver');
+    // The thread's path and author are contributor-controlled text, so the reason is one quoted
+    // argument and the command is the whole of `next`: nothing in it can end the argument or run.
+    const reason = `Address the unresolved review threads: ${threads.map(describeThread).join('; ')}. Fix each finding; resolving or dismissing a thread the master did not write is not the master's call`;
+    const attentionOwner = owner('master', `graphyard master decide ${row.key} rework ${shellQuote(reason)}`, 'approver');
     rewritten.set(row.key, { previous: row.attention, item: { subject: row.key, text, ...attentionOwner } as S['attentionItems'][number] });
     return { ...row, mergeable: false, reviewThreads: threads, attention: text, attentionOwner };
   });

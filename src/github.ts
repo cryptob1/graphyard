@@ -20,7 +20,7 @@ export const compareFileCap = 300;
 const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login } url } } }
+    nodes { id isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login } url } } }
   } } }
 }`;
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
@@ -74,11 +74,11 @@ export class GitHub {
   /** How often the installed permissions are re-read when nothing has gone wrong. */
   preflightIntervalMs = 5 * 60_000;
   constructor(public config: GitHubConfig) {}
-  private backoff(response: Response) {
-    const retry = Number(response.headers.get('retry-after'));
-    const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+  private backoff(response?: Response) {
+    const retry = Number(response?.headers.get('retry-after'));
+    const reset = Number(response?.headers.get('x-ratelimit-reset')) * 1000;
     this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
-      response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
+      response?.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
   }
   /**
    * Turns a failed response into the right refusal. Only a rate limit pauses the client; an
@@ -251,9 +251,16 @@ export class GitHub {
       return { protected: !!verified, conversationResolution: p.required_conversation_resolution?.enabled === true };
     } catch { return { protected: false, conversationResolution: false }; }
   }
-  /** One GraphQL query as the installation. GitHub answers a failed query with 200 and `errors`, which is refused here. */
+  /**
+   * One GraphQL query as the installation. GitHub answers a failed query with 200 and `errors`,
+   * which is refused here; a `RATE_LIMITED` error pauses the client as a REST rate limit does.
+   */
   async graphql(query: string, variables: Record<string, unknown>): Promise<any> {
     const response = await this.apiRequest('/graphql', 'POST', { query, variables });
+    if (response?.errors?.some((error: any) => error?.type === 'RATE_LIMITED')) {
+      this.backoff();
+      throw new Refusal(`GitHub POST /graphql failed: rate limited; requests paused until ${new Date(this.blockedUntil).toISOString()}`, 502);
+    }
     demand(!response?.errors?.length && response?.data, `GitHub GraphQL query failed: ${response?.errors?.map((error: any) => error?.message).join('; ') || 'no data returned'}`, 502);
     return response.data;
   }
@@ -275,7 +282,7 @@ export class GitHub {
         if (thread?.isResolved !== false) continue;
         const comment = thread.comments?.nodes?.[0];
         const line = Number.isSafeInteger(thread.line) ? thread.line : Number.isSafeInteger(thread.originalLine) ? thread.originalLine : null;
-        threads.push({ author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', path: typeof thread.path === 'string' ? thread.path : '(no path)', line, outdated: thread.isOutdated === true,
+        threads.push({ ...(typeof thread.id === 'string' ? { id: thread.id } : {}), author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', path: typeof thread.path === 'string' ? thread.path : '(no path)', line, outdated: thread.isOutdated === true,
           ...(typeof comment?.url === 'string' ? { url: comment.url } : {}) });
       }
       if (!connection.pageInfo?.hasNextPage) return threads;

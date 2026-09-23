@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { agentOwner, assertMergeCandidate, buildMasterStatus, mergeWork } from '../src/master.js';
@@ -41,7 +42,7 @@ function repository(options: { conversationResolution: boolean; threads: Thread[
     const thread = options.threads[index];
     return { repository: { pullRequest: { reviewThreads: {
       pageInfo: { hasNextPage: index + 1 < options.threads.length, endCursor: String(index + 1) },
-      nodes: thread ? [{ isResolved: thread.isResolved, isOutdated: thread.isOutdated ?? false, path: thread.path, line: thread.line, originalLine: thread.originalLine ?? thread.line, comments: { nodes: [{ author: { login: thread.author }, url: `https://github.com/owner/repo/pull/133#discussion_r${index}` }] } }] : [],
+      nodes: thread ? [{ id: `PRRT_thread${index}`, isResolved: thread.isResolved, isOutdated: thread.isOutdated ?? false, path: thread.path, line: thread.line, originalLine: thread.originalLine ?? thread.line, comments: { nodes: [{ author: { login: thread.author }, url: `https://github.com/owner/repo/pull/133#discussion_r${index}` }] } }] : [],
     } } } };
   };
   return { github, queries };
@@ -72,8 +73,8 @@ test('integration:unresolved-threads-fail-merge-gate — an unresolved thread fa
   const observed = await blocked.github.observe(candidate(null));
   // The observation records each unresolved thread with its author, path and line; the resolved one is not recorded.
   assert.deepEqual(observed.conversations, { required: true, unresolved: [
-    { author: reviewer, path: 'src/claims.ts', line: 42, outdated: false, url: 'https://github.com/owner/repo/pull/133#discussion_r1' },
-    { author: reviewer, path: 'src/claims.ts', line: 7, outdated: true, url: 'https://github.com/owner/repo/pull/133#discussion_r2' },
+    { id: 'PRRT_thread1', author: reviewer, path: 'src/claims.ts', line: 42, outdated: false, url: 'https://github.com/owner/repo/pull/133#discussion_r1' },
+    { id: 'PRRT_thread2', author: reviewer, path: 'src/claims.ts', line: 7, outdated: true, url: 'https://github.com/owner/repo/pull/133#discussion_r2' },
   ] });
   assert.equal(blocked.queries.length, 3, 'every page of threads is read');
   assert.equal(observed.protected, true); assert.equal(observed.mergeable, true);
@@ -102,6 +103,13 @@ test('integration:unresolved-threads-fail-merge-gate — an unresolved thread fa
   let reads = 0; const graphql = blocked.github.graphql.bind(blocked.github);
   blocked.github.graphql = async (query, variables) => (++reads > 3 ? resolved.github.graphql(query, variables) : graphql(query, variables));
   await assert.rejects(blocked.github.verify(candidate(null)), /gates changed/);
+
+  // GitHub answers a GraphQL rate limit with 200 and a RATE_LIMITED error: it pauses the client
+  // like a REST rate limit, rather than reading as an ordinary failure or as zero threads.
+  const limited = new GitHub({ repository: 'owner/repo', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
+  (limited as any).apiRequest = async () => ({ data: null, errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded' }] });
+  await assert.rejects(limited.unresolvedThreads(133), /rate limited; requests paused until/);
+  assert.ok((limited as any).blockedUntil > Date.now(), 'the client is paused');
 });
 
 /** The record a merge-ready candidate carries once the engine evaluated it and granted authorization. */
@@ -135,7 +143,7 @@ test('unit:unresolved-threads-surfaced — master status lists the unresolved th
   const text = `Branch protection requires conversation resolution and 1 review thread is unresolved on ${head.slice(0, 12)}: ${reviewer} on src/claims.ts:42. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
   assert.equal(row.attention, text);
   assert.equal(row.attentionOwner?.role, 'master'); assert.equal(row.attentionOwner?.approvedBy, 'approver'); assert.equal(row.attentionOwner?.human, false);
-  assert.equal(row.attentionOwner?.next, `graphyard master decide GY-130 rework "Address the unresolved review threads: ${reviewer} on src/claims.ts:42"; resolving or dismissing a thread the master did not write is not the master's call`);
+  assert.equal(row.attentionOwner?.next, `graphyard master decide GY-130 rework 'Address the unresolved review threads: ${reviewer} on src/claims.ts:42. Fix each finding; resolving or dismissing a thread the master did not write is not the master'\\''s call'`);
   assert.deepEqual(report.attentionItems.filter(item => item.subject === 'GY-130').map(item => item.text), [text], 'the row and the attention list say the same thing, once');
   assert.equal(report.counts.attention, report.work.filter(entry => entry.attention).length);
 
@@ -145,6 +153,15 @@ test('unit:unresolved-threads-surfaced — master status lists the unresolved th
   const demoted = status(stale, now);
   assert.equal(demoted.work[0].mergeable, false); assert.equal(demoted.counts.mergeable, 0);
   assert.equal(demoted.work[0].attention, text);
+
+  // A path and author are contributor-controlled: whatever they contain, the remedy is one command
+  // whose reason is a single argument, so following it can never run anything the path names.
+  const hostile = { author: `bot"'$(touch pwned)`, path: `src/$(touch pwned)"; echo 'x\`id\`.ts`, line: 1, outdated: false };
+  const next = status(authorized(observation([hostile], now), now), now).work[0].attentionOwner!.next!;
+  const argv = JSON.parse(execFileSync('bash', ['-c', `set -- ${next.replace(/^graphyard master decide /, '')}; printf '%s\\0' "$@" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(s.split("\\0").slice(0,-1))))'`], { encoding: 'utf8' }));
+  assert.equal(argv.length, 3, 'the key, the action and the reason, nothing more');
+  assert.deepEqual(argv.slice(0, 2), ['GY-130', 'rework']);
+  assert.ok(argv[2].includes(`${hostile.author} on ${hostile.path}:1`), 'the reason carries the thread verbatim, unexpanded');
 
   const guide = (await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
   assert.match(guide, /An unresolved review thread is a finding to fix/);
