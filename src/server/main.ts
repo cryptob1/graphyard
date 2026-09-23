@@ -67,25 +67,33 @@ export async function main() {
   // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
   // it runs once a minute rather than every tick.
   let patternsAt = 0;
+  let tickStartedAt = 0, stallReportedAt = 0, tickStep = 'idle';
   const timer = setInterval(async () => {
-    if (running) return; running = true;
+    if (running) {
+      // A tick that never finishes stops every later one, so name the step it is stuck in.
+      if (Date.now() - tickStartedAt > 60_000 && Date.now() - stallReportedAt > 60_000) { stallReportedAt = Date.now(); console.error(`reconciliation tick stuck ${Math.round((Date.now() - tickStartedAt) / 1000)}s in ${tickStep}`); }
+      return;
+    }
+    running = true; tickStartedAt = Date.now();
+    const step = async <T>(name: string, run: () => Promise<T>) => { tickStep = name; const started = Date.now(); try { return await run(); } finally { if (Date.now() - started > 10_000) console.error(`reconciliation step ${name} took ${Date.now() - started} ms`); } };
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
     // backlog of observations drains across ticks without ever skipping one.
     try {
-      await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep();
-      await projectFlow(engine.store, { batches: 4 });
+      await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
+      await step('engine.reconcile', () => engine.reconcile()); await step('delivery.sweep', () => delivery.sweep());
+      await step('projectFlow', () => projectFlow(engine.store, { batches: 4 }));
       if (Date.now() - patternsAt >= 60_000) {
         patternsAt = Date.now();
-        for (const work of (await openPatternItems(engine, http.services.interventionPolicy)).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
+        for (const work of (await step('openPatternItems', () => openPatternItems(engine, http.services.interventionPolicy))).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
       }
       // Provider polling is bounded inside the watch to once a minute; incidents it raises
       // land in the ledger and in /api/status, and are announced here once each.
       const before = production.status().incidents.map(incident => incident.id);
-      for (const incident of (await production.tick()).incidents) if (!before.includes(incident.id)) console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`);
+      for (const incident of (await step('production.tick', () => production.tick())).incidents) if (!before.includes(incident.id)) console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`);
       if (github) {
-        const preflight = await github.preflightIfDue();
+        const preflight = await step('github.preflight', () => github.preflightIfDue());
         if (preflight) await announcePreflight(preflight);
-        await Promise.all(Array.from({ length: 4 }, () => processJob(engine, github)));
+        await step('processJob', () => Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))));
       }
     }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
