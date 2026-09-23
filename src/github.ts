@@ -59,6 +59,7 @@ export class GitHub {
   private rateFailures = 0;
   private authentication?: Promise<void>;
   private cache = new Map<string, { etag: string; value: any }>();
+  private ancestry = new Map<string, boolean>();
   private preflightState: AppPermissionReport | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
@@ -249,12 +250,20 @@ export class GitHub {
     demand(ref?.object?.type === 'commit' && typeof tip === 'string' && /^[a-f0-9]{40}$/.test(tip), `GitHub did not return a readable head for refs/heads/${this.config.base}`, 502);
     return { tip, tree: await this.commitTree(tip) };
   }
-  /** Whether `head` contains `base` by ancestry, as GitHub's compare reports it. */
+  /** Whether `head` contains `base` by ancestry, as GitHub's compare reports it. Ancestry between two commit SHAs never changes, so it is asked once. */
   async contains(base: string, head: string): Promise<boolean> {
     if (base === head) return true;
+    const key = `${base}...${head}`;
+    const known = /^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key) ? this.ancestry.get(key) : undefined;
+    if (known !== undefined) return known;
     const comparison = await this.request(`/compare/${base}...${head}?per_page=1`);
     demand(typeof comparison?.status === 'string', `GitHub did not compare ${base.slice(0, 12)} with ${head.slice(0, 12)}`, 502);
-    return comparison.status === 'ahead' || comparison.status === 'identical';
+    const contained = comparison.status === 'ahead' || comparison.status === 'identical';
+    if (/^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key)) {
+      this.ancestry.set(key, contained);
+      if (this.ancestry.size > ancestryEntries) this.ancestry.delete(this.ancestry.keys().next().value!);
+    }
+    return contained;
   }
   /** The base a published speculative tip was built on, when the head is that tip; otherwise null. */
   private speculativeBase(work: Work, headSha: string): string | null {
@@ -387,11 +396,15 @@ export class GitHub {
     // every drop of theirs is a removal or a modification in `base...head`. So they are judged
     // there, and `carried` judges the candidates the landing commit does not hold.
     const ahead = new Set(predicted ? speculation!.predecessors : []);
-    for (const peer of open) {
-      if (ahead.has(peer.key)) continue;
-      let contained = false;
-      for (const sha of ownHeads(peer)) if (await this.contains(sha, head)) { contained = true; break; }
-      if (!contained) continue;
+    // One compare per peer, asked a few at a time: asked in turn they held an observation past the
+    // merge window's 25 seconds, so a candidate with many open peers could never be authorized in time.
+    const containment = await boundedMap(open, peerContainmentConcurrency, async peer => {
+      if (ahead.has(peer.key)) return false;
+      for (const sha of ownHeads(peer)) if (await this.contains(sha, head)) return true;
+      return false;
+    });
+    for (const [index, peer] of open.entries()) {
+      if (!containment[index]) continue;
       foreign.push({ key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha });
       const entry: CarriedCandidate = { key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, dropped: [] };
       for (const file of peer.observation!.scopeFiles ?? []) {
@@ -903,6 +916,17 @@ export const permissionHoldMs = 30 * 60_000;
  * smaller than a round evicts every entry before its reuse, so no request earns a free 304.
  */
 export const etagCacheEntries = 4096;
+/** Commit-pair ancestry answers kept; each is immutable, so the bound only limits memory. */
+export const ancestryEntries = 16384;
+/** Peer containment compares one observation keeps in flight. */
+export const peerContainmentConcurrency = 8;
+async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length); let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const index = next++; results[index] = await run(items[index]); }
+  }));
+  return results;
+}
 /** Seconds between observations: a merge-stage candidate needs a fresh one to merge; webhooks wake the rest on change. */
 export const mergeObservationSeconds = 20;
 export const idleObservationSeconds = 90;
