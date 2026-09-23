@@ -813,7 +813,9 @@ test('merge queue shows each entry with its position, predicted tip, and wait', 
   await expect(entries).toHaveCount(2);
   await expect(entries.nth(0)).toContainText('1. GY-10');
   await expect(entries.nth(0)).toContainText('Next to merge');
-  await expect(entries.nth(0)).toContainText('Waiting 45m');
+  await expect(entries.nth(0)).toContainText('queued 45m ago');
+  // A queued card is a work card too: it carries the item's time in its status beside its position.
+  await expect(entries.nth(0).locator('.status-age')).toHaveCount(1);
   await expect(entries.nth(1)).toContainText('2. GY-11');
   await expect(entries.nth(1)).toContainText('Behind GY-10');
   await entries.nth(1).click();

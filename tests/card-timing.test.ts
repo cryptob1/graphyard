@@ -44,6 +44,13 @@ function dashboard(work: Work[], observedAt = NOW, overrides: Partial<Dashboard>
   };
 }
 const homeView = (work: Work[], observedAt = NOW) => markup(createElement(OverviewPage as any, dashboard(work, observedAt)));
+/** The home page with `item` in the merge queue: the queue draws its own card for each entry. */
+const queuedEntry = (item: Work) => ({ id: item.id, key: item.key, position: 0, size: 1, sequence: 1, enqueuedAt: new Date(NOW - 7 * minute).toISOString(), waitMs: 7 * minute,
+  predecessors: [], predictedBase: null, tip: null, base: null, binding: null, current: true, publishable: true, reasons: [] });
+const queueCard = (item: Work, observedAt = NOW) => {
+  const html = markup(createElement(OverviewPage as any, dashboard([item], observedAt, { queue: [queuedEntry(item)] as any })));
+  return html.slice(html.indexOf('aria-label="Merge queue"'), html.indexOf('aria-label="Shipped this week"'));
+};
 /** A board column draws the same component the list draws; web/pages/overview.tsx maps one `card`. */
 const boardCard = (item: Work, observedAt = NOW) => markup(createElement(WorkCard as any, { item, now: observedAt, repository: 'fixture/repository', onOpen: noop }));
 const itemView = (item: Work, work: Work[] = fixture, observedAt = NOW) => markup(createElement(WorkDetails as any, { ...dashboard(work, observedAt), item }));
@@ -76,6 +83,8 @@ test('unit:card-shows-status-duration — every work card in every view carries 
     // The same card, drawn as a board column draws it, and the item view: one number everywhere.
     assert.ok(ages(boardCard(item))[0]?.startsWith(expected), `${item.key} shows ${expected} in board view`);
     assert.ok(ages(itemView(item))[0]?.startsWith(expected), `${item.key} shows ${expected} in the item view`);
+    // A queued item's card in the merge queue carries the same number, not only its queue wait.
+    assert.ok(ages(queueCard(item))[0]?.startsWith(expected), `${item.key} shows ${expected} in the merge queue: ${ages(queueCard(item)).join(' | ')}`);
   }
   // The status the card names, not the stage behind it: the item whose claim lapsed reads
   // "Waiting for someone to pick this up", so its clock runs from when the claim lapsed rather
@@ -108,6 +117,7 @@ test('unit:overdue-threshold-applied — twenty-nine minutes is not red, thirty-
     ['home list', item => homeView([item])],
     ['board column', item => boardCard(item)],
     ['item view', item => itemView(item)],
+    ['merge queue', item => queueCard(item)],
   ];
   for (const [name, render] of views) {
     for (const [minutes, overdue] of [[29, false], [30, false], [31, true], [90, true]] as const) {
@@ -187,7 +197,7 @@ const executor: Principal = { id: 'card-timing-executor', role: 'coordinator' };
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_CARD_TIMING_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 45);
+  const port = Number(process.env.GRAPHYARD_CARD_TIMING_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 52);
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-card-timing-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
@@ -254,8 +264,38 @@ test('integration:status-duration-tracks-real-progress — a retry loop, a heart
   assert.equal(statusHeld(item, handedIn + 29 * minute).overdue, false);
   assert.equal(statusHeld(item, handedIn + 31 * minute).overdue, true);
 
-  // An observation that changes nothing leaves the restarted clock running.
-  const observed = await engine.observe(item.id, item.revision, { candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 4108, branch: `graphyard/${item.key.toLowerCase()}-1`, author: worker.id }, reviews: [], checks: [], merged: false } as any);
-  assert.equal(Date.parse(statusSince(observed, Date.now())) >= handedIn, true);
-  assert.equal(statusHeld(observed, Date.parse(statusSince(observed, Date.now())) + 50 * minute).overdue, true, 'a stalled item cannot be made fresh by being looked at');
+  // The first observation is a real move — the build gate passes and the card turns from
+  // "Handed in" to waiting for review — so the clock may follow it. Observing the same candidate
+  // again is the routine case and moves nothing: the instant is pinned, not re-derived.
+  const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 4108, branch: `graphyard/${item.key.toLowerCase()}-1`, author: worker.id };
+  const observation = { candidate, reviews: [], checks: [], merged: false } as any;
+  let observed = await engine.observe(item.id, item.revision, observation);
+  const inReview = statusSince(observed, Date.now());
+  assert.ok(Date.parse(inReview) >= handedIn);
+  for (let look = 0; look < 3; look++) {
+    observed = await engine.observe(observed.id, observed.revision, observation);
+    assert.equal(statusSince(observed, Date.now()), inReview, `observation ${look + 2} of an unchanged candidate is not a move`);
+  }
+  assert.equal(statusHeld(observed, Date.parse(inReview) + 50 * minute).overdue, true, 'a stalled item cannot be made fresh by being looked at');
+
+  // Sent back for changes: the card names a new status, waiting for a builder, and never one
+  // older than the hand-in it was sent back from.
+  item = await engine.execute(operator, 'rework', observed.id, { previousWorkerStopped: true, reason: 'card timing: send back' }, id());
+  assert.equal(phaseOf(item, Date.now()), 'needs-worker');
+  assert.ok(Date.parse(statusSince(item, Date.now())) >= handedIn, 'sending work back does not rewind its clock to the first claim');
+
+  // Nobody picks it up for two hours. Then a worker claims it: the old submission still stands,
+  // so the stored stage stays at build and its instant is not rewritten, but the card now names
+  // a builder at work, and its clock starts at that claim rather than two hours overdue.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document, '{stageEnteredAt}', to_jsonb($2::text)) WHERE id=$1", [item.id, new Date(Date.now() - 120 * minute).toISOString()]);
+  item = await engine.execute(worker, 'claim', item.id, {}, id());
+  const reclaimed = Date.parse(statusSince(item, Date.now()));
+  assert.equal(item.stage, 'build', 'the stage did not move on the second claim');
+  assert.ok(Date.parse(item.stageEnteredAt) < Date.parse(item.lastAssignment!.claimedAt!) - 100 * minute, 'and still carries the instant from before the wait');
+  assert.equal(phaseOf(item, reclaimed), 'building');
+  assert.equal(reclaimed, Date.parse(item.lastAssignment!.claimedAt!), 'the clock restarted on the second claim');
+  assert.equal(statusHeld(item, reclaimed + minute).overdue, false, 'an item claimed a minute ago is not red');
+  assert.equal(statusHeld(item, reclaimed + minute).minutes, 1);
+  for (let beat = 0; beat < 2; beat++) item = await engine.execute(worker, 'heartbeat', item.id, { epoch: item.epoch }, id());
+  assert.equal(Date.parse(statusSince(item, Date.now())), reclaimed, 'and the new attempt\'s heartbeats leave it running');
 });

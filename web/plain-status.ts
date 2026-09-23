@@ -185,18 +185,33 @@ const handedInPhases: Phase[] = ['review', 'checks', 'proof', 'merging'];
  *
  * `stageEnteredAt` is the spine: the engine rewrites it when, and only when, the evaluated stage
  * changes, so an observation, a heartbeat or a failed retry of the same action leaves it alone
- * and a stalled item cannot appear fresh. Two moves the stage does not see get their own instant,
- * because the card's sentence does see them: handing the work in, which the build gate keeps in
- * the build stage until GitHub is observed, and a claim running out, which reads as nobody
- * working on it before the next evaluation writes the ready stage. The latest instant wins, and
- * one in the future — a clock that disagrees — is ignored rather than trusted.
+ * and a stalled item cannot appear fresh. Three moves the stage does not see get their own
+ * instant, because the card's sentence does see them. Handing the work in, which the build gate
+ * keeps in the build stage until GitHub is observed. A claim, which after a send-back leaves the
+ * stage at build (the old submission still stands) while the card turns from waiting for a
+ * builder to being built. And an attempt ending — a claim running out, work sent back — which
+ * reads as nobody working on it before, or without, the next evaluation writing a new stage.
+ * The latest instant wins, and one in the future — a clock that disagrees — is ignored rather
+ * than trusted.
  */
 export function statusSince(work: Work, now: number): string {
   const phase = phaseOf(work, now);
   const pipeline = (work as Work & { pipeline?: PipelineTimeline }).pipeline;
+  const attempts = pipeline?.attempts ?? [];
   const moves: (string | undefined | null)[] = [work.stageEnteredAt];
   if (handedInPhases.includes(phase)) moves.push(pipeline?.resubmittedAt ?? pipeline?.submittedAt);
-  if (phase === 'needs-worker' && work.lease && Date.parse(work.lease.expiresAt) <= now) moves.push(work.lease.expiresAt);
+  if (phase === 'building' && work.lease) {
+    // The claim that opened the attempt being built, never an earlier attempt's.
+    moves.push(attempts.find(attempt => attempt.epoch === work.lease!.epoch)?.claimedAt);
+    if (work.lastAssignment?.epoch === work.lease.epoch) moves.push(work.lastAssignment.claimedAt);
+  }
+  if (phase === 'needs-worker') {
+    if (work.lease && Date.parse(work.lease.expiresAt) <= now) moves.push(work.lease.expiresAt);
+    // The last attempt's end: submitted, sent back, released or lapsed, the builder left then.
+    moves.push(attempts.at(-1)?.endedAt);
+    // Work sent back after it was handed in cannot have been waiting since before the hand-in.
+    if (work.reworkRequested) moves.push(pipeline?.resubmittedAt ?? pipeline?.submittedAt);
+  }
   const instants = moves.map(at => at ? Date.parse(at) : Number.NaN).filter(at => Number.isFinite(at) && at <= now);
   return instants.length ? new Date(Math.max(...instants)).toISOString() : work.stageEnteredAt;
 }
