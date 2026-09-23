@@ -11,7 +11,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, populationRule, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
+import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, populationRule, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { actionRetryDelay } from '../src/model/actions.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
@@ -218,6 +218,9 @@ test('integration:live-throughput-population — the population rule reads the r
   assert.match(nine.shortfall!.missed[0].text, /9 of the 10 deliveries the claim is judged over were made with no master session running; 1 more/);
   // A release that does not carry the claim, or that cannot name itself, verifies nothing.
   assert.match(verifyThroughput(work, now, { deployed: release({ containsClaim: false }), claimKey }).reason, /does not contain .* merge, so its executors are not the ones serving/);
+  const unchecked = verifyThroughput(work, now, { deployed: release({ containsClaim: null, reason: 'git could not compare the commits' }), claimKey });
+  assert.equal(unchecked.met, null); assert.equal(unchecked.verdict, 'unverified');
+  assert.match(unchecked.reason, /could not be established: git could not compare the commits/);
   assert.match(verifyThroughput(work, now, { deployed: release({ revision: 'unknown' }), claimKey }).reason, /reports no build revision/);
   assert.equal(verifyThroughput(work, now, { deployed: release({ revision: null }), claimKey }).met, null);
 
@@ -244,6 +247,17 @@ test('integration:live-throughput-population — the population rule reads the r
     { at: at(3 * minute + actionRetryDelay(1) + minute), event: 'claimed', requester: 'graphyard', executor: 'executor-b', result: null, reason: '' },
     { at: at(5 * minute), event: 'completed', requester: 'graphyard', executor: 'executor-b', result: 'done', reason: '' },
   ] }, Date.parse(windowStart) + 60 * minute).map(span => span.ms), [2 * minute, minute], 'the retry backoff is not counted as idleness');
+  assert.deepEqual(actionIdleSpans({ requestedAt: at(0), state: 'done', history: [
+    { at: at(0), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
+    { at: at(minute), event: 'claimed', requester: 'graphyard', executor: 'executor-a', result: null, reason: '' },
+    { at: at(2 * minute), event: 'failed', requester: 'graphyard', executor: 'executor-a', result: 'failed', reason: '' },
+    { at: at(2 * minute + actionRetryDelay(1)), event: 'claimed', requester: 'graphyard', executor: 'executor-b', result: null, reason: '' },
+    { at: at(3 * minute), event: 'failed', requester: 'graphyard', executor: 'executor-b', result: 'failed', reason: '' },
+    { at: at(3 * minute + actionRetryDelay(2)), event: 'claimed', requester: 'graphyard', executor: 'executor-c', result: null, reason: '' },
+    { at: at(5 * minute), event: 'completed', requester: 'graphyard', executor: 'executor-c', result: 'done', reason: '' },
+    { at: at(15 * minute), event: 'reopened', requester: 'graphyard', executor: null, result: null, reason: '' },
+    { at: at(23 * minute), event: 'claimed', requester: 'graphyard', executor: 'executor-d', result: null, reason: '' },
+  ] }, Date.parse(windowStart) + 60 * minute).map(span => span.ms), [minute, 0, 0, 8 * minute], 'a reopened row is immediately actionable and inherits no earlier retry delay');
   assert.deepEqual(actionIdleSpans({ requestedAt: at(0), state: 'pending', history: [{ at: at(0), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' }] }, Date.parse(windowStart) + 9 * minute).map(span => span.ms), [9 * minute]);
   assert.deepEqual(actionIdleSpans({ requestedAt: at(0), state: 'done', history: [
     { at: at(0), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
@@ -252,6 +266,17 @@ test('integration:live-throughput-population — the population rule reads the r
   // And the fingerprints are read from the item, not asserted about it.
   assert.deepEqual(coordinatorFingerprints(fast[0], deliveryActions(fast[0], now)), []);
   assert.match(coordinatorFingerprints({ ...fast[0], sessions: [{ id: 'master-1', kind: 'coordination', host: 'machine-a' }] } as unknown as Work, [])[0], /a coordination session \(master-1 on machine-a\) was recorded on it/);
+  const failedThenSuperseded = actionExecution({ id: 'failed-action', kind: 'merge', work: fast[0].id, key: fast[0].key,
+    inputs: { kind: 'merge', pr: 1, sha: commit('candidate'), baseSha: commit('base'), policyRevision: 1, queuePosition: null },
+    gate: 'merge', refusal: null, reason: '', binding: 'merge:1', requestedBy: 'graphyard', requestedAt: at(0), state: 'pending', claim: null, attempts: 1,
+    resolvedAt: at(3 * minute), result: 'failed', resolution: 'provider failed', history: [
+      { at: at(0), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
+      { at: at(minute), event: 'claimed', requester: 'graphyard', executor: 'executor-a', result: null, reason: 'attempt 1 claimed by executor-a on host-a' },
+      { at: at(2 * minute), event: 'failed', requester: 'graphyard', executor: 'executor-a', result: 'failed', reason: 'provider failed' },
+      { at: at(3 * minute), event: 'cancelled', requester: 'graphyard', executor: null, result: null, reason: 'now needs another action' },
+    ] }, now);
+  assert.equal(failedThenSuperseded.supersededUnexecuted, false);
+  assert.deepEqual(coordinatorFingerprints(fast[0], [failedThenSuperseded]), [], 'an executor-run action that failed before supersession is not a coordinator fingerprint');
 
   // The script the producer sessions run, end to end against a server serving these documents.
   assert.deepEqual(parseArguments(['--claim', 'GY-87', '--since', windowStart]).claim, 'GY-87');
@@ -289,6 +314,10 @@ test('integration:live-throughput-population — the population rule reads the r
     assert.deepEqual((JSON.parse(await readFile(join(directory, files[0]), 'utf8')) as ThroughputReport).population, recorded.population);
     assert.match(logged.join('\n'), /throughput claim: VERIFIED/);
     assert.match(logged.join('\n'), /Excluded:/);
+    ledger = snapshot.filter(item => item.id !== idled.id); logged.length = 0; process.exitCode = undefined;
+    const uncheckedRelease = await measureMain(['--claim', claimKey], environment, { run: () => ({ status: 128, stderr: 'bad object' }) }) as ThroughputReport;
+    assert.equal(uncheckedRelease.verdict, 'unverified'); assert.equal(uncheckedRelease.met, null); assert.equal(process.exitCode, 2);
+    assert.match(uncheckedRelease.reason, /could not be established/);
     // The same run over a ledger holding the delivery that idled past the bound: the finding and
     // the follow-up are printed, the report is recorded, and the exit status says it missed — a
     // scheduled measurement can never report a shortfall as a quiet success.
@@ -340,6 +369,9 @@ test('unit:throughput-claim-visible — master status carries GY-87\'s throughpu
     const verified = throughputClaimVisibility({ report: measured, file: 'f.json' }, { revision: deployedRevision, version: '0.9.1' }, 12);
     assert.equal(verified.verdict, 'verified'); assert.equal(verified.attention, null); assert.equal(verified.shortfall, null);
     assert.deepEqual(verified.measurement, { at: measured.measuredAt, deployedRevision, admitted: 10, submitToMergeP50Ms: 20 * minute, idleMaxMs: 90_000, file: 'f.json' });
+    const ancestryUnknown = throughputClaimVisibility({ report: { ...measured, deployed: { ...measured.deployed, containsClaim: null, reason: 'git lacked the object' } }, file: 'f.json' }, { revision: deployedRevision, version: '0.9.1' }, 12);
+    assert.equal(ancestryUnknown.verdict, 'unverified'); assert.ok(ancestryUnknown.attention);
+    assert.match(ancestryUnknown.reason, /did not establish.*git lacked the object/);
 
     // Measured against another release: what is serving now is unproven, whatever that measurement said.
     const moved = throughputClaimVisibility({ report: measured, file: 'f.json' }, { revision: commit('next-release'), version: '0.9.2' }, 12);

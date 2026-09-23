@@ -1483,8 +1483,11 @@ claim's delivery, or, when there is none, its merge instant — reported as the 
 never moved later to improve a figure. `--since`, `--until` and `--claim` override the window and
 the item; `--json` prints the whole report; `--record DIR` writes it as one timestamped file, which
 is what `master status` reads. An unverified verdict exits 2, so a scheduled run cannot report a
-miss as a quiet success. The arithmetic is the module master status uses (`src/throughput.ts`),
-and the percentiles are the same nearest-rank estimator as [pipeline speed](#pipeline-speed).
+miss as a quiet success. A missing local commit, shallow checkout or other ancestry-check failure
+is unverified too: only a positive containment result can verify the claim, and `master status`
+rechecks that fact from the recorded report before displaying `verified`. The arithmetic is the
+module master status uses (`src/throughput.ts`), and the percentiles are the same nearest-rank
+estimator as [pipeline speed](#pipeline-speed).
 
 **The population rule is the delicate part, so it is written to be audited rather than trusted.** A
 delivery is counted when it is a merged pull request of this repository with a recorded submission,

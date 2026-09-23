@@ -152,28 +152,38 @@ export function claimWindow(claim: Work | undefined, given?: string | null): { s
  * entry. The row's own `requestedAt` opens the walk for that case and is overwritten by the first
  * open marker in the records, which makes an untrimmed row read identically.
  */
-export function actionIdleSpans(row: Pick<ActionRow, 'requestedAt' | 'history' | 'state'>, now: number): { from: string; ms: number }[] {
+export function actionIdleSpans(row: Pick<ActionRow, 'requestedAt' | 'history' | 'state'> & Partial<Pick<ActionRow, 'attempts'>>, now: number): { from: string; ms: number }[] {
   const spans: { from: string; ms: number }[] = [];
-  let openSince: string | null = row.requestedAt, failures = 0;
-  const close = (at: string, deliberateMs = 0) => {
+  const recordedClaims = (row.history ?? []).filter(record => record.event === 'claimed').length;
+  // History is bounded, while attempts is not. Start before the retained claims so a failed span
+  // still gets the same delay the engine assigned when older claim records have been trimmed.
+  let openSince: string | null = row.requestedAt, deliberateMs = 0;
+  let attempts = Math.max(0, (row.attempts ?? recordedClaims) - recordedClaims);
+  const open = (at: string, deliberate = 0) => { openSince = at; deliberateMs = deliberate; };
+  const close = (at: string) => {
     const from = openSince, start = time(from);
     openSince = null;
     if (from === null || start === null) return;
     const ms = Math.max(0, (time(at) ?? start) - start - deliberateMs);
+    deliberateMs = 0;
     spans.push({ from, ms });
   };
   for (const record of row.history ?? ([] as ActionRecord[])) {
-    if (record.event === 'requested' || record.event === 'reopened' || record.event === 'reclaimed') openSince = record.at;
-    else if (record.event === 'failed') { failures += 1; openSince = record.at; }
+    if (record.event === 'requested' || record.event === 'reopened' || record.event === 'reclaimed') open(record.at);
+    else if (record.event === 'claimed') { attempts += 1; close(record.at); }
+    // The engine bases retryAt on claims (row.attempts), not failures: an expired claim consumes
+    // an attempt too. Bind that deliberate delay to this span when it opens, so a later reopen or
+    // reclaim cannot accidentally inherit it after the engine has cleared retryAt.
+    else if (record.event === 'failed') open(record.at, actionRetryDelay(attempts));
     // A claim ends the wait, and so does a supersession: a row nobody claimed before something
     // else moved the item on was actionable and unrun for exactly that long, which is the wait
     // the bound is about. A completion never opens one, because the claim before it closed it.
-    else if (record.event === 'claimed' || record.event === 'cancelled') close(record.at, failures ? actionRetryDelay(failures) : 0);
-    else if (record.event === 'completed') openSince = null;
+    else if (record.event === 'cancelled') close(record.at);
+    else if (record.event === 'completed') { openSince = null; deliberateMs = 0; }
   }
   // A row still open at the measurement is still waiting; a retired one stopped waiting when it
   // was retired, which the `cancelled` record above already closed.
-  if (openSince && row.state === 'pending') close(new Date(now).toISOString(), failures ? actionRetryDelay(failures) : 0);
+  if (openSince && row.state === 'pending') close(new Date(now).toISOString());
   return spans;
 }
 
@@ -193,7 +203,7 @@ export function actionExecution(row: ActionRow, now: number): ActionExecution {
     attempts: row.attempts, requestedAt: row.requestedAt,
     claimedAt: claimed?.at ?? null, settledAt: settled?.at ?? row.resolvedAt ?? null,
     result: settled?.event === 'completed' ? 'done' : settled?.event === 'failed' ? 'failed' : null,
-    supersededUnexecuted: records.some(record => record.event === 'cancelled') && !records.some(record => record.event === 'completed'),
+    supersededUnexecuted: records.some(record => record.event === 'cancelled') && claimed === null,
     idleMs: longest?.ms ?? 0, idleSince: longest?.from ?? null,
     resolution: row.resolution ?? null,
   };
@@ -313,6 +323,7 @@ export function verifyThroughput(work: Work[], now: number, options: { deployed:
   const releaseRefusal = !options.deployed.revision || options.deployed.revision === 'unknown'
     ? 'the deployed release reports no build revision, so what was measured cannot be named'
     : options.deployed.containsClaim === false ? `the deployed release ${options.deployed.revision.slice(0, 12)} does not contain ${claimKey}'s merge, so its executors are not the ones serving`
+    : options.deployed.containsClaim === null ? `whether the deployed release ${options.deployed.revision.slice(0, 12)} contains ${claimKey}'s merge could not be established${options.deployed.reason ? `: ${options.deployed.reason}` : ''}`
     : null;
   const met = releaseRefusal ? null : enough ? missed.length === 0 : null;
   const verdict: ThroughputReport['verdict'] = met === true ? 'verified' : 'unverified';
@@ -439,6 +450,7 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   const measured = measurement.report.deployed?.revision ?? null;
   if (!deployed.revision || deployed.revision === 'unknown') return unverified(`the control plane reports no build revision, so the last measurement (of ${measured ?? 'an unnamed release'} at ${measurement.report.measuredAt}) cannot be matched to what is serving`, measurement.report.shortfall ?? null);
   if (measured !== deployed.revision) return unverified(`the last measurement was taken against ${measured ?? 'an unnamed release'} at ${measurement.report.measuredAt}; the release now serving is ${deployed.revision.slice(0, 12)}`, measurement.report.shortfall ?? null);
+  if (measurement.report.deployed?.containsClaim !== true) return unverified(`the last measurement did not establish that ${deployed.revision.slice(0, 12)} contains ${throughputClaim.item}'s merge${measurement.report.deployed?.reason ? `: ${measurement.report.deployed.reason}` : ''}`, measurement.report.shortfall ?? null);
   if (measurement.report.verdict !== 'verified') return unverified(measurement.report.reason, measurement.report.shortfall ?? null);
   return { ...base, verdict: 'verified', reason: measurement.report.reason, shortfall: null, attention: null };
 }
