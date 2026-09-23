@@ -624,7 +624,7 @@ consumes a capped ledger or a resource the registry does not declare.
 | --- | --- | --- | --- | --- |
 | `review-ledger` | the `reviews` cap of `reviewLedgerSchema`: 200 records | `.graphyard/reviews.json` | a tenth of the bound (20 records) | terminal records reaped 15 minutes after they settle, unless they answer a live review request |
 | `producer-ledger` | the `producers` cap of `producerLedgerSchema`: 400 records | `.graphyard/producers.json` | a tenth of the bound (40 records) | as the review ledger |
-| `agent-names:PROFILE` | the profile's concurrency: its fixed name, or that many derived names | `herdr agent list` | one name, and only when a name is held by a pane no live session owns | a pane on the name is closed once its record has been settled a minute; a worker's pane by the loop's first step once its lease ends |
+| `agent-names:PROFILE` | the profile's concurrency: its fixed name, or that many derived names | `herdr agent list` | one name, and only when a name is held by a pane no live session owns | a finished pane on the name, its record settled and nothing pending on it, is closed once two passes a minute apart have seen it so; a worker's pane by the loop's first step once its lease ends |
 | `session-slots:ROLE` | the summed concurrency of the role's launch profiles | pending ledger records; live worker leases | one slot, and only while a request waits for one | a pending session blocked on a prompt, or never seen in Herdr, is failed after 10 minutes, releasing its slot |
 | `github-budget` | the installation's hourly core limit | `/healthz` `resources.github` (the plane reads `GET /rate_limit`, cached a minute) | a tenth of the limit | GitHub restores it at the reset it reports |
 | `executor-liveness` | two cycle intervals past the last cycle, plus any announced backoff | the loop's daemon cursor | half the bound | the supervisor restarts a loop whose watchdog stops hearing it |
@@ -653,8 +653,10 @@ resource instead.
 
 **The reclaim pass.** Every cycle, after worktree reclamation, the loop runs the resource reclaim
 pass (`graphyard master run --once` runs it immediately). It reaps terminal ledger records past
-their 15-minute retention that answer no live request; closes a pane holding a profile's name once
-that name's record has been settled a minute and nothing pending holds it, releasing the name; and
+their 15-minute retention that answer no live request; closes a finished pane holding a profile's name,
+releasing the name, once its record has been settled a minute, nothing pending holds it, and an
+earlier pass at least a minute before saw it the same way — a session launched a moment ago holds
+its name before its record is written, so one sighting never closes a pane; and
 fails a pending session that has sat blocked on a prompt (a consent dialog, a question) or has never
 appeared in Herdr for 10 minutes, releasing its slot so the relaunch rule may try again, and closes
 its pane. Each pass that took anything back is recorded as a `reclaim` action in the loop's cursor

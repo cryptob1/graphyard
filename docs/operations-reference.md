@@ -169,7 +169,7 @@ below its warning line is also an attention item with subject `resource:ID` nami
   settle. Run `graphyard master run --once` to reclaim now; records that answer a live request stay
   until the request is answered or superseded, so a ledger full of those needs the requests settled.
 - **`agent-names:PROFILE` at its bound with a pane no live session owns.** The reclaim pass closes
-  the pane a minute after its record settles. By hand: read the pane, confirm the verdict or result
+  the pane once two passes a minute apart have seen it finished with its record settled. By hand: read the pane, confirm the verdict or result
   was posted, then `herdr pane close PANE`.
 - **`session-slots:ROLE` at its bound with requests waiting.** Raise `concurrency` on a profile of
   the role, or add a profile on another account, in `.graphyard/master.json`; the loop adopts it on

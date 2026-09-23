@@ -258,7 +258,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   return { ...status, attentionItems: attributeAttention([...attentionItems, ...decisions.attentionItems], resources.readings), resources: resources.report,
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, stalledActions: stalled.length, overlongSessions: overlong.length,
-      attention: status.counts.attention + resources.attention.length + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length + resources.attention.length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,

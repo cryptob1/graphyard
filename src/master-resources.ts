@@ -158,7 +158,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'agent-names', title: 'Herdr agent-name namespace', unit: 'names',
     bound: "each launch profile's concurrency: its fixed agent name at concurrency 1, or that many derived <agentName>-<8hex> names above it",
     usage: 'Herdr agent list: every agent whose name is one of the profile\'s session names', owner: 'Herdr, through the worker, reviewer and producer launchers in src/master.ts',
-    reclaim: `the reclaim pass closes a pane on one of the names once its record has been settled ${finishedSessionGraceMs / 1000}s (a worker pane is closed by the loop's first step once its lease ends)`,
+    reclaim: `the reclaim pass closes a finished pane on one of the names once its record has been settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned (a worker pane is closed by the loop's first step once its lease ends)`,
     remedy: 'close the finished panes holding the names (graphyard master run --once, or herdr pane close PANE after confirming the session posted its result)',
     // A name held by a live session is the slot pool working; only names nothing live owns warn.
     warnBelow: () => 1, symptoms: [/\b(?:reviewer|producer) agent (\S+) is (?:busy|already visible) in Herdr/i, /agent_name_taken/],
@@ -411,17 +411,19 @@ export interface ResourceReclaimReport {
 export const resourceReportFile = (root: string) => resolve(root, '.graphyard/resource-reclaims.json');
 const retainedReports = 50;
 
-export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> {
-  try { await privateFile(resourceReportFile(root)); return JSON.parse(await readFile(resourceReportFile(root), 'utf8')).reports ?? []; }
-  catch { return []; }
+interface ReclaimFile { version: 1; reports: ResourceReclaimReport[]; seen: Record<string, string> }
+async function readReclaimFile(root: string): Promise<ReclaimFile> {
+  try { await privateFile(resourceReportFile(root)); const body = JSON.parse(await readFile(resourceReportFile(root), 'utf8')); return { version: 1, reports: body.reports ?? [], seen: body.seen ?? {} }; }
+  catch { return { version: 1, reports: [], seen: {} }; }
 }
+export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> { return (await readReclaimFile(root)).reports; }
 
 /**
  * Gives every reclaimable resource back, and records what it took. Within the bounds the registry
  * documents: a terminal ledger record is reaped once it has been settled `ledgerRetentionMs` and
- * answers no live request; a pane holding a profile's name whose record settled
+ * answers no live request; a finished pane holding a profile's name whose record settled
  * `finishedSessionGraceMs` ago, with no pending record on the name, is closed and its name
- * released; a pending session blocked on a prompt or never seen in Herdr for `stuckSessionMs` is
+ * released once an earlier pass at least that long before saw it the same way; a pending session blocked on a prompt or never seen in Herdr for `stuckSessionMs` is
  * failed — its slot released and the relaunch rule free to try again — and its pane closed.
  *
  * It runs every cycle of the loop and from `master run --once`. It removes nothing a live request
@@ -432,6 +434,10 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   const now = options.now ?? Date.now();
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
   const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], errors: [] };
+  // A pane is closed only once it has been seen finished and unowned by an earlier pass at least
+  // the grace ago: a session launched a moment ago holds its name before its record is written.
+  const file = await readReclaimFile(root);
+  const seen: Record<string, string> = {};
   const live = liveRequests(observed.work);
   const reclaimLedger = async <R extends { state: string; agentName: string; pane: string | null; requestId?: string; closedAt?: string; idleSince?: string; requestedAt: string; resolution?: string }>(
     kind: 'review' | 'producer', records: R[], profiles: { name: string; agentName: string; concurrency?: number }[]) => {
@@ -453,6 +459,8 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       // A session this pass just released is closed at once; any other waits out the grace, finished.
       const released = report.released.some(entry => entry.name === agent.name);
       if (!settled || (!released && (now - settledAt(settled) < finishedSessionGraceMs || !finished.includes(agent.agent_status ?? '')))) continue;
+      const first = file.seen[agent.pane_id] ?? report.at;
+      if (!released && now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id] = first; continue; }
       try { await close(agent.pane_id); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${settled.state}${settled.resolution ? `: ${settled.resolution.slice(0, 160)}` : ''}` }); }
       catch (error) { report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`); }
     }
@@ -471,8 +479,9 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
     const result = await reclaimLedger('producer', ledger.producers, config.producers);
     if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
-  if (report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.errors.length) {
-    try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: [...await readReclaimReports(root), report].slice(-retainedReports) }); }
+  const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.errors.length);
+  if (took || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
+    try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen }); }
     catch (error) { report.errors.push(`Recording the reclaim: ${error instanceof Error ? error.message : String(error)}`); }
   }
   return report;

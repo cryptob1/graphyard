@@ -236,27 +236,34 @@ test('integration:resources-reclaimed-within-bound — a finished session and a 
   const work = [{ id: 'w', key: 'GY-5', stage: 'review', autoDispatch: { review: requested(liveRequest), producers: [], history: [] } } as unknown as Work];
   const closed: string[] = [];
 
-  // Inside the retention the finished pane is closed (its record settled past the grace), but the record is kept.
-  const early = await reclaimResources(directory, config, { work, agents }, { now: settled + ledgerRetentionMs - 1000, closePane: pane => { closed.push(pane); } });
-  assert.ok(finishedSessionGraceMs < ledgerRetentionMs);
-  assert.deepEqual(early.reaped, { review: 0, producer: 0 }, 'a terminal record is kept until its retention elapses');
-  assert.deepEqual(early.closed.map(entry => entry.name), ['reviewer-a', 'reviewer-b'], 'the finished session is closed, and the consent-blocked one after failing its record');
-  assert.deepEqual(early.released.map(entry => entry.name), ['reviewer-b'], 'the session blocked on a prompt past its bound releases its slot');
-  assert.match(early.released[0].reason, /blocked on a prompt in Herdr for over 10 minutes/);
+  // First pass: the consent-blocked session is past its bound, so its record is failed, its slot
+  // released and its pane closed at once. The finished pane is only noted: a pane launched a moment
+  // ago holds its name before its record is written, so nothing is closed on a single sighting.
+  const t0 = settled + 2 * finishedSessionGraceMs;
+  const first = await reclaimResources(directory, config, { work, agents }, { now: t0, closePane: pane => { closed.push(pane); } });
+  assert.deepEqual(first.released.map(entry => entry.name), ['reviewer-b'], 'the session blocked on a prompt past its bound releases its slot');
+  assert.match(first.released[0].reason, /blocked on a prompt in Herdr for over 10 minutes/);
+  assert.deepEqual(first.closed.map(entry => entry.name), ['reviewer-b']);
+  assert.deepEqual(first.reaped, { review: 0, producer: 0 }, 'a terminal record is kept until its retention elapses');
 
-  // At the documented bound both are reclaimed: the terminal record reaped, the live one kept.
+  // One grace later the finished session, still unowned, is closed and its name released.
+  const second = await reclaimResources(directory, config, { work, agents: agents.slice(0, 1) }, { now: t0 + finishedSessionGraceMs, closePane: pane => { closed.push(pane); } });
+  assert.deepEqual(second.closed.map(entry => [entry.name, entry.pane]), [['reviewer-a', 'pane-1']]);
+  assert.match(second.closed[0].reason, /its review session failed/);
+  assert.ok(t0 + finishedSessionGraceMs < settled + ledgerRetentionMs, 'the session is reclaimed well inside the ledger bound');
+
+  // At the documented ledger bound the terminal record is reaped; the live one is kept.
   const bound = await reclaimResources(directory, config, { work, agents: [] }, { now: settled + ledgerRetentionMs, closePane: pane => { closed.push(pane); } });
   assert.deepEqual(bound.reaped, { review: 1, producer: 0 }, 'the terminal record is reaped once its retention elapses');
   const remaining = (await readReviewLedger(directory)).reviews;
   assert.deepEqual(remaining.map(entry => [entry.id, entry.state]), [[answersLive.id, 'failed'], [stuck.id, 'failed']], 'a record answering a live request is kept, and the released one waits out its own retention');
-  assert.deepEqual(closed, ['pane-1', 'pane-2']);
+  assert.deepEqual(closed, ['pane-2', 'pane-1']);
 
   // The pass records what it reclaimed.
   const reports = await readReclaimReports(directory);
-  assert.equal(reports.length, 2);
-  assert.deepEqual(reports.map(report => report.at), [iso(settled + ledgerRetentionMs - 1000), iso(settled + ledgerRetentionMs)]);
-  assert.deepEqual(reports[0].closed.map(entry => entry.pane), ['pane-1', 'pane-2']);
-  assert.equal(reports[1].reaped.review, 1);
+  assert.deepEqual(reports.map(report => report.at), [iso(t0), iso(t0 + finishedSessionGraceMs), iso(settled + ledgerRetentionMs)]);
+  assert.deepEqual(reports.map(report => report.closed.map(entry => entry.pane)), [['pane-2'], ['pane-1'], []]);
+  assert.equal(reports[2].reaped.review, 1);
 
   // The loop runs the pass every cycle and records what it took back.
   const state = emptyDaemonState(master('https://graphyard.example'));
