@@ -190,6 +190,15 @@ test('integration:hold-is-bounded — a hold three deep names its chain, is hono
   const claimedAhead = dispatchHold(x, [claimed('GY-w', ['src/cli/b.ts'], 3 * hour), x], clock)!;
   assert.deepEqual(claimedAhead.chain, [{ key: 'GY-w', stage: 'build', state: 'claimed', position: null, behind: [] }], 'a claimed item waits on nobody but its worker');
   assert.equal(claimedAhead.since, iso(-90 * 60_000));
+  // The item ahead moving stage does not restart the hold: GY-v was claimed 3h ago and entered acceptance ten minutes ago,
+  // so a hold behind it is counted from its claim, and GY-u, dispatchable for 2.5h, is past the bound.
+  const moved = submitted('GY-v', ['src/cli/'], ['src/cli/v.ts'], 3 * hour, { stage: 'acceptance', stageEnteredAt: iso(-10 * 60_000) });
+  const u = work('GY-u', { plannedFiles: ['src/cli/v.ts'], stageEnteredAt: iso(-150 * 60_000) });
+  const behindMoved = dispatchHold(u, [moved, u], clock)!;
+  assert.equal(behindMoved.since, iso(-150 * 60_000), 'the stage the item ahead entered ten minutes ago does not reset the hold');
+  assert.equal(behindMoved.overdue, true);
+  assert.doesNotThrow(() => assertDispatchable(u, [moved, u], iso(0)));
+  assert.equal(dispatchHold(u, [{ ...moved, lastAssignment: undefined } as Work, u], clock)!.since, iso(-10 * 60_000), 'with no claim on record the stage entry stands in');
 
   // Under the bound the hold stands, naming the chain; a shorter configured bound lifts it.
   assert.throws(() => assertDispatchable(x, all, iso(0)), /held by planned-file overlap with GY-b \(submitted, merge\) on src\/cli\/b\.ts.*Held since 2030-01-01T10:30:00\.000Z \(1\.5h of the 2h bound\); the chain it waits behind: GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d \(submitted, merge, merge queue position 1\) → GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\).*--allow-overlap/);

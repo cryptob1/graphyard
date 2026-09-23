@@ -74,8 +74,12 @@ export interface DispatchHold { ahead: OverlapAhead[]; since: string; ageMs: num
 const latest = (...stamps: (string | null | undefined)[]) => Math.max(...stamps.map(stamp => stamp ? Date.parse(stamp) : NaN).filter(Number.isFinite), 0);
 /** When the item last became dispatchable: its current stage, or the end of its latest attempt, whichever is later. */
 const dispatchableSince = (work: Work, now: number) => latest(work.stageEnteredAt, ...(work.pipeline?.attempts ?? []).map(attempt => attempt.endedAt), work.lease && Date.parse(work.lease.expiresAt) <= now ? work.lease.expiresAt : null);
-/** When an in-flight item started being ahead of anything: its current attempt's claim, or the quarantine that still holds it. */
-const inFlightSince = (work: Work) => latest(work.lastAssignment?.claimedAt, ...(work.pipeline?.attempts ?? []).map(attempt => attempt.claimedAt), work.containmentQuarantine?.at, work.stageEnteredAt);
+/**
+ * When an in-flight item started being ahead of anything: its current attempt's claim, or the quarantine that still holds it.
+ * Not its stage entry: a submitted candidate re-enters a stage on every gate it passes, and counting from that would restart
+ * the hold behind it each time. The stage stamp stands in only for an item with no claim on record.
+ */
+const inFlightSince = (work: Work) => latest(work.lastAssignment?.claimedAt, ...(work.pipeline?.attempts ?? []).map(attempt => attempt.claimedAt), work.containmentQuarantine?.at) || latest(work.stageEnteredAt);
 /**
  * The hold on a dispatchable item, with its age and the chain it waits behind. The hold began when
  * the item became dispatchable or when the first item now ahead of it went into flight, whichever
