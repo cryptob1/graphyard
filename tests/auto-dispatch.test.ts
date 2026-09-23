@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
@@ -11,15 +11,18 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { createSchema, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { automatableOutcomes, automatableProof, dispatchIneligibility, dispatchRequestsFor, reconcileAutoDispatch, reviewNeed, type DispatchRequest } from '../src/model/dispatch.js';
-import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, producerProfileSchema, saveProducerProfile, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
+import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, observedExhaustions, paneLastLine, producerProfileSchema, readEnvironmentLog, saveProducerProfile, SessionStartError, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
 import { assertProducerCandidate, independentProducerProfiles, launchProducer, producerIdleGraceMs, producerPrompt, proofOutcome, readProducerLedger, reconcileProducers, summarizeProducers, type ProducerRecord } from '../src/producer.js';
-import { dispatchCursorPath, dispatchFailureLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, writeDispatchCursor, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
+import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, watchInstantExit, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
+import { exhaustionReportSchema } from '../src/model/capacity.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof: unit:auto-dispatch-binding, integration:auto-dispatch-review,
-// integration:auto-dispatch-producers, and the docs check behind manual:auto-dispatch-status.
+// integration:auto-dispatch-producers, and the docs check behind manual:auto-dispatch-status; GY-120 adds
+// unit:dispatcher-reasons-bounded, unit:dispatcher-cursor-repaired, integration:dispatcher-tick-failure-visible,
+// integration:instant-exit-classified and the docs check behind manual:dispatcher-state-docs-review.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -512,4 +515,269 @@ test('manual:auto-dispatch-status — the master guide, the generated instructio
     const profile = producerProfileSchema.parse(JSON.parse(await read(`examples/master/${name}`)));
     assert.equal(profile.approvals, 'auto'); assert.ok(profile.credentialFile.startsWith('/'));
   }
+});
+
+// GY-120: the dispatcher's own state. Every string it stores is bounded where it is composed, a
+// cursor that fails its schema is repaired rather than fatal, a tick failure is attributed to the
+// request it was composed for, and a session that exits at launch is classified from its pane.
+const coordinatorToken = async (directory: string) => { const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 }); return token; };
+
+test('unit:dispatcher-reasons-bounded — every string the dispatcher writes into its cursor is bounded where it is composed, with room for the sentence that wraps it, so a 2,000-character refusal persists and reads as an ellipsis inside the cap', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-bounded-')), root = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-bounded-root-'));
+  try {
+    execFileSync('git', ['init', '-q', root]);
+    assert.equal(bounded('short', 10), 'short'); assert.equal(bounded('x'.repeat(10), 5), 'xxxx…'); assert.equal(bounded('x'.repeat(10), 5).length, 5);
+    assert.ok(dispatchFailureReasonLimit + 200 <= cursorTextLimit, 'a stored failure reason leaves room for the wait sentence that wraps it');
+    const config = masterConfig(await coordinatorToken(directory));
+    const item = requestedWork(), review = item.autoDispatch!.review!;
+    // The refusal as it shipped: Herdr's JSON error for a pane whose runtime already exited, 2,000 characters long.
+    const huge = `Command failed: herdr agent get pane-1\n${JSON.stringify({ error: { code: 'agent_not_found', message: 'x'.repeat(2000) } })}`;
+    assert.ok(huge.length >= 2000);
+    const repairs: CursorRepair[] = [];
+    const persist = (cursor: DispatchCursor) => writeDispatchCursor(config, cursor, repair => repairs.push(repair));
+    const effects = stubEffects(() => [item], [], { launchReview: async () => { throw new Error(huge); }, persist });
+    const cursor = emptyDispatchCursor(config);
+    const refused = await runDispatchTick(config, cursor, effects, () => clock);
+    assert.equal(refused.refused.length, 1);
+    const reason = refused.refused[0].reason;
+    assert.ok(reason.endsWith('…') && reason.length <= dispatchFailureReasonLimit, `the failure reason is cut inside its cap and marked: ${reason.length} characters`);
+    assert.equal(cursor.failures[review.id].reason, reason);
+    assert.equal(cursor.ticks, 1, 'the tick persisted');
+    // The wait sentence that wraps it on the next tick is stored inside the cursor's cap, the cut still marked.
+    const waiting = await runDispatchTick(config, cursor, effects, () => clock + 1000);
+    const wrapped = waiting.waiting.find(entry => entry.kind === 'review')!.reason;
+    assert.match(wrapped, /^launch refused 1 time\(s\): Command failed: herdr agent get pane-1/); assert.ok(wrapped.includes('…; next attempt at '), wrapped);
+    const stored = cursor.lastTick!.reasons.find(entry => entry.startsWith('review for GY-64'))!;
+    assert.ok(stored.length <= cursorTextLimit && stored.includes('…'), stored);
+    assert.equal(cursor.ticks, 2);
+    // A failure reason exactly at its cap, past its attempts, still yields a valid wait reason with the closing sentence intact.
+    cursor.failures[review.id] = { ...cursor.failures[review.id], attempts: dispatchFailureLimit, reason: 'r'.repeat(dispatchFailureReasonLimit) };
+    const capped = await runDispatchTick(config, cursor, effects, () => clock + 2000);
+    assert.ok(capped.waiting.some(entry => entry.kind === 'review'));
+    const cappedReason = cursor.lastTick!.reasons.find(entry => entry.startsWith('review for GY-64'))!;
+    assert.ok(cappedReason.length <= cursorTextLimit && cappedReason.endsWith('no further automatic attempt, launch it with master review once the cause is fixed'), cappedReason);
+    // A capacity reason, a session resolution the tick wraps, and a tick failure are bounded the same way.
+    const spent = Object.assign(new Error(`producer-a: ${'q'.repeat(3000)}`), { accountsExhausted: true, capacityExhausted: true });
+    const capacityCursor = emptyDispatchCursor(config);
+    await runDispatchTick(config, capacityCursor, stubEffects(() => [item], [], { launchProducer: async () => { throw spent; }, persist }), () => clock);
+    assert.ok(capacityCursor.capacity.producer!.reason.length <= capacityReasonLimit && capacityCursor.capacity.producer!.reason.endsWith('…'), 'the capacity hold is bounded');
+    assert.ok(capacityCursor.lastTick!.reasons.every(entry => entry.length <= cursorTextLimit) && capacityCursor.lastTick!.reasons.some(entry => entry.startsWith('producer for GY-64')));
+    const settledCursor = emptyDispatchCursor(config);
+    const settled = stubEffects(() => [item], [], { persist });
+    settled.reviews.push({ requestId: review.id, state: 'failed', requestedAt: iso(-120_000), closedAt: iso(-1000), resolution: 's'.repeat(500) });
+    await runDispatchTick(config, settledCursor, settled, () => clock);
+    const resolution = settledCursor.lastTick!.reasons.find(entry => entry.startsWith('review for GY-64'))!;
+    assert.match(resolution, /reviewer session attempt 1 failed: sss/); assert.ok(resolution.length <= cursorTextLimit && resolution.endsWith('…'), resolution);
+    const failing = emptyDispatchCursor(config);
+    await runAutoDispatch(config, failing, stubEffects(() => [item], [], { snapshot: async () => { throw new Error('f'.repeat(2000)); }, persist }), { intervalMs: 10, once: true, log: () => {} });
+    assert.ok(failing.lastFailure!.reason.length <= cursorTextLimit && failing.lastFailure!.reason.endsWith('…'), 'the tick failure is bounded');
+    assert.deepEqual(repairs, [], 'nothing composed inside the bounds ever needs a repair');
+    // Every cursor above went through the schema on disk and reads back without one either.
+    const reread: CursorRepair[] = [];
+    assert.equal((await readDispatchCursor(root, config, repair => reread.push(repair))).lastFailure!.reason, failing.lastFailure!.reason); assert.deepEqual(reread, []);
+  } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:dispatcher-cursor-repaired — a cursor that fails validation on load or before persist is repaired in place and logged once with the path that failed, and the next tick loads it, launches the pending request and persists', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-repair-')), root = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-repair-root-'));
+  try {
+    execFileSync('git', ['init', '-q', root]);
+    const config = masterConfig(await coordinatorToken(directory));
+    const item = requestedWork(), review = item.autoDispatch!.review!;
+    // The cursor as the defect left it: the wrapped wait reason past the cap, and the failure reason it wrapped past it too.
+    const persisted = { ...emptyDispatchCursor(config), ticks: 7, lastTickAt: iso(-10_000), lastSuccessAt: iso(-10_000),
+      failures: { [review.id]: { kind: 'review', work: 'GY-64', sha: H, attempts: 4, reason: 'e'.repeat(700), at: iso(-10_000), nextAt: iso(-1) } },
+      lastTick: { at: iso(-10_000), launched: 0, refused: 0, waiting: 2, settled: 0, reasons: ['producer for GY-64 a1ff: waiting on a slot', `review for GY-64 ${H.slice(0, 12)}: launch refused 4 time(s): ${'e'.repeat(700)}; next attempt at ${iso(-1)}`] } };
+    await writeFile(dispatchCursorPath(config), JSON.stringify(persisted), { mode: 0o600 });
+    assert.equal(dispatchCursorSchema.safeParse(persisted).success, false, 'the schema refuses it as it did');
+    const repairs: CursorRepair[] = [];
+    const cursor = await readDispatchCursor(root, config, repair => repairs.push(repair));
+    assert.deepEqual(repairs.map(repair => repair.path).sort(), [`failures.${review.id}.reason`, 'lastTick.reasons[1]']);
+    assert.equal(repairs.find(repair => repair.path === 'lastTick.reasons[1]')!.detail, `${persisted.lastTick.reasons[1].length} characters exceeded its cap of 500 and it was truncated`);
+    assert.equal(cursor.failures[review.id].reason.length, cursorTextLimit); assert.ok(cursor.failures[review.id].reason.endsWith('…'));
+    assert.equal(cursor.lastTick!.reasons[1].length, cursorTextLimit); assert.equal(cursor.lastTick!.reasons[0], 'producer for GY-64 a1ff: waiting on a slot');
+    assert.equal(cursor.ticks, 7, 'everything else in the cursor is kept');
+    // The next tick loads it, launches the pending request (its retry is due) and persists successfully.
+    const log: string[] = [];
+    const tick = await runDispatchTick(config, cursor, stubEffects(() => [item], log, { persist: current => writeDispatchCursor(config, current, repair => repairs.push(repair)) }), () => clock);
+    assert.ok(log.includes('review:GY-64:a1ff:claude-reviewer'), log.join(', ')); assert.equal(tick.launched.length, 3);
+    assert.equal(cursor.ticks, 8); assert.deepEqual(cursor.failures, {});
+    assert.equal(repairs.length, 2, 'the persist needed no repair of its own');
+    const reloaded = await readDispatchCursor(root, config, repair => repairs.push(repair)); assert.equal(reloaded.ticks, 8); assert.equal(repairs.length, 2);
+    // Before persist: a string past its cap is truncated in the live cursor itself, so it is never composed past the cap again.
+    cursor.lastTick!.reasons[0] = 'w'.repeat(700);
+    await writeDispatchCursor(config, cursor, repair => repairs.push(repair));
+    assert.equal(cursor.lastTick!.reasons[0].length, cursorTextLimit); assert.equal(repairs.at(-1)!.path, 'lastTick.reasons[0]');
+    assert.equal((await readDispatchCursor(root, config, () => {})).lastTick!.reasons[0], cursor.lastTick!.reasons[0]);
+    // The loop's effects log a repair once per path, however often the same path is repaired.
+    const lines: string[] = [];
+    const effects = dispatchEffects(root, config, { snapshot: async () => ({ work: [item], now: iso(0) }), mutate: async () => ({}), run: () => '{"result":{}}', log: line => lines.push(line) });
+    cursor.lastTick!.reasons[0] = 'w'.repeat(700); await effects.persist(cursor);
+    cursor.lastTick!.reasons[0] = 'w'.repeat(800); await effects.persist(cursor);
+    assert.deepEqual(lines, ['[graphyard-dispatch] repaired the dispatch cursor while persisting it: lastTick.reasons[0] — 700 characters exceeded its cap of 500 and it was truncated']);
+    // Anything but an over-long string is still refused, naming its path.
+    assert.throws(() => repairDispatchCursor({ ...persisted, ticks: -1 }), /Master dispatch cursor is invalid at ticks/);
+    await writeFile(dispatchCursorPath(config), JSON.stringify({ ...emptyDispatchCursor(config), consecutiveFailures: -3 }), { mode: 0o600 });
+    await assert.rejects(readDispatchCursor(root, config, () => {}), /invalid at consecutiveFailures/);
+  } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+});
+
+test('integration:dispatcher-tick-failure-visible — a tick that cannot persist is attributed to the request, item and field it composed, and three consecutive failures raise the attention item that no reviewer or producer is being launched and why', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-failing-'));
+  try {
+    const config = masterConfig(await coordinatorToken(directory));
+    const item = requestedWork(), review = item.autoDispatch!.review!;
+    // The defect replayed at the persist boundary: the schema refusing the tick's first reason.
+    const refusal = (cursor: DispatchCursor) => {
+      const { accounts: _accounts, ...rest } = cursor;
+      const parsed = dispatchCursorSchema.safeParse({ ...rest, lastTick: { ...rest.lastTick!, reasons: rest.lastTick!.reasons.map((reason, index) => index === 0 ? reason.padEnd(cursorTextLimit + 1, '!') : reason) } });
+      assert.equal(parsed.success, false); return parsed.error!;
+    };
+    let thrown = 0; const persisted: DispatchCursor[] = []; const stopping = new AbortController();
+    const cursor = emptyDispatchCursor(config);
+    // Herdr unreadable: every request waits, so the tick's only persist is its last, and its first reason is the review request's.
+    const effects = stubEffects(() => [item], [], { agents: () => null, persist: async current => {
+      if (current.consecutiveFailures === 0 && thrown < 3) { thrown++; throw refusal(current); }
+      persisted.push(structuredClone(current)); if (current.consecutiveFailures >= 3) stopping.abort();
+    } });
+    const log: string[] = [];
+    await runAutoDispatch(config, cursor, effects, { intervalMs: 50, retryMinMs: 1, signal: stopping.signal, log: line => log.push(line) });
+    assert.equal(thrown, 3); assert.equal(cursor.consecutiveFailures, 3); assert.equal(cursor.lastSuccessAt, null);
+    assert.deepEqual({ field: cursor.lastFailure!.field, kind: cursor.lastFailure!.kind, request: cursor.lastFailure!.request, work: cursor.lastFailure!.work }, { field: 'lastTick.reasons[0]', kind: 'review', request: review.id, work: 'GY-64' });
+    assert.match(cursor.lastFailure!.reason, /^the dispatch cursor could not be persisted: lastTick\.reasons\[0\] Too big: expected string to have <=500 characters, composed for the review request /);
+    assert.match(log.at(-1)!, /tick failed \(3 in a row, retrying in \d+ms\): the dispatch cursor could not be persisted: lastTick\.reasons\[0\]/);
+    // master status names the request, the item and the field under dispatch, and raises the attention item at the third failure.
+    const summary = dispatchSummary(cursor, clock, 10_000);
+    assert.deepEqual([summary.consecutiveFailures, summary.lastFailure!.request, summary.lastFailure!.work, summary.lastFailure!.field], [3, review.id, 'GY-64', 'lastTick.reasons[0]']);
+    const [attention, ...rest] = dispatchFailureAttention(summary);
+    assert.ok(attention && !rest.length, 'one item for the dispatcher');
+    assert.deepEqual([attention.subject, attention.role, attention.human], ['dispatch', 'master', false]);
+    assert.match(attention.text, /^The dispatcher has failed 3 ticks in a row \(last at .*; last successful tick none since it started\), so no reviewer or producer session is being launched for any item: the dispatch cursor could not be persisted: lastTick\.reasons\[0\]/);
+    assert.ok(attention.text.includes(`The tick could not persist lastTick.reasons[0], composed for the review request ${review.id} on GY-64.`), attention.text);
+    assert.match(attention.next, /graphyard master restart re-reads and repairs the dispatch cursor/);
+    assert.deepEqual(dispatchFailureAttention(dispatchSummary(persisted[1], clock, 10_000)), [], 'two failures are not yet attention');
+    // A refusal recorded in the cursor is attributed through the failure it belongs to; a write failure through its own message.
+    const recorded = { ...emptyDispatchCursor(config), failures: { [review.id]: { kind: 'review' as const, work: 'GY-64', sha: H, attempts: 2, reason: 'x', at: iso(0), nextAt: iso(0) } } };
+    const attributed = attributePersistFailure(dispatchCursorSchema.safeParse({ ...recorded, failures: { [review.id]: { ...recorded.failures[review.id], attempts: 5000 } } }).error, recorded, []);
+    assert.deepEqual(attributed.persistFailure, { field: `failures.${review.id}.attempts`, kind: 'review', request: review.id, work: 'GY-64' });
+    const disk = attributePersistFailure(new Error('ENOSPC: no space left on device, write'), recorded, []);
+    assert.deepEqual(disk.persistFailure, { field: null }); assert.match(disk.message, /^the dispatch cursor could not be persisted: ENOSPC/);
+    const unreadable = dispatchFailureAttention({ error: 'Master dispatch cursor belongs to another Graphyard server or repository' });
+    assert.match(unreadable[0].text, /^The dispatch cursor cannot be read, so whether any reviewer or producer is being launched is unknown: /);
+    // The tick that persists again clears the streak and the attention with it.
+    await runDispatchTick(config, cursor, effects, () => clock);
+    assert.equal(cursor.consecutiveFailures, 0); assert.ok(cursor.lastSuccessAt); assert.deepEqual(dispatchFailureAttention(dispatchSummary(cursor, clock, 10_000)), []);
+    assert.equal(cursor.lastFailure!.field, 'lastTick.reasons[0]', 'the last failure stays visible after recovery');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('integration:instant-exit-classified — a session Herdr cannot find seconds after its launch is classified from its pane: a provider limit notice holds the account and relaunches the request on the next account, and any other cause is recorded with the pane\'s last words', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-instant-exit-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-instant-exit-credentials-')), homes = await mkdtemp(join(tmpdir(), 'graphyard-instant-exit-homes-'));
+  try {
+    execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+    const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+    await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
+    // Two logged-in Claude accounts whose stored tokens have expired: the launch check reads the login and never the provider.
+    for (const name of ['env-a', 'env-b']) { await mkdir(join(homes, name), { recursive: true }); await writeFile(join(homes, name, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'not-a-real-token', refreshToken: 'not-a-real-token', expiresAt: 1 } })); }
+    const file = join(root, '.graphyard/master.json'), written = JSON.parse(await readFile(file, 'utf8'));
+    written.environments = ['env-a', 'env-b'].map(name => ({ name, kind: 'claude', home: join(homes, name) }));
+    await writeFile(file, JSON.stringify(written), { mode: 0o600 });
+    const credential = join(credentialDirectory, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'] }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
+    const config = await loadMasterConfig(root);
+    const item = requestedWork();
+    const resetsAt = '2026-09-26T07:00:00Z';
+    // The stub runtime under a stub Herdr: on env-a it prints the weekly-limit notice and exits before Herdr ever
+    // sees it (`agent get` answers agent_not_found with a long JSON body on every read, the pane holds the notice
+    // under the banner); on env-b it starts at once.
+    const calls: string[][] = []; let account = '';
+    const herdrFailure = (code: string, detail: unknown) => Object.assign(new Error(`Command failed: herdr (${code})`), { stdout: JSON.stringify({ error: { code, message: `${code}: ${JSON.stringify(detail)}` } }) });
+    const run = (_command: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] === 'tab' && args[1] === 'create') { account = args.find(arg => arg.startsWith('CLAUDE_CONFIG_DIR='))!.split('/').at(-1)!; return JSON.stringify({ result: { root_pane: { pane_id: `pane-${account}`, tab_id: `tab-${account}` } } }); }
+      if (account === 'env-a') {
+        if (args[0] === 'pane' && args[1] === 'run') return '';
+        if (args[0] === 'agent' && args[1] === 'get') throw herdrFailure('agent_not_found', { pane: args[2], panes: Array.from({ length: 30 }, (_, index) => ({ pane_id: `pane-${index}`, agent: null, cwd: root })) });
+        if (args[0] === 'pane' && args[1] === 'read') return `╭─ Claude Code ─╮\n● Starting…\n  ⎿ You've hit your weekly limit · resets ${resetsAt}\n`;
+      }
+      if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
+      if (args[0] === 'agent' && args[1] === 'list') return JSON.stringify({ result: { agents: [] } });
+      return startedAtOnce(args) ?? JSON.stringify({ result: {} });
+    };
+    const mutations: { path: string; body: any }[] = [], log: string[] = [];
+    const effects = dispatchEffects(root, config, { snapshot: async () => ({ work: [item], now: new Date().toISOString() }), mutate: async (path, body) => { mutations.push({ path, body }); return {}; }, run, log: line => log.push(line) });
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects);
+    assert.deepEqual(tick.refused, [], 'an exit on the limit notice is capacity, never a counted refusal');
+    const launched = tick.launched.find(entry => entry.kind === 'producer')!;
+    assert.ok(launched, JSON.stringify(tick));
+    assert.equal(launched.profile, 'producer-a'); assert.equal(launched.relaunched, undefined, 'no prompt was dropped');
+    assert.deepEqual(launched.failover, [`producer-a: env-a exited at launch on its provider's limit notice (You've hit your weekly limit · resets ${resetsAt}); held until it resets 2026-09-26T07:00:00.000Z`]);
+    // Held exactly as a mid-session exhaustion holds it, and the request launched on the next account.
+    const held = await observedExhaustions(config);
+    assert.deepEqual(Object.keys(held), ['env-a']);
+    assert.deepEqual([held['env-a'].resetsAt, held['env-a'].until, held['env-a'].role, held['env-a'].profile, held['env-a'].work], ['2026-09-26T07:00:00.000Z', '2026-09-26T07:00:00.000Z', 'producer', 'producer-a', 'GY-64']);
+    assert.equal(held['env-a'].reason, `You've hit your weekly limit · resets ${resetsAt}`);
+    const tabs = calls.filter(args => args[0] === 'tab' && args[1] === 'create').map(args => args.find(arg => arg.startsWith('CLAUDE_CONFIG_DIR='))!.split('/').at(-1));
+    assert.deepEqual(tabs, ['env-a', 'env-b']);
+    assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'read').map(args => args[2]), ['pane-env-a'], 'the pane is read once, at the first observation and before its tab is closed: the notice is never waited out against the start bound');
+    assert.equal(calls.some(args => args[0] === 'agent' && args[1] === 'rename' && args[2] === 'pane-env-a'), false, 'nothing is named on the exited pane');
+    assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'close').map(args => args[2]), ['pane-env-a'], 'the exited session\'s tab is closed; the running one stays');
+    const skipped = (await readEnvironmentLog(config)).skipped.at(-1)!;
+    assert.deepEqual([skipped.environment, skipped.cause, skipped.profile], ['env-a', 'exhausted', 'producer-a']); assert.match(skipped.reason, /env-a exhausted its quota mid-session/);
+    const ledger = await readProducerLedger(root);
+    assert.equal(ledger.producers.length, 1); assert.deepEqual([ledger.producers[0].state, ledger.producers[0].requestId, ledger.producers[0].pane], ['pending', launched.requestId, 'pane-env-b']);
+    // The exhaustion is recorded on the item, as the control plane's own schema accepts it.
+    const capacity = mutations.find(entry => entry.path === `work/${item.id}/capacity`);
+    assert.ok(capacity, JSON.stringify(mutations.map(entry => entry.path)));
+    assert.deepEqual(exhaustionReportSchema.parse(capacity.body), { event: 'exhausted', role: 'producer', requestId: launched.requestId, profile: 'producer-a', account: 'env-a', runtime: 'claude', reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z',
+      partialWork: { state: 'not-applicable', detail: 'the session exited at launch on the provider limit notice: it read nothing and edited nothing' } });
+    assert.ok(mutations.some(entry => entry.path === `work/${item.id}/session`), 'the launched session records its handle');
+    // Any other cause is the refusal the launcher worded — the case it saw and the pane's last words, never the
+    // CLI's JSON error — and the watch leaves it exactly as it came: a start refused for a runtime that crashed,
+    // one whose pane could not be read, and an error that is no start refusal at all.
+    const typed = (watch: ReturnType<typeof watchInstantExit>, pane: string) => { watch.run('herdr', ['pane', 'run', pane, 'GY=/s; claude']); try { watch.run('herdr', ['agent', 'get', pane]); } catch { /* not found */ } };
+    const crashedScreen = "$ claude --permission-mode bypassPermissions\nError: ENOENT: no such file or directory, open '/nope/.claude.json'\n";
+    const crashedRun = (_command: string, args: string[]) => { if (args[0] === 'agent' && args[1] === 'get') throw herdrFailure('agent_not_found', { pane: args[2] }); if (args[0] === 'pane' && args[1] === 'read') return crashedScreen; return '{"result":{}}'; };
+    const crashed = watchInstantExit(crashedRun, () => clock);
+    typed(crashed, 'pane-9'); assert.equal(crashed.run('herdr', ['pane', 'read', 'pane-9', '--source', 'recent-unwrapped', '--lines', '40']), crashedScreen);
+    const waited = Date.now(); crashed.start.wait!(1); assert.ok(Date.now() - waited < 1000, 'a pane without the notice is waited on, as the launcher asked');
+    const refusal = new SessionStartError('never started', 'pane-9', paneLastLine(crashedScreen), 30_000, `the claude runtime never started within 30 s in pane pane-9 (no runtime under the pane); the pane last showed: "${paneLastLine(crashedScreen)}"`);
+    assert.equal(crashed.classify(refusal), refusal);
+    assert.equal(refusal.message.includes('agent_not_found'), false); assert.match(refusal.message, /Error: ENOENT: no such file or directory/);
+    const unreadable = watchInstantExit((_command, args) => { if (args[0] === 'pane' && args[1] === 'read') throw new Error('pane gone'); return crashedRun(_command, args); }, () => clock);
+    typed(unreadable, 'pane-9'); assert.throws(() => unreadable.run('herdr', ['pane', 'read', 'pane-9']), /pane gone/);
+    assert.equal(unreadable.classify(refusal), refusal);
+    const other = herdrFailure('agent_exited', 'the runtime exited with status 1');
+    assert.equal(crashed.classify(other), other, 'an error that is no start refusal is not classified');
+    // The pane that shows the notice: the launcher's next pause is the refusal, with the notice and the session's
+    // last words, and Herdr's agent_not_found as its cause; a refusal the launcher raised at its bound with the
+    // notice on the pane is classified the same way. A read of another pane is not the launch's pane.
+    const noticeScreen = `╭─ Claude Code ─╮\n● Starting…\n  ⎿ You've hit your weekly limit · resets ${resetsAt}\n`;
+    const noticed = watchInstantExit((_command, args) => { if (args[0] === 'agent' && args[1] === 'get') throw herdrFailure('agent_not_found', { pane: args[2] }); if (args[0] === 'pane' && args[1] === 'read') return noticeScreen; return '{"result":{}}'; }, () => clock);
+    typed(noticed, 'pane-1'); noticed.run('herdr', ['pane', 'read', 'pane-other']);
+    noticed.start.wait!(1);
+    noticed.run('herdr', ['pane', 'read', 'pane-1']);
+    let exited: any; try { noticed.start.wait!(500); } catch (error) { exited = error; }
+    assert.ok(exited instanceof InstantExitError, 'the pause between polls refuses the launch rather than waiting out the bound');
+    assert.equal(exited.message, `the session exited within seconds of its launch on its provider's limit notice: You've hit your weekly limit · resets ${resetsAt}`);
+    assert.deepEqual(exited.instantExit, { pane: 'pane-1', words: `╭─ Claude Code ─╮ ● Starting… ⎿ You've hit your weekly limit · resets ${resetsAt}`, notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z' } });
+    assert.match((exited.cause as { stdout: string }).stdout, /agent_not_found/); assert.equal(exited.message.includes('agent_not_found'), false);
+    const atBound = new SessionStartError('still starting', 'pane-1', paneLastLine(noticeScreen), 120_000, 'the claude runtime was still starting after 120 s in pane pane-1 (the claude banner is on screen)');
+    assert.deepEqual((noticed.classify(atBound) as InstantExitError).instantExit, exited.instantExit);
+    const elsewhere = new SessionStartError('never started', 'pane-2', '', 30_000, 'the claude runtime never started within 30 s in pane pane-2 (no runtime under the pane); the pane showed nothing');
+    assert.equal(noticed.classify(elsewhere), elsewhere, 'a refusal for another pane is not this launch\'s exit');
+    const dialog = new SessionStartError('blocked', 'pane-1', 'Yes, I trust this folder', 0, 'the claude runtime is blocked before it is ready in pane pane-1 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"');
+    assert.equal(noticed.classify(dialog), dialog, 'a runtime Herdr found at a dialog did not exit');
+    // A dispatcher wired without an account hold records the notice itself as the refusal, bounded, never the JSON.
+    const bareNotice = new InstantExitError({ pane: 'pane-1', words: '', notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: '2026-09-26T07:00:00.000Z' } }, exited.cause);
+    const bareTick = await runDispatchTick(masterConfig(join(credentialDirectory, 'coordinator.token')), emptyDispatchCursor(config), stubEffects(() => [item], [], { launchProducer: async () => { throw bareNotice; } }), () => clock);
+    assert.equal(bareTick.refused.length, 2); assert.equal(bareTick.refused[0].reason, `the session exited within seconds of its launch on its provider's limit notice: You've hit your weekly limit · resets ${resetsAt}`);
+  } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(homes, { recursive: true, force: true }); }
+});
+
+test('manual:dispatcher-state-docs-review — the master guide states that the dispatcher bounds and repairs its own state, how a persist failure is surfaced, and how a session that exits at launch is classified', async () => {
+  const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
+  for (const fragment of ["### The dispatcher's own state", 'bounds its own state where it composes it', 'marked with an ellipsis', 'repaired, not fatal', 'logged once with the', 'path that failed',
+    'A tick failure is attributed and surfaced', 'dispatch.lastFailure', 'Three consecutive failures raise one attention item', 'no reviewer or producer session is being launched for any item',
+    'A session that exits at launch is classified from its pane', 'agent_not_found', 'herdr pane read', 'provider limit notice', 'fails over exactly as a mid-session', "the pane's last words", 'exits **at launch**']) assert.ok(guide.includes(fragment), `docs/master-agent.md must state: ${fragment}`);
 });

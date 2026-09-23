@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { setupMaster } from '../master.js';
+import { loadMasterConfig, setupMaster } from '../master.js';
+import { initialFleetProposal } from './master-registry.js';
 import { readSecretFromStdin, type CliContext } from './context.js';
 
 /**
@@ -8,7 +9,8 @@ import { readSecretFromStdin, type CliContext } from './context.js';
  * systemd unit. This is the one command that passes `installSupervisor` to `setupMaster`
  * (GY-114), so the unit under the real user home is written by an operator's explicit
  * action and never as a side effect of another call; `--replace-supervisor` is the only
- * source of `replaceSupervisor`.
+ * source of `replaceSupervisor`. Setup then proposes the fleet from the agent CLIs already
+ * logged in on this host (GY-91); nothing is stored until accepted.
  */
 export async function masterInit(context: CliContext, root: string) {
   const { args, base, print } = context;
@@ -20,5 +22,7 @@ export async function masterInit(context: CliContext, root: string) {
     ...(values['dispatch-interval'] ? { dispatchIntervalSeconds: Number(values['dispatch-interval']) } : {}), ...(values['reviewer-profile'] ? { reviewerProfile: values['reviewer-profile'] } : {}), ...(values['producer-timeout'] ? { producerTimeoutMinutes: Number(values['producer-timeout']) } : {}) };
   if (values['browser-executable'] && !values['browser-profile']) throw new Error('--browser-executable requires --browser-profile');
   const browser = values['browser-profile'] ? { profile: values['browser-profile'], ...(values['browser-executable'] ? { executable: values['browser-executable'] } : {}) } : undefined;
-  return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}), installSupervisor: true, replaceSupervisor: !!values['replace-supervisor'] }));
+  const installed = await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}), installSupervisor: true, replaceSupervisor: !!values['replace-supervisor'] });
+  const fleet = await initialFleetProposal(await loadMasterConfig(root), masterToken);
+  return print({ ...installed, fleet });
 }

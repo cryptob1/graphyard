@@ -198,7 +198,63 @@ Without `--apply` the command writes nothing: it lists every environment with wh
 - one reviewer profile per logged-in environment, with the first one answering automatic reviews;
 - every profile's `accounts` lists the logged-in environments in failover order, its own runtime's first and rotated so profiles start on different accounts. An existing profile keeps the order it has and gains accounts that logged in since; a home it pinned with `CLAUDE_CONFIG_DIR` becomes its first account.
 
-Rerun `master environments --apply` after logging in another account; nothing changes when nothing new logged in. Before every worker, reviewer and producer launch the master checks the chosen account's login and quota and fails over to the next healthy one; see [agent environments](master-agent.md#agent-environments).
+Rerun `master environments --apply` after logging in another account; nothing changes when nothing new logged in. These profiles give each session its Graphyard identity; which runtime, account and model a launch runs on is decided by the agent registry, configured next.
+
+### Configure the fleet
+
+The fleet — which agent CLIs exist, which logins each has, what model each login runs, and which logins may serve which role — lives in the control plane's **agent registry**, not in a file on the coordinator host. A profile in `.graphyard/master.json` is only the Graphyard identity a session acts under (its principal and credential file); the runtime, account and model a launch actually runs on are chosen from the registry, per action. Setup proposes the registry from what the host already has:
+
+```sh
+node "$GRAPHYARD_CLI" master registry propose           # what is logged in on this host, and the registry it implies
+node "$GRAPHYARD_CLI" master registry propose --apply   # store it in the control plane
+node "$GRAPHYARD_CLI" master registry                   # every account, and why any is ineligible
+```
+
+`master init` prints the same proposal at the end of the install. Discovery reads the isolated environments above, each runtime's own default login home (`~/.claude`, `~/.codex`, `~/.cursor`, OpenCode's data directory), and notes an installed `muse`; it proposes one runtime per CLI found with its launch contract, one account per logged-in login (the home it found, on this host), a placeholder `<runtime>-default` model per runtime, and all five roles — worker, reviewer, producer, approver, escalation handler — over those accounts. Nothing is stored without `--apply`, a rerun proposes only what is new, and an order you arranged is never reshuffled. After that the fleet is changed from anywhere that holds the coordinator credential — this CLI, the API (`/api/agent-registry`), or the dashboard's **Agent fleet** page — and a running `master run` follows on its next action: no restart, no file edit.
+
+Adding capacity by hand follows the same order the proposal does, because each entry names the one before it.
+
+### Add a runtime
+
+A runtime is an agent CLI and its **launch contract**: what to start, the arguments every session of it starts with, the variable that points it at one login home, the flag that selects a model, and how to log in. The five runtimes Graphyard knows (`claude`, `codex`, `cursor`, `opencode`, `muse`) are proposed with their contracts; any other CLI is one command:
+
+```sh
+node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
+  --home-variable AIDER_HOME --model-flag=--model --login 'AIDER_HOME={home} aider --login' --login-file session.json \
+  --reason "Add the Aider runtime"
+```
+
+`--kind` is the executable (Herdr's agent kind); a value that starts with a dash is written onto its flag with `=`, as `--arg=--yes-always` and `--model-flag=--model` are here — written apart, the shell hands the CLI two flags and it refuses. `--login-file` is a path inside the login home whose presence means "logged in", for runtimes whose login and quota Graphyard cannot read itself. A contract never carries a secret: a variable named like a token, a `GRAPHYARD_` variable, or a value that looks like a credential is refused.
+
+### Add an account
+
+An account is one login of a runtime. It holds the credential **by reference** — the host whose disk holds the login and the home directory it lives in — and never the credential itself. Record the model it runs first, with what it costs and what it is good for, then the account:
+
+```sh
+node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
+  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Record the model and its price"
+CLAUDE_CONFIG_DIR=~/.coding_agents/claude-b claude        # /login, once: the credential stays in this home
+node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --model opus \
+  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second Claude subscription"
+```
+
+`--host` defaults to this host; an account is *placed* where its login is, so only an executor on that host launches it, and a fleet may span several hosts. `--max-sessions` bounds how many sessions share the login at once. A `set` names only what changes — `account set claude-b --model sonnet --reason …` moves the model and keeps the rest. Executors observe each account's login and provider quota before every launch and report it to the registry (state, usage windows and reset time); for what no probe can see, mark it yourself — the mark holds until its reset or until you clear it:
+
+```sh
+node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan cut off until Monday"
+node "$GRAPHYARD_CLI" master registry account quota opencode-a available --reason "Plan renewed"
+```
+
+### Add a role
+
+A role names the accounts that may serve it, **most preferred first**, and how many of its sessions may run at once:
+
+```sh
+node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude; Codex is overflow"
+node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --reason "Review on a different model than the author"
+```
+
+Every worker dispatch, reviewer, producer and approver launch then runs on the first account of its role that is placed on the executor's host, logged in, within quota, under its own session limit, with the role under its concurrency limit. The control plane makes the choice, and records it with its reason and every account it passed over; `master registry` and the Agent fleet page show each account's runtime, model, roles, live sessions, quota, reset time and — when it cannot launch — exactly why. Removing capacity is the same kind of change: `master registry account remove NAME --reason …` takes the account out of every role, and `master registry runtime remove NAME --reason …` removes the runtime with its accounts, so each role falls back to the accounts that remain, in the order they held. A role the registry does not define yet keeps launching from its local profile, so an existing installation moves onto the registry one role at a time. See [the agent registry](master-agent.md#the-agent-registry).
 
 ### Size review and proof capacity
 
