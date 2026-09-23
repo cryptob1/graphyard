@@ -7,8 +7,8 @@ import type { Work } from '../model.js';
  * still holds the lease: the item, the pane, the prompt and the attach command. A credential or
  * payment prompt is the human's; any other prompt outside the allow-list is the master's to answer.
  */
-export function consentHoldItems(checkouts: string[], snapshot: { work: Work[]; now: string }): AttentionItem[] {
-  return checkouts.flatMap(checkout => readConsentHolds(checkout)).flatMap(hold => {
+export function consentHoldItems(checkouts: (string | { path: string })[], snapshot: { work: Work[]; now: string }): AttentionItem[] {
+  return checkouts.flatMap(checkout => readConsentHolds(typeof checkout === 'string' ? checkout : checkout.path)).flatMap(hold => {
     const work = snapshot.work.find(item => item.key === hold.key);
     if (!work?.lease || work.lease.epoch !== hold.epoch || Date.parse(work.lease.expiresAt) <= Date.parse(snapshot.now)) return [];
     const text = consentHoldAttention(hold), next = `${hold.attach}, then answer the prompt`;

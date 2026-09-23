@@ -10,7 +10,7 @@ import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { assertDispatchable, awaitRuntimeStart, consentHold, dispatchWork, loadMasterConfig, saveProducerProfile, SessionStartError, setupMaster, startAgentSession, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { consentAnswers, consentHoldMs, detectConsentPrompt, readConsentHolds, writeConsentHold } from '../src/consent-prompt.js';
-import { consentHoldItems } from '../src/cli/master-status.js';
+import { consentHoldItems } from '../src/cli/consent-holds.js';
 import { assignmentSurrender, consentHoldProbe, supervise } from '../src/supervisor.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
