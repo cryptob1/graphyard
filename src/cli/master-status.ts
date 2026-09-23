@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import type { HumanRequestRow } from '../model/human-request.js';
+import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
@@ -259,8 +259,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // half of that table; this is the whole of it, approvals included (GY-102).
   const humanOnly = (coordinator?.humanOnly ?? []) as HumanRequestRow[];
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    humanOnly: humanOnly.map(row => ({ work: row.work, rule: row.rule, decision: row.decision, needed: row.request.needed, reason: row.request.reason,
-      requestedBy: row.request.requestedBy, requestedAt: row.request.at, waitedMs: row.waitedMs, answerOn: row.answer.dashboard, refusesAgents: row.refusal })),
+    humanOnly: humanOnly.map(humanOnlyStatusRow),
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, humanOnly: humanOnly.length, stalledActions: stalled.length, overlongSessions: overlong.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,

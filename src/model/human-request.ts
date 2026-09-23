@@ -88,6 +88,11 @@ export interface HumanRequestRow {
   refusal: string;
   answer: { cli: string; decline: string; dashboard: string; api: string; post: HumanOnlyPost };
 }
+/** A row as `master status` reports it: what is needed, why, who asked, how long, and where it is answered. */
+export function humanOnlyStatusRow(row: HumanRequestRow) {
+  return { work: row.work, rule: row.rule, decision: row.decision, needed: row.request.needed, reason: row.request.reason,
+    requestedBy: row.request.requestedBy, requestedAt: row.request.at, waitedMs: row.waitedMs, answerOn: row.answer.dashboard, refusesAgents: row.refusal };
+}
 /** Every open human-only request, longest wait first: the human-facing list. */
 export function openHumanRequests(work: readonly { id: string; key: string; title: string; stage: string; humanRequest?: HumanRequest | null }[], now: number): HumanRequestRow[] {
   return work.filter(item => item.stage !== 'done' && parkedOnHuman(item)).map(item => {
