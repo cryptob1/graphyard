@@ -5,6 +5,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { clearConsentHold, consentHoldVerdict, readConsentHolds } from './consent-prompt.js';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -107,6 +108,28 @@ export interface SupervisedSession {
   visible?: () => boolean | null;
   /** Records the cause on the assignment and releases the lease. */
   surrender?: (cause: string) => Promise<void>;
+  /** Why the session's slot must be given back because it never took its request, or null (GY-130, consentHoldProbe). */
+  unconsented?: () => string | null;
+}
+
+/**
+ * The launcher's consent hold on this supervisor's session (GY-130): the record it leaves beside
+ * the launch files in the worktree when the runtime stopped on a first-run prompt outside its
+ * allow-list. While the prompt is on the pane's screen the session has not read its request; a
+ * prompt a human answered clears the hold, and one still showing past the hold's `releaseAt`
+ * answers the cause the supervisor surrenders the assignment for instead of renewing it again.
+ */
+export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[]) => string = (command, args) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 })), now: () => number = Date.now): () => string | null {
+  return () => {
+    const hold = readConsentHolds(checkout)[0];
+    if (!hold) return null;
+    const pane = env.HERDR_PANE_ID ?? hold.pane;
+    let screen: string | null = null;
+    try { screen = run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', '40']); } catch { screen = null; }
+    const verdict = consentHoldVerdict(hold, screen, now());
+    if (verdict === 'cleared') clearConsentHold(hold.path);
+    return verdict === 'release' ? `its session never took its request: it waited on a ${hold.kind} consent prompt outside the launcher's allow-list from ${hold.since} past the hold bound (${hold.releaseAt}) — "${hold.prompt}"` : null;
+  };
 }
 
 const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as { code?: string }).code === 'EPERM'; } };
@@ -183,6 +206,7 @@ export async function supervise(command: string, args: string[], epoch: number, 
   if (containment && !options.quarantine) throw new Error('Foreground worker supervision requires a durable Graphyard containment quarantine');
   const sessionVisible = options.session?.visible ?? herdrSessionProbe();
   const surrender = options.session?.surrender ?? assignmentSurrender(epoch);
+  const unconsented = options.session?.unconsented ?? consentHoldProbe();
   return new Promise<number>((resolve, reject) => {
     let child: ReturnType<typeof spawn> | undefined;
     let stopping = false, pending = false, prelaunchInterrupted = false, finished = false;
@@ -258,7 +282,9 @@ export async function supervise(command: string, args: string[], epoch: number, 
       const visible = sessionVisible();
       if (visible === true) sessionSeen = true;
       else if (visible === false && sessionSeen) return 'Herdr no longer reports this agent session';
-      return null;
+      // A session still held on a consent prompt past its bound holds a slot it never used: the
+      // lease is not renewed for it again, the assignment is released, and the item is dispatchable.
+      return unconsented();
     };
     // The lease outlives several of these checks, so an orphaned supervisor is found, surrenders
     // its assignment and stops well inside one lease period.

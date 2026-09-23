@@ -16,6 +16,7 @@ import { stalledActionAttention } from './stalled-actions.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
+import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 
@@ -23,6 +24,7 @@ export { actionReport, agentRequestAttention, agentRequestReport, sessionReport 
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
+export { consentHoldItems } from './consent-holds.js';
 
 /**
  * One attention item per requested decision whose approver could not be launched (GY-101). A
@@ -184,7 +186,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // filling is exactly the condition that stops it. The plan behind the number is the same one the
   // loop and `master reclaim` compute, so the attention item never promises room reclaiming cannot give.
   const worktrees = worktreesDirectory(root);
-  const reclaimPlan = planWorktreeReclaim(await inventoryWorktrees(root).catch(() => []), snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
+  const inventory = await inventoryWorktrees(root).catch(() => []);
+  const reclaimPlan = planWorktreeReclaim(inventory, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
   // live there, and it is judged against its own minimum and budget, before a write there fails.
@@ -213,7 +216,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
+  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot), ...consentHoldItems(inventory.map(entry => entry.path), snapshot)];
   // A session past its role's maximum: running but making no progress is as visible as one that died.
   const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
