@@ -37,6 +37,74 @@ export interface QueueSpeculation {
   /** An approval GitHub dismissed for a merge-base change on this very tip, restored as the binding approval; see `restoredApproval`. */
   restoredApproval?: RestoredApproval | null;
 }
+/**
+ * One unresolved review thread on a candidate's pull request: who opened it (the author of its
+ * first comment), and the path and line it is anchored to. `line` is null for a thread on a file
+ * rather than a line; `outdated` threads sit on code the head has since changed and still block.
+ * `id` is the thread's GraphQL node id — what `scripts/resolve-thread.mjs` takes — so whoever may
+ * resolve it can do so without a raw GraphQL read to rediscover it.
+ */
+export interface ReviewThread { id?: string; author: string; path: string; line: number | null; outdated: boolean; url?: string }
+/**
+ * Review conversations as a gate input (GY-139). `required` is the managed branch's
+ * `required_conversation_resolution`; `unresolved` is read only when it is set, since a thread
+ * blocks nothing otherwise. Absent on observations recorded before threads were observed.
+ */
+export interface ConversationResolution { required: boolean; unresolved: ReviewThread[] }
+declare module './model/work.js' { interface Observation { conversations?: ConversationResolution } }
+
+/** One single-quoted shell argument: nothing inside it is expanded, whatever a contributor named a file. */
+const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+/** `author on path:line`, the way every refusal and attention line names a thread. */
+export const describeThread = (thread: ReviewThread) => `${thread.author} on ${thread.path}${thread.line === null ? '' : `:${thread.line}`}${thread.outdated ? ' (outdated)' : ''}`;
+/**
+ * The unresolved threads that block the current candidate's merge: none unless the observation is
+ * of the current head and branch protection requires conversation resolution.
+ */
+export function blockingThreads(work: Pick<Work, 'candidate' | 'observation'>): ReviewThread[] {
+  const observation = work.observation, candidate = work.candidate;
+  if (!candidate || !observation?.conversations?.required || observation.candidate?.sha !== candidate.sha || observation.merged) return [];
+  return observation.conversations.unresolved;
+}
+/**
+ * The merge refusal for those threads, or null. Each thread is a reviewer's finding: the remedy
+ * is rework that addresses it, never resolving or dismissing a thread somebody else wrote.
+ */
+export function unresolvedThreadRefusal(work: Pick<Work, 'candidate' | 'observation'>): string | null {
+  const threads = blockingThreads(work);
+  if (!threads.length) return null;
+  return `Branch protection requires conversation resolution and ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} unresolved on ${work.candidate!.sha.slice(0, 12)}: ${threads.map(describeThread).join('; ')}. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
+}
+/**
+ * `master status` for candidates GitHub will not merge over unresolved threads: each row lists
+ * them under `reviewThreads`, is never `mergeable`, and its attention names the remedy — a rework
+ * decision that addresses the findings. The row's attention and its attention item are rewritten
+ * together, so both say the same thing.
+ */
+export function nameUnresolvedThreads<S extends { work: { key: string; mergeable: boolean; attention: string | null; attentionOwner: unknown }[]; attentionItems: { subject: string; text: string }[]; counts: { attention: number; mergeable: number } }, O extends object>(status: S, work: Work[], owner: (role: 'master', next: string, approvedBy: 'approver') => O): Omit<S, 'work'> & { work: (S['work'][number] & { reviewThreads: ReviewThread[] })[] } {
+  const rewritten = new Map<string, { previous: string | null; item: S['attentionItems'][number] }>();
+  const rows = status.work.map(row => {
+    const item = work.find(candidate => candidate.key === row.key);
+    const threads = item ? blockingThreads(item) : [];
+    if (!threads.length) return { ...row, reviewThreads: [] as ReviewThread[] };
+    const text = unresolvedThreadRefusal(item!)!;
+    // The thread's path and author are contributor-controlled text, so the reason is one quoted
+    // argument and the command is the whole of `next`: nothing in it can end the argument or run.
+    const reason = `Address the unresolved review threads: ${threads.map(describeThread).join('; ')}. Fix each finding; resolving or dismissing a thread the master did not write is not the master's call`;
+    const attentionOwner = owner('master', `graphyard master decide ${row.key} rework ${shellQuote(reason)}`, 'approver');
+    rewritten.set(row.key, { previous: row.attention, item: { subject: row.key, text, ...attentionOwner } as S['attentionItems'][number] });
+    return { ...row, mergeable: false, reviewThreads: threads, attention: text, attentionOwner };
+  });
+  const attentionItems = status.attentionItems.map(entry => {
+    const rewrite = rewritten.get(entry.subject);
+    return rewrite && entry.text === rewrite.previous ? rewrite.item : entry;
+  });
+  for (const [key, rewrite] of rewritten) if (!attentionItems.some(entry => entry.subject === key && entry.text === rewrite.item.text)) attentionItems.push(rewrite.item);
+  const raised = [...rewritten.values()].filter(rewrite => !rewrite.previous).length;
+  const demoted = status.work.filter(row => row.mergeable && rewritten.has(row.key)).length;
+  return { ...status, work: rows, attentionItems, counts: { ...status.counts, attention: status.counts.attention + raised, mergeable: status.counts.mergeable - demoted } };
+}
+
 export interface QueueEntry { sequence: number; enqueuedAt: string; policyRevision: number; speculation: QueueSpeculation | null }
 /** The published tip that replaces a queued entry's head on the next observation, or null when the head is the tip. */
 export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>): string | null {
@@ -564,6 +632,10 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [])
   });
   if (check) return `Required CI check ${check} did not pass on speculative tip ${tip}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
+  // An unresolved review thread GitHub will not merge over is a finding like a change request:
+  // the entry leaves rather than holding the head of the queue with a merge that cannot land.
+  const threads = unresolvedThreadRefusal(work);
+  if (threads) return threads;
   // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
   // failure or a withdrawal of it is an adverse conclusion about this tip.
   const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);

@@ -22,7 +22,7 @@ import { containmentAttestation, containmentGraceMs, containmentSettlementRefusa
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
 import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
-import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
+import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, unresolvedThreadRefusal, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
 import { allocateSessionCheckout, inspectWorktreeRoot, reclaimCommand, removeSessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootConcerns, worktreeRootMinFreeBytes, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout, type WorktreeRootHealth } from './install/worktree-root.js';
@@ -3080,6 +3080,10 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
     && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
     && work.mergeExecution!.policyRevision === work.policyRevision;
   if (activeMerge && !resumable) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization for this executor: merge execution ${work.mergeExecution!.id} is held by ${work.mergeExecution!.owner} until ${work.mergeExecution!.expiresAt}; this executor stands down without cancelling it`);
+  // Unresolved review threads on a branch that requires conversation resolution are a merge
+  // GitHub will refuse (GY-139): refused here, naming them, before any execution is issued.
+  const threads = activeMerge ? null : unresolvedThreadRefusal(work);
+  if (threads) throw new Error(`${work.key} was refused before any merge execution was issued: ${threads}`);
   // An unresolved escalation, a standing blocking lead ruling, and trusted
   // evidence whose producer has since implemented the item each refuse delivery
   // in the broker as well as in the gate, so a stale snapshot can never present
