@@ -6,6 +6,7 @@ import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { approveDecision, listDecisions, requestDecision } from '../decisions.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 import { readEscalationContext } from '../escalation-context.js';
+import { judgeClosedQuestion } from '../closed-question.js';
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
 // ledger entry. Routing order decides which handler matches first; it must never
@@ -43,6 +44,15 @@ export const workRoutes = defineRoutes('work', [
       return action === 'park' ? requestHumanDecision(context.services, context.actor, target, data, key)
         : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key)
         : recordCapacity(context.services, context.actor, target, data, key);
+    },
+  },
+  // A closed-question proof (GY-109): the control plane asks the configured responder against the
+  // bound candidate state and records the answer as evidence, never as an approval.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/closed-question$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'closed-question');
+      return judgeClosedQuestion(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   {

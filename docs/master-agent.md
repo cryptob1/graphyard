@@ -10,7 +10,7 @@ Graphyard remains the source of truth. Herdr only reports live session health. T
 Autonomy is the default. The master acts without asking; the human operator sets goals and priorities, and keeps only two other decisions: spending money or opening third-party accounts, and issuing credentials to people (approving a GitHub sudo prompt on their own device is one). Every other decision names the agent that makes it and the independent agent that approves it ([who decides](glossary.md#who-decides)):
 
 - **Intent the master applies alone**, as its own operator-agent identity: `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, and `master requirements GY-N FILE REASON` for additions. None of it weakens anything, and the reviewer and proof producers judge every candidate that follows.
-- **Two-party decisions**, requested by the master and approved by the separate approver agent: requirement rewrites and removals, escalation resolution, `manual:` attestation, rework and containment recovery (attesting the previous worker stopped), proof grants to a producer, and merge approval when automatic merging is off. Request with `master decide GY-N ACTION [JSON|@FILE] REASON`, launch the approver session with `master approver GY-N DECISION`, and read the outcome with `master decisions GY-N`. The approver runs `master approve GY-N DECISION REASON` from its own session; the server refuses self-approval and any approver that held an assignment on the item, produced the evidence the decision rests on, or would receive the grant, naming the conflict. See [two-party decisions](operator-automation.md#two-party-decisions).
+- **Two-party decisions**, requested by the master and approved by the separate approver agent: requirement rewrites and removals, escalation resolution, `manual:` attestation, rework and containment recovery (attesting the previous worker stopped), proof grants to a producer, and merge approval when automatic merging is off. Request with `master decide GY-N ACTION [JSON|@FILE] REASON`, launch the approver session with `master approver GY-N DECISION`, and read the outcome with `master decisions GY-N`. The approver runs `master approve GY-N DECISION REASON` from its own session, or `master refuse GY-N DECISION REASON` to decline it: a decline is recorded, never expressed by exiting. The server refuses self-approval and any approver that held an assignment on the item, produced the evidence the decision rests on, or would receive the grant, naming the conflict. See [two-party decisions](operator-automation.md#two-party-decisions).
 - **Routine operations**: principal-roster rotation for agent principals (`master principals` previews it and refuses to drop a live principal or change its role; `--apply` deploys it), restarting the durable loop (`master restart`), GitHub administration through the API and the browser flows, dispatch, review and proof shepherding, and the guarded merge.
 
 Onboarding provides the identities once: `master autonomy --admin-token-stdin --apply` provisions the master's operator-agent identity and the approver identity and installs the master's harness rules; dispatch installs each worker's own rules in its worktree, so a worker pushes its assigned branch and opens its pull request without a keypress. Every attention item in `master status` carries `attentionOwner` — the resolving `role` (`master`, `reviewer`, `control plane`, or `human` only for the three human-only decisions), whether the approver agent must approve, and the `next` command — and `attentionItems` lists them all. Never ask a human to run a command an agent identity is permitted to run.
@@ -263,8 +263,9 @@ Each cycle:
 5. **dispatches claimable work** to a healthy worker profile, through the same launcher
    `master dispatch` uses: the worker claims under its own identity and the loop holds no lease.
    Ready items are offered [smallest planned scope first](#conflict-avoidance) within a priority,
-   and an item whose `plannedFiles` overlap a claimed or unmerged item is held rather than
-   dispatched — the loop never overrides a hold; only `master dispatch --allow-overlap` does;
+   and an item that overlaps the files an in-flight item is changing is held rather than
+   dispatched, for at most the hold bound — after it the loop dispatches over the overlap and
+   records it; under it only `master dispatch --allow-overlap` does;
 6. **requests the routine decisions**, launches an approver session for each, and looks at every
    one of them again on every cycle until it is applied — a standing verdict, a base branch
    Graphyard could not merge in, a delivered item still fenced, and the merge itself where
@@ -272,8 +273,12 @@ Each cycle:
 7. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
-   producer workflow when automatable proof is missing and one is configured, and anything that needs
-   a judgement no rule covers is surfaced in `master status` with its owner and next command;
+   producer workflow when automatable proof is missing and one is configured, a proof its criterion
+   declares answerable as a closed question is first put to the configured responder and needs no
+   session once a confident answer decides it (see
+   [closed-question criteria](onboarding.md#judge-mechanical-criteria-with-a-closed-question)), and
+   anything that needs a judgement no rule covers is surfaced in `master status` with its owner and
+   next command;
 8. **invokes only the guarded merge** for a candidate whose gates are all green. With automatic
    merging off it merges exactly the candidate an approver agent approved, and step 6 is what asked
    for that approval;
@@ -349,6 +354,36 @@ It never approves what it requested: the approver session judges from its own id
 server refuses self-approval, an approver that held an assignment on the item, and one that
 produced the evidence the decision rests on.
 
+### Refused and unanswered decisions
+
+An approver has two writes, and a decline is one of them: **a decline is recorded, never expressed
+by exiting.** `master refuse GY-N DECISION REASON` (`POST /api/work/GY-N/approve` with
+`{ action: "refuse", decision, reason }`) moves a `requested` decision to the terminal `refused`
+state, carrying `refusal: { approver, reason, at }` in `master decisions GY-N` and a
+`decision.declined` ledger entry. Like `master approve` it runs only in the approver session, under
+its own `GRAPHYARD_TOKEN_FILE`: the master's session and the master's own credentials are refused
+before anything is sent, and the server refuses the requester — which takes its own request back
+with `master withdraw` instead — and every identity that could not have approved it.
+
+A refused decision is not re-requestable unchanged. A new request of the same action and input is
+refused, naming the refusal, the approver and its reason, unless its `REASON` cites the refused
+decision's id and says something the refused request did not — the same rule as answering a
+refused reconciliation. `master status` lists it under `terminalDecisions` (`state: refused`, the
+reason, `refusedBy`), counts it in `counts.refusedDecisions` while it is the latest decision of its
+action, and raises it for the master: `Decision … was refused by APPROVER: REASON. Answer the
+refusal: …`, whose `next` is a request citing it — or acting on the refusal instead. The durable
+loop never re-requests a refused decision — it settles its watch and leaves the answer to the master
+— and any unchanged re-request is refused the same way, so a refusal is never silently retried. The
+approver session's own request names `master refuse` for a decline; it is never told to state its
+reason in its tab and stop.
+
+A decision still `requested` whose approver session is not running — gone from Herdr, or `done` —
+with no outcome recorded is **unanswered**: a stall, not a refusal. `master status` lists each under
+`unansweredDecisions` with the session it was put to and its age, counts them in
+`counts.unansweredDecisions`, and raises `Decision … is unanswered after AGE: approver session NAME is
+not running and recorded no outcome — a stall, not a refusal`, whose `next` puts it to a fresh
+approver. Nothing is concluded while Herdr cannot be read.
+
 **A request is not the end of it.** The approver is a launched session like any other: it can die,
 drop its prompt, hit an account limit, decline, or hang. The loop keeps a watch per requested
 decision (`daemon.approvals` in `master status`) and on every cycle reads the decision back from the
@@ -357,8 +392,9 @@ control plane and the session back from Herdr:
 | What it sees | What it does |
 | --- | --- |
 | The decision is `applied` | Closes the approver's finished tab and retires the watch once the item has moved on |
+| The decision ended `refused` | Closes the approver's tab and settles the watch: no replacement session and no re-request. Escalates once with the approver's reason; `master status` names the refusal and the next step is the master's: answer it (see [refused and unanswered decisions](#refused-and-unanswered-decisions)) |
 | Still `requested` (or `approved` but not yet applied) and the session is working, inside ten minutes | Waits |
-| The session is gone, ended `idle`/`done`/`blocked` without approving (a decline is only ever visible this way), or has worked past ten minutes | Closes it and launches a replacement — at most three sessions per decision |
+| The session is gone, ended `idle`/`done`/`blocked` without approving or refusing — a stall, never a decline — or has worked past ten minutes | Closes it and launches a replacement — at most three sessions per decision |
 | The decision ended `failed`, `stale` or `withdrawn`, or the server no longer holds it, and the item still needs it | Requests it again — at most three requests per binding, on the usual widening retry interval |
 | Three sessions spent and still unjudged | Escalates once with the decision, how each session ended, and `master approver GY-N DECISION`; stops spending sessions; leaves the request standing |
 | A `merge` decision standing for an earlier candidate | Withdraws it as its requester — it can never apply, and the server refuses a second request while it stands — then requests one for the current candidate |
@@ -1558,7 +1594,7 @@ file is gone, and a configured `herdrWorkspace` that Herdr no longer lists. `set
 registration.
 
 What this leaves the master — the loop's judgment half, or the visible session — is the
-findings: read a `CHANGES_REQUESTED` verdict or a failed proof, decide whether it needs rework,
+findings: read a `CHANGES_REQUESTED` verdict, an [unresolved review thread](#unresolved-review-threads) or a failed proof, decide whether it needs rework,
 route it, and merge when every gate passes. The master handles findings, reworks and merges; it
 never launches reviews or producers by hand, never approves a candidate, and never submits
 evidence.
@@ -1891,6 +1927,16 @@ A master merge succeeds only when Graphyard has a current authorization for the 
 
 The command never uses an admin bypass. Graphyard marks Done only after independently observing the matching merge. Direct or late merges remain visible violations.
 
+### Unresolved review threads
+
+When branch protection sets `required_conversation_resolution`, GitHub refuses the merge while any review thread on the pull request is unresolved — whoever opened it, including a reviewer bot Graphyard does not otherwise know about. Graphyard reads the threads with each observation of such a branch and records every unresolved one under `observation.conversations` with its author, path and line. They are a gate input:
+
+- the merge gate fails naming each thread (`<author> on <path>:<line>`, `(outdated)` for a thread on code the head has since changed, which still blocks), and a candidate in that state does not enter the merge queue — a queued one is ejected, as a change request ejects it;
+- `master status` lists them under the row's `reviewThreads` — each with its GraphQL node `id`, the argument `scripts/resolve-thread.mjs` takes — reports the row with `mergeable: false`, and its attention names the remedy: `master decide GY-N rework 'Address the unresolved review threads: …'`. A thread's path and author are text a contributor chose, so the reason is a single shell-quoted argument: running the command as printed cannot expand or execute anything a file name contains;
+- `master merge` refuses such a candidate before it acquires anything, naming the threads, so no merge execution is issued and none is left retained with an unknown outcome.
+
+An unresolved review thread is a finding to fix, not a switch to flip. Read it, and route it the way a `CHANGES_REQUESTED` verdict is routed: request rework whose reason carries the finding, and let the next attempt address it. Resolving a thread the master did not write is not the master's call — neither is dismissing it, or asking a worker to resolve it without a change. The thread's author, or the fix that answers it, closes it; the merge gate passes once the next observation finds no unresolved thread. A thread a fix has made outdated, whose author never resolves it, still blocks: that is the operator's call, made with the recorded `id`, not a raw GraphQL read.
+
 ### One executor per execution
 
 A merge execution is owned by the executor instance that acquired it, never by the coordinator principal alone. The durable loop is one instance for the life of its process; each `master merge` command is one instance named by its request id, so a replay under the same `GRAPHYARD_REQUEST_ID` resumes its own execution. Every merge step names the instance, and the engine records the owner as `principal#instance` and refuses `merge-verify`, `merge-commit` and above all `merge-cancel` from any other instance, even under the same credential.
@@ -1939,23 +1985,87 @@ Most of those rounds have two causes — items with overlapping `plannedFiles` b
 and shared generated files that nearly every pull request regenerated — and `master status`
 reports both so the master can schedule around them.
 
-**Overlap-aware dispatch.** An item's `plannedFiles` are a soft exclusive resource against every
-item that is *claimed* (a live lease, or a quarantine still holding its assignment) or *submitted
-but not merged*. Such an item is not dispatched, by the loop or by `master dispatch`; the row's
-`overlap` says `held: true`, lists each item `ahead` with the overlapping `paths` on both sides, and
-`schedule.held` repeats the hold with its reason. Two ready items that overlap each other hold
-nothing: the first to be dispatched then holds the other. The hold is advisory with an operator
-override — `master dispatch GY-N PROFILE --allow-overlap` dispatches anyway and records the
-overlap in its result — and the loop never uses the override. Exclusive resources, dependencies,
-blockers and quarantines refuse exactly as before; `--allow-overlap` lifts nothing else.
+**Overlap-aware dispatch.** The paths an item excludes on are a soft exclusive resource against
+every item that is *in flight*: *claimed* (a live lease, or a quarantine still holding its
+assignment) or *submitted with its candidate standing* (not sent back for rework). Such an item is
+not dispatched, by the loop or by `master dispatch`, while the hold is under its bound; the row's
+`overlap` says `held: true`, lists each item `ahead` with the overlapping `paths` on both sides,
+carries the `hold` — `since`, `ageMs`, `boundMs`, and the `chain` the item waits behind — and
+`schedule.held` repeats it with its reason. A ready or reworked item nobody has claimed holds
+nothing: two such peers that overlap are ordered, and the first to be dispatched then holds the
+other. Exclusive resources, dependencies, blockers and quarantines refuse exactly as before;
+neither the bound nor `--allow-overlap` lifts anything else.
+
+**What the rule compares once a candidate exists.** Before an item has a candidate, its
+`plannedFiles` are all anyone knows, and a directory scope counts as the whole directory. Once a
+candidate is observed, the item is compared on the files that candidate actually changed and its
+declared scope no longer counts: a `tests/` claim that turned into `tests/one.test.ts` excludes
+only items touching that file. Two items whose declared directories overlap but whose candidates
+changed disjoint files run together; two candidates that changed the same file are still held
+apart. Exclusion is decided by real conflict, not by declared breadth, and a directory claim stops
+serialising the fleet the moment its pull request opens.
+
+**How to draw a scope, and why a directory claim serialises the fleet.** Name the files the item
+will change. Use a directory only below the root and only when the item owns that whole tree
+(`src/cli/` for a new command module, never `src/`). A root-level directory — `src/`, `docs/`,
+`tests/`, `/` — is a claim on nearly the whole repository: until the item has a candidate it
+excludes every other item under that root, and every one of them excludes it, whether or not any
+two of them ever touch the same file. Enough such claims make the overlap graph complete, so the
+fleet's effective concurrency falls to one however many workers are idle, and held branches then
+sit while the base moves under them and land with the real conflicts the hold was meant to prevent.
+On 2026-09-21 fourteen in-flight items mutually overlapped this way (one declared twenty-three
+paths, `tests/`, `src/cli/`, `examples/` and `AGENTS.md` among them), every ready item was held,
+eleven worker profiles idled, and the repository measured an execution share of 10% and a routine
+submit→merge p90 of 22 hours. So `master create`, `master requirements` and `master scope` refuse
+a root-level directory scope, naming the narrower paths the item's own title, description and
+criteria mention (`tests/` → `tests/one-file.test.ts`); `--allow-broad-scope` records the
+exception in the audited reason instead (`Broad scope exception (tests/) recorded with
+--allow-broad-scope: …`), attributed to the identity that set it, so a high-conflict scope is
+never introduced unnoticed. Each row's `scope` still carries the breadth and marks a root-level
+directory `highConflict` (also under `schedule.highConflict`). A worker that needs a root
+directory asks with `graphyard scope-request`; the loop refuses it like any path the item does not
+imply — unless a criterion's own text names that directory, which the loop reads as implied — and
+the master decides it with the flag.
+
+**Effective concurrency.** `master status` reports, under `effectiveConcurrency`, how many items the
+overlap graph lets run at once — the largest set of open items (in flight or dispatchable) no two
+of which exclude each other, exact for the sizes a board reaches — beside the number of idle
+launch profiles, the items in flight, dispatchable and held, and the holds past the bound, in one
+`statement`: `1 item could be in flight at once over 14 open items (91 overlaps); 11 of 11 launch
+profiles idle; 12 held, 0 past the 2h hold bound`. Eleven free workers and an effective
+concurrency of one is serialization, not a shortage of anything, and it is read without opening a
+single hold reason. `counts.effectiveConcurrency`, `counts.idleWorkers`, `counts.held` and
+`counts.holdsOverdue` carry the same numbers.
+
+**The hold is bounded.** A hold is honoured for two hours (`dispatchHoldBoundMs`), counted from
+the later of the item becoming dispatchable and the first item now ahead of it going into flight —
+its claim, not the stage it last entered, so an item ahead moving from review to acceptance to the
+merge queue does not restart the hold behind it.
+Past the bound the item is no longer held: the loop and `master dispatch` offer it over the overlap,
+the dispatch result records the overlap, the age of the hold and the chain it waited behind
+(`Dispatched over a planned-file overlap with GY-b (submitted, merge) on src/cli/b.ts after a hold
+of 2.2h, past the 2h bound, behind GY-b (submitted, merge, merge queue position 3, itself behind
+GY-d, GY-c) → …`), and until a worker takes it `master status` raises the overdue hold as an
+attention item naming that chain (`schedule.overdue` lists them). The chain follows each item ahead
+to what it in turn waits for — a submitted candidate's merge-queue predecessors, in the order the
+item must see them merge — so a hold three deep names every link. A held item in flight beside an
+item it overlaps, dispatched past the bound or by override, shows what it runs `concurrent` with on
+its row, so the overlap stays recorded. Under the bound the override remains the master's call:
+`master dispatch GY-N PROFILE --allow-overlap` dispatches anyway and records the overlap in its
+result as an operator override. The sync round before every push and the merge queue's speculative
+tips handle the genuine conflicts either way.
 
 **Smallest scope first.** Among ready items of the same operator priority, `schedule.order` offers
 the smallest planned scope first: fewest root-level directory scopes (`src/`, `docs/`, `tests/`),
 then fewest directory scopes, then fewest files, then the older item. A small item that lands early
-is one fewer re-integration for everything that would otherwise have waited behind it. Each row's
-`scope` carries that breadth, and a root-level directory scope marks the item `highConflict`
-(also listed under `schedule.highConflict`): narrow such a scope with a two-party `requirements`
-decision before dispatching it beside anything else.
+is one fewer re-integration for everything that would otherwise have waited behind it.
+
+**Measuring the effect.** The numbers that motivated this are the repository's own: before the
+change, `node scripts/measure-pipeline-speed.mjs` read an execution share of 10%, a submit→merge
+p90 of 2,516 minutes over every delivery and 1,325 minutes (22 hours) over routine ones, and a
+median of two rework rounds. `node scripts/measure-pipeline-speed.mjs --split GY-112` recomputes
+the same figures for the deliveries merged before and after the change landed, so whether
+serialization rather than capacity was the constraint is settled by the same data.
 
 **Per-candidate conflict sets.** For every open candidate, `master status` runs
 `git merge-tree --write-tree` between its head and each other open candidate's head — a real
@@ -2239,8 +2349,8 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master registry runtime\|model\|account\|role remove NAME --reason R` | Remove an entry; removing a runtime removes its accounts, and roles fall back in order |
 | `master registry history [--limit N]` | Every registry change and selection, newest first |
 | `master start KIND` | Launch the visible master session with its harness rules |
-| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), per-row `contamination` and `restoredApproval` with `branches` ([speculative tips and branch protection](#speculative-tips-and-branch-protection)), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
-| `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
+| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds with their age and chain, overdue holds, high-conflict scopes), `effectiveConcurrency` (what the overlap graph lets run at once, beside idle workers), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), per-row `contamination` and `restoredApproval` with `branches` ([speculative tips and branch protection](#speculative-tips-and-branch-protection)), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
+| `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; an overlap with in-flight changes holds it for at most the hold bound, and `--allow-overlap` dispatches over the hold under it |
 | `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
 | `master producer replace FILE` | Replace the producer profile of the same name, verified like `add` |
 | `master producer remove NAME` | Remove a proof-producer launch profile |
@@ -2254,8 +2364,8 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master config FIELD=VALUE…` | Tune the settings the master owns (run cadence, workflows, deployment, reviewer profile, producer timeout, quota ceiling, `accounts:PROFILE=a,b`); `autoMerge` and credential paths stay operator-only |
 | `master merge GY-N\|--all` | Guarded merge of authorized candidates as one executor instance; with automatic merging off, only candidates with an approved merge decision; stands down from an execution the loop holds |
 | `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
-| `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
-| `master scope GY-N [REASON]` | Apply a scope request the loop refused, while the attempt keeps its lease; requests the item already implies are decided by the loop ([scope requests the loop decides](#scope-requests-the-loop-decides)) |
+| `master create FILE [--allow-broad-scope] REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE [--allow-broad-scope] REASON` | The master's own non-weakening intent, as its operator-agent identity; a root-level directory scope is refused with the narrower paths to name unless the flag records the exception ([conflict avoidance](#conflict-avoidance)) |
+| `master scope GY-N [--allow-broad-scope] [REASON]` | Apply a scope request the loop refused, while the attempt keeps its lease; requests the item already implies are decided by the loop ([scope requests the loop decides](#scope-requests-the-loop-decides)); a requested root-level directory needs the flag |
 | `master repair GY-N REASON` | Ask the control plane to restore a branch found carrying another item's unlanded commits to the item's own reviewed head merged onto the base ([a contaminated branch](#a-contaminated-branch)) |
 | `master decide GY-N ACTION [JSON\|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`; a handler cites the precedent it followed and the context it judged from |
 | `master context GY-N [TRIGGER] [--budget N]` | The assembled [escalation context](#escalation-context), read by key alone and verified against its fingerprint |
@@ -2263,6 +2373,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
 | `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision, on the registry's `approver` role (KIND overrides the runtime) |
 | `master approve GY-N DECISION REASON` | Approve, from the approver session only |
+| `master refuse GY-N DECISION REASON` | Record a considered refusal, from the approver session only; the decision ends `refused` with the reason |
 | `master principals [--apply]` | Preview or apply an agent-principal roster rotation that keeps every live principal |
 | `master restart` | Stop this host's durable loop and start it again detached |
 | `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers; its cycle also reclaims [worktree disk](#worktree-disk) |

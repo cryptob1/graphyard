@@ -14,6 +14,7 @@ import type { ScopeDecision, ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import { proofSchema } from './proof.js';
+import { closedQuestionsSchema } from './closed-question.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
@@ -38,6 +39,10 @@ export const createSchema = z.object({
   // the human operator. See model/dispatch.ts.
   producerProofs: z.array(proofSchema).max(50).optional().refine(proofs => !proofs || proofs.every(proof => proof.startsWith('manual:')), 'producerProofs names only manual: proofs; unit and integration proofs are producer-runnable already')
     .refine(proofs => !proofs || new Set(proofs).size === proofs.length, 'producerProofs must be unique'),
+  // Proofs a criterion declares answerable as a closed question: Graphyard asks the configured
+  // responder against the bound candidate state instead of launching a producer session, and
+  // records the answer as evidence. See model/closed-question.ts.
+  closedQuestions: closedQuestionsSchema.optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
