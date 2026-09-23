@@ -8,7 +8,7 @@ import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
-import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, type SessionLedgerSpec } from './reviewer.js';
+import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -228,7 +228,11 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
       requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), delivery, checkout: checkout.directory });
     // A record that cannot be written leaves no session behind.
     try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
-    catch (error) { try { stopCreatedHerdrTab(pane, tabId, dependencies.run); } catch { /* the refusal below is the cause */ } await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); throw error; }
+    catch (error) {
+      // A pane Herdr could not confirm closed keeps its checkout and is named in the refusal, so it is not lost with the record.
+      if (!unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
+      await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); throw error;
+    }
     return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
       profile: profile.name, principal: profile.principal, agentName, pane: record.pane, checkout: checkout.directory, expiresAt: record.expiresAt, approvals: launch.plan.approvals, delivery,
       account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,

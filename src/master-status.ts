@@ -21,31 +21,53 @@ import { reviewLedgerSpec, sessionLedgerRefusal, sessionLedgerRemedy } from './r
  * matching the list.
  */
 export function ledgerRefusalAttention<T extends { work: any[]; attentionItems: AttentionItem[]; counts?: { attention: number } }>(status: T, work: Work[]): T {
-  const refusals = new Map<string, RegExpMatchArray>();
+  // Per item, one standing refusal per ledger: a refused review and a refused producer launch are separate faults.
+  const refusals = new Map<string, Map<LedgerKind, RegExpMatchArray>>();
   // What an action says now: its failed resolution, its stall, or a latest event that is a failure.
   const standing = (action: ActionRow) => [action.result === 'failed' ? action.resolution : undefined, action.stall?.reason, action.history.at(-1)?.event === 'failed' ? action.history.at(-1)!.reason : undefined];
   for (const row of status.work as { key: string; dispatch?: { review: { failure?: { reason: string } | null } | null; producers: { failure?: { reason: string } | null }[] } | null }[]) {
     const item = work.find(candidate => candidate.key === row.key);
     const reasons = [row.dispatch?.review?.failure?.reason, ...(row.dispatch?.producers ?? []).map(request => request.failure?.reason), ...(item?.actionQueue?.actions ?? []).flatMap(standing)];
-    const match = reasons.map(reason => reason?.match(sessionLedgerRefusal)).find(Boolean);
-    if (match) refusals.set(row.key, match);
+    const byKind = new Map<LedgerKind, RegExpMatchArray>();
+    for (const match of reasons.map(reason => reason?.match(sessionLedgerRefusal))) if (match && !byKind.has(match[1] as LedgerKind)) byKind.set(match[1] as LedgerKind, match);
+    if (byKind.size) refusals.set(row.key, byKind);
   }
   if (!refusals.size) return status;
-  const items = new Map<string, AttentionItem>(), replaced = new Map<string, string | null>();
+  const items: AttentionItem[] = [], replaced = new Map<string, string | null>();
   const rows = status.work.map((row: { key: string; attention: string | null }) => {
-    const match = refusals.get(row.key);
-    if (!match) return row;
-    const [, kind, path, bound, live] = match;
-    const spec = kind === 'review' ? reviewLedgerSpec : producerLedgerSpec;
-    const text = `${row.key}'s ${kind === 'review' ? 'review' : 'proof producer'} cannot be requested because the ${spec.name} (${path}) refused the write: its bound is ${bound} records and ${live} are live sessions. This is local state, not ${spec.role} capacity`;
-    const item: AttentionItem = { subject: row.key, text, ...agentOwner('master', `${sessionLedgerRemedy(spec)}; master status reports the ledger's headroom under ledgers`) };
-    items.set(row.key, item); replaced.set(row.key, row.attention);
-    const { subject, text: attention, ...owner } = item;
+    const byKind = refusals.get(row.key);
+    if (!byKind) return row;
+    const own = [...byKind.values()].map(([, kind, path, bound, live]) => {
+      const spec = kind === 'review' ? reviewLedgerSpec : producerLedgerSpec;
+      const text = `${row.key}'s ${kind === 'review' ? 'review' : 'proof producer'} cannot be requested because the ${spec.name} (${path}) refused the write: its bound is ${bound} records and ${live} are live sessions. This is local state, not ${spec.role} capacity`;
+      return { subject: row.key, text, ...agentOwner('master', `${sessionLedgerRemedy(spec)}; master status reports the ledger's headroom under ledgers`) } as AttentionItem;
+    });
+    items.push(...own); replaced.set(row.key, row.attention);
+    const { subject, text: attention, ...owner } = own[0];
     return { ...row, attention, attentionOwner: owner };
   });
-  // What the item used to say — its row's attention, the busy agent, the raw launch refusal, a stalled row repeating it — gives way to the one ledger item.
-  const superseded = (entry: AttentionItem) => items.has(entry.subject) && (entry.text === replaced.get(entry.subject) || sessionLedgerRefusal.test(entry.text) || /is busy in Herdr|launch for \S+ refused|request-review action/i.test(entry.text));
-  const attentionItems = [...status.attentionItems.filter(entry => !superseded(entry)), ...items.values()];
+  // What the item used to say about a refused launch — its row's attention, the busy agent, the raw
+  // launch refusal, a stalled row repeating it — gives way to that ledger's item. Supersession is
+  // per launch: a review ledger refusal never hides a stalled or refused producer launch, nor the reverse.
+  const superseded = (entry: AttentionItem) => {
+    const byKind = refusals.get(entry.subject);
+    if (!byKind) return false;
+    if (entry.text === replaced.get(entry.subject)) return true;
+    const kind = attentionLaunchKind(entry.text);
+    return !!kind && byKind.has(kind);
+  };
+  const attentionItems = [...status.attentionItems.filter(entry => !superseded(entry)), ...items];
   const counts = status.counts && { ...status.counts, attention: status.counts.attention + attentionItems.length - status.attentionItems.length };
   return { ...status, work: rows, attentionItems, ...(counts ? { counts } : {}) };
+}
+
+type LedgerKind = 'review' | 'producer';
+
+/** Which launch an attention text is about, when it is about a launch at all. */
+function attentionLaunchKind(text: string): LedgerKind | null {
+  const refusal = text.match(sessionLedgerRefusal);
+  if (refusal) return refusal[1] as LedgerKind;
+  if (/reviewer agent \S+ is busy in Herdr|request-review action|review launch for \S+ refused/i.test(text)) return 'review';
+  if (/producer profile is busy|producer launch for \S+ refused/i.test(text)) return 'producer';
+  return null;
 }

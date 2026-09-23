@@ -113,6 +113,21 @@ export const sessionLedgerRemedy = (spec: SessionLedgerSpec) => `settle the live
 /** Matches a ledger refusal wherever its text was recorded: an action row, a dispatch failure, a launch error. */
 export const sessionLedgerRefusal = /The (review|producer) ledger \((\S+)\) refused the write: its bound is (\d+) records and (\d+) are live/;
 
+/**
+ * After a launch whose record could not be written, stop the pane it created. When Herdr cannot
+ * confirm the pane closed, the refusal says so — naming the pane and the agent name it still holds —
+ * so a session with no ledger record is never reported as removed; the caller keeps its checkout.
+ * Returns whether the pane is gone (or never existed).
+ */
+export function unrecordedPaneStopped(error: unknown, pane: string | undefined, tab: string | undefined, agentName: string, stop: () => void): boolean {
+  if (!pane && !tab) return true;
+  try { stop(); return true; }
+  catch (cleanup) {
+    if (error instanceof Error) error.message += `; Herdr could not confirm the created pane ${pane ?? tab} closed (${cleanup instanceof Error ? cleanup.message.split('\n')[0] : String(cleanup)}), so agent ${agentName} may still be running with no ledger record: close that pane in Herdr before relaunching`;
+    return false;
+  }
+}
+
 /** The records one write keeps: every live and pinned one, then the newest other terminal ones the bound and the retention allow. */
 export function boundSessionLedger<T extends LedgerRecord>(records: T[], spec: SessionLedgerSpec, limits: { bound?: number; retention?: number } = {}): T[] {
   const bound = limits.bound ?? sessionLedgerBound, retention = limits.retention ?? sessionLedgerRetention;
@@ -427,7 +442,10 @@ export async function launchReview(root: string, work: Work, profileName: string
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
     // A record that cannot be written leaves no session behind: the pane is stopped and the credential withdrawn.
     try { await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] }); }
-    catch (error) { try { stopCreatedHerdrTab(pane, tabId, dependencies.run); } catch { /* the refusal below is the cause; the pane is reported by Herdr */ } await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
+    catch (error) {
+      if (!unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
+      await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
+    }
     return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
       pane: record.pane, checkout: checkout.directory, reviewer: `${reviewerApp.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery,
       account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,

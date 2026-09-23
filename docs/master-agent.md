@@ -1282,13 +1282,17 @@ on a cap the other lacks.
 - **Full ledger.** A write that would pass the bound gives up retained terminal records first, even
   inside the window. It is refused only when live and pinned records alone reach the bound. A
   launch checks this before it creates a pane, so a refused launch never leaves a running session
-  holding the agent's name.
+  holding the agent's name. When the write itself is refused after the pane exists, the launcher
+  stops the pane; if Herdr cannot confirm it closed, the refusal names the pane and the agent name
+  it may still hold, and the session's checkout is kept for it.
   The refusal names the ledger, its bound, the live count and any pinned count:
   `The review ledger (.graphyard/reviews.json) refused the write: its bound is 200 records and 200 are live sessions …`.
   This is local state, not reviewer or producer capacity. `master status` attributes it that way.
-  The row's attention and a single attention item name the ledger, the bound, the live count and
-  the remedy, and `counts.attention` counts that one item. The item is never reported as waiting
-  on a busy reviewer agent. Only a refusal that stands now is attributed: a dispatch failure, a
+  The row's attention and one attention item per refusing ledger name the ledger, the bound, the
+  live count and the remedy, and `counts.attention` counts those items. The item is never reported
+  as waiting on a busy reviewer agent. Only attention about the refused launch gives way: a review
+  ledger refusal replaces the busy reviewer and the stalled `request-review` action, never a
+  producer launch failure of the same item, and the reverse. Only a refusal that stands now is attributed: a dispatch failure, a
   stalled action, or an action whose latest event is the failure. An action that failed once on a full ledger and has since
   been claimed again or completed is not. The remedy is to settle the
   live sessions: `master status` reconciles every pending record against its session and GitHub.
