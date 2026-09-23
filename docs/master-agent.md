@@ -99,6 +99,18 @@ An account that fails either check is skipped with its reason — `claude-a quot
 
 `master status` shows, under `dispatch.accounts`, every environment as the last launch check saw it (login, quota, usage windows, the login command when it is logged out) and the recent launches that skipped an account, with role, profile, item and reason. The same record is kept beside the coordinator credential (`*.environments.json`, mode 0600); it never holds a provider token.
 
+### The agent registry
+
+The fleet is control-plane state. The **agent registry** stores the *runtimes* (each agent CLI with its launch contract), the *accounts* of each runtime (a credential held by reference — host and login home — with the quota state and reset time executors observed), the *model* each account runs with its cost and capability, and the *roles* — `worker`, `reviewer`, `producer`, `approver`, `escalation-handler` — each naming its eligible accounts in preference order with a concurrency limit. It is configured through the API (`/api/agent-registry`), `graphyard master registry …`, and the dashboard's Agent fleet page, by the admin or the coordinator identity; [onboarding](onboarding.md#configure-the-fleet) adds a runtime, an account and a role in that order, and `master registry propose --apply` builds the whole thing from the logins a host already has. Changing the fleet is the master's own call, not the operator's — logging an account in, or buying one, is the only human part.
+
+**Selection.** When an executor runs an action — a worker dispatch, a reviewer or producer launch, an approver session — it probes the logins on its own host, reports what it saw, and asks the control plane for a session. Inside the coordination transaction the control plane folds those observations in, closes sessions whose work has moved on, and picks **the first account of the role, in the role's order,** that is enabled, placed on the asking host, logged in, within quota, and under its session limit, provided the role is under its concurrency limit. It records the choice as an `agent-registry.selected` event with its reason and every account passed over (`claude-c is the first eligible account for worker (preference 3 of 4; 2 of 4 concurrent) — passed over codex-a quota is exhausted until …; claude-b is not logged in`), and a refusal once per distinct reason. The launch then uses the registry runtime's contract and the account's model; the profile contributes only the Graphyard identity (and its own `agentArgs` when it is the same runtime). Because selection is serialized in the control plane, the limits hold across every executor host.
+
+**Live sessions** need no bookkeeping by the executor: a worker session lives as long as its item's lease, a reviewer or producer session as long as the request it answers stands, an approver session for thirty minutes, and every session through a five-minute launch grace. A launch that fails gives its session back at once, on every path — worker, reviewer, producer and approver alike — for every failure after the choice: a credential mismatch, a token mint, a session harness, a Herdr tab, a prompt the runtime never took. And a request supersedes the session it replaces before any limit is counted: a relaunch for the same work — the next attempt of a request, a review of a new head — takes over the slot of the session it follows (a producer within its own proof group, so the groups of one item still run side by side), so a role is never refused by the session of its own previous attempt. The one end the control plane cannot infer — a launcher killed mid-flight, a host that went away — is `master registry session end ID --reason …`.
+
+**No restart, no file edit.** Nothing is cached between actions, so adding an account, marking one exhausted, reordering a role or removing a whole runtime takes effect on the next action of a running `master run`. An operator's exhausted mark holds against the probe until its reset or until it is cleared; a probe-observed exhaustion clears itself when its window resets. If the control plane cannot be reached, a role the registry decides launches nothing until it answers — an outage never hands a role back to a file. A role the registry does not define yet launches from the profile's own `accounts` as described above, which is how an installation migrates role by role; `master status` says so under `fleet.next` while no role is configured.
+
+**Visibility.** `master status` reports the registry under `fleet`: per account its runtime, model (id, cost, capability tier), host, role eligibility with its place in each role's order, live sessions, login, quota, usage windows, reset time, and `ineligible` — the reason it cannot take a session now; per role the account its next action would run on, or what blocks it; the recent selections with their reasons; and the recent refusals. A blocked role, an account that serves no role, and an unconfigured role are raised as `fleet` attention items the master resolves itself with `master registry`. The dashboard's Agent fleet page shows the same view and carries the forms that configure it. The registry is kept on the append-only event ledger (every change and selection is an `agent-registry.*` event carrying the resulting registry), so its full history is `master registry history` and every logical backup carries it.
+
 ### Exhaustion in the middle of a session
 
 The launch check reads an account before a session starts. An account that runs out **while its session works** does not fail: the runtime prints its provider's limit notice — `You've hit your weekly limit · resets …`, `Weekly usage limit reached … reset at …`, `You've reached your spend limit … resets on 10/8` — and the session stops there, holding its lease or its request. Until GY-89 a master noticed by reading panes and repointed profiles by hand, at 20–60 minutes each. The durable loop now does it on the cycle it sees it:
@@ -110,6 +122,8 @@ The launch check reads an account before a session starts. An account that runs 
 5. **Re-queue.** A worker's item is claimable again once that quarantine settles, and the dispatch step of the next cycle launches it on the profile's next account or on another profile — twenty seconds after detection at the default interval, inside the two-minute bound. A reviewer or producer session is ended on its ledger as `failed` with the exhaustion as its resolution and its request is launched again at once, the exhausted profile last.
 
 Each failover is one `failover` action in `daemon.actions`, and `master status` shows the item's recent exhaustions under `work[].capacity`.
+
+A session that exits **at launch** on the same notice — the account was spent before its session started, and the launch check did not see it — is classified by the automatic dispatcher from what its pane printed and failed over the same three ways (hold, record, relaunch on the next account) without a ledger record to end; see [a session that exits at launch](#the-dispatchers-own-state).
 
 ### When a role has no account left
 
@@ -148,7 +162,7 @@ A runtime ready within **30 seconds** has started. One that is *starting* at 30 
 - `the claude runtime was still starting after 120 s in pane w1V:pR6 (the claude runtime process exists under the pane, Herdr reports it unknown); the pane last showed: "…"` — the runtime's process exists but nothing of it ever reached the screen.
 - `the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"` — a dialog the runtime raised before taking its request; what it asks is the last line.
 
-A refused start is recorded with that reason wherever launches are recorded: the dispatcher's `failures` for a reviewer or producer request, the row's `attention` in `master status` (`Automatic producer launch for GY-N refused 1 time(s): the claude runtime never started …`), and a worker dispatch's error. The tab is closed and, for a reviewer or producer, the session checkout removed; the loop retries on its widening schedule.
+A refused start is recorded with that reason wherever launches are recorded: the dispatcher's `failures` for a reviewer or producer request, the row's `attention` in `master status` (`Automatic producer launch for GY-N refused 1 time(s): the claude runtime never started …`), and a worker dispatch's error. The tab is closed and, for a reviewer or producer, the session checkout removed; the loop retries on its widening schedule. One case is not a refusal: a reviewer or producer runtime whose pane shows its provider's limit notice exited on it, and the automatic dispatcher fails the launch over to the next account instead, without waiting for the bound — see [a session that exits at launch](#the-dispatchers-own-state).
 
 #### Confirmed prompt delivery
 
@@ -1246,6 +1260,69 @@ each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…)
 dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
 later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
 
+### The dispatcher's own state
+
+The dispatch cursor (`*.dispatch.json` beside the coordinator credential) is the dispatcher's
+memory: its tick count, the last tick's counts and the reasons nothing launched, every refused
+launch with its widening retry, and each role's capacity hold. Every string in it has a cap, and
+until GY-120 the cap was checked only when the cursor was persisted: a refusal whose error text
+reached the failure reason's cap (a Herdr JSON error, for one) was wrapped in a longer wait
+sentence on the next tick, the sentence failed the cursor's schema, the tick failed, and the
+dispatcher retried the identical tick forever — no reviewer or producer launched for *any* item,
+while the tick count and the cursor's timestamp made it look alive. Three rules now hold:
+
+- **The dispatcher bounds its own state where it composes it.** Every string it writes into the
+  cursor — a tick reason, a failure reason, a capacity reason, a session resolution it wraps — is
+  bounded before it is stored, and each cut is marked with an ellipsis rather than hidden. The
+  bounds nest: a stored failure reason (300 characters) leaves room for the wait sentence that
+  wraps it (`launch refused 12 time(s): …; no further automatic attempt`), and that sentence is
+  bounded again (500) before it becomes a tick reason, so a failure reason at its cap still
+  yields a valid tick. A launch that fails with a 2,000-character error is a refusal whose
+  reason ends in `…`, not a tick that cannot persist.
+- **A cursor that fails its schema is repaired, not fatal.** On load and again before every
+  persist, a string past its cap is truncated in place and the repair is logged once with the
+  path that failed (`[graphyard-dispatch] repaired the dispatch cursor while persisting it:
+  lastTick.reasons[1] — 612 characters exceeded its cap of 500 and it was truncated`). A defect
+  of this class degrades one reason string; it never takes launching away from the other items.
+  Anything else the schema refuses — a count out of range, a missing field — is still refused,
+  naming its path, and `master status` reports a cursor it cannot read as one attention item
+  rather than a dispatcher silently absent.
+- **A tick failure is attributed and surfaced.** A tick that cannot persist names the field it
+  could not write and the request and item that field was composed for: `master status` shows it
+  under `dispatch.lastFailure` (`field`, `kind`, `request`, `work`) beside `consecutiveFailures`
+  and `lastSuccessAt`. Three consecutive failures raise one attention item, addressed to the
+  master, saying that no reviewer or producer session is being launched for any item and why —
+  the reason, and for a persist failure the field and the request behind it — with the repair
+  path (`graphyard master restart` re-reads and repairs the cursor) or the fault to fix (the
+  control plane, its credential, Herdr). Every request keeps reading as `waiting` meanwhile, so
+  the dispatcher's own health is named before the requests it is not launching.
+
+**A session that exits at launch is classified from its pane.** The launcher types the launch
+into the pane and [reads the pane](#the-start-bound-reads-the-pane) until the runtime is ready:
+`herdr agent get` answers `agent_not_found` while the runtime is not there, which says nothing
+about why, and `herdr pane read` shows what the runtime printed. A runtime that printed its
+provider's limit notice and exited leaves the notice under its banner, and the banner alone would
+hold the start bound to its 120-second ceiling before the refusal. The dispatcher therefore
+watches each launch's own reads of the pane it typed into — the pane is read no more often than
+the launcher reads it, and never after the launcher closed it — and classifies from the last read:
+
+- a **provider limit notice** (the same notices [mid-session detection](#exhaustion-in-the-middle-of-a-session)
+  matches) is account exhaustion: the launch is refused at the launcher's next pause between
+  polls, within seconds rather than at the bound, and the exit is recorded for the account the
+  launcher selected — `profile:NAME` for a profile that names no `accounts` — and it
+  fails over exactly as a mid-session exhaustion does: the account is held until the reset the notice named,
+  `capacity.exhausted` is recorded on the item with `requestId`, profile, account and runtime, and
+  the same profile launches again at once on its next account; a profile with no account left
+  fails over to the next profile, or the role waits for capacity. The tick's launch entry lists
+  each account passed over this way under `failover`, and `master status` shows the hold under
+  `dispatch.accounts`. A refusal the launcher raised at its bound while the notice was on the pane
+  is classified the same way; a runtime Herdr found at a dialog (`blocked`) did not exit and is not;
+- **any other cause** is the refusal the launcher worded — which case it saw (`no runtime under
+  the pane`, `command still echoing`, the dialog) and the pane's last words as the reason — rather
+  than the CLI's error, and it is retried on the usual widening schedule. A dispatcher wired
+  without an account hold records the notice itself as the refusal
+  (`the session exited within seconds of its launch on its provider's limit notice: …`).
+
 ### Managing profiles
 
 Profiles change while the loop runs; it adopts each change on its next tick.
@@ -1826,6 +1903,12 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | --- | --- |
 | `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
 | `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
+| `master registry` | The fleet the control plane holds: every account with its runtime, model, roles, live sessions, quota, reset and ineligible reason ([the agent registry](#the-agent-registry)) |
+| `master registry propose [--directory DIR] [--apply]` | Discover the agent CLIs logged in on this host and propose (or store) the runtimes, models, accounts and roles for them |
+| `master registry runtime\|model\|account\|role set … --reason R` | Add or change one registry entry; a `set` names only what changes |
+| `master registry account quota NAME exhausted\|available\|unknown [--resets-at ISO] --reason R` | Mark an account's quota by hand; an exhausted mark holds until its reset or until cleared |
+| `master registry runtime\|model\|account\|role remove NAME --reason R` | Remove an entry; removing a runtime removes its accounts, and roles fall back in order |
+| `master registry history [--limit N]` | Every registry change and selection, newest first |
 | `master start KIND` | Launch the visible master session with its harness rules |
 | `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
@@ -1848,7 +1931,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master context GY-N [TRIGGER] [--budget N]` | The assembled [escalation context](#escalation-context), read by key alone and verified against its fingerprint |
 | `master escalation GY-N [TRIGGER] [--budget N] [precedent\|KIND]` | Spawn a fresh handler on that context alone: `precedent` follows the newest applied line in this process, an agent `KIND` launches a judging session |
 | `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
-| `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision |
+| `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision, on the registry's `approver` role (KIND overrides the runtime) |
 | `master approve GY-N DECISION REASON` | Approve, from the approver session only |
 | `master principals [--apply]` | Preview or apply an agent-principal roster rotation that keeps every live principal |
 | `master restart` | Stop this host's durable loop and start it again detached |
