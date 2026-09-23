@@ -14,7 +14,7 @@ import { launchAuthorization, loadConnection, managedInstructions, serverOrigin 
 import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
-import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
@@ -2326,7 +2326,7 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard') {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
@@ -2480,8 +2480,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
+  // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
+  const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
+  const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
+    ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
@@ -2490,13 +2494,13 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length,
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length,
       contaminatedBranches: rows.filter(row => row.contamination && row.contamination.source.length).length, restoredApprovals: rows.filter(row => row.restoredApproval).length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
     // What waits on the human, longest first, with how to answer; the roles out of capacity; and
     // each role's sessions against its concurrency limit with the longest wait for a slot.
-    humanRequests, capacity, concurrency,
+    humanRequests, capacity, concurrency, unrunnableRemedies: remedies,
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
@@ -3377,27 +3381,67 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
 
 /**
  * A worker session's own rules, written into its assigned worktree: it runs its item's commands,
- * pushes its assigned branch and opens the pull request without a keypress, and can never push
- * the base branch, force-push, rebase, merge, review, or read a credential.
+ * pushes its assigned branch and opens the pull request without a keypress, and is denied pushing
+ * the base branch, force-pushing, deleting a ref, rebasing, merging, reviewing and reading a
+ * credential, in every spelling a rule names; a spelling no rule names is unmatched, not denied.
+ *
+ * The one history rewrite it may make goes through `restore-branch GY-N EPOCH`, never a raw push:
+ * the recovery of an ejected or contaminated tip resets the assigned branch to the item's reviewed
+ * head, syncs it onto the base and pushes, and the rework the control plane authorizes must be
+ * executable by the session it dispatches (GY-128). A permission glob cannot say "this ref and no
+ * other", and a Claude worker runs under bypassPermissions, where a command no rule matches runs.
+ * So every raw `--force*` push is denied, the lease push included, and the CLI makes the one lease
+ * push itself: to the branch registered for the caller's live lease, conditional on the tip it
+ * fetched (`--force-with-lease=refs/heads/BRANCH:TIP`), so it replaces only what it saw.
  */
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
-    ...['status', 'sync', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
+    ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
     { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
     { rule: `Bash(git push -u origin ${input.branch})`, why: 'Publish the assigned branch the first time.' },
     { rule: `Bash(git push origin HEAD:${input.branch})`, why: 'Push the current head to the assigned branch.' },
+    { rule: 'Bash(git fetch origin)', why: 'Read the remote tips restore-branch and sync compare against.' },
+    { rule: 'Bash(git reset --hard *)', why: 'Move the assigned branch back to the reviewed head before sync; it changes only this worktree.' },
     { rule: 'Bash(gh pr create:*)', why: 'Open the pull request the worker submits with complete.' },
     { rule: 'Bash(gh pr view:*)', why: 'Read the pull request number and state before submitting.' },
     { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for the worker\'s own candidate.' },
     { rule: `Bash(git merge origin/${input.baseBranch})`, why: 'sync merges the base branch; the worker never rebases.' },
   ];
+  // Every rewrite, in each spelling a rule can name: `--force`, `--force-with-lease` (bare or
+  // `=REF:SHA`) and `--force-if-includes` alike, and the abbreviations git accepts for them. The
+  // lease push of the assigned branch is restore-branch's, which checks the ref itself; no rule may
+  // end in `:*` or ` *` where the bare prefix would match an allowed push, because Claude Code reads
+  // both as "this prefix, with or without more" (` :**` ends in neither). Each rule also has a twin
+  // for a push behind git's global options (`git -C DIR push`, `git -c KEY=VALUE push`).
+  const push: [string, string][] = [
+    ['*--force*', 'A raw force push, the lease form included, could rewrite any ref: a glob cannot limit it to the assigned branch. The one restoration push is restore-branch.'],
+    ['*--f*', 'Any abbreviation git accepts for --force, --force-with-lease or --force-if-includes.'],
+    ['-f*', 'Short form of a force push.'],
+    ['* -f*', 'Short form of a force push.'],
+    ['*-*f *', 'A force flag bundled with other short flags (-uf).'],
+    ['*-*f', 'A force flag bundled with other short flags, last on the line.'],
+    ['*+*', 'A leading + refspec is a force push.'],
+    ['*--mirror*', 'Mirroring rewrites every ref on the remote.'],
+    ['*--m*', 'An abbreviation of --mirror.'],
+    ['*--all*', 'The worker pushes its assigned branch, never every branch.'],
+    ['*--al*', 'An abbreviation of --all.'],
+    ['*--delete*', 'Deleting a remote ref is never part of an attempt.'],
+    ['*--de*', 'An abbreviation of --delete.'],
+    ['*--pru*', 'Pruning deletes every remote ref the local side lacks.'],
+    ['-d*', 'Short form of deleting a remote ref, alone or first in a bundle (-du).'],
+    ['* -d*', 'Short form of deleting a remote ref, alone or first in a bundle (-du).'],
+    ['*-*d *', 'A delete flag bundled with other short flags (-ud).'],
+    ['*-*d', 'A delete flag bundled with other short flags, last on the line.'],
+    ['* :**', 'An empty source refspec deletes the ref it names, whatever the name.'],
+    [`*:${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
+    [`origin ${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
+    [`* ${input.baseBranch}`, 'The base branch moves only through the guarded merge.'],
+    [`* ${input.baseBranch} *`, 'The base branch moves only through the guarded merge.'],
+    [`*refs/heads/${input.baseBranch}*`, 'The base branch moves only through the guarded merge, in its full ref spelling too.'],
+  ];
   const deny: HarnessRule[] = [
-    { rule: 'Bash(git push *--force*)', why: 'History on a submitted branch is never rewritten; the review and proofs are bound to its heads.' },
-    { rule: 'Bash(git push * -f*)', why: 'Short form of a force push.' },
-    { rule: 'Bash(git push *+*)', why: 'A leading + refspec is a force push.' },
-    { rule: `Bash(git push *:${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
-    { rule: `Bash(git push origin ${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
+    ...push.flatMap(([form, why]) => [{ rule: `Bash(git push ${form})`, why }, { rule: `Bash(git -* push ${form})`, why: `${why} Also behind git's global options.` }]),
     { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
     { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },
@@ -3406,6 +3450,62 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
   ];
   return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
+}
+/**
+ * How a worker restores its assigned branch after an ejected or contaminated tip, as the exact
+ * commands a rework reason carries: fetch, reset to the item's reviewed head, sync onto the base,
+ * restore-branch (the lease push of the leased branch), complete. Every one is permitted by the
+ * worker's own harness, so the rework the control plane authorizes is carried out by the attempt it
+ * dispatches, with no human shell.
+ */
+export function branchRestoration(input: { cliPath: string; key: string; epoch: number; pr: number; reviewedHead: string }) {
+  const cli = `node ${input.cliPath}`;
+  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} ${input.pr}`];
+}
+/**
+ * The shell commands a blocker names: each backtick-quoted command line, or, in a blocker that
+ * quotes none, each `git push …` clause. The worker's blocker instruction asks for the exact
+ * command that was refused, so this is where it is written.
+ */
+export function blockerCommands(text: string) {
+  const quoted = [...text.matchAll(/`([^`\n]+)`/g)].map(match => match[1].trim()).filter(command => /^[a-z][\w.-]*\s+\S/.test(command));
+  const found = quoted.length ? quoted : [...text.matchAll(/\bgit push\b[^\n;,'"]*/g)].map(match => match[0].replace(/\s+(?:was|were|is|failed|fails|because|but)\b.*$/, '').trim().replace(/[.:]$/, ''));
+  return [...new Set(found)];
+}
+export interface UnrunnableRemedy { key: string; epoch: number; command: string; role: 'worker'; rule: string; why: string; deniedBy: { role: string; rule: string }[]; text: string }
+/**
+ * A blocker whose remedy no session Graphyard launches may run is a defect of Graphyard, not a
+ * wait on a human shell (GY-128): Graphyard authorized work that none of its own sessions can
+ * carry out. Every command a blocker names is judged against each launched role's harness —
+ * the item's worker on its assigned branch, reviewer, producer and master — and reported when
+ * every one of them denies it, naming the command, the role that would need it (the worker that
+ * raised the blocker) and the rule in that role's harness that denies it.
+ */
+export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseBranch: string; repository?: string; workerKinds?: string[] }): UnrunnableRemedy[] {
+  const shared = { cliPath: input.cliPath, repository: input.repository ?? 'OWNER/REPOSITORY', baseBranch: input.baseBranch, credentialHome: '/graphyard-credentials', credentialDirectories: [] as string[] };
+  const others = [
+    { role: 'reviewer', plan: sessionHarnessPlan({ ...shared, role: 'reviewer', kind: 'claude' }) },
+    { role: 'producer', plan: sessionHarnessPlan({ ...shared, role: 'producer', kind: 'claude' }) },
+    { role: 'master', plan: masterHarnessPlan({ ...shared, harness: 'claude', root: '/repository' }) },
+  ];
+  // A worker runtime other than Claude loads no generated rules, so a rework dispatched to it may
+  // run the command: only when every configured worker runtime denies it is the remedy unrunnable.
+  const workerKinds = [...new Set(input.workerKinds?.length ? input.workerKinds : ['claude'])];
+  if (workerKinds.some(kind => kind !== 'claude')) return [];
+  return work.filter(item => item.stage !== 'done' && item.blocker).flatMap(item => {
+    const epoch = item.workspaces.at(-1)?.epoch ?? item.epoch;
+    const branch = item.workspaces.at(-1)?.branch ?? `graphyard/${item.key.toLowerCase()}-${epoch}`;
+    const worker = sessionHarnessPlan({ ...shared, role: 'worker', kind: 'claude', branch });
+    return blockerCommands(item.blocker!).flatMap(command => {
+      const own = harnessDecision(worker, command);
+      if (own.decision !== 'deny') return [];
+      const deniedBy = others.map(({ role, plan }) => ({ role, judged: harnessDecision(plan, command) }));
+      if (deniedBy.some(entry => entry.judged.decision !== 'deny')) return [];
+      return [{ key: item.key, epoch, command, role: 'worker' as const, rule: own.rule!.rule, why: own.rule!.why,
+        deniedBy: deniedBy.map(entry => ({ role: entry.role, rule: entry.judged.rule!.rule })),
+        text: `${item.key}'s blocker names \`${command}\`, which no session Graphyard launches may run: the worker that needs it is denied by its harness rule ${own.rule!.rule} (${own.rule!.why}), and ${deniedBy.map(entry => `the ${entry.role} by ${entry.judged.rule!.rule}`).join(', ')}. This is a Graphyard defect, not a wait on a human shell` }];
+    });
+  });
 }
 /** Install the worker rules in a freshly prepared worktree, only where Git already ignores them. */
 export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker) {
