@@ -207,6 +207,8 @@ export const approvalWatchSchema = z.object({
   /** Set once every launch is spent on a decision still unjudged: the loop has escalated it. */
   exhaustedAt: z.string().nullable().default(null),
   closeAttempts: z.number().int().min(0).default(0),
+  /** The GitHub observation a rework request was decided from (GY-144): its time and candidate head. */
+  observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 
@@ -613,6 +615,48 @@ export function standingVerdict(work: Work): StandingVerdict | null {
   const agent = observation.agentReview;
   if (agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && agentVerdictBindsRequest(work, agent))
     return { reviewer: agent.profile ?? agent.provider, at: agent.completedAt ?? observation.at, reason: `${agent.profile ?? agent.provider} requested changes on ${agent.sha.slice(0, 12)}: ${agent.reason}` };
+  return null;
+}
+
+/**
+ * GY-144. Rework throws away a current review and its proofs, so it is asked for only on a GitHub
+ * observation that still describes the item: one taken within the two minutes the merge gate
+ * trusts, while GitHub answers. During a rate-limit pause the control plane cannot observe, and
+ * a worker may meanwhile have synced, pushed and submitted a green head the last observation
+ * never saw; a verdict or conflict read from that observation is about a head the branch has
+ * moved past. The loop waits for a fresh observation and decides from that.
+ */
+export const reworkObservationMaxAgeMs = 120_000;
+export interface GitHubPause { until: string }
+/**
+ * Whether the control plane's GitHub client is paused, read from the observation jobs it refused:
+ * a paused client refuses every request with "GitHub requests paused until <time>", and the job
+ * keeps that error until it next runs. The latest pause still in the future is the one standing.
+ */
+export function githubPause(jobs: readonly { error?: string | null }[] | undefined, now: number): GitHubPause | null {
+  let until = 0;
+  for (const job of jobs ?? []) {
+    const at = Date.parse(/requests paused until (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/.exec(job.error ?? '')?.[1] ?? '');
+    if (Number.isFinite(at) && at > now && at > until) until = at;
+  }
+  return until ? { until: new Date(until).toISOString() } : null;
+}
+/** What a rework request records of the observation it was decided from, so an approver can see whether the item has moved since. */
+export const observedFrom = (work: Work) => work.observation
+  ? `[Decided from the GitHub observation taken at ${work.observation.at} of candidate ${work.observation.candidate.sha}; if the item has moved since, this request no longer describes it.]`
+  : '[Decided with no GitHub observation of the item.]';
+/**
+ * Why a rework request must wait for a fresh observation, or null when the one on the item may be
+ * decided from. The reason names the stale observation — its time and head — and never its age,
+ * so it reads the same on every cycle it stands.
+ */
+export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null): string | null {
+  const observation = work.observation;
+  if (!observation) return `${work.key}: rework waits for a GitHub observation of the item; there is none to decide from`;
+  const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
+  if (pause) return `${work.key}: rework waits for a fresh GitHub observation — GitHub requests are paused until ${pause.until}, so ${seen} is a stale observation that may describe a head the branch has moved past`;
+  const age = now - Date.parse(observation.at);
+  if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
 }
 
@@ -1209,7 +1253,12 @@ export interface DaemonEffects {
    */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
   credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>>;
-  snapshot: () => Promise<{ work: Work[]; now: string }>;
+  /**
+   * The coordination read. `jobs` are the control plane's integration jobs with their last error,
+   * which is where a paused GitHub client shows (see `githubPause`); a snapshot without them is
+   * judged on observation age alone.
+   */
+  snapshot: () => Promise<{ work: Work[]; now: string; jobs?: { work_id?: string; error?: string | null }[] }>;
   persist: (state: DaemonState) => Promise<void>;
 }
 
@@ -1726,8 +1775,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
         standing = undefined;
       }
-      const requested = standing ?? await effects.decide!(item, decision.action, decision.reason);
-      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [] });
+      // A rework request names the observation it was decided from (GY-144), so its approver sees
+      // at once whether the item has moved since; the watch keeps the same pair.
+      const observed = decision.action === 'rework' && item.observation ? { at: item.observation.at, sha: item.observation.candidate.sha } : null;
+      const reason = decision.action === 'rework' ? `${observedFrom(item)} ${decision.reason}` : decision.reason;
+      const requested = standing ?? await effects.decide!(item, decision.action, reason);
+      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [], observation: observed });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it
       // needs. A base conflict has no verdict behind it, so it is not part of that measurement. It
       // is sampled with the request, before the launch: a request whose first launch throws is
@@ -1739,7 +1792,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // fails leaves the watch behind, so the next cycle sees a decision with no session and
       // launches again, inside the same bound.
       const how = await launch(item, watch, true);
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${decision.reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
@@ -1777,6 +1830,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   };
 
   const needed = new Set<string>(), unattestable = new Set<string>();
+  const pause = githubPause(snapshot.jobs, clock);
   for (const item of snapshot.work) {
     const assessment = assessments[item.id];
     const decision = routineDecision(item, config, clock, assessment);
@@ -1795,6 +1849,15 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const key = decisionKey(item, decision);
     needed.add(key);
     const watch = state.approvals[key];
+    // Rework waits for an observation that still describes the item (GY-144). A request already
+    // standing is left as it is — neither supervised into a second request nor withdrawn — until
+    // GitHub is observed again and the item says whether it still needs the round.
+    const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
+    if (wait) {
+      const waitKey = `wait:rework:${item.id}`;
+      if (state.actions[waitKey]?.detail !== wait.slice(0, 2000)) await note(waitKey, item, 'decision', 'done', wait);
+      continue;
+    }
     if (watch) { if (!watch.settledAt) await supervise(item, decision, key, watch); continue; }
     const previous = state.actions[key];
     // A `done` entry with no watch is a cursor written before requests were supervised; the

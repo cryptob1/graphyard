@@ -312,6 +312,17 @@ decision. A lapsed fence the host could not verify withholds the decision: it is
 with the probe's refusals (`decision-withheld` for a delivered item or a fence on another host; the
 step 4 containment escalation otherwise), it stays on the silence measure, and nothing is requested.
 
+Rework also waits for an observation that still describes the item. It throws away a current review
+and its proofs, and while GitHub is paused after a rate limit a worker may already have pushed and
+submitted a green head the control plane has not observed — the verdict or conflict on record is then
+about a head the branch has moved past. So the loop requests rework only from a GitHub observation
+taken within the last two minutes, and never while the control plane's observation jobs report
+`GitHub requests paused until …`. Until then it records one `wait:rework` line on the item naming the
+stale observation — its time and head — and the pause, requests nothing, and neither re-requests nor
+withdraws a rework request already standing; the next fresh observation decides. Every rework request
+opens with `[Decided from the GitHub observation taken at TIME of candidate SHA …]`, and the loop keeps
+the same pair on its approval watch, so the approver sees at once whether the item has moved since.
+
 It never approves what it requested: the approver session judges from its own identity, and the
 server refuses self-approval, an approver that held an assignment on the item, and one that
 produced the evidence the decision rests on.
