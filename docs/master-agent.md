@@ -1,7 +1,6 @@
 <!-- page: Operate Graphyard | 5 | routing, merges. -->
 # Master-agent operating mode
 
-- **A quarantine whose supervisor died:** `containment` carries the recorded scope unit and supervisor pid, what systemd reports for it, and `containment.held`: each process still holding the fence, with pid, cmdline and cwd
 For the coordinator session: what the master decides, and must never do.
 
 ## Autonomy: agents approve agents
@@ -36,10 +35,12 @@ Keep cycling until both hold: every in-scope item is Done or has a genuinely ext
 
 1. `master status` after startup and every material event
 2. `master dispatch GY-N PROFILE` in `schedule.order` ([conflict avoidance](#conflict-avoidance))
+3. Route review findings and failed proofs to rework; reviews and producers launch themselves
+4. `master merge GY-N|--all` only when the exact candidate passes every gate ([guarded merges](github.md#the-guarded-merge)); a protocol mismatch refuses with `deploy main first`, and it stands down from an execution the loop holds
 5. One deployment verification per delivery: `master verify-deployment GY-N`; main ahead of production, or a flagged capacity variable, is a deployment incident, never a ledger edit
 6. Close finished agent sessions, then return to status
 
-Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. Most of this runs unattended ([the loop](master-loop.md)), leaving the master the escalations, the findings and the two-party decisions.
+Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions: resolve them and keep cycling. Most of this runs unattended ([the loop](master-loop.md)), leaving the master the escalations, the findings and the two-party decisions.
 
 ## Conflict avoidance
 
@@ -115,6 +116,7 @@ A harness command classifier would otherwise stop the master's routine commands;
 
 ## Containment and recovery
 
+- **A quarantine whose supervisor died:** `containment` carries the recorded scope unit and supervisor pid, what systemd reports for it, and `containment.held`: each process still holding the fence, with pid, cmdline and cwd
 - `settleable: true`, no `refusals`: `master settle-containment GY-N "reason"`. **Any refusal:** stop the supervisor, then attest through a two-party `rework` decision, or `recover` once delivered ([procedure](operations-reference.md#recovery-procedures))
 - **A lapsed lease:** `lease-loss` stands only for a worker that silently vanished; every other lapse is `lease.expired` with cause `submitted`, `blocked-awaiting-operator` or `stopped-by-attestation`. Reconciliation settles an explained one each tick, any `admin` at once with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`; the rest need a two-party `resolve` decision or a declared human session ([who settles what](delegation.md#who-may-settle-what))
 - **Merged without a valid execution:** [merge bypass](operations-reference.md#merge-bypass), a two-party `merge` decision requested after the merge. A merged item whose content is **not on the base branch** is a [reverted delivery](coordination.md#the-landing-re-check) instead, and no merge decision is requested until the base branch holds its content
