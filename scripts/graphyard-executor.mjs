@@ -20,7 +20,6 @@
 // declaration, claims under a stable name, and answers systemd's watchdog on every poll and every
 // claim renewal. `--install` writes that declaration and enables the units (src/repository-setup.ts
 // installExecutorSupervision); `graphyard init` does the same on a coordinator host.
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -52,9 +51,11 @@ export function parseArguments(argv) {
  * loop's `notify` effect for why it goes through `systemd-notify`). A notification that fails is
  * logged, never fatal: the executor is still doing its work, and the watchdog decides on the window.
  */
-export function supervisorNotifier(env = process.env, run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }), log = line => console.error(line)) {
+export function supervisorNotifier(env = process.env, run, log = line => console.error(line)) {
   if (!env.NOTIFY_SOCKET) return null;
-  return state => { try { run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); } catch (error) { log(`[graphyard-executor] supervisor notification failed: ${error.message}`); } };
+  // Through the process's asynchronous runner (GY-125), never a synchronous child: a notification
+  // is fire-and-forget, and one that fails is logged rather than awaited.
+  return state => { Promise.resolve().then(() => run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1'], { timeoutMs: 10_000 })).catch(error => log(`[graphyard-executor] supervisor notification failed: ${error.message}`)); };
 }
 
 /** The TypeScript modules this process is a thin entry point for; tsx is a runtime dependency already. */
@@ -72,11 +73,46 @@ export async function load() {
 /** An exit status the supervisor reads: a slot the declaration does not have stays down instead of flapping. */
 class SlotUndeclared extends Error { constructor(message, exitCode) { super(message); this.exitCode = exitCode; } }
 
+/**
+ * The effects the handlers run actions with, built in one place so they can be held against stub
+ * modules in a test rather than only against a live control plane.
+ *
+ * Every call here reaches the runtime through the asynchronous runner and every module call is
+ * awaited (GY-125). The Herdr inventory read is the one to watch: `observeHerdrAgents` is async,
+ * so reading `.available` off the promise rather than off its value is silently falsy — this
+ * executor would claim every dispatch row and then report no agents at all, failing each one.
+ */
+export function controlPlaneEffects(modules, context) {
+  const { master: m, daemon: d, reviewer: r, producer: pr } = modules;
+  const { root, current, run, snapshot, mutate, mergeExecutor } = context;
+  return {
+    snapshot, mutate,
+    agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
+    workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
+    producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
+    dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now),
+    launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
+    launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
+    // Every merge this process brokers is owned by this executor instance (GY-92), never by the
+    // coordinator principal alone: a `master run` loop, an interactive `master merge` and every
+    // other executor sharing this credential each hold their own. A foreign in-flight execution
+    // is then refused rather than resumed, so two brokers never drive one merge — see
+    // docs/master-agent.md, "Running executors beside the daemon".
+    merge: work => m.mergeExecutor(current(), snapshot, mutate, mergeExecutor, randomUUID(), run)(work),
+    observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
+    recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
+  };
+}
+
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const options = parseArguments(argv);
   const modules = await load();
   const { master: m, daemon: d, dispatch: a, executor: x, reviewer: r, producer: pr, actions: k, view: v, setup: s } = modules;
-  const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+  // Bounded, captured and awaited, exactly as the daemon runs its own children: a launch that
+  // holds for its whole thirty-second timeout must not stop this process renewing the claim it
+  // is holding while the launch runs.
+  const run = m.childRunner({ timeoutMs: 90_000 });
+  const root = (await run('git', ['rev-parse', '--show-toplevel'])).trim();
   if (options.install) {
     // Only a coordinator host can run an executor at all: without master.json every unit this
     // enables would fail on start and be restarted every ten seconds.
@@ -119,25 +155,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const live = m.liveMasterConfig(root, config), current = () => live.current;
   // Minted once per process, exactly as the daemon mints its own (src/executor.ts).
   const mergeExecutor = x.executorMergeExecutor(status.actor.id);
-  const run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 });
   const snapshot = () => request('work-snapshot', {}, { [v.coordinationViewHeader]: 'coordination' });
-  const handlers = x.controlPlaneHandlers(current, {
-    snapshot, mutate,
-    agents: () => { const runtime = m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
-    workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
-    producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
-    dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now),
-    launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
-    launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
-    // Every merge this process brokers is owned by this executor instance (GY-92), never by the
-    // coordinator principal alone: a `master run` loop, an interactive `master merge` and every
-    // other executor sharing this credential each hold their own. A foreign in-flight execution
-    // is then refused rather than resumed, so two brokers never drive one merge — see
-    // docs/master-agent.md, "Running executors beside the daemon".
-    merge: work => m.mergeExecutor(current(), snapshot, mutate, mergeExecutor, randomUUID(), run)(work),
-    observeDeployment: delivered => d.observeDeployment(current(), delivered, run),
-    recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-  });
+  const handlers = x.controlPlaneHandlers(current, controlPlaneEffects(modules, { root, current, run, snapshot, mutate, mergeExecutor }));
   // The rule, not the prose: a kind whose judgment happens in the step itself may never have a
   // handler here, so no way of configuring this process puts one inside the loop.
   const judgment = x.judgmentInExecutorLoop(handlers);
@@ -148,7 +167,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 
   // Under systemd every poll and every claim renewal is a keep-alive: a process whose event loop
   // wedged stops sending them and is restarted, while a slow handler that still renews is left alone.
-  const notify = supervisorNotifier(env);
+  const notify = supervisorNotifier(env, run);
   const alive = () => notify?.('alive');
   const effects = {
     claim: body => { alive(); return mutate('actions/claim', body); },

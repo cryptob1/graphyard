@@ -9,9 +9,10 @@ import { assignment } from '../assignment';
 import { CandidatePr, CandidateSha } from '../candidate';
 import EvidenceArtifacts from '../components/evidence-artifacts';
 import PostDeployment from '../components/post-deployment';
+import StatusAge from '../components/status-age';
 import Term, { Explained } from '../components/term';
 import { age } from '../format';
-import { plainReason, plainStatus } from '../plain-status';
+import { plainReason, plainStatus, statusHeld } from '../plain-status';
 import type { Dashboard } from './dashboard';
 
 const stepLabel: Record<string, string> = { ready: 'Released for work', build: 'Built and handed in', review: 'Reviewed', test: 'Automated checks pass', acceptance: 'Proven to work', merge: 'Merged' };
@@ -31,6 +32,8 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
 export default function WorkDetails({ item, work, status, token, observedAt, jobs, queue, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, sessionEpoch }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
+  // The same duration and the same threshold the card carries; this view is another view of it.
+  const held = statusHeld(item, now);
   const owner = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
   const current = item.gates.findIndex(g => !g.passed);
@@ -50,7 +53,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // unclaimable rather than as waiting its turn.
   const unserved: { kind: string; since: string; start: string } | undefined = (status?.executors?.unserved ?? []).find((entry: any) => entry.work === item.id);
   return <Dialog onClose={() => setSelected(null)}><section role="dialog" aria-modal="true" aria-label={item.title} className="drawer" onClick={e => e.stopPropagation()}><button className="close" aria-label="Close details" onClick={() => setSelected(null)}>×</button>
-    <div className="drawer-key">{item.key}</div><h2>{item.title}</h2>
+    <div className="drawer-key">{item.key}<StatusAge held={held}/></div><h2>{item.title}</h2>
     <p className={`status-sentence tone-${plain.tone}`}><Explained sentence={plain.sentence}/></p>
     <dl className="facts">
       <div><dt>Owner</dt><dd className="assignment-details">{owner.active ? owner.label : owner.owner ? owner.text : 'Nobody yet'}</dd></div>

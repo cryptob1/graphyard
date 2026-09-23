@@ -73,7 +73,7 @@ function observation(w: Work): Observation {
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, files: ['src/claims.ts'], scopeFiles: [], at: new Date().toISOString() };
 }
-function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0 }; }
+function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }; }
 /**
  * A proven candidate with Graphyard's queue tip published for it: the state a merge authorization
  * now requires, since only a published tip proves the validated commit contains its base. Its
@@ -254,7 +254,7 @@ async function quarantinedByDeadSupervisor(hostId = 'coordinator-host') {
   assert.equal((await store.list()).find(item => item.id === w.id)!.lease, null, 'reconciliation clears the expired lease record');
   return { work: (await store.list()).find(item => item.id === w.id)!, settlementHash, settlementToken, path, hostId };
 }
-const deadProbe = (workspacePath: string, overrides: Partial<ReturnType<typeof probeSupervisorAbsence>> = {}) => () =>
+const deadProbe = (workspacePath: string, overrides: Partial<Awaited<ReturnType<typeof probeSupervisorAbsence>>> = {}) => () =>
   ({ method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath, processes: [], scopes: [], held: [], recordedScope: null, inaccessible: 0, unverifiable: [], ...overrides });
 
 test('master status verifies supervisor death on the registered host and the coordinator settles it with recorded evidence', async () => {
@@ -263,7 +263,7 @@ test('master status verifies supervisor death on the registered host and the coo
   const { snapshot, clockOffset } = await snapshotWithClock(async () => (await (await fetch(`${url}/api/work-snapshot`, { headers })).json()) as { work: Work[]; now: string });
   // A live containment scope on the host belongs to another assignment only because every
   // member it holds was attributed to one; it does not fence this quarantine.
-  const containment = assessContainment(snapshot.work, { hostId, observedAt: snapshot.now, clockOffset,
+  const containment = await assessContainment(snapshot.work, { hostId, observedAt: snapshot.now, clockOffset,
     probe: deadProbe(path, { scopes: [{ unit: 'graphyard-watch-9-x.scope', activeState: 'active', processes: [], attributed: [4242] }] }) });
   const status = buildMasterStatus(snapshot, [], [], {}, containment);
   const row = status.work.find(entry => entry.key === work.key)!;
@@ -340,7 +340,7 @@ test('every unverifiable containment signal refuses automatic settlement and kee
   assert.equal((await engine.execute(worker, 'settle', work.id, { epoch: 1, settlementToken }, randomUUID())).containmentQuarantine, null);
 
   const stranded = await quarantinedByDeadSupervisor('another-machine');
-  const localHost = assessContainment([stranded.work], { hostId, observedAt: new Date().toISOString(), clockOffset: { min: 0, max: 5 }, probe: deadProbe(stranded.path) });
+  const localHost = await assessContainment([stranded.work], { hostId, observedAt: new Date().toISOString(), clockOffset: { min: 0, max: 5 }, probe: deadProbe(stranded.path) });
   assert.deepEqual(localHost, {}, 'a quarantine registered on another host is not this coordinator to verify');
   assert.equal((await engine.execute(operator, 'rework', stranded.work.id, { reason: 'Operator attested the stopped worker', previousWorkerStopped: true }, randomUUID())).containmentQuarantine, null);
 });
