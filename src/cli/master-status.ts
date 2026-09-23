@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
+import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { elapsed } from '../model/sessions.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
-import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
+import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
@@ -14,6 +14,8 @@ import { readAdministrationLedger, readSudoState, summarizeAdministration } from
 import { stalledActionAttention } from './stalled-actions.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
+import { setupHealth } from './master-setup.js';
+import type { LoopSupervisorHost } from '../supervisor.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
@@ -164,7 +166,7 @@ async function terminalDecisions(masterApi: (path: string) => Promise<any>, work
  * review, producer, dispatch, daemon and administration ledgers, the dispatch schedule with its
  * overlap holds, and the conflict set of every open candidate probed over the fetched PR heads.
  */
-export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }) {
+export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost } = {}) {
   const runtime = observeHerdrAgents();
   const credentials = await inspectWorkerCredentials(root, master.workers);
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
@@ -178,11 +180,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const reviews = summarizeReviews(reviewRecords), producers = summarizeProducers(producerRecords);
   // Every request whose last session failed or expired, with its attempts and the next relaunch.
   const retries = [...sessionRetries(reviewRecords, Date.now()), ...sessionRetries(producerRecords, Date.now())];
-  // Setup that silently stops every launch: an App registered but never bound, a bound App whose
-  // credential is gone, a Herdr workspace that no longer exists.
-  const reviewerBinding = await reviewerBindingHealth(master);
-  const workspace = herdrWorkspaceHealth(master);
-  const setup = { reviewer: reviewerBinding, herdrWorkspace: workspace, attention: [...reviewerBinding.attention, ...(workspace.exists === false ? [workspace.reason!] : [])] };
+  // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
+  const { setup, attention: setupItems } = await setupHealth(root, master, dependencies.supervisorHost);
   // Status reads the cursor as the loop would, repairing an over-long string in memory; the loop
   // is what logs and persists that repair, so status reports the cursor rather than announcing it.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
@@ -238,9 +237,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's.
   attentionItems.unshift(...loopItems, ...dispatchItems);
-  // Setup that stops every launch is the master's to repair.
-  for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
-  if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
+  // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
+  attentionItems.push(...setupItems);
   // The generated-files variable the installers set beside GRAPHYARD_PRINCIPALS, compared with
   // the managed repository's manifest: a deployment that does not exempt the manifest's paths
   // sends every docs-touching item into the out-of-scope refusal, so the drift is raised here
