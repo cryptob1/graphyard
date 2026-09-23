@@ -41,7 +41,7 @@ const credentials = roster.map(principal => ({ ...principal, token: `delegation-
 let pr = 500;
 const id = () => randomUUID();
 const input = (title: string, slice?: SliceId) => ({ title, ...(slice ? { slice } : {}), plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
-const proof = (overrides: Record<string, unknown> = {}) => ({ proof: 'unit:works', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, ...overrides });
+const proof = (overrides: Record<string, unknown> = {}) => ({ proof: 'unit:works', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, ...overrides });
 function observation(work: Work, sha = head): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],

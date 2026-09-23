@@ -1,8 +1,9 @@
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
+import { consentAnswerSchema } from './consent-prompt.js';
+import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
@@ -27,7 +28,8 @@ import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
  */
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
-export const producerOutcomes = ['pass', 'fail', 'untrusted', 'missing'] as const;
+/** `unexercised`: the pass was recorded as not exercising its criterion (GY-135, model/evidence.ts exerciseRefusal). */
+export const producerOutcomes = ['pass', 'fail', 'unexercised', 'untrusted', 'missing'] as const;
 export type ProducerOutcome = typeof producerOutcomes[number];
 export const producerRecordSchema = z.object({
   id: z.string().uuid(),
@@ -49,6 +51,8 @@ export const producerRecordSchema = z.object({
   idleSince: z.string().min(1).max(40).optional(),
   /** How the request reached the session: on its command line, or as a paste for a runtime without that contract (GY-93). */
   delivery: z.enum(['request', 'paste']).optional(),
+  /** The first-run consent prompts the launcher answered before the session took its request, with the option it chose (GY-130). */
+  consent: z.array(consentAnswerSchema).max(8).optional(),
   /** Acknowledgement of the request, judged by the loop (acknowledgeLaunch): when sustained activity was seen, when it was re-prompted once, and the observation window. */
   acknowledgedAt: z.string().min(1).max(40).optional(),
   repromptedAt: z.string().min(1).max(40).optional(),
@@ -178,19 +182,20 @@ export class ClosedQuestionsDecided extends Error {
  */
 export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'> & { run?: MasterConfig['run'] }, binding: Pick<ProducerBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision' | 'proofs'> & { group: string; requestId?: string; checkout?: string }, profile: Pick<ProducerProfile, 'principal'>,
   checkout: SessionCheckout = binding.checkout ? { directory: binding.checkout, worktree: resolve(binding.checkout, 'checkout') } : sessionCheckout(worktreeRoot(process.cwd(), config), 'proof', binding.key, binding.sha, binding.requestId ?? '0'.repeat(8))) {
-  const worktree = checkout.worktree;
+  const worktree = checkout.worktree, stripped = resolve(checkout.directory, 'exercise');
   const evidenceFile = (proof: string) => resolve(checkout.directory, `${proof.replace(/[^a-zA-Z0-9]+/g, '-')}.evidence.json`);
   return `You are an independent Graphyard proof producer for ${config.repository}, principal ${profile.principal}. Produce trusted evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
     + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. `
     + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in this checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key} — with every GRAPHYARD_* and HERDR_* variable unset for the project's own test runs and a free GRAPHYARD_TEST_PORT. `
     + 'Do not edit, commit, push, rebase or merge the candidate, do not claim Graphyard work, do not post a review, and never weaken, skip or narrow a test to make a proof pass. '
-    + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"]} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, and a failing or incomplete run submitted as result fail rather than omitted — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
-    + `Keep everything this session writes — the install, build output, evidence files — inside ${checkout.directory}; Graphyard removes that directory when the session ends. When every proof of the group is submitted, remove the worktree with git worktree remove --force ${worktree}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence. `
+    + `A proof that passes against an unchanged tree proves nothing, so for each proof that passes also show it exercises its criterion: in a second detached worktree of the same head at ${stripped} (git worktree add --detach ${stripped} ${binding.sha}), remove the behaviour the criterion the proof is attached to describes — revert or stub exactly the lines of the change that implement it — and run the same proof there. `
+    + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"],"exercise":{"criterion":"<the criterion id, such as AC-1>","behaviour":"<the behaviour you removed, in words a worker can find in the diff>","result":"pass"|"fail","executed":N}} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, a failing or incomplete run submitted as result fail rather than omitted, and exercise as the stripped run's true outcome: a proof that still passes there is recorded as not exercising its criterion rather than as passing, which is the finding, not something to hide — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
+    + `Keep everything this session writes — the install, build output, evidence files — inside ${checkout.directory}; Graphyard removes that directory when the session ends. When every proof of the group is submitted, remove both worktrees with git worktree remove --force ${worktree} and git worktree remove --force ${stripped}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence. `
     + autonomousSession('submit pass or fail evidence for every proof of the group', `submit that proof as result fail with executed as the cases that ran, putting the blocked command and its error in environment`);
 }
 
 export async function launchProducer(root: string, work: Work, request: DispatchRequest, profile: ProducerProfile, agents: { name?: string }[], observedAt: string, dependencies: {
-  run?: (command: string, args: string[]) => string;
+  run?: ChildRun;
   now?: () => Date;
   /** How the profile's agent accounts are checked before the launch, and how its prompt is confirmed. */
   probe?: FleetProbe;
@@ -239,24 +244,24 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     // session directory is allocated under the managed worktree root — durable storage with room
     // left, outside every worktree — and is the only place beside the Git directory it may write.
     const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, id, dependencies.filesystem);
-    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
     // The producer loads its own role rules, never the master's. The harness follows the account's
     // runtime, so a cross-runtime failover keeps its role rules.
-    let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
+    let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
       const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
-      const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
+      const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
         '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
       pane = created.pane; tabId = created.tab;
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery } = startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
+      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
       const malformedTab = (error as any)?.herdrTab as string | undefined;
-      if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
+      if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
         catch { throw new Error(`${error instanceof Error ? error.message : 'Producer launch failed'}; Herdr could not confirm cleanup of the created tab`); }
       // A launch that failed for want of room says so, with the path and the reclaim command.
       throw writeFailure(error, `Launching the ${binding.key} producer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
@@ -264,7 +269,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     const requestedAt = now();
     const record: ProducerRecord = producerRecordSchema.parse({ id, requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
       group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName, pane: pane ?? null,
-      requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), delivery, checkout: checkout.directory });
+      requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory });
     await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] });
     return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
       profile: profile.name, principal: profile.principal, agentName, pane: record.pane, checkout: checkout.directory, expiresAt: record.expiresAt, approvals: launch.plan.approvals, delivery,
@@ -278,6 +283,7 @@ export function proofOutcome(work: Work | undefined, record: Pick<ProducerRecord
   const bound = (work?.evidence ?? []).filter(entry => entry.proof === proof && entry.sha === record.sha && entry.baseSha === record.baseSha && entry.policyRevision === record.policyRevision && !entry.revocation);
   const trusted = bound.filter(entry => entry.trusted).at(-1);
   if (trusted) return trusted.result === 'pass' && trusted.executed > 0 && trusted.skipped === 0 ? 'pass' : 'fail';
+  if (bound.at(-1)?.unexercised) return 'unexercised';
   return bound.length ? 'untrusted' : 'missing';
 }
 
@@ -297,15 +303,15 @@ export function proofOutcome(work: Work | undefined, record: Pick<ProducerRecord
  */
 /** `agents` is null when Herdr could not be read: a session is then never judged finished. */
 export async function reconcileProducers(root: string, config: MasterConfig, work: Work[], agents: HerdrAgent[] | null, dependencies: {
-  run?: (command: string, args: string[]) => string;
+  run?: ChildRun;
   now?: () => Date;
   /** Re-prompts a quiet session with its request; the default delivers it in Herdr. */
-  reprompt?: (record: ProducerRecord, message: string) => void;
+  reprompt?: (record: ProducerRecord, message: string) => void | Promise<void>;
 } = {}) {
   const ledger = await readProducerLedger(root);
   const now = (dependencies.now ?? (() => new Date()))();
-  const run = dependencies.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
-  const reprompt = dependencies.reprompt ?? ((record: ProducerRecord, message: string) => { deliverPrompt(record.agentName, message, run); });
+  const run = dependencies.run ?? defaultChildRun;
+  const reprompt = dependencies.reprompt ?? (async (record: ProducerRecord, message: string) => { await deliverPrompt(record.agentName, message, run); });
   const ackMs = acknowledgementMs(config);
   let changed = 0;
   for (const record of ledger.producers) {
@@ -321,16 +327,21 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     // Acknowledgement is judged only from a Herdr that could be read; a submitted proof is the
     // strongest acknowledgement of all.
     if (agents !== null) {
-      const judged = acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: results.some(result => result !== 'missing'), screen });
+      const judged = await acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: results.some(result => result !== 'missing'), screen });
       if (judged.changed) changed++;
       if (judged.reprompt) {
         markReprompted(record, now.getTime()); changed++;
-        try { reprompt(record, repromptText(producerPrompt(config, record, record), ackMs)); }
+        try { await reprompt(record, repromptText(producerPrompt(config, record, record), ackMs)); }
         catch { /* the settlement below records a session the re-prompt could not reach */ }
       }
     }
     let next: { state: ProducerRecord['state']; resolution: string } | null = null;
     if (results.some(result => result === 'fail')) next = { state: 'completed', resolution: `trusted evidence failed for ${record.proofs.filter(proof => outcome[proof] === 'fail').join(', ')}` };
+    // A pass recorded as not exercising its criterion is the producer's finding about the proof: the
+    // worker fixes it from the reason, which names the proof, the criterion and the behaviour. The
+    // session keeps its time for the group's other proofs until none is still missing.
+    else if (results.some(result => result === 'unexercised') && !results.includes('missing')) next = { state: 'completed', resolution: `evidence does not exercise its criterion: ${record.proofs.filter(proof => outcome[proof] === 'unexercised')
+      .map(proof => item?.evidence.filter(entry => entry.proof === proof && entry.sha === record.sha && entry.unexercised).at(-1)?.unexercised ?? proof).join('; ')}`.slice(0, 900) };
     else if (results.every(result => result === 'pass')) next = { state: 'completed', resolution: `trusted passing evidence recorded for ${record.proofs.join(', ')}` };
     else if (request && request.state === 'cancelled') next = { state: 'cancelled', resolution: request.resolution ?? 'the control plane withdrew the request' };
     else if (item && (!item.candidate || item.candidate.sha !== record.sha || item.candidate.baseSha !== record.baseSha || item.policyRevision !== record.policyRevision)) next = { state: 'cancelled', resolution: `head changed from ${record.sha.slice(0, 12)} to ${item.candidate?.sha.slice(0, 12) ?? 'none'}` };
@@ -342,7 +353,7 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
         const failure = agent?.agent_status === 'blocked'
           ? `the session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without trusted evidence for ${missing}`
           : `the session finished (${agent?.agent_status ?? 'gone from Herdr'}) without trusted evidence for ${missing}`;
-        next = { state: 'failed', resolution: settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, failure) };
+        next = { state: 'failed', resolution: await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, failure) };
       }
     } else if (record.idleSince) { delete record.idleSince; changed++; }
     if (!next) continue;
@@ -350,7 +361,7 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     // A pane that is already gone is the state the close wanted (GY-137), so it settles the record
     // with the absence named on the resolution; any other close failure keeps it pending and retried.
     // A session Herdr no longer reports is not closed at all, so an expired request settles as expired.
-    try { if (record.pane && (agent || agents === null)) closeHerdrPane(record.pane, run); }
+    try { if (record.pane && (agent || agents === null)) await closeHerdrPane(record.pane, run); }
     catch (error) { if (paneAlreadyGone(error)) paneGone = true; else closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
     record.closeFailure = closeFailure;
     if (!closeFailure) {

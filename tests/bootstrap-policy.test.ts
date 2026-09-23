@@ -54,7 +54,7 @@ async function submitted(input: Record<string, unknown>, observe: Partial<Observ
 const acceptance = (work: Work) => work.gates.find(gate => gate.name === 'acceptance')!;
 async function prove(work: Work, proof: string, overrides: Record<string, unknown> = {}) {
   const producer: Principal = { id: `producer-${proof}`, role: 'producer', proofs: [proof] };
-  return engine.execute(producer, 'evidence', work.id, { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 4, skipped: 0, ...overrides }, id());
+  return engine.execute(producer, 'evidence', work.id, { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, ...overrides }, id());
 }
 
 // ---------------------------------------------------------------------------
