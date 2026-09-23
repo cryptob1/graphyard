@@ -77,6 +77,7 @@ export const masterCommands = defineCommands([
       '                                the newest applied line, KIND launches a judging session',
       '  master withdraw GY-N DECISION REASON  Take back the master\'s own requested decision',
       '  master decisions GY-N | approver GY-N DECISION [KIND] | approve GY-N DECISION REASON',
+      '  master refuse GY-N DECISION REASON  Record the approver session\'s considered refusal',
       '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
       '  master restart                Restart this host\'s master loop detached',
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
@@ -196,6 +197,17 @@ export const masterCommands = defineCommands([
         // Runs under the operator-agent identity that made the request; the server resolves GY-N.
         if (!args[0] || !args[1] || !args.slice(2).join(' ').trim()) throw new Error('Use master withdraw GY-N DECISION REASON');
         return print(await masterMutation(`work/${encodeURIComponent(args[0])}/decide`, { action: 'withdraw', decision: args[1], reason: args.slice(2).join(' ') }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
+      }
+      if (id === 'refuse') {
+        // The approver's decline is a recorded write, never a session that ends without approving
+        // (GY-141). Like approve, it runs only under the approver session's own credential.
+        if (process.env.GRAPHYARD_MASTER === '1') throw new Error('The master never judges its own decisions; to take one back, graphyard master withdraw GY-N DECISION REASON');
+        const file = process.env.GRAPHYARD_TOKEN_FILE;
+        if (!file) throw new Error('master refuse runs in an approver session, which carries its own credential file in GRAPHYARD_TOKEN_FILE');
+        if (!args[0] || !args[1] || !args.slice(2).join(' ').trim()) throw new Error('Use master refuse GY-N DECISION REASON');
+        const token = await readCredentialFile(file);
+        for (const own of [master.credentialFile, master.operatorAgent?.credentialFile]) if (own && token === await readCredentialFile(own).catch(() => null)) throw new Error('That is one of the master\'s own credentials; refusals come from the approver identity');
+        return print(await masterMutation(`work/${encodeURIComponent(args[0])}/approve`, { action: 'refuse', decision: args[1], reason: args.slice(2).join(' ') }, randomUUID(), token));
       }
       if (id === 'verify-deployment') {
         if (!args[0]) throw new Error('Use master verify-deployment GY-N');

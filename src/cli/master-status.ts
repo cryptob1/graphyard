@@ -17,6 +17,7 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
+import { terminalDecisions } from './decision-report.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
@@ -136,33 +137,6 @@ export function nameOrphanSupervisors(status: MasterStatus, work: Work[], profil
 }
 
 /**
- * Terminal decisions nothing waits on any more: a stale one — approval refused on a revision or
- * candidate race, so its pin can never hold again — and a withdrawn one the requester took back.
- * A stale decision raises master attention with the re-request command only while it is still the
- * latest decision for its action — a later decision of the same action supersedes it, whatever its
- * state; a withdrawn one is listed for the record and never raises attention.
- */
-async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string }[]) {
-  const listed: { work: string; id: string; action: string; state: string; reason: string | null; race?: unknown }[] = [];
-  const attentionItems: AttentionItem[] = [];
-  for (const item of work) {
-    if (item.stage === 'done') continue;
-    const history = await masterApi(`work/${item.id}/decisions`).catch(() => null);
-    const decisions = history?.decisions ?? [];
-    const latest = new Map<string, string>();
-    for (const decision of decisions) latest.set(decision.action, decision.id);
-    for (const decision of decisions) {
-      if (decision.state !== 'stale' && decision.state !== 'withdrawn') continue;
-      listed.push({ work: item.key, id: decision.id, action: decision.action, state: decision.state, reason: decision.outcome ?? null, ...(decision.race ? { race: decision.race } : {}) });
-      if (decision.state === 'stale' && latest.get(decision.action) === decision.id)
-        attentionItems.push({ subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
-          ...agentOwner('master', `graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION`, 'approver') });
-    }
-  }
-  return { listed, attentionItems };
-}
-
-/**
  * The `master status` report: Graphyard work truth joined with Herdr session health, the local
  * review, producer, dispatch, daemon and administration ledgers, the dispatch schedule with its
  * overlap holds, and the conflict set of every open candidate probed over the fetched PR heads.
@@ -253,11 +227,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
   }
   attentionItems.push(...generatedFiles);
-  const decisions = await terminalDecisions(masterApi, snapshot.work);
+  const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
-    terminalDecisions: decisions.listed,
+    terminalDecisions: decisions.listed, unansweredDecisions: decisions.unanswered,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
