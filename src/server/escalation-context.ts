@@ -1,3 +1,4 @@
+import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, escalationTriggers, operatorScopeIncludes, standingEscalations, type Principal, type Work } from '../model.js';
 import { foldDecisions } from '../model/approval.js';
@@ -74,4 +75,13 @@ export async function readEscalationContext(services: Services, actor: Principal
   finally { db.release(); }
   // Canonical key order on the wire: the body's bytes are what the fingerprint covers.
   return canonical(assembleEscalationContext(inputs));
+}
+
+/** What a request citing no precedent is recorded with: whether any applied decision of its action (and trigger) existed to cite. */
+export async function precedentAvailability(db: pg.PoolClient, action: string, input: any) {
+  const trigger = action === 'resolve' && typeof input?.trigger === 'string' ? input.trigger as string : null;
+  const applied = Number((await db.query(`SELECT count(*)::int AS count FROM events requested WHERE requested.kind='decision.requested' AND requested.payload->>'action'=$1 AND ($2::text IS NULL OR requested.payload->'input'->>'trigger'=$2)
+    AND EXISTS (SELECT 1 FROM events applied WHERE applied.kind='decision.applied' AND applied.payload->>'id'=requested.payload->>'id')`, [action, trigger])).rows[0].count);
+  const of = `${action} decision${trigger ? ` of the ${trigger} trigger` : ''}`;
+  return applied ? `No precedent cited, though ${applied} applied ${of}${applied === 1 ? ' was' : 's were'} recorded` : `No precedent was available: no applied ${of} had been recorded, so this decision was taken on the facts alone`;
 }

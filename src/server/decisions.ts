@@ -5,7 +5,8 @@ import { Refusal, demand, resolveEscalation, standingEscalations, type Principal
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, foldDecisions, requiredDecisionCapabilities, unansweredRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import type { Services } from './routes.js';
-import { refuseDecision } from './decision-refusal.js';
+import { refuseDecision, withdrawDecision } from './decision-refusal.js';
+import { precedentAvailability } from './escalation-context.js';
 
 type Db = pg.PoolClient;
 /**
@@ -111,6 +112,10 @@ export async function requestDecision(services: Services, caller: Principal, id:
       const unknown = cited.filter(entry => !known.has(entry));
       demand(!unknown.length, `Cited precedent ${unknown.join(', ')} is not a recorded ${data.action} decision; cite decisions from the assembled context`, 422);
     }
+    // A request that cites nothing is accepted, never refused for it (GY-138): a handler whose
+    // context carried no applied decision of its trigger has nothing to cite. The ledger records
+    // whether any precedent was available, so an approver sees a first-of-its-kind decision as one.
+    const noPrecedent = cited?.length ? null : await precedentAvailability(db, data.action, input);
     // A spawned handler that reaches the same line as a standing request — same action, same
     // input, same precedent — is following it, not competing with it: its judgement is appended
     // to that decision as a concurrence and the standing decision is returned.
@@ -123,33 +128,8 @@ export async function requestDecision(services: Services, caller: Principal, id:
     demand(!pending, `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
-      ...(cited ? { precedent: cited } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}) });
+      ...(cited ? { precedent: cited } : {}), ...(noPrecedent ? { noPrecedent } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}) });
     const result = (await readDecisions(db, work!)).find(decision => decision.id === decisionId)!;
-    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-    return result;
-  });
-}
-
-const withdrawalSchema = z.object({ decision: z.string().uuid(), reason: decisionRequestSchema.shape.reason }).strict();
-
-/**
- * The requester's way out of a request that must not wait for an approver: recorded as
- * 'withdrawn' — terminal, with the reason — so a new request of the same action is accepted.
- */
-export async function withdrawDecision(services: Services, caller: Principal, id: string, body: unknown, key: string) {
-  const { action: _action, ...rest } = (body ?? {}) as Record<string, unknown>;
-  const data = withdrawalSchema.parse(rest);
-  const fingerprint = digest({ id, withdraw: data.decision, reason: data.reason });
-  return services.engine.store.transaction(async (db, now) => {
-    const actor = await authenticated(services, db, now, caller);
-    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
-    const work = await findWork(db, id); demand(work, 'Work item not found', 404);
-    const decision = (await readDecisions(db, work!)).find(entry => entry.id === data.decision);
-    demand(decision, `Decision ${data.decision} does not exist on ${work!.key}`, 404);
-    demand(actor.id === decision!.requestedBy, `Only the requester may withdraw decision ${decision!.id}; ${decision!.requestedBy} requested it`, 403);
-    demand(decision!.state === 'requested', `Decision ${decision!.id} is already ${decision!.state}; only a requested decision can be withdrawn`, 409);
-    await record(db, work!, actor.id, 'decision.withdrawn', { id: decision!.id, action: decision!.action, reason: data.reason });
-    const result = (await readDecisions(db, work!)).find(entry => entry.id === decision!.id)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });

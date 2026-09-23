@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
+import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type CycleMetrics, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
+import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -18,12 +18,15 @@ import { setupHealth } from './master-setup.js';
 import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
+import { nameOrphanSupervisors } from './orphan-supervisors.js';
+import { contextOverflows } from '../model/escalation-context.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { terminalDecisions } from './decision-report.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
+export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
 export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
 
 /**
@@ -63,56 +66,6 @@ export function approverLaunchAttention(daemon: {
     return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
       ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
   });
-}
-
-type MasterStatus = ReturnType<typeof buildMasterStatus>;
-
-/**
- * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
- * coordination cycle does it on its own; this is how a master runs that cycle once when the loop
- * is stopped, which is the state the item is usually noticed in.
- */
-export const supervisorReclaimCommand = 'graphyard master run --once';
-
-/**
- * One attention line for an assignment whose watch supervisor has outlived its session.
- *
- * `Assigned worker session is done` reads as an item that finished, which is exactly what it is
- * not: the session is gone, the lease is still advancing, and the item cannot be dispatched to
- * anybody. This names the supervisor holding it, the process and scope it is held by, and the
- * command that reclaims it — an agent command, never a hand search for a pid.
- */
-export function orphanSupervisorAttention(orphan: OrphanSupervisor, host: string | null): AttentionItem {
-  return { subject: orphan.key,
-    text: `Lease epoch ${orphan.epoch} of ${orphan.key} is still advancing (to ${orphan.leaseExpiresAt}) while Herdr no longer reports session ${orphan.agentName}: an orphaned watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) holds the item for a worker that cannot act`,
-    ...agentOwner('master', `${supervisorReclaimCommand} stops that supervisor through its containment scope; on ${host ?? 'its registered host'}, systemctl --user kill --kill-whom=all --signal=SIGTERM ${orphan.scope.unit} does the same by hand`) };
-}
-
-/**
- * Rewrite the session attention of every assignment held by an orphaned supervisor, in the row
- * and in the attention list alike, so both say the same thing. A Herdr that could not be read
- * reports no sessions, and every live assignment would then look orphaned, so an unavailable
- * runtime changes nothing.
- */
-export function nameOrphanSupervisors(status: MasterStatus, work: Work[], profiles: WorkerProfile[], runtime: { agents: HerdrAgent[]; available: boolean }, now: number): MasterStatus {
-  if (!runtime.available) return status;
-  const orphans = orphanedSupervisors(work, profiles, runtime.agents, now);
-  if (!orphans.length) return status;
-  const rewritten = new Map<string, { previous: string | null; item: AttentionItem }>();
-  const rows = status.work.map(row => {
-    const orphan = orphans.find(entry => entry.key === row.key);
-    if (!orphan) return row;
-    const item = orphanSupervisorAttention(orphan, work.find(candidate => candidate.id === orphan.id)?.workspaces.find(space => space.epoch === orphan.epoch)?.host ?? null);
-    rewritten.set(row.key, { previous: row.attention, item });
-    const { subject, text, ...owner } = item;
-    return { ...row, attention: text, attentionOwner: owner };
-  });
-  const attentionItems = status.attentionItems.map(entry => {
-    const rewrite = rewritten.get(entry.subject);
-    return rewrite && entry.text === rewrite.previous ? rewrite.item : entry;
-  });
-  for (const [key, rewrite] of rewritten) if (!attentionItems.some(entry => entry.subject === key && entry.text === rewrite.item.text)) attentionItems.push(rewrite.item);
-  return { ...status, work: rows, attentionItems };
 }
 
 /**
@@ -209,11 +162,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
       ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
   }
-  attentionItems.push(...generatedFiles);
+  // An escalation context over its budget (GY-138), named before a handler declines on it.
+  const overflow = await contextOverflows(masterApi, snapshot.work);
+  attentionItems.push(...generatedFiles, ...overflow);
   const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
   return { ...status, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + overflow.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
