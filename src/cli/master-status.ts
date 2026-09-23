@@ -10,6 +10,7 @@ import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewe
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
+import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
@@ -228,10 +229,12 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
   const unanswered = unansweredRequestAttention(status.work);
+  // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
+  const conflicted = reviewConflictAttention(snapshot.work, reviewRecords).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
   // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
   const stalled = stalledActionAttention(snapshot);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...stalled, ...overlong, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stalled, ...overlong, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's.
   attentionItems.unshift(...loopItems, ...dispatchItems);
@@ -253,8 +256,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length, stalledActions: stalled.length, overlongSessions: overlong.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, reviewConflicts: conflicted.length, stalledActions: stalled.length, overlongSessions: overlong.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
