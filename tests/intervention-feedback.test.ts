@@ -371,6 +371,15 @@ test('unit:intervention-fold-reads-only-typed-rows — the fold reads the ledger
   const first = foldInterventions(all.rows, work, await dbNow()), second = foldInterventions(all.rows, work, await dbNow());
   assert.deepEqual(first.interventions.map(entry => entry.id), second.interventions.map(entry => entry.id));
   assert.equal(new Set(first.interventions.map(entry => entry.id)).size, first.interventions.length, 'ids are unique');
+  // One requirements command that widens the scope and clears a blocker beside it answers two asks, each as what it was.
+  const id = randomUUID(), at = (seconds: number) => new Date(Date.parse('2026-09-01T00:00:00.000Z') + seconds * 1000).toISOString();
+  const row = (seq: number, kind: string, details: Record<string, unknown>, document: Record<string, unknown>) => ({ seq, workId: id, actor: 'someone', kind, at: at(seq), details, work: { key: 'GY-FOLD', stage: 'build', ...document }, stageBefore: 'build' });
+  const both = foldInterventions([
+    row(1, 'blocked', { reason: 'the fixture needs an operator answer' }, { plannedFiles: ['src/a.ts'], blocker: 'the fixture needs an operator answer' }),
+    row(2, 'scope', { paths: ['src/b.ts'] }, { plannedFiles: ['src/a.ts'], blocker: 'the fixture needs an operator answer' }),
+    row(3, 'requirements', { reason: 'widened and answered' }, { plannedFiles: ['src/a.ts', 'src/b.ts'], blocker: null }),
+  ], [], at(10)).interventions;
+  assert.deepEqual(both.map(entry => [entry.kind, entry.trigger, entry.resolvedAt]).sort(), [['escalation', 'blocked-report', at(3)], ['scope-widening', 'scope-request', at(3)]]);
   // An open signal: a parked item still waiting on its human.
   const waiting = await claimed('waiting');
   await ok(token(worker), 'POST', `work/${waiting.key}/park`, { epoch: waiting.epoch, kind: 'credentials-for-people', needed: 'a GitHub seat for the reviewer', reason: 'The reviewer identity is a person' });
