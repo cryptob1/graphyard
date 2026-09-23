@@ -127,7 +127,7 @@ test('result receipts deduplicate evidence and a newer request prevents old-pass
   const late: any = await validation.result(collector, report(f, command), id()); assert.equal(late.accepted, false);
   await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: (await current(f.w.id)).revision }, id());
   let w = await current(f.w.id); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false); assert.equal(w.mergeAuthorization, null);
-  w = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());
+  w = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());
   assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false, 'generic evidence cannot bypass pinned attempt');
   await cleanup(f);
 });
@@ -449,7 +449,7 @@ test('request and definition pages are bounded and stable under newer inserts', 
 test('proof previews reject generic and superseded validation passes just like gates', async () => {
   const f = await fixture();
   let w = await current(f.w.id);
-  w = await engine.execute(collector, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, scenarioRevision: 1, environment: f.environment.id }, id());
+  w = await engine.execute(collector, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scenarioRevision: 1, environment: f.environment.id }, id());
   assert.equal(proofPreview(w)[0].status, 'unmeasured');
   const command = await start(f); await validation.result(collector, report(f, command), id());
   w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'passed');

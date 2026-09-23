@@ -1210,6 +1210,45 @@ each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…)
 dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
 later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
 
+### Proofs must exercise their criterion
+
+A proof that passes against an unchanged tree proves nothing, so a pass is trusted only when the
+producer shows the proof depends on the behaviour its criterion describes. Beside the outcome,
+the producer records `"exercise"` — the same proof run in a second detached worktree of the same
+head with that behaviour removed (the lines of the change that implement it reverted or stubbed):
+
+```json
+"exercise": { "criterion": "AC-1", "behaviour": "the lease expiry check in claim()", "result": "fail", "executed": 4 }
+```
+
+`criterion` is the criterion the proof is attached to (`KEY AC-n` for a bootstrap obligation the
+item inherited; it may be left out when the proof is attached to exactly one), `behaviour` names what was removed in words a worker can find in the diff, and
+`result`/`executed` are that run's true outcome. The control plane decides at submission
+(`exerciseRefusal` in `src/model/evidence.ts`): a passing record from a producer granted the proof
+is trusted only when the stripped run failed with at least one case executed, for a criterion
+the proof is attached to. Otherwise — no stripped run, no case run there, a criterion the proof is
+not attached to, or a proof that passed against both the changed and the stripped tree — the record
+is kept with its outcome but untrusted, and is **recorded as not exercising its criterion rather
+than as passing**:
+
+- the evidence record carries `unexercised`, the reason, which names the proof, the criterion and
+  the behaviour whose removal left the proof passing — for example `integration:claim does not
+  exercise AC-1: it passed against the tree with "the lease expiry check in claim()" removed as
+  well as against the change, so it is recorded as not exercising its criterion rather than as
+  passing`;
+- the item's history gains an `evidence.exercise.refused` entry with the proof, the attached
+  criteria, the behaviour and the same reason;
+- the producer ledger reports the proof's outcome as `unexercised` (not `pass`, and not merely
+  `untrusted`), and the session settles `completed` with that reason once no proof of its group is
+  still missing.
+
+The acceptance gate keeps asking for trusted passing evidence, so the finding goes back to the
+worker, who strengthens the proof until it fails without the behaviour. A failing outcome needs
+no stripped run, and a proof attached to no criterion (post-deployment smoke) has none to exercise.
+The rule has no lane of its own: an attested `manual:` proof carries `exercise` in the `attest`
+decision's input, and the CI reporter (`scripts/publish-acceptance.mjs`) forwards the report's
+`exercise`, so a CI job that ran no stripped run is recorded as not exercising like any other.
+
 ### The dispatcher's own state
 
 The dispatch cursor (`*.dispatch.json` beside the coordinator credential) is the dispatcher's

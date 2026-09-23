@@ -216,9 +216,9 @@ test('integration:auto-dispatch-review — the control plane records the review 
   assert.equal(satisfied.length, 1); assert.match(satisfied[0].payload.details.resolution, /approved by graphyard-reviewer\[bot\]/);
   assert.ok(item.gates.find(gate => gate.name === 'review')!.passed);
   // Trusted evidence satisfies a producer request; untrusted evidence does not.
-  item = await engine.execute(implementer, 'evidence', item.id, { proof: 'unit:auto-dispatch-binding', sha: H2, baseSha: B, policyRevision: 1, result: 'pass', executed: 4, skipped: 0 }, randomUUID());
+  item = await engine.execute(implementer, 'evidence', item.id, { proof: 'unit:auto-dispatch-binding', sha: H2, baseSha: B, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   assert.equal(item.autoDispatch!.producers.length, 2, 'a worker assertion satisfies nothing');
-  item = await engine.execute(producer, 'evidence', item.id, { proof: 'unit:auto-dispatch-binding', sha: H2, baseSha: B, policyRevision: 1, result: 'pass', executed: 4, skipped: 0 }, randomUUID());
+  item = await engine.execute(producer, 'evidence', item.id, { proof: 'unit:auto-dispatch-binding', sha: H2, baseSha: B, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['integration']);
   assert.equal((await events(item, 'dispatch.satisfied')).length, 2);
   // Operator rework cancels what is live; the resubmitted head is requested afresh.

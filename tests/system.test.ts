@@ -73,7 +73,7 @@ function observation(w: Work): Observation {
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, files: ['src/claims.ts'], scopeFiles: [], at: new Date().toISOString() };
 }
-function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0 }; }
+function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }; }
 /**
  * A proven candidate with Graphyard's queue tip published for it: the state a merge authorization
  * now requires, since only a published tip proves the validated commit contains its base. Its

@@ -64,7 +64,7 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
     });
     snapshot = observe({ prState: 'open', draft: false });
     work = await observeWork(work, observe());
-    work = (await call(`work/${work.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 9, skipped: 0 })).body;
+    work = (await call(`work/${work.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } })).body;
     work = await observeWork(work, observe(), speculation(work, head, base));
     record('authorized-candidate', { stage: work.stage, gatesPassed: work.gates.every(gate => gate.passed), authorized: !!work.mergeAuthorization });
 
@@ -81,7 +81,7 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
     const acquireKey = randomUUID();
     const granted = (await call(`work/${work.id}/merge-acquire`, 'probe-coordinator', acquireInput, acquireKey)).body;
     record('execution-granted', { owner: granted.execution?.owner ?? null, sha: granted.execution?.sha ?? null, authorizationRevision: granted.execution?.authorizationRevision ?? null });
-    record('frozen-during-execution', refusal(await call(`work/${work.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 9, skipped: 0 })));
+    record('frozen-during-execution', refusal(await call(`work/${work.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } })));
 
     const revoked = (await call(`work/${work.id}/revoke`, 'probe-producer', withdrawal)).body;
     record('revoked', {
@@ -118,7 +118,7 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
     raced = (await call(`work/${raced.id}/submit`, 'probe-worker', { epoch: raced.epoch, pr: 4002 })).body;
     snapshot = observe({ candidate: { sha: head, baseSha: base, pr: 4002, branch: racedBranch, author: 'probe-implementer' }, prState: 'open', draft: false });
     raced = await observeWork(raced, snapshot);
-    raced = (await call(`work/${raced.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, result: 'pass', executed: 9, skipped: 0 })).body;
+    raced = (await call(`work/${raced.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, result: 'pass', executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } })).body;
     raced = await observeWork(raced, snapshot, speculation(raced, head, base));
     const racedAcquire = (await call(`work/${raced.id}/merge-acquire`, 'probe-coordinator', { expectedRevision: raced.revision, sha: head, baseSha: base, policyRevision: raced.policyRevision })).body;
     await call(`work/${raced.id}/merge-verify`, 'probe-coordinator', { executionId: racedAcquire.execution.id });

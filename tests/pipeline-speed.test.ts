@@ -264,7 +264,7 @@ test('integration:speed-auto-dispatch — one passing observation records the re
     assert.equal(item.autoDispatch!.review!.sha, H2); assert.ok(item.autoDispatch!.producers.every(request => request.sha === H2));
     assert.equal((await events(item, 'dispatch.cancelled')).length, 4);
     // Trusted evidence for every proof of a group satisfies its request; the master routes nothing.
-    for (const proof of ['unit:speed-scope-diff']) item = await engine.execute(producer, 'evidence', item.id, { proof, sha: H2, baseSha: B, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+    for (const proof of ['unit:speed-scope-diff']) item = await engine.execute(producer, 'evidence', item.id, { proof, sha: H2, baseSha: B, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
     assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['integration', 'manual']);
     assert.match((await events(item, 'dispatch.satisfied')).at(-1)!.payload.details.resolution, /trusted passing evidence binds every proof: unit:speed-scope-diff \(proof-runner\)/);
   } finally { await rm(directory, { recursive: true, force: true }); }

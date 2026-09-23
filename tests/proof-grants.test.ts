@@ -50,7 +50,7 @@ async function workFor(proofs: string[]) {
   return engine.execute(operator, 'create', null, { title: 'Proof authority fixture', criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs }] }, id()) as Promise<Work>;
 }
 async function submitEvidence(actor: Principal, work: Work, proof: string) {
-  const updated = await engine.execute(actor, 'evidence', work.id, { proof, sha: head, baseSha, policyRevision: work.policyRevision, result: 'pass', executed: 4, skipped: 0 }, id());
+  const updated = await engine.execute(actor, 'evidence', work.id, { proof, sha: head, baseSha, policyRevision: work.policyRevision, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   return updated.evidence.at(-1)!;
 }
 const trustOf = async (actor: Principal, proof: string) => store.transaction(db => authorizedForProof(db, actor, proof));
