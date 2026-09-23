@@ -20,6 +20,7 @@ import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } f
 import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
+import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
 import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
@@ -1195,12 +1196,19 @@ export const runtimeScreens: Record<string, RegExp> = {
   claude: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
   codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\bOpenCode\b/, gemini: /\bGemini\b/,
 };
-export type StartState = 'ready' | 'starting' | 'absent' | 'blocked';
-export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string }
-export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[] }
+export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent';
+export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
+export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[];
+  /** Whether a session stopped on a consent prompt the launcher does not answer is held for a human (a worker, whose supervisor bounds the hold) rather than refused. */ holdConsent?: boolean }
 export class SessionStartError extends Error {
-  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
+  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked' | 'awaiting consent', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
 }
+/**
+ * How many times the launcher answers one allow-listed prompt before it treats the prompt as one it
+ * cannot answer, and how long an answered dialog is given to close before it is answered again — a
+ * second keystroke into a dialog that was already closing would land in the runtime's input.
+ */
+export const consentAnswerAttempts = 2, consentSettleMs = 5_000;
 /** The pane's terminal as text, unwrapped; null when Herdr cannot read it. */
 export async function readPaneScreen(pane: string, run: ChildRun = defaultChildRun, lines = 40) {
   try { return String(await run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
@@ -1215,8 +1223,17 @@ export const commandEchoing = (line: string, command: string) => !!line && (line
 export async function observeStart(pane: string, kind: string, command: string, run?: ChildRun, readyStates = startedStates): Promise<StartObservation> {
   let agent: HerdrAgent | null = null;
   try { const raw = await herdrJson(['agent', 'get', pane], run); agent = raw?.agent ?? raw ?? null; } catch { agent = null; }
-  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
+  // A runtime Herdr sees `working` is at work on its request. Any other state is read off the
+  // screen too: a runtime stopped on a first-run consent prompt is `idle` to Herdr, just as a
+  // started one is, and has not read its request (GY-130).
+  if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
+  const prompt = detectConsentPrompt(screen);
+  if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
+  // An unread pane rules nothing out: an idle runtime may be sitting on a consent prompt, so it is
+  // polled again until a read shows its screen, never taken as ready without one.
+  if (screen === null && agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'starting', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status} but its pane could not be read, so a consent prompt is not ruled out`, line };
+  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
   const showing = screen !== null && !!runtimeScreens[kind]?.test(screen);
   if (agent?.agent === kind && agent.agent_status === 'blocked') return { state: 'blocked', agent, detail: 'Herdr reports it blocked', line };
   // Herdr sees the runtime's process and its screen is showing: a session at work that Herdr has
@@ -1235,9 +1252,31 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
   const startedAt = clock();
   const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
   let extended: string | null = null;
+  const consent: ConsentAnswer[] = [];
   for (;;) {
     const observed = await observeStart(pane, kind, command, run, bounds.readyStates), waitedMs = clock() - startedAt;
-    if (observed.state === 'ready') return { ...observed, waitedMs, extended };
+    if (observed.state === 'ready') return { ...observed, waitedMs, extended, consent, awaiting: null };
+    if (observed.state === 'consent') {
+      const prompt = observed.prompt!, rule = prompt.rule;
+      // Answers are counted per dialog, not per rule: a second dialog the same rule matches (a
+      // crash-report question after a usage-statistics one) gets its own bounded attempts.
+      const answered = consent.filter(answer => answer.rule === rule?.id && sameConsentPrompt({ kind: answer.kind, prompt: answer.prompt }, prompt));
+      const answeredAt = answered.at(-1)?.at;
+      if (answeredAt && clock() - Date.parse(answeredAt) < consentSettleMs && waitedMs < ceilingMs) { await wait(pollMs); continue; }
+      // An allow-listed prompt is answered with its least-privilege option, and the answer is
+      // recorded; the start bound keeps running, so a prompt that returns is not answered forever.
+      if (rule && prompt.keys && answered.length < consentAnswerAttempts && waitedMs < ceilingMs) {
+        await herdrRun(['pane', 'send-keys', pane, ...prompt.keys], run);
+        consent.push({ rule: rule.id, kind: prompt.kind, prompt: prompt.text, answer: rule.answer, keys: prompt.keys, at: new Date(clock()).toISOString() });
+        await wait(pollMs);
+        continue;
+      }
+      const why = rule ? `the launcher answered it ${consentAnswerAttempts} times and it is still showing` : `it is outside the launcher's consent allow-list`;
+      // A session held for a human is reported, not refused: it has not taken its request, and it
+      // is never counted as started. Everything else refuses the launch with the prompt's own text.
+      if (bounds.holdConsent) return { ...observed, waitedMs, extended, consent, awaiting: { prompt: prompt.text, kind: prompt.kind, why } };
+      throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime is awaiting consent in pane ${pane} on a ${prompt.kind} prompt, and ${why}: "${prompt.text}"`);
+    }
     const quoted = observed.line ? `; the pane last showed: "${observed.line}"` : '; the pane showed nothing';
     if (observed.state === 'blocked') throw new SessionStartError('blocked', pane, observed.line, waitedMs, `the ${kind} runtime is blocked before it is ready in pane ${pane} (${observed.detail})${quoted}`);
     if (waitedMs >= timeoutMs && observed.state !== 'starting') throw new SessionStartError('never started', pane, observed.line, waitedMs, `the ${kind} runtime never started within ${seconds(timeoutMs)} in pane ${pane} (${observed.detail})${quoted}`);
@@ -1266,15 +1305,24 @@ export async function startAgentSession(name: string, kind: string, pane: string
   const command = launchCommand(kind, args, files, options.prefix);
   await herdrRun(['pane', 'run', pane, command], run);
   const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });
+  let named = true;
   try { await herdrJson(['agent', 'rename', pane, name], run); }
   catch (error) {
     // A runtime whose own naming rules are narrower than the ones checked above says so in its
     // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
     if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
-    throw error;
+    // A held session is still named so a human can find it, but a runtime that will not take the
+    // name before its dialog is answered does not turn the hold into a failed start.
+    // The hold records it unnamed, so the watch supervisor retries the name before it clears.
+    if (!started.awaiting) throw error;
+    named = false;
   }
-  if (delivery === 'paste') await deliverPrompt(name, text, run, options);
-  return { delivery, command, files, started: { detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
+  // A session awaiting consent has not read its request, so a paste would land in the dialog: the
+  // request waits in its launch file instead, for whoever clears the hold to deliver.
+  if (delivery === 'paste' && !started.awaiting) await deliverPrompt(name, text, run, options);
+  const pending = delivery === 'paste' && started.awaiting ? writeLaunchFiles(options.directory, name, { request: text }).request : null;
+  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: pending, named } : undefined,
+    started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
 /**
@@ -2817,6 +2865,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   let dependencies: PreparedWorker['dependencies'] | null = null;
   let delivery: RequestDelivery | null = null;
+  let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -2831,7 +2880,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
-      try { ({ target, harness, dependencies, delivery } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start)); break; }
+      try { ({ target, harness, dependencies, delivery, started, consent } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start)); break; }
       catch (error) {
         if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
         // The registry session chosen for this launch never ran; its account is free again at once.
@@ -2843,8 +2892,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery,
+    // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
+    started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
+}
+
+export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
+export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
+  return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
 async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds) {
@@ -2863,8 +2919,14 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...launch.args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'] });
-    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery };
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true });
+    // A worker stopped on a prompt the launcher does not answer is held for a human rather than
+    // closed: its record beside the launch files is what master status raises and what the watch
+    // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
+    const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
+    if (hold) writeConsentHold(started.files.stem, hold);
+    return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery,
+      started: started.started.state, consent: { answered: started.consent, awaiting: hold } };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) {

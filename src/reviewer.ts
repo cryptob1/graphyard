@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
+import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import type { FleetProbe } from './fleet.js';
@@ -40,6 +41,8 @@ export const reviewRecordSchema = z.object({
   idleSince: z.string().min(1).max(40).optional(),
   /** How the request reached the session: on its command line, or as a paste for a runtime without that contract (GY-93). */
   delivery: z.enum(['request', 'paste']).optional(),
+  /** The first-run consent prompts the launcher answered before the session took its request, with the option it chose (GY-130). */
+  consent: z.array(consentAnswerSchema).max(8).optional(),
   /** Acknowledgement of the request, judged by the loop (acknowledgeLaunch): when sustained activity was seen, when it was re-prompted once, and the observation window. */
   acknowledgedAt: z.string().min(1).max(40).optional(),
   repromptedAt: z.string().min(1).max(40).optional(),
@@ -301,7 +304,7 @@ export async function launchReview(root: string, work: Work, profileName: string
     try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
     catch (error) { await discard(); throw error; }
     const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
-    let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
+    let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       // The reviewer loads its own role rules, never the master's: it may post this one verdict.
       // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
@@ -312,7 +315,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       pane = created.pane; tabId = created.tab;
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
+      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await discard();
@@ -324,7 +327,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       throw writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
     }
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
-      profile: profile.name, agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, checkout: checkout.directory,
+      profile: profile.name, agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory,
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
     await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
     return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
