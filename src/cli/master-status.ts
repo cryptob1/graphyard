@@ -4,6 +4,7 @@ import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+import { executorFleet } from './executor-report.js';
 import { owedAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
@@ -136,6 +137,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const stalledItems = stalledItemAttention(snapshot);
+  // An action no live executor can claim is not queued behind other work (GY-105); it is named
+  // with its wait and the unit to start, ahead of everything that waits on it.
+  const executors = await executorFleet(root, masterApi, snapshot);
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
   // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
   const stalled = stalledActionAttention(snapshot);
@@ -143,8 +147,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const owed = owedAttention(snapshot, status.work as { key: string; attention: string | null }[], scopeRequests);
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...stuck.attentionItems, ...stalledItems, ...stalled, ...overlong, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
-  // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's.
-  attentionItems.unshift(...loopItems, ...dispatchItems);
+  // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's,
+  // then an action no live executor can claim: nothing below any of the three is moving until they are.
+  attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
   // The generated-files variable the installers set beside GRAPHYARD_PRINCIPALS, compared with
@@ -169,7 +174,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + overflow.length + owed.counted },
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + overflow.length + owed.counted },
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
     actionless: { bound: stallBoundMs, items: actionless },
@@ -184,7 +189,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     setup, administration, daemon, dispatch,
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
-    actions: needsHumanActions(actionReport(snapshot), owed.rows), sessions: sessionReport(snapshot),
+    actions: needsHumanActions(actionReport(snapshot), owed.rows), executors, sessions: sessionReport(snapshot),
     // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).
     branches: branchReport(status.work),
     requests: agentRequestReport(snapshot),

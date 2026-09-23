@@ -1,10 +1,12 @@
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
+import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -118,7 +120,7 @@ async function atomicWrite(file: string, content: string, mode: number) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, content, { mode, flag: 'wx' }); await rename(temporary, file); await chmod(file, mode);
 }
-export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch } = {}) {
+export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch; executors?: false | { run?: SystemctlRunner; unitDirectory?: string; node?: string } } = {}) {
   const connection = connectionSchema.parse(input); connection.url = serverOrigin(connection.url);
   delete connection.principal; // Identity is established only by the authenticated server response.
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
@@ -155,8 +157,20 @@ export async function setupRepository(root: string, input: Connection, options: 
     await atomicWrite(resolve(configDirectory, 'config.json'), JSON.stringify({ url: connection.url, token: connection.token, cliPath: connection.cliPath, hostId: connection.hostId }, null, 2), 0o600);
     runHerdr(['plugin', 'enable', 'graphyard']); pluginConfigured = true;
   }
+  // A coordinator host — one whose primary checkout `master init` configured — gets its executors
+  // supervised as part of being connected: the fleet then survives a reboot or a crash without a
+  // hand-typed command (GY-105). A host without a coordinator credential runs no executor.
+  let executors: ExecutorSupervision | { installed: false; reason: string; next: string } | null = null;
+  if (options.executors !== false && await coordinatorConfigured(connectionRoots(root)[0])) {
+    try { executors = await installExecutorSupervision(root, options.executors ?? {}); }
+    catch (error) { const reason = error instanceof Error ? error.message : String(error); executors = { installed: false, reason, next: `Executor supervision could not be installed: ${reason}. Fix it and rerun init, or node scripts/graphyard-executor.mjs --install` }; }
+  }
   return { discovery, server: connection.url, cliPath: connection.cliPath, principal: connection.principal ?? null, connected: !!connection.principal,
-    instructions: 'AGENTS.md', pluginConfigured, next: connection.principal ? 'Use Herdr or the CLI to claim work, then handoff GY-N for the assigned workspace and supervisor command' : 'Supply an individual worker credential and rerun init to verify the connection' };
+    instructions: 'AGENTS.md', pluginConfigured, executors, next: connection.principal ? 'Use Herdr or the CLI to claim work, then handoff GY-N for the assigned workspace and supervisor command' : 'Supply an individual worker credential and rerun init to verify the connection' };
+}
+/** Whether `master init` configured this checkout: the coordinator credential an executor needs lives there. */
+async function coordinatorConfigured(primary: string) {
+  try { return (await lstat(resolve(primary, '.graphyard/master.json'))).isFile(); } catch (error: any) { if (error.code === 'ENOENT') return false; throw error; }
 }
 export const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 export function handoff(work: any, status: any, hostId: string, cliPath: string) {
@@ -373,4 +387,136 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     next: githubApp
       ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`
       : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently' };
+}
+
+// --- Executor supervision: what a host runs, and the unit that keeps it running (GY-105) -----------
+
+/**
+ * How many executors this host runs and which action kinds they serve. It is the one thing about
+ * executors a host declares; everything else — credential, host name, server — an executor reads
+ * from the same checkout's `.graphyard/master.json`. `kinds: null` serves every kind an executor
+ * has a handler for. Local and ignored, like every file under `.graphyard/`.
+ */
+export const executorDeclarationFile = '.graphyard/executors.json';
+export const executorDeclarationSchema = z.object({
+  version: z.literal(1),
+  count: z.number().int().min(0).max(32),
+  kinds: z.array(z.enum(executorRunnableKinds as [NextActionKind, ...NextActionKind[]])).min(1).nullable().default(null),
+  intervalSeconds: z.number().int().min(1).max(60).default(5),
+}).strict();
+export type ExecutorDeclaration = z.infer<typeof executorDeclarationSchema>;
+export const defaultExecutorDeclaration: ExecutorDeclaration = { version: 1, count: 1, kinds: null, intervalSeconds: 5 };
+
+/** The template unit Graphyard ships, its installed name, and the instance one slot runs as. */
+export const executorUnitTemplate = 'graphyard-executor@.service';
+export const executorUnit = (slot: number) => `graphyard-executor@${slot}.service`;
+/** An executor started for a slot the declaration does not have exits with this status; the unit does not restart it. */
+export const executorSlotUndeclaredExit = 78;
+
+export async function readExecutorDeclaration(root: string): Promise<ExecutorDeclaration | null> {
+  try { return executorDeclarationSchema.parse(JSON.parse(await readFile(resolve(connectionRoots(root)[0], executorDeclarationFile), 'utf8'))); }
+  catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
+}
+export async function writeExecutorDeclaration(root: string, declaration: ExecutorDeclaration) {
+  const parsed = executorDeclarationSchema.parse(declaration);
+  const file = resolve(await localDirectory(connectionRoots(root)[0]), 'executors.json');
+  await atomicWrite(file, JSON.stringify(parsed, null, 2), 0o600);
+  return { file, declaration: parsed };
+}
+
+/**
+ * The shipped template, bound to one checkout: its working directory and the node binary and
+ * script it starts. Nothing else in the unit is host-specific, so an operator who edited the
+ * template by hand gets the same result as the installer.
+ */
+export function renderExecutorUnit(template: string, binding: { root: string; node: string }) {
+  const escape = (value: string) => value.replaceAll('%', '%%');
+  const lines = template.split('\n');
+  const working = lines.findIndex(line => line.startsWith('WorkingDirectory=')), start = lines.findIndex(line => line.startsWith('ExecStart='));
+  if (working < 0 || start < 0) throw new Error('The executor unit template has no WorkingDirectory= or ExecStart= line');
+  lines[working] = `WorkingDirectory=${escape(binding.root)}`;
+  lines[start] = `ExecStart=${escape(binding.node)} ${escape(resolve(binding.root, 'scripts/graphyard-executor.mjs'))} --slot %i`;
+  return lines.join('\n');
+}
+
+export type SystemctlRunner = (args: string[]) => string;
+const systemctl: SystemctlRunner = args => execFileSync('systemctl', ['--user', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }).trim();
+/** Whether this host has a systemd user manager to supervise with; the reason when it does not. */
+export function systemdUserManager(run: SystemctlRunner = systemctl): { available: boolean; reason: string | null } {
+  if (process.platform !== 'linux') return { available: false, reason: `systemd user units are Linux-only; this host is ${process.platform}` };
+  try { run(['show-environment']); return { available: true, reason: null }; }
+  catch (error) { return { available: false, reason: `no systemd user manager answers on this host (${error instanceof Error ? error.message.split('\n')[0] : String(error)})` }; }
+}
+export const executorUnitDirectory = () => resolve(process.env.XDG_CONFIG_HOME ?? resolve(homedir(), '.config'), 'systemd/user');
+
+export interface ExecutorSupervision {
+  declaration: ExecutorDeclaration;
+  declarationFile: string;
+  /** Whether the units are installed and enabled under systemd; when not, why, and what to do by hand. */
+  installed: boolean; reason: string | null; unitFile: string | null;
+  units: { slot: number; unit: string; active: string }[];
+  /** Instances above the declared count that were disabled. */
+  disabled: string[];
+  next: string;
+}
+
+/**
+ * Install and enable the executor supervision a host declares: write the declaration, bind the
+ * shipped template to this checkout under the systemd user manager, enable one instance per slot
+ * and start them, and disable any instance above the count. Idempotent: an unchanged declaration
+ * and unit are left alone, and `enable --now` on a running instance is a no-op. Without a user
+ * manager the declaration is still written, and the result names the unit to install by hand.
+ */
+export async function installExecutorSupervision(root: string, options: { count?: number; kinds?: NextActionKind[] | null; intervalSeconds?: number; run?: SystemctlRunner; unitDirectory?: string; template?: string; node?: string } = {}): Promise<ExecutorSupervision> {
+  const primary = connectionRoots(root)[0];
+  const existing = await readExecutorDeclaration(primary);
+  const declaration = executorDeclarationSchema.parse({ ...(existing ?? defaultExecutorDeclaration), ...(options.count !== undefined ? { count: options.count } : {}), ...(options.kinds !== undefined ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== undefined ? { intervalSeconds: options.intervalSeconds } : {}) });
+  const written = await writeExecutorDeclaration(primary, declaration);
+  const run = options.run ?? systemctl;
+  const manager = systemdUserManager(run);
+  const byHand = `copy examples/master/${executorUnitTemplate} to ~/.config/systemd/user/, edit WorkingDirectory and ExecStart to ${primary}, then systemctl --user daemon-reload && systemctl --user enable --now ${Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1)).join(' ') || '(no slot is declared)'}`;
+  if (!manager.available) return { declaration, declarationFile: written.file, installed: false, reason: manager.reason, unitFile: null, units: [], disabled: [], next: `Executors are not supervised on this host: ${manager.reason}. ${byHand}` };
+  const template = options.template ?? await readFile(resolve(primary, 'examples/master', executorUnitTemplate), 'utf8');
+  const unitFile = resolve(options.unitDirectory ?? executorUnitDirectory(), executorUnitTemplate);
+  const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath });
+  let current: string | null = null;
+  try { current = await readFile(unitFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  if (current !== rendered) { await mkdir(dirname(unitFile), { recursive: true }); await atomicWrite(unitFile, rendered, 0o644); }
+  run(['daemon-reload']);
+  const wanted = Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1));
+  if (wanted.length) run(['enable', '--now', ...wanted]);
+  // Every instance the manager knows beyond the count: enabled earlier under a larger declaration.
+  const known = new Set<string>();
+  for (const listing of [['list-units', '--all', '--plain', '--no-legend', 'graphyard-executor@*.service'], ['list-unit-files', '--plain', '--no-legend', 'graphyard-executor@*.service']]) {
+    try { for (const match of run(listing).matchAll(/graphyard-executor@(\d+)\.service/g)) known.add(match[0]); } catch { /* an older systemctl without the glob; nothing to disable */ }
+  }
+  const disabled = [...known].filter(unit => !wanted.includes(unit)).sort();
+  if (disabled.length) run(['disable', '--now', ...disabled]);
+  if (current !== rendered && wanted.length) run(['restart', ...wanted]);
+  const units = wanted.map((unit, index) => ({ slot: index + 1, unit, active: activeState(run, unit) }));
+  return { declaration, declarationFile: written.file, installed: true, reason: null, unitFile, units, disabled,
+    next: declaration.count ? `${declaration.count} executor slot(s) run under systemd; journalctl --user -u 'graphyard-executor@*' -f follows them, and node scripts/graphyard-executor.mjs --install --count N changes the count` : 'No executor slot is declared, so no action of any kind runs on this host; node scripts/graphyard-executor.mjs --install --count 1 declares one' };
+}
+
+function activeState(run: SystemctlRunner, unit: string) {
+  try { return run(['is-active', unit]) || 'unknown'; }
+  catch (error) { const output = (error as { stdout?: string })?.stdout?.toString().trim(); return output || 'inactive'; }
+}
+
+/**
+ * What this host declares and what systemd says of each slot, for `master status`: the exact
+ * unit to start when an action kind is unserved, or the install command when nothing is declared.
+ */
+export async function executorSupervisionStatus(root: string, run: SystemctlRunner = systemctl) {
+  let declaration: ExecutorDeclaration | null = null, error: string | null = null;
+  try { declaration = await readExecutorDeclaration(root); } catch (failure) { error = failure instanceof Error ? failure.message : String(failure); }
+  const manager = systemdUserManager(run);
+  const units = declaration && manager.available ? Array.from({ length: declaration.count }, (_, index) => ({ slot: index + 1, unit: executorUnit(index + 1), active: activeState(run, executorUnit(index + 1)) })) : [];
+  const down = units.filter(entry => entry.active !== 'active');
+  const start = !declaration ? 'node scripts/graphyard-executor.mjs --install --count 1 declares and starts a supervised executor on this host'
+    : !manager.available ? `node scripts/graphyard-executor.mjs --slot 1 (this host has no systemd user manager: ${manager.reason})`
+    : down.length ? `systemctl --user start ${down.map(entry => entry.unit).join(' ')}`
+    : declaration.count ? `every declared slot is active here (${units.map(entry => entry.unit).join(', ')}); node scripts/graphyard-executor.mjs --install --count ${declaration.count + 1} adds one`
+    : 'node scripts/graphyard-executor.mjs --install --count 1 declares the first slot';
+  return { declaration, error, supervised: manager.available, reason: manager.reason, units, start };
 }

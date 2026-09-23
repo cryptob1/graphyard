@@ -30,7 +30,7 @@ import { probeSupervisorAbsence } from './containment-probe.js';
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
@@ -293,6 +293,8 @@ export const daemonStateSchema = z.object({
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
   /** Per decision action key, the request this loop put to an approver and what became of it. */
   approvals: z.record(z.string(), approvalWatchSchema).default({}),
+  /** Per work item, a live lease whose session Herdr no longer reports while no fence stands (see step 1d). */
+  absences: z.record(z.string(), z.object({ epoch: z.number().int().min(0), owner: z.string().max(200), firstSeenAt: z.string(), cycle: z.number().int().min(0) }).strict()).default({}),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
 }).strict();
@@ -1262,8 +1264,12 @@ export interface DaemonEffects {
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
   selectedAccount?: (role: CapacityRole, profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
-  /** Commits (or cleanly discards) what the interrupted attempt left uncommitted in its worktree. */
-  preserveWork?: (work: Work, epoch: number) => Promise<PartialWork>;
+  /**
+   * Commits (or cleanly discards) what the interrupted attempt left uncommitted in its worktree.
+   * `cause` is the WIP commit's subject after the key and attempt; the provider-quota wording is
+   * the default, and the killed-worker step names its own.
+   */
+  preserveWork?: (work: Work, epoch: number, cause?: string) => Promise<PartialWork>;
   /** Keeps every launcher off the spent account until it resets. */
   holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<unknown>;
   /** Ends an exhausted reviewer or producer session on its ledger, so its request may launch again. */
@@ -1309,6 +1315,39 @@ async function record(state: DaemonState, key: string, action: Omit<DaemonAction
   const entry = daemonActionSchema.parse({ ...action, at: action.at ?? new Date(now).toISOString() });
   state.actions[key] = entry; await persist(state);
   return entry;
+}
+
+/** One preservation per attempt: the record an interrupted attempt leaves for the next one. */
+export const preserveKey = (work: Pick<Work, 'id'>, epoch: number) => `preserve:${work.id}:${epoch}`;
+/** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
+export const launchAppearanceMs = 120_000;
+/**
+ * Keep what a worker that died left behind, the same way an exhausted one's is kept (GY-105).
+ *
+ * A worker killed outright — the agent process OOM-killed, the supervisor's tree stopped, the host
+ * rebooted — never reaches `complete`, and its worktree holds whatever it had not committed. Before
+ * the item can be dispatched again, that is committed on the attempt's own branch (or the record
+ * says it was discarded) and written onto the item through the same capacity record the quota path
+ * uses, with the cause it was observed for; the next attempt's request then names the commit,
+ * branch and worktree. For an attempt whose lease is still live the record ends it, so the item
+ * becomes claimable only once its partial work is on the record. Nothing is preserved for an
+ * attempt that submitted — its work is on the pull request — or one the quota path already kept.
+ */
+async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[]) {
+  if (!effects.reportCapacity) return null;
+  const key = preserveKey(item, epoch), previous = state.actions[key];
+  if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return previous;
+  if (item.submission?.epoch === epoch || item.capacity?.exhaustions.some(entry => entry.role === 'worker' && entry.epoch === epoch)) return null;
+  const principal = profile?.principal ?? item.lastAssignment?.owner ?? null, attempts = (previous?.attempts ?? 0) + 1;
+  await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'started', detail: `Keeping what attempt ${epoch} of ${item.key} left in its worktree: ${observed}`, attempts, cycle: state.cycle }, now(), effects.persist);
+  try {
+    const partialWork = await effects.preserveWork?.(item, epoch, 'interrupted before it could submit') ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
+    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork });
+    const where = partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}${partialWork.branch ? ` on ${partialWork.branch}` : ''}${partialWork.path ? ` (${partialWork.path})` : ''}` : '';
+    return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'done', detail: `${item.key} attempt ${epoch} ${observed}. Partial work ${partialWork.state}${where}${partialWork.detail ? `: ${partialWork.detail}` : ''}; the attempt ended on the record and the next attempt's request names the commit`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
+  } catch (error) {
+    return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'failed', detail: `${item.key} attempt ${epoch} ${observed}, but its partial work could not be put on the record: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
+  }
 }
 
 /**
@@ -1486,6 +1525,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       const key = `incident:orphan-supervisor:${orphan.id}:${orphan.epoch}:${orphan.scope.pid}`;
       const incident = `${orphan.key} epoch ${orphan.epoch} renewed its lease to ${orphan.leaseExpiresAt} while Herdr no longer reports session ${orphan.agentName}: its watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) has outlived the agent`;
       await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'started', detail: `${incident}; stopping it with ${signal} through that scope`, attempts: stops, cycle: state.cycle }, now(), effects.persist);
+      // The agent is gone, so its worktree is quiescent: what it left uncommitted is kept and put
+      // on the record — which ends the attempt — before the supervisor holding it is stopped.
+      const held = open.find(item => item.id === orphan.id);
+      if (held) await preserveInterruptedAttempt(state, effects, held, orphan.epoch, config.workers.find(profile => profile.principal === orphan.owner), `ended without submitting: its agent session ${orphan.agentName} is gone from Herdr while its supervisor (pid ${orphan.scope.pid}) still renewed the lease`, now, performed);
       try {
         await effects.stopSupervisor(orphan, signal);
         state.orphans[orphan.id] = { ...state.orphans[orphan.id], stops, stoppedLeaseExpiresAt: orphan.leaseExpiresAt };
@@ -1494,6 +1537,32 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         performed.push(await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'failed', detail: `${incident}; it could not be stopped through that scope: ${message(error)}`, attempts: stops, cycle: state.cycle }, now(), effects.persist));
       }
     }
+  }
+
+  // 1d. A worker whose supervisor has already exited. When the agent dies under a supervisor that
+  //     is still healthy, the supervisor stops, settles its own quarantine and exits — but it
+  //     releases nothing, so the lease stays live until it lapses, and the item would then be
+  //     dispatched again with the attempt's uncommitted work still sitting in the old worktree.
+  //     Herdr no longer reporting the session while no fence stands for a lease that is still
+  //     live is that state exactly (a live launch holds its fence until the agent has appeared,
+  //     and a stopped agent still in Herdr is 1a's case). The partial work is kept and recorded,
+  //     which ends the attempt, so the re-dispatch that follows is told where it is (GY-105).
+  //     Two observations establish it, as for an orphaned supervisor: a session Herdr failed to
+  //     list once is not a dead worker, and ending a live attempt on one reading would stop it.
+  if (runtime?.available) {
+    const gone = new Set<string>();
+    for (const profile of config.workers.filter(worker => worker.mode === 'launch')) {
+      const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
+      if (!item || failedOver.has(item.id) || item.containmentQuarantine || runtime.agents.some(agent => agent.name === profile.agentName)) continue;
+      const epoch = item.lease!.epoch;
+      if (item.submission?.epoch === epoch || item.lastAssignment?.epoch !== epoch || !(clock - Date.parse(item.lastAssignment.claimedAt ?? item.stageEnteredAt) > launchAppearanceMs)) continue;
+      gone.add(item.id);
+      const seen = state.absences[item.id];
+      if (!seen || seen.epoch !== epoch || seen.owner !== profile.principal) { state.absences[item.id] = { epoch, owner: profile.principal, firstSeenAt: new Date(clock).toISOString(), cycle: state.cycle }; await effects.persist(state); continue; }
+      if (seen.cycle === state.cycle) continue;
+      await preserveInterruptedAttempt(state, effects, item, epoch, profile, `ended without submitting: its agent session ${profile.agentName} is gone from Herdr (first seen gone at ${seen.firstSeenAt}) and its supervisor has exited without releasing the lease`, now, performed);
+    }
+    for (const id of Object.keys(state.absences)) if (!gone.has(id)) delete state.absences[id];
   }
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
@@ -1612,6 +1681,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!effects.settleContainment) continue;
     const previous = state.actions[key];
     if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) continue;
+    // A supervisor verified gone with the lease lapsed is a worker killed outright — the whole
+    // tree stopped, or the host rebooted. Its partial work goes on the record before the fence is
+    // lowered, so the item is offered again only once the next attempt can be told where it is.
+    await preserveInterruptedAttempt(state, effects, item, epoch, config.workers.find(profile => profile.principal === item.containmentQuarantine!.owner), `ended without submitting: its lease lapsed and its supervisor (pid ${assessment.scope?.pid ?? 'unknown'}) is verified gone on ${assessment.host ?? 'this host'}`, now, performed);
     await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'started', detail: `Settling the verified-dead containment quarantine of ${item.key} epoch ${epoch}`, attempts: (previous?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist);
     try {
       await effects.settleContainment(item, assessment);
@@ -2496,10 +2569,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
     ],
     selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
-    preserveWork: async (work, epoch) => {
+    preserveWork: async (work, epoch, cause = 'interrupted by provider quota exhaustion') => {
       const workspace = work.workspaces.find(entry => entry.epoch === epoch);
       if (!workspace || workspace.host !== current().hostId) return { state: 'not-applicable', detail: workspace ? `the attempt worktree is on ${workspace.host}, not this host; its commits stay on ${workspace.branch}` : 'the attempt registered no workspace' };
-      return preservePartialWork(workspace.path, `${work.key} attempt ${epoch} interrupted by provider quota exhaustion`, run);
+      return preservePartialWork(workspace.path, `${work.key} attempt ${epoch} ${cause}`, run);
     },
     holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed),
     endSession: async (session, resolution) => {

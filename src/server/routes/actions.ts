@@ -1,5 +1,6 @@
 import { demand } from '../../model.js';
 import { idleActionable, queueSnapshot, type ActionRow } from '../../model/actions.js';
+import { executorRegistry, executorReport } from '../../model/executor-presence.js';
 import { mechanicalActionKinds, nextActionKinds } from '../../model/next-action.js';
 import { openAgentRequests } from '../../model/agent-requests.js';
 import { runningSessions } from '../../model/sessions.js';
@@ -33,6 +34,9 @@ export const actionRoutes = defineRoutes('actions', [
         // What each open item needs next, whether or not a row has been claimed for it yet.
         nextActions: work.filter(item => item.nextAction).map(item => item.nextAction),
         idle: idleActionable(work, now),
+        // Who is alive to claim, and every pending row whose kind none of them serves (GY-105):
+        // an action nobody can run, reported apart from one waiting its turn.
+        executors: executorReport(work, executorRegistry(services.engine), now),
         requests: work.flatMap(item => openAgentRequests(item, now).map(request => ({ ...request, key: item.key, work: item.id }))),
         sessions: runningSessions(work, now),
       };
@@ -41,7 +45,12 @@ export const actionRoutes = defineRoutes('actions', [
   {
     method: 'POST', path: '/api/actions/claim',
     async handle(context) {
-      return context.services.engine.claimNextAction(context.actor, await parseJson(context, undefined, '{}'), context.idempotencyKey());
+      const body = await parseJson(context, undefined, '{}') as { executor?: string; host?: string; kinds?: string[] };
+      const result = await context.services.engine.claimNextAction(context.actor, body, context.idempotencyKey()) as { action: ActionRow | null; at?: string };
+      // The poll itself is the presence signal, whether or not it claimed: the engine validated
+      // the body, so what is recorded here is exactly what an executor can run.
+      executorRegistry(context.services.engine).observe({ executor: body.executor ?? context.actor.id, host: body.host!, principal: context.actor.id, kinds: (body.kinds ?? nextActionKinds) as typeof nextActionKinds[number][] }, new Date(result.at ?? Date.now()), !!result.action);
+      return result;
     },
   },
   {

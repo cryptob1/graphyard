@@ -2996,8 +2996,11 @@ export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<W
 /** What the previous attempt left for this one: the work an exhausted session had not committed, and a human's answer. */
 function resumedAttempt(work: Partial<Pick<Work, 'capacity' | 'humanRequests'>>) {
   const interrupted = work.capacity?.exhaustions.filter(entry => entry.role === 'worker').at(-1);
+  // Why the attempt ended: a spent provider account, or a worker killed or gone without submitting (GY-105).
+  const ended = interrupted?.cause === 'interrupted' ? `${interrupted.reason.replace(/\.\s*$/, '')}` : 'stopped when its provider account ran out of quota';
   const kept = interrupted?.partialWork.commit && interrupted.partialWork.state !== 'discarded'
-    ? `The previous attempt (epoch ${interrupted.epoch}) stopped when its provider account ran out of quota; its work is kept as commit ${interrupted.partialWork.commit}${interrupted.partialWork.branch ? ` on local branch ${interrupted.partialWork.branch}` : ''}${interrupted.partialWork.path ? ` (worktree ${interrupted.partialWork.path})` : ''}. Read it with git log and git show, and bring what is sound into your branch with git cherry-pick or git merge instead of redoing it. ` : '';
+    ? `The previous attempt (epoch ${interrupted.epoch}) ${ended}; its work is kept as commit ${interrupted.partialWork.commit}${interrupted.partialWork.branch ? ` on local branch ${interrupted.partialWork.branch}` : ''}${interrupted.partialWork.path ? ` (worktree ${interrupted.partialWork.path})` : ''}. Read it with git log and git show, and bring what is sound into your branch with git cherry-pick or git merge instead of redoing it. `
+    : interrupted?.partialWork.state === 'discarded' ? `The previous attempt (epoch ${interrupted.epoch}) ${ended}; its uncommitted changes could not be committed and were discarded (${interrupted.partialWork.detail ?? 'no detail recorded'}), so nothing of them is left to read${interrupted.partialWork.branch ? `; its committed work is on local branch ${interrupted.partialWork.branch}` : ''}. ` : '';
   const answered = work.humanRequests?.at(-1)?.answer?.outcome === 'provided' ? work.humanRequests.at(-1)! : null;
   return kept + (answered ? `An earlier attempt asked the human for ${answered.needed} (${humanDecisionLabel[answered.kind]}); the human answered: ${answered.answer!.text}. Continue from that answer. ` : '');
 }

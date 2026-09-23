@@ -4,6 +4,8 @@
 // a master, and killing one costs the claim it held and nothing else.
 //
 //   node scripts/graphyard-executor.mjs [--once] [--interval SECONDS] [--kinds a,b] [--name NAME]
+//   node scripts/graphyard-executor.mjs --slot N                 # one supervised slot (GY-105)
+//   node scripts/graphyard-executor.mjs --install [--count N] [--kinds a,b] [--interval SECONDS]
 //
 // It reads this host's .graphyard/master.json for the launch profiles the dispatching actions
 // need and authenticates with the coordinator credential named there — the same credential
@@ -11,11 +13,19 @@
 // default is every kind it has a handler for. Two kinds can never be among them: `escalate` and
 // `request-rework` are judgments made in the step itself, and the process refuses to start with a
 // handler for either, which is what keeps a language model out of the loop rather than inside it.
+//
+// Under supervision (GY-105) the host declares how many executors it runs and of which kinds in
+// .graphyard/executors.json, and the shipped systemd template examples/master/graphyard-executor@.service
+// starts one instance per slot with `--slot N`: the slot takes its kinds and poll interval from the
+// declaration, claims under a stable name, and answers systemd's watchdog on every poll and every
+// claim renewal. `--install` writes that declaration and enables the units (src/repository-setup.ts
+// installExecutorSupervision); `graphyard init` does the same on a coordinator host.
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export function parseArguments(argv) {
-  const options = { once: false, intervalSeconds: 5, kinds: null, name: null };
+  const options = { once: false, intervalSeconds: null, kinds: null, name: null, slot: null, install: false, count: null };
   for (let i = 0; i < argv.length; i++) {
     const argument = argv[i];
     const value = () => { const next = argv[++i]; if (next === undefined) throw new Error(`${argument} needs a value`); return next; };
@@ -23,23 +33,45 @@ export function parseArguments(argv) {
     else if (argument === '--interval') options.intervalSeconds = Number(value());
     else if (argument === '--kinds') options.kinds = value().split(',').map(kind => kind.trim()).filter(Boolean);
     else if (argument === '--name') options.name = value();
+    else if (argument === '--slot') options.slot = Number(value());
+    else if (argument === '--install') options.install = true;
+    else if (argument === '--count') options.count = Number(value());
     else throw new Error(`Unknown argument ${argument}`);
   }
-  if (!Number.isInteger(options.intervalSeconds) || options.intervalSeconds < 1 || options.intervalSeconds > 900) throw new Error('--interval takes whole seconds between 1 and 900');
+  if (options.intervalSeconds !== null && (!Number.isInteger(options.intervalSeconds) || options.intervalSeconds < 1 || options.intervalSeconds > 900)) throw new Error('--interval takes whole seconds between 1 and 900');
+  if (options.slot !== null && (!Number.isInteger(options.slot) || options.slot < 1)) throw new Error('--slot takes a whole number from 1');
+  if (options.count !== null && (!Number.isInteger(options.count) || options.count < 0)) throw new Error('--count takes a whole number from 0');
+  if (options.count !== null && !options.install) throw new Error('--count only goes with --install');
+  if (options.slot !== null && (options.install || options.name)) throw new Error('--slot names a supervised slot; it takes no --install or --name');
   return options;
+}
+
+/**
+ * systemd's keep-alive channel, spoken only when the supervisor set NOTIFY_SOCKET (see the master
+ * loop's `notify` effect for why it goes through `systemd-notify`). A notification that fails is
+ * logged, never fatal: the executor is still doing its work, and the watchdog decides on the window.
+ */
+export function supervisorNotifier(env = process.env, run, log = line => console.error(line)) {
+  if (!env.NOTIFY_SOCKET) return null;
+  // Through the process's asynchronous runner (GY-125), never a synchronous child: a notification
+  // is fire-and-forget, and one that fails is logged rather than awaited.
+  return state => { Promise.resolve().then(() => run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1'], { timeoutMs: 10_000 })).catch(error => log(`[graphyard-executor] supervisor notification failed: ${error.message}`)); };
 }
 
 /** The TypeScript modules this process is a thin entry point for; tsx is a runtime dependency already. */
 export async function load() {
   const { tsImport } = await import('tsx/esm/api');
   const here = import.meta.url;
-  const [master, daemon, dispatch, executor, reviewer, producer, actions, view] = await Promise.all([
+  const [master, daemon, dispatch, executor, reviewer, producer, actions, view, setup] = await Promise.all([
     tsImport('../src/master.ts', here), tsImport('../src/master-daemon.ts', here), tsImport('../src/auto-dispatch.ts', here),
     tsImport('../src/executor.ts', here), tsImport('../src/reviewer.ts', here), tsImport('../src/producer.ts', here),
-    tsImport('../src/model/next-action.ts', here), tsImport('../src/server/work-view.ts', here),
+    tsImport('../src/model/next-action.ts', here), tsImport('../src/server/work-view.ts', here), tsImport('../src/repository-setup.ts', here),
   ]);
-  return { master, daemon, dispatch, executor, reviewer, producer, actions, view };
+  return { master, daemon, dispatch, executor, reviewer, producer, actions, view, setup };
 }
+
+/** An exit status the supervisor reads: a slot the declaration does not have stays down instead of flapping. */
+class SlotUndeclared extends Error { constructor(message, exitCode) { super(message); this.exitCode = exitCode; } }
 
 /**
  * The effects the handlers run actions with, built in one place so they can be held against stub
@@ -75,12 +107,30 @@ export function controlPlaneEffects(modules, context) {
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const options = parseArguments(argv);
   const modules = await load();
-  const { master: m, daemon: d, dispatch: a, executor: x, reviewer: r, producer: pr, actions: k, view: v } = modules;
+  const { master: m, daemon: d, dispatch: a, executor: x, reviewer: r, producer: pr, actions: k, view: v, setup: s } = modules;
   // Bounded, captured and awaited, exactly as the daemon runs its own children: a launch that
   // holds for its whole thirty-second timeout must not stop this process renewing the claim it
   // is holding while the launch runs.
   const run = m.childRunner({ timeoutMs: 90_000 });
   const root = (await run('git', ['rev-parse', '--show-toplevel'])).trim();
+  if (options.install) {
+    // Only a coordinator host can run an executor at all: without master.json every unit this
+    // enables would fail on start and be restarted every ten seconds.
+    await m.loadMasterConfig(root);
+    const installed = await s.installExecutorSupervision(root, { ...(options.count !== null ? { count: options.count } : {}), ...(options.kinds ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== null ? { intervalSeconds: options.intervalSeconds } : {}) });
+    console.log(JSON.stringify(installed, null, 2));
+    return installed;
+  }
+  // A supervised slot is configured by the host's declaration, not by its command line, so every
+  // slot on a host serves the same kinds and a change to the declaration reaches all of them.
+  if (options.slot !== null) {
+    const declaration = await s.readExecutorDeclaration(root);
+    if (!declaration) throw new SlotUndeclared(`This host declares no executors (${s.executorDeclarationFile} is missing); node scripts/graphyard-executor.mjs --install --count N declares them`, s.executorSlotUndeclaredExit);
+    if (options.slot > declaration.count) throw new SlotUndeclared(`Slot ${options.slot} is above this host's declared count of ${declaration.count}; raise it with node scripts/graphyard-executor.mjs --install --count ${options.slot}, or disable ${s.executorUnit(options.slot)}`, s.executorSlotUndeclaredExit);
+    options.kinds ??= declaration.kinds;
+    options.intervalSeconds ??= declaration.intervalSeconds;
+  }
+  options.intervalSeconds ??= 5;
   const config = await m.loadMasterConfig(root);
   const token = await m.readCredentialFile(config.credentialFile);
 
@@ -115,28 +165,39 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (!k.executorRunnableKinds.includes(kind)) throw new Error(`No executor runs ${kind}; it runs ${k.executorRunnableKinds.join(', ')}`);
   }
 
+  // Under systemd every poll and every claim renewal is a keep-alive: a process whose event loop
+  // wedged stops sending them and is restarted, while a slow handler that still renews is left alone.
+  const notify = supervisorNotifier(env, run);
+  const alive = () => notify?.('alive');
   const effects = {
-    claim: body => mutate('actions/claim', body),
+    claim: body => { alive(); return mutate('actions/claim', body); },
     // The settlement names the executor the claim was recorded under, never this credential's own
     // principal: several executors may run behind one coordinator credential.
     settle: (action, result, reason) => mutate(`actions/${action.id}/settle`, { result, reason, ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
     // A handler is not bounded by the claim lease — a dispatch waits on a runtime, a guarded merge
     // chains provider calls — so while one runs this says the claim is still held. Without it a
     // slow handler loses its row mid-flight and another executor runs the action beside it.
-    renew: action => mutate(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
+    renew: action => { alive(); return mutate(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }); },
     handlers: options.kinds ? Object.fromEntries(options.kinds.filter(kind => handlers[kind]).map(kind => [kind, handlers[kind]])) : handlers,
   };
-  const identity = { id: options.name ?? `${status.actor.id}@${config.hostId}:${process.pid}`, host: config.hostId };
+  // A supervised slot claims under a stable name, so a restart is the same executor coming back
+  // rather than a new one appearing beside a ghost; the pid says which incarnation is speaking.
+  const identity = { id: options.name ?? (options.slot !== null ? `${status.actor.id}@${config.hostId}/${options.slot}` : `${status.actor.id}@${config.hostId}:${process.pid}`), host: config.hostId };
   const stopping = new AbortController();
   const stop = () => stopping.abort();
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, stop);
+  notify?.('ready');
+  console.error(`[graphyard-executor] ${identity.id} (pid ${process.pid}) serving ${a.executorKinds(effects.handlers).join(', ')} every ${options.intervalSeconds}s${options.slot !== null ? ` as slot ${options.slot}` : ''}${notify ? ' under systemd supervision' : ''}`);
   try {
     const result = await a.runExecutor(identity, effects, { intervalMs: options.intervalSeconds * 1000, once: options.once, signal: stopping.signal, log: line => console.error(line) });
-    const report = { executor: identity.id, host: identity.host, repository: config.repository, kinds: a.executorKinds(effects.handlers), intervalSeconds: options.intervalSeconds,
+    const report = { executor: identity.id, host: identity.host, pid: process.pid, slot: options.slot, repository: config.repository, kinds: a.executorKinds(effects.handlers), intervalSeconds: options.intervalSeconds,
       steps: result.steps.length, ran: result.steps.filter(step => step.action).length, failed: result.steps.filter(step => step.result === 'failed').length, last: result.steps.at(-1) ?? null };
     console.log(JSON.stringify(report, null, 2));
     return report;
   } finally { for (const signal of ['SIGINT', 'SIGTERM']) process.off(signal, stop); }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error.message); process.exitCode = 1; });
+// The entry check follows symlinks: a checkout may reach the shipped scripts through a link, and
+// Node resolves the module URL to the real path.
+const entry = (() => { try { return process.argv[1] ? pathToFileURL(realpathSync(process.argv[1])).href : null; } catch { return null; } })();
+if (entry === import.meta.url) main().catch(error => { console.error(error.message); process.exitCode = error.exitCode ?? 1; });
