@@ -927,9 +927,12 @@ async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Pro
   }));
   return results;
 }
-/** Seconds between observations: a merge-stage candidate needs a fresh one to merge; webhooks wake the rest on change. */
-export const mergeObservationSeconds = 20;
-export const idleObservationSeconds = 90;
+/**
+ * Seconds between observations. Only the merge-queue head needs one under 25 s old to merge; every
+ * other item is woken at once by a webhook naming it, so its timer is only a backstop.
+ */
+export const headObservationSeconds = 20;
+export const idleObservationSeconds = 300;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
 export async function processJob(engine: Engine, github: GitHub) {
@@ -1025,7 +1028,10 @@ export async function processJob(engine: Engine, github: GitHub) {
     }
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
-    else await engine.store.finishJob(job.work_id, job.token, undefined, false, work?.stage === 'merge' ? mergeObservationSeconds : idleObservationSeconds);
+    else {
+      const head = work?.stage === 'merge' && queuePlacement(work, await engine.store.list(), Date.now())?.position === 1;
+      await engine.store.finishJob(job.work_id, job.token, undefined, false, head ? headObservationSeconds : idleObservationSeconds);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
