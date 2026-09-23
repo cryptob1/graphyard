@@ -5,7 +5,7 @@ import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../coordination.js';
 import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
-import { daemonEffects, readDaemonState, runDaemon, type DaemonState } from '../master-daemon.js';
+import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { reviewCommand } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
@@ -13,7 +13,7 @@ import { applyProtection, protectionPlan, readProtection } from '../protection.j
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
-import { approveScopeRequest, masterStatusReport } from './master-status.js';
+import { approveScopeRequest, cycleBudget, masterStatusReport } from './master-status.js';
 import { masterInit } from './master-init.js';
 import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
@@ -155,8 +155,8 @@ export const masterCommands = defineCommands([
         if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
         const assessment = await verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
         if (!assessment.settleable) {
-          // Every process still holding the fence is printed with its command line and cwd;
-          // the master verifies whose it is before stopping anything.
+          // Every process still holding the fence is printed with its command line and working
+          // directory: the master verifies whose it is before stopping anything.
           const held = assessment.verification?.held ?? [];
           const processes = held.length ? `\nProcesses holding the fence (verify before stopping anything):\n${held.map(entry => `- pid ${entry.pid}${entry.unit ? ` in ${entry.unit}` : ''}: cmdline "${entry.command}" cwd ${entry.cwd ?? '<unreadable>'}`).join('\n')}` : '';
           const recorded = assessment.scope ? `\nRecorded launch scope: ${assessment.scope.unit} (supervisor pid ${assessment.scope.pid}); systemd reports it ${assessment.verification?.recordedScope?.activeState ?? 'unqueried'}` : '\nThis quarantine recorded no launch scope; every live graphyard-watch scope is judged by its members';
@@ -182,13 +182,13 @@ export const masterCommands = defineCommands([
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
-        // Skew is refused before any candidate is read: an undeployed server is skew, not a failed gate.
+        // Skew is refused before any candidate is read: an undeployed server is protocol skew, not a failed gate.
         assertProtocol(coordinator);
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
         if (!master.autoMerge) selected.splice(0, selected.length, ...await approvedMerges(selected, item => masterApi(`work/${item.id}/decisions`), args[0] !== '--all'));
-        // One executor per request id (see MergeExecutor in master.ts).
+        // One executor instance per request id (see MergeExecutor in master.ts).
         const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
         const mergeOne = mergeExecutor(master, () => masterApi('work-snapshot'), masterMutation, { principal: coordinator.actor.id, instance: outerRequest }, outerRequest);
         const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
@@ -212,12 +212,13 @@ export const masterCommands = defineCommands([
         const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
         const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
         if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
-        // A coordinator credential is the daemon's whole authority; anything broader could satisfy a gate it must wait on.
+        // A coordinator credential is the daemon's entire authority; anything broader could satisfy a gate the loop must wait on.
         if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
         if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
         assertProtocol(coordinator);
         const state = await readDaemonState(root, master);
-        // The cycle and the dispatcher poll the bounded coordination view; the guarded merge re-reads full documents.
+        // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
+        // server answers with whole documents); the guarded merge re-reads the full documents.
         const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
         const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
         const executor = daemonExecutor(coordinator.actor.id);
@@ -231,7 +232,7 @@ export const masterCommands = defineCommands([
         const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
         const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatchEffects(root, current, { snapshot: () => coordinationSnapshot(dispatchReadTimeoutMs) }), { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });
         const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
-        // A cycle that threw was recorded and retried in-process (GY-119); reported here, never as an exit.
+        // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
         return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null,
           dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
       }
@@ -241,20 +242,4 @@ export const masterCommands = defineCommands([
   ...sessionCommands,
 ]);
 
-/**
- * How the coordination cycle keeps to its configured interval, from the durations the daemon
- * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
- * longer than its interval means the loop is falling behind the work it shepherds.
- */
-export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
-  const metrics = state.metrics;
-  const last = metrics.at(-1) ?? null;
-  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
-  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
-  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
-  return {
-    intervalMs, measured: metrics.length, lastCycle: last ? { cycle: last.cycle, at: last.at, durationMs: last.durationMs } : null,
-    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
-    lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
-  };
-}
+export { cycleBudget };

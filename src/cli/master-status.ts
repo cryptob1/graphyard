@@ -296,10 +296,8 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
 }
 
 /**
- * The one-command approval behind `master scope GY-N [--allow-broad-scope] [REASON]`: read the
- * item's open scope request, verify the requesting epoch still holds the lease, and apply the
- * additive requirements revision with the master's own operator-agent identity. A requested
- * root-level directory is refused like any other broad scope unless the flag records the exception.
+ * `master scope`: apply an open scope request of the lease-holding epoch as an additive
+ * requirements revision; a root-level directory needs --allow-broad-scope.
  */
 export async function approveScopeRequest(root: string, config: MasterConfig, args: string[], deps: { coordinator: (path: string) => Promise<any>; fetcher?: typeof fetch; operatorToken?: () => Promise<string> }) {
   const allowBroad = args.includes(broadScopeFlag); args = args.filter(flag => flag !== broadScopeFlag);
