@@ -477,3 +477,10 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   if (measurement.report.verdict !== 'verified') return unverified(measurement.report.reason, measurement.report.shortfall ?? null);
   return { ...base, verdict: 'verified', reason: measurement.report.reason, shortfall: null, attention: null };
 }
+
+/** The claim's visibility as master status reads it: the recorded measurement, the release the control plane says is serving, and the delivered items. */
+export async function throughputStatus(root: string, coordinator: Parameters<typeof deployedRevision>[0] & { release?: { version?: string | null } | null }, work: Work[]): Promise<ThroughputVisibility> {
+  return throughputClaimVisibility(await readThroughputMeasurement(root).catch(() => null),
+    { revision: deployedRevision(coordinator).revision, version: coordinator?.release?.version ?? null },
+    work.filter(item => item.stage === 'done' && item.delivery).length);
+}
