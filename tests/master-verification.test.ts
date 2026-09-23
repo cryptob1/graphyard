@@ -91,7 +91,7 @@ test('integration:master-loop-deployment-verification — verification is record
   try {
     const master = config(release.cliPath, url);
     const mutations: string[] = [];
-    const effects = verificationEffects(master, { snapshot: async () => ({ work: state.work, now: iso(clock) }), mutate: async (path, data) => { mutations.push(path); state.records.push(data); return data; } });
+    const effects = verificationEffects(master, { root: release.checkout, snapshot: async () => ({ work: state.work, now: iso(clock) }), mutate: async (path, data) => { mutations.push(path); state.records.push(data); return data; } });
     const result = await verifyDeployment(state.work[0], effects);
     assert.equal(result.result, 'verified', result.refusals.join('; '));
     assert.deepEqual(result.checks, { guide: 'pass', init: 'pass' });
@@ -118,21 +118,49 @@ test('integration:master-loop-deployment-verification — verification is record
     // Local-only: the deployed release moved on; this checkout is no longer what serves.
     const rolledForward = 'f'.repeat(40); state.sha = rolledForward;
     const compare = (_command: string, args: string[]) => { if (args[0] === 'api' && args[1].includes(`compare/${release.sha}...${rolledForward}`)) return JSON.stringify({ status: 'ahead' }); throw new Error(`unexpected ${args.join(' ')}`); };
-    const moved = await verifyDeployment(state.work[0], verificationEffects(master, { snapshot: effects.snapshot, mutate: async () => assert.fail('nothing is recorded from a checkout that is not the deployed release'), run: (command, args, options) => command === 'gh' ? compare(command, args) : execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) }));
+    const moved = await verifyDeployment(state.work[0], verificationEffects(master, { root: release.checkout, snapshot: effects.snapshot, mutate: async () => assert.fail('nothing is recorded from a checkout that is not the deployed release'), run: (command, args, options) => command === 'gh' ? compare(command, args) : execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) }));
     assert.equal(moved.result, 'refused'); assert.equal(moved.release.sha, rolledForward); assert.equal(moved.release.covers, null);
     assert.match(moved.refusals.join('\n'), new RegExp(`emitted by a local checkout at ${release.sha}, not by the deployed release ${rolledForward}`));
     assert.equal(mutations.length, 1);
     state.sha = release.sha;
 
     // The release does not serve the merge yet: pending, not verified.
-    const behind = await verifyDeployment(delivered('a'.repeat(40), iso(clock, -hour)), verificationEffects(master, { snapshot: async () => ({ work: [delivered('a'.repeat(40), iso(clock, -hour))], now: iso(clock) }), mutate: async () => assert.fail('nothing is recorded for a release that does not serve the merge'), run: (command, args, options) => command === 'gh' ? JSON.stringify({ status: 'behind' }) : execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) }));
+    const behind = await verifyDeployment(delivered('a'.repeat(40), iso(clock, -hour)), verificationEffects(master, { root: release.checkout, snapshot: async () => ({ work: [delivered('a'.repeat(40), iso(clock, -hour))], now: iso(clock) }), mutate: async () => assert.fail('nothing is recorded for a release that does not serve the merge'), run: (command, args, options) => command === 'gh' ? JSON.stringify({ status: 'behind' }) : execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) }));
     assert.equal(behind.result, 'refused'); assert.match(behind.refusals.join('\n'), /does not serve GY-42 merge commit a{40} yet/);
 
     // No observation at all: unavailable is a refusal with the endpoint's reason, never a pass
     // (the stub answers 401 off the release path, as a probe behind the wrong credential would).
-    const silent = await verifyDeployment(state.work[0], verificationEffects(config(release.cliPath, url, { deploymentUrl: `${url}/missing` }), { snapshot: effects.snapshot, mutate: async () => assert.fail('nothing is recorded without an observation') }));
+    const silent = await verifyDeployment(state.work[0], verificationEffects(config(release.cliPath, url, { deploymentUrl: `${url}/missing` }), { root: release.checkout, snapshot: effects.snapshot, mutate: async () => assert.fail('nothing is recorded without an observation') }));
     assert.equal(silent.result, 'refused'); assert.match(silent.refusals[0], /deployed release is unobserved: Deployment endpoint answered 401/);
   } finally { await close(server); await rm(release.directory, { recursive: true, force: true }); }
+});
+
+test('integration:master-loop-deployment-verification — containment is derived in the managed checkout, not in the launcher\'s directory', async () => {
+  // The launcher may live outside any checkout of the managed repository (an npm install, or a
+  // checkout of Graphyard beside another project). Ancestry asked there answers nothing.
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-managed-'));
+  const managed = join(directory, 'project'), launcherDirectory = join(directory, 'launcher');
+  const git = (...args: string[]) => execFileSync('git', ['-C', managed, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  execFileSync('git', ['init', '-q', '-b', 'main', managed]);
+  execFileSync('git', ['init', '-q', '-b', 'main', launcherDirectory]);
+  const commit = (message: string) => { git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', message); return git('rev-parse', 'HEAD'); };
+  const merge = commit('GY-42 merge'), release = commit('later release');
+  const state = { sha: release, work: [] as Work[], records: [] as any[] };
+  const { server, url } = await stubServer(state);
+  const repositories: string[] = [];
+  const run = (command: string, args: string[], options?: { cwd?: string }) => {
+    if (command === 'gh') throw new Error(`unexpected GitHub request ${args.join(' ')}`);
+    if (command === 'git' && args[0] === '-C') repositories.push(args[1]);
+    return execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  };
+  try {
+    const effects = verificationEffects(config(join(launcherDirectory, 'bin/graphyard.mjs'), url), { root: managed, snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: async () => assert.fail('observing records nothing'), run });
+    const observation = await effects.observe([delivered(merge, new Date().toISOString())]);
+    assert.equal(observation.sha, release);
+    assert.deepEqual(observation.deployed, ['GY-42'], 'the release descends from the merge in the managed checkout');
+    assert.deepEqual(observation.pending, []);
+    assert.ok(repositories.length > 0 && repositories.every(path => path === managed), `every ancestry read ran in the managed checkout: ${repositories.join(', ')}`);
+  } finally { await close(server); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('integration:master-loop-deployment-verification — stale observations, undelivered work, and instructions without the loop are refused before anything is recorded', async () => {

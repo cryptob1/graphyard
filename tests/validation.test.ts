@@ -63,7 +63,7 @@ async function start(f: Awaited<ReturnType<typeof fixture>>) {
   await validation.collectionAuthority(collector, command); return command;
 }
 function report(f: Awaited<ReturnType<typeof fixture>>, command: { requestId: string; attemptId: string; epoch: number }) {
-  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true };
+  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } };
 }
 async function expire(f: Awaited<ReturnType<typeof fixture>>) {
   await store.pool.query("UPDATE validation_requests SET document=jsonb_set(document,'{attempts,0,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [f.r.id]); await validation.reconcile();
@@ -127,8 +127,33 @@ test('result receipts deduplicate evidence and a newer request prevents old-pass
   const late: any = await validation.result(collector, report(f, command), id()); assert.equal(late.accepted, false);
   await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: (await current(f.w.id)).revision }, id());
   let w = await current(f.w.id); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false); assert.equal(w.mergeAuthorization, null);
-  w = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());
+  w = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());
   assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false, 'generic evidence cannot bypass pinned attempt');
+  await cleanup(f);
+});
+test('GY-135: a collector pass with no failing run against the stripped tree is recorded as not exercising its criterion', async () => {
+  const cases: [string, Record<string, unknown> | undefined, RegExp][] = [
+    ['no exercise run', undefined, /no run of it against a tree with the criterion's behaviour removed was recorded/],
+    ['a stripped run that still passed', { criterion: 'AC-1', behaviour: 'the behaviour check in the scenario', result: 'pass', executed: 2 }, /passed against the tree with "the behaviour check in the scenario" removed/],
+  ];
+  for (const [label, exercise, reason] of cases) {
+    const f = await fixture(), command = await start(f);
+    const { exercise: _discriminating, ...bare } = report(f, command); void _discriminating;
+    const outcome: any = await validation.result(collector, exercise ? { ...bare, exercise } : bare, id());
+    assert.equal(outcome.accepted, true, label); assert.match(outcome.unexercised, reason, label);
+    const w = await current(f.w.id), evidence = w.evidence.at(-1)!;
+    assert.equal(evidence.result, 'pass', label); assert.equal(evidence.trusted, false, label); assert.match(evidence.unexercised!, reason, label);
+    for (const named of [f.proof, 'AC-1']) assert.ok(evidence.unexercised!.includes(named), `${label}: ${named}`);
+    assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false, `${label}: the criterion is not proven`);
+    assert.ok((await store.events(f.w.id)).some(e => e.kind === 'evidence.exercise.refused'), label);
+    await cleanup(f);
+  }
+  // The same lane with a stripped run that failed is trusted and proves the criterion.
+  const f = await fixture(), command = await start(f);
+  const outcome: any = await validation.result(collector, report(f, command), id());
+  assert.equal(outcome.passed, true); assert.equal(outcome.unexercised, undefined);
+  const w = await current(f.w.id);
+  assert.equal(w.evidence.at(-1)!.trusted, true); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, true);
   await cleanup(f);
 });
 test('unacknowledged timeout is recoverable and stale ACK cannot start an old epoch', async () => {
@@ -449,7 +474,7 @@ test('request and definition pages are bounded and stable under newer inserts', 
 test('proof previews reject generic and superseded validation passes just like gates', async () => {
   const f = await fixture();
   let w = await current(f.w.id);
-  w = await engine.execute(collector, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, scenarioRevision: 1, environment: f.environment.id }, id());
+  w = await engine.execute(collector, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scenarioRevision: 1, environment: f.environment.id }, id());
   assert.equal(proofPreview(w)[0].status, 'unmeasured');
   const command = await start(f); await validation.result(collector, report(f, command), id());
   w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'passed');

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type pg from 'pg';
-import { admin, demand, proofSchema, type Evidence, type Principal, type Work } from './model.js';
+import { admin, demand, exerciseRefusal, proofSchema, type Evidence, type Principal, type Work } from './model.js';
 import { producerIndependenceRefusal } from './delegation.js';
 import { candidateManifest, compatibilitySignature } from './attribution.js';
 import type { Attempt, BuildAttestation, Bundle, Environment, ReusePolicy, Validation, ValidationCandidate, ValidationRequest } from './validation.js';
@@ -141,6 +141,11 @@ export class EvidenceReuse {
           if (Date.parse(evidence.at) + policy.freshnessSeconds * 1000 <= now.getTime()) refuse(`The newest pass was observed at ${evidence.at}, older than the policy freshness of ${policy.freshnessSeconds}s`);
           const dependent = producerIndependenceRefusal(v.principals.find(p => p.id === evidence!.producer) ?? { id: evidence.producer, role: 'producer' }, w, v.principals);
           if (dependent) refuse(dependent);
+          // GY-135: a pass trusted before the exercise rule, or otherwise without a stripped run
+          // that failed, is not carried onto a new head; the proof runs live instead.
+          const all: Work[] = (await db.query('SELECT document FROM work_items')).rows.map(row => row.document as Work).map(x => x.id === w.id ? w : x);
+          const unexercised = exerciseRefusal(w, all, evidence);
+          if (unexercised) refuse(unexercised);
         }
         // Exact binding: requirement/proof policy revision, scenario revision and hash, the
         // approved bundle and environment revisions, and the base the head was compared to.

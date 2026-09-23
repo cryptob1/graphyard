@@ -149,6 +149,39 @@ export const workspaceCommands = defineCommands([
     },
   },
   {
+    name: 'restore-branch',
+    scope: 'work',
+    help: [
+      '  restore-branch GY-N EPOCH     Replace the leased attempt\'s own branch with HEAD after an',
+      '                                ejected or contaminated tip: a lease push to that one branch,',
+      '                                conditional on the tip just fetched; run after reset and sync',
+    ],
+    async run(context, work) {
+      // The worker's one history rewrite (GY-128). Its harness denies every raw force push, the lease
+      // form included, because a glob cannot limit one to a single ref; this command can. The server
+      // confirms the caller holds this epoch's live lease, and the push names only the branch
+      // registered for that epoch, leased on the tip fetched here, so it replaces what it saw.
+      const epoch = Number(context.args[0]);
+      if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use restore-branch GY-N EPOCH');
+      await workMutation(context, work)('heartbeat', { epoch });
+      const branch = work.workspaces.find((w: any) => w.epoch === epoch)?.branch;
+      if (!branch) throw new Error(`No workspace branch is registered for ${work.key} epoch ${epoch}`);
+      const git = (...gitArgs: string[]) => execFileSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
+      const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      const current = quietly('symbolic-ref', '--short', 'HEAD').stdout.trim();
+      if (current !== branch) throw new Error(`Run restore-branch on ${branch}, the branch of ${work.key} epoch ${epoch}; this worktree is on ${current || 'a detached HEAD'}`);
+      if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) throw new Error(`A merge is in progress: finish sync ${work.key} before restoring the branch`);
+      if (quietly('diff', '--quiet', 'HEAD').status !== 0) throw new Error('The worktree has uncommitted changes: commit them or reset before restoring the branch');
+      git('fetch', '--quiet', 'origin');
+      const tip = quietly('rev-parse', '-q', '--verify', `refs/remotes/origin/${branch}`).stdout.trim();
+      const head = git('rev-parse', 'HEAD');
+      const push = quietly('push', `--force-with-lease=refs/heads/${branch}:${tip}`, 'origin', `HEAD:refs/heads/${branch}`);
+      if (push.status !== 0) throw new Error(`The lease push of ${branch} was refused${/stale info/.test(push.stderr) ? ': the branch moved after the fetch; fetch again and read the new tip before replacing it' : ''}: ${push.stderr.trim()}`);
+      context.print({ key: work.key, epoch, branch, replaced: tip || null, head,
+        next: `The branch holds ${head.slice(0, 12)}. Submit it with complete ${work.key} ${epoch} PR.` });
+    },
+  },
+  {
     name: 'worktree',
     scope: 'work',
     help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree'],

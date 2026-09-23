@@ -235,10 +235,10 @@ test('integration:concurrent-producers — the control plane refuses evidence fo
   const touched = await submitted('Implemented by the runner principal', runnerAsWorker, 301);
   const untouched = await submitted('Implemented by a worker', worker, 302);
   assert.ok(touched.implementers?.includes('proof-runner'));
-  await assert.rejects(engine.execute(runner, 'evidence', touched.id, { proof: 'unit:concurrency', sha: H, baseSha: B, policyRevision: 1, result: 'pass', executed: 2, skipped: 0 }, randomUUID()), /requires a producer identity distinct from its implementers; proof-runner has held an assignment on it/);
-  const other = await engine.execute(runnerB, 'evidence', touched.id, { proof: 'unit:concurrency', sha: H, baseSha: B, policyRevision: 1, result: 'pass', executed: 2, skipped: 0 }, randomUUID());
+  await assert.rejects(engine.execute(runner, 'evidence', touched.id, { proof: 'unit:concurrency', sha: H, baseSha: B, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID()), /requires a producer identity distinct from its implementers; proof-runner has held an assignment on it/);
+  const other = await engine.execute(runnerB, 'evidence', touched.id, { proof: 'unit:concurrency', sha: H, baseSha: B, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   assert.equal(other.evidence.at(-1)!.trusted, true, 'an independent producer still proves the item');
-  const own = await engine.execute(runner, 'evidence', untouched.id, { proof: 'unit:concurrency', sha: H, baseSha: B, policyRevision: 1, result: 'pass', executed: 2, skipped: 0 }, randomUUID());
+  const own = await engine.execute(runner, 'evidence', untouched.id, { proof: 'unit:concurrency', sha: H, baseSha: B, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   assert.equal(own.evidence.at(-1)!.trusted, true, 'the same principal is trusted on an item it never implemented');
   assert.ok(own.autoDispatch!.producers.every(request => request.group !== 'unit'), 'trusted evidence satisfies the unit request');
 });

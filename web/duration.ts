@@ -29,3 +29,46 @@ export function durationMinutes(startedAt: string | number, now: number): number
 export function formatAge(startedAt: string | number, now: number): string {
   return formatDuration(durationMinutes(startedAt, now));
 }
+
+/**
+ * How long an item may hold one status before the board calls it overdue: the operator's
+ * threshold (GY-108), and the only place it is written. Every view reads its verdict from
+ * `statusDuration`, so no card, column or drawer carries a number of its own.
+ *
+ * Thirty minutes is past the loop's twenty-minute idle-but-actionable bound
+ * (`silenceBudgetMs`) and equal to the thirty-minute p50 submit-to-merge target this
+ * repository measures itself against, so an item over it has stopped moving by the
+ * pipeline's own standard.
+ */
+export const OVERDUE_MINUTES = 30;
+
+/** How long an item has held its status, and whether that is too long. */
+export interface StatusDuration {
+  /** Whole minutes held — the number `text` renders; null when the instant cannot be read. */
+  minutes: number | null;
+  /** The duration as the board writes it: `45m`, `2h 5m`, `3d 2h`, or the unknown marker. */
+  text: string;
+  /** Held longer than the threshold. A settled status is never overdue: it is not waiting. */
+  overdue: boolean;
+  /** The whole thing in words, for the tooltip and for a reader that wants the sentence. */
+  label: string;
+}
+
+/**
+ * The duration a card shows for the status it names, judged against the one threshold.
+ *
+ * The verdict is taken on the same whole minutes the text renders, so the number a reader sees
+ * is the number that was judged: 30m is not overdue, 31m is, and nothing turns red while still
+ * reading `30m`. `settled` marks a status nothing is waiting on — delivered work — which shows
+ * its duration but never turns red, because the item has arrived rather than stopped.
+ */
+export function statusDuration(enteredAt: string | number, now: number, settled = false): StatusDuration {
+  const elapsed = durationMinutes(enteredAt, now);
+  const minutes = elapsed === null ? null : Math.floor(elapsed);
+  const text = formatDuration(minutes);
+  const overdue = !settled && minutes !== null && minutes > OVERDUE_MINUTES;
+  const label = minutes === null ? 'How long it has held this status is not recorded'
+    : overdue ? `In this status for ${text} — longer than the ${formatDuration(OVERDUE_MINUTES)} an item may hold one status before it counts as stopped`
+    : `In this status for ${text}`;
+  return { minutes, text, overdue, label };
+}

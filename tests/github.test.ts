@@ -619,9 +619,11 @@ test('a missing blob at the bound base is a new file, and a provider failure oth
   f.baseBlobs({ [`${base}:src/dir/with space.ts`]: 'b'.repeat(40) });
   assert.equal(await f.github.blobAt('src/dir/with space.ts', base), 'b'.repeat(40));
   assert.ok(f.calls.some(call => call.path === `/contents/src/dir/with%20space.ts?ref=${base}`), 'path segments are encoded individually');
-  f.github.request = async (path, method, body) => { if (path.startsWith('/contents/')) throw new Refusal(`GitHub GET ${path} failed (503)`, 502); return request(path, method, body); };
+  // Blobs at a commit SHA never change, so the client memoizes them; this fixture rewrites the answer for the same commit.
+  const forget = () => (f.github as any).blobs.clear();
+  forget(); f.github.request = async (path, method, body) => { if (path.startsWith('/contents/')) throw new Refusal(`GitHub GET ${path} failed (503)`, 502); return request(path, method, body); };
   await assert.rejects(f.github.blobAt('src/none.ts', base), /503/);
-  f.github.request = async () => ({ type: 'file', sha: 'not-a-sha' });
+  forget(); f.github.request = async () => ({ type: 'file', sha: 'not-a-sha' });
   await assert.rejects(f.github.blobAt('src/none.ts', base), /readable blob/);
   f.github.request = async () => [{ type: 'file', sha: 'b'.repeat(40) }];
   assert.equal(await f.github.blobAt('src', base), null, 'a directory is not a file the guard compares');
@@ -648,6 +650,8 @@ test('unit:queue-real-base-tip — the observed base tip and tree come from refs
   assert.ok(f.calls.some(call => call.path === '/git/ref/heads/main'), 'the branch ref is read');
   assert.equal(observation.baseTipContained, true, 'GitHub compares the head with the branch head');
   f.compare('diverged');
+  // Real commits never change ancestry, so the client memoizes it; this fixture rewrites the answer for the same pair.
+  (f.github as any).ancestry.clear();
   assert.equal((await f.github.observe(f.work)).baseTipContained, false, 'a head behind the branch does not contain its tip');
   // A published tip keeps its validated base while the branch is tree-identical to it, and a
   // follower's tip contains the branch by publication of the chain it sits on.

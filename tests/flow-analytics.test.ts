@@ -72,7 +72,7 @@ function observation(work: Work, slice: string, overrides: Partial<Observation> 
 function approval(sha = head, id = 9001, submittedAt = new Date(Date.now() - 3600_000).toISOString()) {
   return [{ reviewer: 'independent-reviewer', sha, state: 'APPROVED', id, submittedAt }];
 }
-function proof(sha = head) { return { proof: 'integration:flow', sha, baseSha: base, policyRevision: 1, result: 'pass' as const, executed: 9, skipped: 0 }; }
+function proof(sha = head) { return { proof: 'integration:flow', sha, baseSha: base, policyRevision: 1, result: 'pass' as const, executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }; }
 
 async function analyse(query: Partial<FlowQuery> = {}) {
   await projectFlow(store);

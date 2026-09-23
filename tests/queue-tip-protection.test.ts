@@ -178,7 +178,7 @@ async function validated(repo: Repo, github: GitHub, work: Work) {
   repo.approve(work.submission!.pr, head);
   work = await cycle(github, work);
   assert.equal(work.candidate!.sha, head);
-  return engine.execute(producer, 'evidence', work.id, { proof: 'unit:queue', sha: head, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, scopeFiles: ['src/queue.ts'] }, randomUUID());
+  return engine.execute(producer, 'evidence', work.id, { proof: 'unit:queue', sha: head, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/queue.ts'] }, randomUUID());
 }
 async function clearQueue() { await store.pool.query("UPDATE work_items SET document=(document-'queue')||'{\"stage\":\"done\"}' WHERE document->>'stage'<>'done'"); }
 const dismissedReview = (work: Work) => work.observation!.reviews.find(review => review.state === 'DISMISSED')!;
