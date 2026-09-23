@@ -15,6 +15,7 @@ import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
+import { workOriginSchema } from './interventions.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
@@ -43,6 +44,9 @@ export const createSchema = z.object({
   // responder against the bound candidate state instead of launching a producer session, and
   // records the answer as evidence. See model/closed-question.ts.
   closedQuestions: closedQuestionsSchema.optional(),
+  // Where Graphyard itself opened the item from feedback (GY-98): a recurring intervention
+  // pattern with its linked instances, or an operator's judgement about delivered work.
+  origin: z.lazy(() => workOriginSchema).optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent

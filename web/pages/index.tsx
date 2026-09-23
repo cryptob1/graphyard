@@ -3,6 +3,7 @@ import type { Dashboard } from './dashboard';
 import OverviewPage from './overview';
 import ShippedPage from './shipped';
 import HumanRequestsPage from './human-requests';
+import InterventionsPage from './interventions';
 import GuidePage from './guide';
 import AutomationPage from './automation';
 import FleetPage from './fleet';
@@ -54,6 +55,8 @@ export const views: readonly View[] = [
   // Every agent session across every item (GY-116): a tab in the Work section, beside the work list
   // and Needs you, since the sidebar holds exactly the four primary entries.
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'work', render: dashboard => <WorkersPage {...dashboard}/> },
+  // What shipping cost people (GY-98): every intervention, and the operator's judgement about what shipped, as a tab beside the delivered list.
+  { id: 'interventions', icon: '☝', label: 'Interventions', section: 'shipped', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <InterventionsPage {...dashboard}/> },
   { id: 'pulse', icon: '∿', label: 'Shipping pulse', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <ShippingPulse token={dashboard.token} repository={dashboard.status?.repository}/> },
   { id: 'flow', icon: '◷', label: 'Flow analytics', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <FlowAnalytics request={dashboard.api} token={dashboard.token} canAudit={['admin', 'coordinator', 'producer'].includes(role(dashboard))}/> },
   { id: 'validation', icon: '↻', label: 'Validation', section: 'insights', visible: dashboard => configured(dashboard.features.validation), render: dashboard => <ValidationView api={dashboard.api} work={dashboard.work}/> },

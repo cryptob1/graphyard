@@ -446,8 +446,9 @@ a master started for the same decision with `master approver` is adopted rather 
 name is built inside the runtime's own limit — at most 32 characters, starting with a lowercase
 letter, made of lowercase letters, digits, `-` and `_` — and built so that what a human reads first
 survives it: the work key is kept whole and the decision id takes what the limit leaves, up to
-eight characters. A key long enough to crowd the decision id out shortens the role word instead
-(`gy-approver-<key>-<decision>`), because a cut-short key says less than an abbreviated role does;
+eight characters. A key long enough to leave the decision id fewer than six shortens the role word
+instead (`gy-approver-<key>-<decision>`, from `GY-1000` up), because a cut-short key says less than an
+abbreviated role does and a cut-short decision id is how two decisions on one item become one session;
 only a key too long for even that carries a digest of the whole identity, so a shortened name still
 names one decision only. Every other session name Graphyard generates (worker, reviewer, producer,
 master, escalation handler) is built and checked the same way, where it is constructed: a profile
@@ -2645,6 +2646,76 @@ reads that output. The committed `tests/helpers/timing-baseline.json` is the spr
 regression is judged against: the CI job summary prints each run's measurement beside it, and the
 suite refuses a timing-dependent assertion whose spread was never recorded. On a machine whose
 `/tmp` is under a quota, point `TMPDIR` at a sticky directory outside it for the run.
+
+## Throughput verification after deployment
+
+[Typed actions and stateless executors](#typed-next-actions-and-stateless-executors) shipped with a
+throughput claim: routine deliveries reach merge from their first submission in at most 30 minutes
+at the median, and nothing that has something to do waits longer than the five-minute idle bound
+for somebody to do it — with no master session running. That claim was demonstrated over a
+simulated fleet, which says the arithmetic holds and nothing about what the deployed release does.
+Delivered is not proven, so `master status` carries the claim in one of three states and never
+assumes it, under `throughput`:
+
+- `verified` — a recorded measurement of the revision now serving met both budgets.
+- `unverified`, with `shortfall` — a measurement of this revision missed one, with the values.
+- `unverified`, with the reason — the last measurement was of another release, or none was taken.
+
+Anything but `verified` raises an attention item owned by the master, with the command that
+measures it, as soon as the installation has delivered anything at all.
+
+The measurement is a separate run, because it reads the deployed release's own identity and the
+whole ledger:
+
+```sh
+GRAPHYARD_URL=… GRAPHYARD_TOKEN_FILE=… node scripts/measure-throughput.mjs \
+  --record .graphyard/measurements/throughput
+```
+
+It reads `/api/status` for the release actually serving — its release revision is the deployed
+commit the report names, or, for a build that never stamped one (`GRAPHYARD_BUILD_REVISION`), the
+build identity's `commit` that the platform injects and `/healthz` serves; the report's
+`revisionSource` says which named it, and with neither the claim stays unverified — and `/api/work-snapshot` for the ledger, checks that the deployed revision
+contains the claim's own merge commit (`git merge-base --is-ancestor`, from `--repository`, which
+defaults to the working directory), and judges the window that starts where a release carrying the
+claim began serving: the coordinator's [deployment observation](#deployment-verification) on the
+claim's delivery, or, when there is none, its merge instant — reported as the weaker basis it is,
+never moved later to improve a figure. `--since`, `--until` and `--claim` override the window and
+the item; `--json` prints the whole report; `--record DIR` writes it as one timestamped file, which
+is what `master status` reads. An unverified verdict exits 2, so a scheduled run cannot report a
+miss as a quiet success. A missing local commit, shallow checkout or other ancestry-check failure
+is unverified too: only a positive containment result can verify the claim, and `master status`
+rechecks that fact from the recorded report before displaying `verified`. The arithmetic is the
+module master status uses (`src/throughput.ts`), and the percentiles are the same nearest-rank
+estimator as [pipeline speed](#pipeline-speed).
+
+**The population rule is the delicate part, so it is written to be audited rather than trusted.** A
+delivery is counted when it is a merged pull request of this repository with a recorded submission,
+at most one rework round — the same routine population the speed target is stated over — at least
+one action an executor claimed and completed, and no trace of a coordinator on it: no
+action superseded before an executor ran it — the queue's own record of something outside it moving
+the item on — no coordination session recorded, and no blocked report or requirements revision while
+it was under way. Every delivery the window holds is listed either way, with the executor that
+claimed each of its actions, the host it ran on, its submit→merge time and its longest
+idle-but-actionable wait, and, when it is excluded, the reason. Deliberate waits are not idleness:
+the backoff after a failed attempt is subtracted, and the settle window a completed row holds never
+opens a wait.
+
+Narrowing a population until it passes is the failure this guards against, so the report also
+carries `all` — the same figures over every real delivery in the window, counted or not — and
+`populationEffect`, which says in words when the exclusions flatter the result and by how much.
+Nothing synthetic is admitted: an item with no merge commit, no pull request, no worker who held
+it, or no action an executor completed is refused before the coordinator rule is even asked.
+
+A miss is a finding about the design, never a reason to move a budget or shrink the window. The
+report records the measured values, what missed and by how much, and a follow-up naming it — an
+unnamed release is listed beside the population and budget misses, never instead of them, and a
+figure over no deliveries reads `n/a`, never zero minutes; raise
+that follow-up as a work item against the claim, the same as any other finding.
+
+## Interventions as product feedback
+
+Every time you, an approver, or the operator has to step in, the product failed to handle something itself, and the control plane counts it. A rework decision, a scope request the loop refused and an operator widened, a merge outside the guarded path, a containment fence somebody settled by hand, a session nudged after it ignored its re-prompt, an escalation resolved, a human-only decision answered: each is read from the ledger's own typed events as a signal with its kind, what was blocked, how long it waited, the item and stage, and what resolved it. `master status` carries the last seven days under `interventions` — the rate per delivery, the breakdown by kind and stage, the costliest items and the crossed patterns — and `GET /api/interventions?window=7|30|90` is the full report. When one kind at one stage crosses the threshold in the window, the server opens a work item for the pattern on its own, once, linking the instances as evidence; `master status` raises attention only for a crossed pattern the server has not opened an item for yet. Record what you do by hand that the ledger cannot see, so it counts: `POST /api/interventions` with your coordinator credential, naming the kind (`session-nudge` for a session you re-prompted yourself), the item, what was blocked, `since` and what you did. The operator's judgement about delivered work — confusing, wrong for its user, not good enough — is recorded with `POST /api/judgements` or on the dashboard's Interventions page and enters the backlog as an item with the same standing as a failed gate; you release and dispatch it like any other. The model is stated in [interventions as product feedback](interventions.md).
 
 ## Escalation context
 
