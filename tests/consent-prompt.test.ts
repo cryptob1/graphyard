@@ -320,6 +320,46 @@ test('integration:unconsented-session-releases-its-slot — the watch supervisor
     writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), { ...hold, request: requestFile });
     refuse = true;
     assert.match(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, herdr, () => clock + consentHoldMs)() ?? '', /the credential consent prompt was answered, but the request could not be delivered by the hold bound/);
+
+    // A different dialog that follows the held one — a sign-in after a human answered folder trust —
+    // is a new prompt: the hold is rewritten for it with a fresh bound, and its attention item goes
+    // to the prompt's owner. A cursor moved between the options is the same dialog.
+    for (const path of readConsentHolds(checkout).map(entry => entry.path)) await rm(path);
+    const folderHold = consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', { prompt: detectConsentPrompt(folderDialog)!.text, kind: 'folder', request: requestFile }, clock);
+    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), folderHold);
+    const moved = folderDialog.replace(' ❯ 1. Yes', '   1. Yes').replace('   2. No', ' ❯ 2. No');
+    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, () => moved, () => clock + 60_000)(), null);
+    assert.equal(readConsentHolds(checkout)[0].since, folderHold.since, 'the same dialog keeps its hold and bound');
+    const later = clock + consentHoldMs - 60_000, sent: string[][] = [];
+    const signIn = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read') return loginDialog; sent.push(args); return ''; };
+    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, signIn, () => later)(), null, 'a new dialog is not released on the old bound');
+    const reclassified = readConsentHolds(checkout)[0];
+    assert.equal(reclassified.kind, 'credential');
+    assert.equal(reclassified.prompt, detectConsentPrompt(loginDialog)!.text);
+    assert.equal(reclassified.since, new Date(later).toISOString());
+    assert.equal(reclassified.releaseAt, new Date(later + consentHoldMs).toISOString());
+    assert.equal(reclassified.request, requestFile, 'the undelivered request stays with the hold');
+    assert.equal(sent.length, 0, 'a credential prompt is never answered');
+    const leased = work({ epoch: 1, lease: { epoch: 1, owner: 'graphyard-cursor-1', expiresAt: new Date(Date.now() + 240_000).toISOString() } });
+    const [signInItem] = consentHoldItems([checkout], { work: [leased], now: new Date().toISOString() });
+    assert.match(signInItem.text, /credential prompt is outside it/);
+    assert.ok(signInItem.text.includes(`"${reclassified.prompt}"`), 'the attention item quotes the prompt now showing');
+    assert.equal(signInItem.role, 'human'); assert.equal(signInItem.humanOnly, 'issuing credentials to people');
+    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, signIn, () => clock + consentHoldMs)(), null, 'the old bound no longer releases it');
+    assert.match(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, signIn, () => later + consentHoldMs)() ?? '', /waited on a credential consent prompt .* past the hold bound \(/);
+
+    // A following dialog on the allow-list is answered once with its least-privilege option and recorded on the hold.
+    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), folderHold);
+    const telemetry = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read') return telemetryDialog; sent.push(args); return ''; };
+    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, telemetry, () => later)(), null);
+    assert.deepEqual(sent, [['pane', 'send-keys', 'w1V:pC1', '2']]);
+    const answeredHold = readConsentHolds(checkout)[0];
+    assert.equal(answeredHold.kind, 'telemetry');
+    assert.deepEqual(answeredHold.answered?.map(entry => [entry.rule, entry.answer, entry.keys]), [['telemetry-decline', 'Decline (nothing is sent)', ['2']]]);
+    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, telemetry, () => later + 60_000)(), null);
+    assert.equal(sent.length, 1, 'the same dialog is not answered again');
+    const [telemetryItem] = consentHoldItems([checkout], { work: [leased], now: new Date().toISOString() });
+    assert.match(telemetryItem.text, /The launcher answered this telemetry prompt from its allow-list and it is still showing/);
   } finally { await rm(checkout, { recursive: true, force: true }); }
 });
 

@@ -5,7 +5,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { clearConsentHold, consentHoldVerdict, readConsentHolds } from './consent-prompt.js';
+import { clearConsentHold, consentHoldSuffix, consentHoldVerdict, detectConsentPrompt, readConsentHolds, reclassifyConsentHold, writeConsentHold, type ConsentAnswer } from './consent-prompt.js';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -121,7 +121,9 @@ export const consentRequestAcceptMs = 8_000;
  * prompt a human answered clears the hold, and one still showing past the hold's `releaseAt`
  * answers the cause the supervisor surrenders the assignment for instead of renewing it again. A
  * runtime without a request contract, whose request is pasted after it starts, is sent it here
- * once its prompt clears (the hold's `request`).
+ * once its prompt clears (the hold's `request`). A different dialog that replaces the held one is
+ * a new prompt: the hold is rewritten for it with a fresh bound, and one on the launcher's
+ * allow-list is answered once with its least-privilege option, as the launcher would have.
  */
 export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[]) => string = (command, args) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 })), now: () => number = Date.now): () => string | null {
   return () => {
@@ -131,6 +133,18 @@ export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.P
     let screen: string | null = null;
     try { screen = run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', '40']); } catch { screen = null; }
     const verdict = consentHoldVerdict(hold, screen, now());
+    if (verdict === 'changed') {
+      const prompt = detectConsentPrompt(screen)!, stem = hold.path.slice(0, -consentHoldSuffix.length);
+      let answer: ConsentAnswer | undefined;
+      if (prompt.rule && prompt.keys) {
+        try {
+          run('herdr', ['pane', 'send-keys', pane, ...prompt.keys]);
+          answer = { rule: prompt.rule.id, kind: prompt.kind, prompt: prompt.text, answer: prompt.rule.answer, keys: prompt.keys, at: new Date(now()).toISOString() };
+        } catch { /* unanswered, it stays held for a human */ }
+      }
+      writeConsentHold(stem, reclassifyConsentHold(hold, prompt, now(), answer));
+      return null;
+    }
     if (verdict === 'cleared') {
       // A runtime prompted after it starts was never sent its request while the dialog was up: it
       // is delivered now, and the hold stays until the runtime visibly accepts it, so a failed

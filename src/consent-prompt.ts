@@ -111,6 +111,8 @@ export interface ConsentHold {
   key: string; epoch: number; agentName: string; pane: string; attach: string; prompt: string; kind: ConsentKind; since: string; releaseAt: string;
   /** A runtime prompted after it starts (no request contract) has not been sent its request: the file holding it, pasted once the prompt clears. */
   request?: string | null;
+  /** Allow-listed prompts the watch supervisor answered after a first dialog was cleared, each as a session record keeps it. */
+  answered?: ConsentAnswer[];
 }
 export const consentHoldSuffix = '.consent';
 export const consentHoldPath = (stem: string) => `${stem}${consentHoldSuffix}`;
@@ -132,23 +134,43 @@ export function readConsentHolds(checkout: string): (ConsentHold & { path: strin
 }
 export function clearConsentHold(path: string) { try { unlinkSync(path); } catch { /* already gone */ } }
 
+/**
+ * Whether the dialog on the screen is the one a hold names: the same kind and the same text, read
+ * without the cursor mark a human moves between options. A different dialog — a sign-in that
+ * follows an answered folder trust — is a new prompt, not the old one still waiting.
+ */
+const promptIdentity = (kind: ConsentKind, text: string) => `${kind}\n${text.split(' / ').map(part => part.replace(/^\W+/, '')).join(' / ')}`;
+export const sameConsentPrompt = (hold: Pick<ConsentHold, 'kind' | 'prompt'>, prompt: Pick<ConsentPrompt, 'kind' | 'text'>) => promptIdentity(hold.kind, hold.prompt) === promptIdentity(prompt.kind, prompt.text);
+/**
+ * The hold for a dialog that replaced the one it named: the new prompt's kind and text, so its
+ * attention item names the prompt actually showing and goes to its owner (a credential or payment
+ * prompt to the human), with a fresh `consentHoldMs` from the moment it was seen.
+ */
+export function reclassifyConsentHold(hold: ConsentHold, prompt: ConsentPrompt, now: number, answer?: ConsentAnswer): ConsentHold {
+  const { path: _path, ...kept } = hold as ConsentHold & { path?: string };
+  return { ...kept, prompt: prompt.text, kind: prompt.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(answer ? { answered: [...(hold.answered ?? []), answer] } : {}) };
+}
+
 /** The one attention line for a held session: the item, the pane, the prompt and the attach command. */
 export function consentHoldAttention(hold: ConsentHold) {
   return `${hold.key} epoch ${hold.epoch}: session ${hold.agentName} in pane ${hold.pane} is awaiting consent and has not taken its request — "${hold.prompt}". `
-    + `The launcher answers only its allow-list, and this ${hold.kind} prompt is outside it; attach with ${hold.attach} and answer it, or the watch supervisor releases the slot at ${hold.releaseAt}`;
+    + `${hold.answered?.some(answer => sameConsentPrompt(hold, { kind: answer.kind, text: answer.prompt })) ? `The launcher answered this ${hold.kind} prompt from its allow-list and it is still showing` : `The launcher answers only its allow-list, and this ${hold.kind} prompt is outside it`}; attach with ${hold.attach} and answer it, or the watch supervisor releases the slot at ${hold.releaseAt}`;
 }
 
 /**
  * What the watch supervisor does about its session's hold on each check: nothing while there is
- * none, `cleared` once the prompt is off the screen (a human answered it), `release` once the hold
- * has outlived its bound and a successful read shows the prompt still up.
+ * none, `cleared` once the prompt is off the screen (a human answered it), `changed` when a
+ * different dialog now shows (the hold is reclassified for it), `release` once the hold has
+ * outlived its bound and a successful read shows its own prompt still up.
  */
-export function consentHoldVerdict(hold: ConsentHold | null, screen: string | null, now: number): 'none' | 'holding' | 'cleared' | 'release' {
+export function consentHoldVerdict(hold: ConsentHold | null, screen: string | null, now: number): 'none' | 'holding' | 'cleared' | 'changed' | 'release' {
   if (!hold) return 'none';
   // A screen that could not be read is a signal not collected: the prompt may already be answered,
   // so the hold stays pending until a read confirms it either way, however late that is.
   if (screen === null) return 'holding';
-  if (!detectConsentPrompt(screen)) return 'cleared';
+  const prompt = detectConsentPrompt(screen);
+  if (!prompt) return 'cleared';
+  if (!sameConsentPrompt(hold, prompt)) return 'changed';
   return now >= Date.parse(hold.releaseAt) ? 'release' : 'holding';
 }
 
