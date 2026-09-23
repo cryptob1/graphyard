@@ -82,7 +82,9 @@ test('concurrent token refreshes share authentication and honor authentication b
     return new Response(JSON.stringify({repositories:String(url).endsWith('page=1')?Array.from({length:100},(_,i)=>({id:i+1,full_name:`other/repo-${i}`})):[{id:999,full_name:'FIXTURE/Repo'}]}));
   });
   assert.deepEqual(await github.reviewRepository(),{id:999,fullName:'FIXTURE/Repo'});assert.equal(calls,2);
-  for(mode of ['absent','invalid','failure'])assert.equal(await github.reviewRepository(),null);
+  assert.deepEqual(await github.reviewRepository(),{id:999,fullName:'FIXTURE/Repo'});assert.equal(calls,2,'the identity is cached between status reads');
+  // The fixture changes the installation's answer; clear the cache so each mode is read afresh.
+  for(mode of ['absent','invalid','failure']){(github as any).repositoryIdentity=null;assert.equal(await github.reviewRepository(),null);}
  });
 
 // integration:github-error-classification

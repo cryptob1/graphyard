@@ -233,6 +233,14 @@ export class GitHub {
     return value;
   }
   async reviewRepository(): Promise<{ id: number; fullName: string } | null> {
+    // Every status read asks this; the installation's repository changes far more rarely than that.
+    if (this.repositoryIdentity && Date.now() - this.repositoryIdentity.at < 10 * 60_000) return this.repositoryIdentity.value;
+    const value = await this.readReviewRepository();
+    this.repositoryIdentity = { at: Date.now(), value };
+    return value;
+  }
+  private repositoryIdentity: { at: number; value: { id: number; fullName: string } | null } | null = null;
+  private async readReviewRepository(): Promise<{ id: number; fullName: string } | null> {
     try {
       // Membership in the token's installation is stronger than public repository readability.
       for (let page = 1; page <= 100; page++) {
