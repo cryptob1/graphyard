@@ -21,7 +21,7 @@ const mergeBaseMessage = 'The merge-base changed after approval.';
 
 // ---- A fake GitHub with a commit graph, over the same request surface the adapter uses ---------
 
-interface Commit { sha: string; parents: string[]; message: string; tree: string; author: { login: string; type: string } | null }
+interface Commit { sha: string; parents: string[]; message: string; tree: string; author: { login: string; type: string } | null; files: string[] }
 class Repo {
   commits = new Map<string, Commit>();
   refs = new Map<string, string>();
@@ -39,10 +39,18 @@ class Repo {
   pushDismissal: string | null = null;
   private counter = 0;
   private reviewIds = 100;
-  commit(parents: string[], message: string, author: Commit['author'] = { login: AUTHOR, type: 'User' }) {
+  /** A commit and the paths it changes itself; a merge changes none of its own. */
+  commit(parents: string[], message: string, author: Commit['author'] = { login: AUTHOR, type: 'User' }, files: string[] = []) {
     const sha = sha40(`${(++this.counter).toString(16).padStart(6, '0')}`.padEnd(40, 'c'));
-    this.commits.set(sha, { sha, parents, message, tree: `7${sha.slice(1)}`, author });
+    this.commits.set(sha, { sha, parents, message, tree: `7${sha.slice(1)}`, author, files });
     return sha;
+  }
+  /** A worker's commit changing `files`. */
+  change(parents: string[], message: string, files: string[]) { return this.commit(parents, message, undefined, files); }
+  /** What GitHub's three-dot comparison lists: every path the commits `to` has and `from` lacks changed. */
+  changed(from: string, to: string) {
+    const base = this.ancestry(from);
+    return [...new Set([...this.ancestry(to)].filter(sha => !base.has(sha)).flatMap(sha => this.commits.get(sha)!.files))].sort();
   }
   ancestry(sha: string): Set<string> {
     const seen = new Set<string>(); const stack = [sha];
@@ -106,14 +114,14 @@ class Repo {
       }
       if (path.startsWith('/compare/')) {
         const [from, to] = path.slice(9).split('...');
-        return { status: from === to ? 'identical' : this.contains(from, to) ? 'ahead' : this.contains(to, from) ? 'behind' : 'diverged', files: [], commits: [] };
+        return { status: from === to ? 'identical' : this.contains(from, to) ? 'ahead' : this.contains(to, from) ? 'behind' : 'diverged', files: this.changed(from, to).map(filename => ({ filename })), commits: [] };
       }
       const pull = path.match(/^\/pulls\/(\d+)(\/\w+)?$/);
       if (pull) {
         const number = Number(pull[1]);
         if (!pull[2]) return structuredClone(this.pull(number));
         if (pull[2] === '/reviews') return page > 1 ? [] : structuredClone(this.reviews.get(number) ?? []);
-        if (pull[2] === '/files') return [];
+        if (pull[2] === '/files') return page > 1 ? [] : this.changed(this.refs.get('heads/main')!, this.refs.get(`heads/${this.pulls.get(number)!.head}`)!).map(filename => ({ filename, status: 'modified' }));
       }
       const issue = path.match(/^\/issues\/(\d+)\/timeline$/);
       if (issue) return page > 1 ? [] : structuredClone(this.timeline.get(Number(issue[1])) ?? []);
@@ -155,7 +163,7 @@ async function onlyJob(work: Work) {
 async function cycle(github: GitHub, work: Work) { await onlyJob(work); await processJob(engine, github); return reload(work); }
 /** A claimed item whose pull request head is `head` on the fake provider, submitted. */
 async function submitted(repo: Repo, title: string, head: (work: Work) => string) {
-  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/queue.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:queue'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:queue'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   const branch = `graphyard/${work.key.toLowerCase()}-1`;
@@ -243,8 +251,8 @@ test('integration:tip-publication-keeps-approval — publishing a tip that chang
   await clearQueue();
   const graph = new Repo(), provider = graph.adapter();
   const root = graph.commit([], 'main'); graph.refs.set('heads/main', root);
-  let ejected = await submitted(graph, 'Ejected head', () => graph.commit([root], 'feat: ejected'));
-  let survivor = await submitted(graph, 'Survivor', () => graph.commit([root], 'feat: survivor'));
+  let ejected = await submitted(graph, 'Ejected head', () => graph.change([root], 'feat: ejected', ['src/ejected.ts']));
+  let survivor = await submitted(graph, 'Survivor', () => graph.change([root], 'feat: survivor', ['src/survivor.ts']));
   const heads = { ejected: graph.refs.get(`heads/${branchOf(ejected)}`)!, survivor: graph.refs.get(`heads/${branchOf(survivor)}`)! };
   ejected = await validated(graph, provider, ejected); survivor = await validated(graph, provider, survivor);
   ejected = await cycle(provider, ejected); ejected = await cycle(provider, ejected);
@@ -252,6 +260,7 @@ test('integration:tip-publication-keeps-approval — publishing a tip that chang
   const behind = survivor.queue!.speculation!.tip;
   assert.deepEqual(graph.commits.get(behind)!.parents, [heads.survivor, heads.ejected]);
   assert.equal(survivor.candidate!.sha, behind);
+  assert.deepEqual(survivor.observation!.files, ['src/ejected.ts', 'src/survivor.ts'], 'GitHub lists the tip\'s files against the base branch, the unlanded entry ahead included');
   const pushed = reviewDismissal(dismissedReview(survivor))!;
   assert.deepEqual([pushed.mergeBase, pushed.reason, pushed.commit], [false, null, behind], 'the push dismissal names the commit and no merge-base reason');
   assert.ok(gate(survivor, 'review').passed && carriedApproval(survivor)?.originalSha === heads.survivor, gate(survivor, 'review').reasons.join('; '));
@@ -266,7 +275,8 @@ test('integration:tip-publication-keeps-approval — publishing a tip that chang
   const identity = survivor.queue!.speculation!;
   assert.equal(tipReplacesHead(survivor), heads.survivor, 'until the tip is observed, the replaced head is what the record still names');
   assert.equal(survivor.autoDispatch!.review, null, 'nothing is requested for the replaced head meanwhile');
-  assert.deepEqual([identity.tip, identity.reviewedHead, identity.merge, identity.base, identity.predecessors, identity.baseChanges], [heads.survivor, heads.survivor, null, root, [], []], 'the rebuilt tip is the reviewed head itself, with no commit produced');
+  assert.deepEqual([identity.tip, identity.reviewedHead, identity.merge, identity.base, identity.predecessors, identity.baseChanges], [heads.survivor, heads.survivor, null, root, [], ['src/ejected.ts']], 'the rebuilt tip is the reviewed head itself, with no commit produced; the ejected entry\'s files are what changed');
+  assert.deepEqual(identity.carry!.reviewedFiles, ['src/survivor.ts'], 'the carry is decided on the reviewed head\'s own files, not the replaced tip\'s pull-request files');
   assert.equal(graph.refs.get(`heads/${branchOf(survivor)}`), heads.survivor, 'the branch was moved back to the reviewed head');
   assert.deepEqual([identity.carry!.from.sha, identity.carry!.to, identity.carry!.approval.carried, identity.carry!.evidence.map(entry => entry.carried)], [heads.survivor, { sha: heads.survivor, baseSha: root }, true, [true]]);
   assert.match(identity.carry!.approval.reason, /carried to tip [0-9a-f]{12}, the reviewed head itself republished unchanged/);
@@ -285,6 +295,53 @@ test('integration:tip-publication-keeps-approval — publishing a tip that chang
   const reposted = await repostCarriedApproval(config, survivor, kept, { run: () => JSON.stringify(graph.reviews.get(survivor.submission!.pr)), mint: async () => ({ token: 'reviewer-token' }), fetcher });
   assert.deepEqual([reposted.posted, posted[0].commit_id, posted[0].event], [true, heads.survivor, 'APPROVE']);
   assert.match(posted[0].body, /restored this identity's approval of [0-9a-f]{40} \(review \d+\) to the commit it was given on/);
+
+  // The per-file rule still refuses: an entry ahead that changed a file the survivor's review read
+  // costs the approval, and a review is requested for the tip.
+  await clearQueue();
+  const shared = new Repo(), sharedProvider = shared.adapter();
+  const sharedRoot = shared.commit([], 'main'); shared.refs.set('heads/main', sharedRoot);
+  let leader = await submitted(shared, 'Touches shared', () => shared.change([sharedRoot], 'feat: leader', ['src/shared.ts']));
+  let follower = await submitted(shared, 'Reads shared', () => shared.change([sharedRoot], 'feat: follower', ['src/shared.ts', 'src/follower.ts']));
+  leader = await validated(shared, sharedProvider, leader); follower = await validated(shared, sharedProvider, follower);
+  leader = await cycle(sharedProvider, leader); leader = await cycle(sharedProvider, leader);
+  follower = await cycle(sharedProvider, follower);
+  const refused = follower.queue!.speculation!.carry!;
+  assert.deepEqual([refused.changedFiles, refused.reviewedFiles, refused.approval.carried], [['src/shared.ts'], ['src/follower.ts', 'src/shared.ts'], false]);
+  assert.match(refused.approval.reason, /changed reviewed files src\/shared\.ts; a fresh independent approval/);
+  follower = await cycle(sharedProvider, follower);
+  assert.equal(follower.autoDispatch!.review?.state, 'requested', 'the tip is reviewed afresh');
+
+  // The walk to the reviewed head trusts no commit message. A worker commit X that carries the tip
+  // message over F is the worker's own head: the tip is built from X, whose approval carries.
+  // One GitHub attributes to the App — the author address is the App's — is stepped past, so the
+  // tip is built from F; the approval was given on X, never on F, and does not carry.
+  for (const attributed of [false, true]) {
+    await clearQueue();
+    const forged = new Repo(), forgedProvider = forged.adapter();
+    const forgedRoot = forged.commit([], 'main'); forged.refs.set('heads/main', forgedRoot);
+    let hidden = '';
+    let item = await submitted(forged, attributed ? 'Forged App tip' : 'Worker tip message', work => {
+      hidden = forged.change([forgedRoot], 'feat: content nobody should land', ['src/hidden.ts']);
+      return forged.commit([hidden], `Graphyard speculative tip for ${work.key} behind main`, attributed ? { login: APP, type: 'Bot' } : undefined, ['src/hidden.ts']);
+    });
+    const approvedHead = forged.refs.get(`heads/${branchOf(item)}`)!;
+    item = await validated(forged, forgedProvider, item);
+    const landed = forged.commit([forgedRoot], 'Merge pull request #4 from elsewhere', undefined, ['docs/elsewhere.md']); forged.refs.set('heads/main', landed);
+    item = await cycle(forgedProvider, item);
+    const speculation = item.queue!.speculation!;
+    assert.equal(speculation.reviewedHead, attributed ? hidden : approvedHead);
+    assert.deepEqual(forged.commits.get(speculation.tip)!.parents, [attributed ? hidden : approvedHead, landed]);
+    assert.equal(speculation.carry!.approval.carried, !attributed, speculation.carry!.approval.reason);
+    if (attributed) {
+      assert.match(speculation.carry!.approval.reason, new RegExp(`approval by ${REVIEWER.replace(/[[\]]/g, '\\$&')} was given on ${approvedHead.slice(0, 12)}, not on the reviewed head ${hidden.slice(0, 12)}`));
+      assert.deepEqual(speculation.carry!.evidence.map(entry => entry.carried), [false], 'evidence proved on X does not carry onto F either');
+      item = await cycle(forgedProvider, item);
+      assert.equal(item.candidate!.sha, speculation.tip);
+      assert.equal(gate(item, 'review').passed, false);
+      assert.equal(item.autoDispatch!.review?.state, 'requested', 'a fresh review is requested for the tip');
+    }
+  }
 });
 
 test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unchanged head is restored, not treated as a change request, spends no attempt, and master status names it', async () => {
@@ -430,9 +487,9 @@ test('integration:ejection-leaves-no-foreign-commits — three queued candidates
   await clearQueue();
   const repo = new Repo(), github = repo.adapter();
   const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
-  let first = await submitted(repo, 'Queue head', () => repo.commit([main], 'feat: first'));
-  let second = await submitted(repo, 'Queue middle', () => repo.commit([main], 'feat: second'));
-  let third = await submitted(repo, 'Queue tail', () => repo.commit([main], 'feat: third'));
+  let first = await submitted(repo, 'Queue head', () => repo.change([main], 'feat: first', ['src/first.ts']));
+  let second = await submitted(repo, 'Queue middle', () => repo.change([main], 'feat: second', ['src/second.ts']));
+  let third = await submitted(repo, 'Queue tail', () => repo.change([main], 'feat: third', ['src/third.ts']));
   const own = { first: repo.refs.get(`heads/${branchOf(first)}`)!, second: repo.refs.get(`heads/${branchOf(second)}`)!, third: repo.refs.get(`heads/${branchOf(third)}`)! };
   first = await validated(repo, github, first); second = await validated(repo, github, second); third = await validated(repo, github, third);
   // Head first: each entry publishes its tip behind the one ahead, then observes it.
@@ -445,6 +502,7 @@ test('integration:ejection-leaves-no-foreign-commits — three queued candidates
   assert.deepEqual(repo.commits.get(tipThird)!.parents, [own.third, tipSecond]);
   assert.deepEqual([second.queue!.speculation!.reviewedHead, third.queue!.speculation!.reviewedHead], [own.second, own.third]);
   assert.ok(repo.unlanded(branchOf(third)).includes(own.second), 'while the middle entry is queued, the tail\'s tip holds it by construction');
+  assert.deepEqual(third.observation!.files, ['src/first.ts', 'src/second.ts', 'src/third.ts'], 'the tail\'s tip lists every unlanded entry ahead against the base branch');
   assert.ok([first, second, third].every(item => item.stage === 'merge' || item.gates.filter(entry => entry.name !== 'merge').every(entry => entry.passed)), 'every tip validates');
   // The middle entry's speculative validation fails: it is ejected, and its branch is restored on the same reconciliation.
   repo.failing.add(tipSecond);
@@ -462,7 +520,9 @@ test('integration:ejection-leaves-no-foreign-commits — three queued candidates
   assert.notEqual(rebuilt, tipThird);
   assert.deepEqual(repo.commits.get(rebuilt)!.parents, [own.third, own.first], 'the new tip is the reviewed head merged onto the predicted base');
   assert.deepEqual(third.queue!.speculation!.predecessors, [first.key]);
-  assert.equal(third.queue!.speculation!.carry!.approval.carried, true, 'the approval carried across the rebuilt tip');
+  const rebuiltCarry = third.queue!.speculation!.carry!;
+  assert.equal(rebuiltCarry.approval.carried, true, rebuiltCarry.approval.reason);
+  assert.deepEqual([rebuiltCarry.reviewedFiles, rebuiltCarry.changedFiles], [['src/third.ts'], ['src/second.ts']], 'decided on the tail\'s own files against what the ejection changed');
   third = await cycle(github, third);
   assert.equal(third.candidate!.sha, rebuilt); assert.ok(gate(third, 'review').passed && gate(third, 'acceptance').passed, third.gates.flatMap(entry => entry.reasons).join('; '));
   // Every remaining branch: its own commits, its predicted base's history, nothing of the ejected item.

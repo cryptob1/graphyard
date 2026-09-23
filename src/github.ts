@@ -600,15 +600,26 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * own speculative-tip merges. The record names it for a tip the queue published; the walk reads
    * GitHub's account of each commit for a tip built before the record did, or over a tip. A base
    * refresh or a branch restore is landed content and is kept.
+   *
+   * A commit is stepped past only when it is provably one of this item's own tips: a tip the
+   * queue history recorded, or a commit GitHub attributes to the control-plane App that carries
+   * the tip message. A message alone proves nothing — any worker can write it — and a commit the
+   * walk stops at is kept, so its content is in every tip built from it. The walk decides what a
+   * tip is built from, never what carries onto it: the carry refuses an approval that was not
+   * given on the head the walk returned (see Engine.decideTipCarry).
    */
   async ownReviewedHead(work: Work, head: string): Promise<string> {
     const speculation = work.queue?.speculation;
     let sha = speculation?.tip === head ? speculation.reviewedHead ?? speculation.merge?.from ?? head : head;
     const marker = new RegExp(`^Graphyard speculative tip for ${work.key.replace(/[^A-Za-z0-9-]/g, '')} behind `, 'i');
+    const recorded = new Map((work.queueHistory ?? []).filter(entry => entry.event === 'predicted' && entry.tip && entry.from && entry.from !== entry.tip).map(entry => [entry.tip!, entry.from!]));
+    const login = await this.controlPlaneLogin();
     for (let hops = 0; hops < 25; hops++) {
+      const from = recorded.get(sha);
+      if (from) { sha = from; continue; }
       const commit = await this.request(`/commits/${sha}`);
       const first = Array.isArray(commit?.parents) ? commit.parents[0]?.sha : undefined;
-      if (!marker.test(typeof commit?.commit?.message === 'string' ? commit.commit.message : '') || typeof first !== 'string' || !/^[a-f0-9]{40}$/.test(first)) return sha;
+      if (!marker.test(typeof commit?.commit?.message === 'string' ? commit.commit.message : '') || !appAuthored(commit, login) || typeof first !== 'string' || !/^[a-f0-9]{40}$/.test(first)) return sha;
       sha = first;
     }
     return sha;
@@ -667,11 +678,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   private async describeMerge(from: string, tip: string, boundBase: string, predictedBase: string): Promise<TipMerge> {
     const commit = await this.request(`/commits/${tip}`);
     const parents = Array.isArray(commit?.parents) ? commit.parents.map((parent: any) => parent?.sha).filter((sha: unknown) => typeof sha === 'string') : [];
-    const login = await this.controlPlaneLogin();
     const author = typeof commit?.author?.login === 'string' ? commit.author.login : null;
     const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';
-    const authoredByApp = author !== null ? author.toLowerCase() === login.toLowerCase() && commit.author?.type === 'Bot'
-      : new RegExp(`^\\d+\\+${login.replace(/[[\]]/g, '\\$&')}@users\\.noreply\\.github\\.com$`, 'i').test(email);
+    const authoredByApp = appAuthored(commit, await this.controlPlaneLogin());
     // The provider merge never resolves a conflict: a conflicting merge is refused with 409 and
     // ejects the entry (see mergeBranch), so a tip that exists was produced without one.
     return { from, parents, author: author ?? (email || null), authoredByApp, conflicts: false, baseChanges: await this.changedFiles(boundBase, predictedBase) };
@@ -825,6 +834,13 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return;
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
+}
+/** Whether GitHub attributes a commit to the control-plane App's bot account: by the linked author, or by the App's noreply address. */
+function appAuthored(commit: any, login: string): boolean {
+  const author = typeof commit?.author?.login === 'string' ? commit.author.login : null;
+  const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';
+  return author !== null ? author.toLowerCase() === login.toLowerCase() && commit.author?.type === 'Bot'
+    : new RegExp(`^\\d+\\+${login.replace(/[[\]]/g, '\\$&')}@users\\.noreply\\.github\\.com$`, 'i').test(email);
 }
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;

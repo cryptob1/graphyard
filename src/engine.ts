@@ -8,7 +8,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, pendingRestore, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
@@ -1299,28 +1299,50 @@ export class Engine {
   }
   /** The carry decision for a tip that replaced the candidate's head; see model/carry.ts for the rule. */
   private decideTipCarry(work: Work, all: Work[], speculation: QueueSpeculation, now: Date) {
-    const candidate = work.candidate!, observation = work.observation;
+    const candidate = work.candidate!;
     const aheadKey = speculation.predecessors.at(-1) ?? null;
     const ahead = aheadKey ? all.find(item => item.key === aheadKey) : undefined;
     // The base branch is validated by definition. A queue entry is validated when every gate
     // passes on exactly the tip predicted here, the merge gate refusing only for its turn.
     const validated = !aheadKey ? true : !!ahead && ahead.stage === 'merge' && ahead.candidate?.sha === speculation.base && !ahead.violations.length
       && ahead.gates.every(gate => gate.passed || gate.name === 'merge' && gate.reasons.every(queueSequencingReason));
-    const observed = !!observation && observation.candidate.sha === candidate.sha && observation.candidate.baseSha === candidate.baseSha;
     // A tip is built from the item's own reviewed head (GY-127): the replaced head when the worker
     // pushed it, or the head under the tip it replaces. The bindings carried are the ones that
     // bind the replaced head now — exact on it, or already carried onto it. `from` is that
     // reviewed head in every case; a record that predates `reviewedHead` names the merge's own.
+    const from = { sha: speculation.reviewedHead ?? speculation.merge?.from ?? candidate.sha, baseSha: candidate.baseSha };
+    // What the reviewer read is the reviewed head's own change, never the replaced tip's pull
+    // request diff: GitHub lists that against the base branch, so a tip built behind an entry that
+    // has not landed lists the entry's files too, and a rebuild after the entry is ejected would
+    // then be refused for files nobody reviewed.
+    const reviewedFiles = reviewedFilesOf(work, from.sha);
+    const approval = bindingApproval(work);
     const input = {
-      from: { sha: speculation.reviewedHead ?? speculation.merge?.from ?? candidate.sha, baseSha: candidate.baseSha }, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
-      predecessor: { key: aheadKey, validated }, reviewedFiles: observed ? observation!.files : [],
-      approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
+      from, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
+      predecessor: { key: aheadKey, validated }, reviewedFiles: reviewedFiles ?? [],
+      approval, proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
     };
     // A tip that is the reviewed head itself — no merge, because the head already contained its
     // predicted base — is decided as an identity carry on the files the predicted base changed,
     // never refused for lacking a merge (see merge-queue.ts decideIdentityCarry).
-    if (!speculation.merge && speculation.tip === input.from.sha) return decideIdentityCarry({ ...input, baseChanges: speculation.baseChanges });
-    return decideCarry({ ...input, merge: speculation.merge, app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane' });
+    const carry = !speculation.merge && speculation.tip === from.sha ? decideIdentityCarry({ ...input, baseChanges: speculation.baseChanges })
+      : decideCarry({ ...input, merge: speculation.merge, app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane' });
+    // A binding carries only from the head the tip was built from. One given on another commit —
+    // the replaced head, when the walk to the reviewed head stepped past it — never saw the
+    // content the tip holds, unless a recorded decision already carried it onto that head.
+    const reaches = onto(work, from.sha);
+    if (carry.approval.carried && approval && approval.sha !== from.sha && !reaches.some(entry => entry.approval.carried && entry.approval.originalSha === approval.sha)) {
+      carry.approval = { carried: false, reason: `the approval by ${approval.reviewer} was given on ${approval.sha.slice(0, 12)}, not on the reviewed head ${from.sha.slice(0, 12)} tip ${speculation.tip.slice(0, 12)} was built from, and no recorded decision carried it there; a fresh independent approval of ${speculation.tip.slice(0, 12)} is required` };
+    }
+    if (carry.approval.carried && reviewedFiles === null) {
+      carry.approval = { carried: false, reason: `the files the reviewed head ${from.sha.slice(0, 12)} changed are not recorded, so its independence from what the predicted base changed cannot be shown; a fresh independent approval of ${speculation.tip.slice(0, 12)} is required` };
+    }
+    carry.evidence = carry.evidence.map(entry => {
+      const evidence = entry.carried ? work.evidence.find(item => item.id === entry.evidenceId) : undefined;
+      if (!evidence || evidence.sha === from.sha || reaches.some(decision => decision.evidence.some(carried => carried.carried && carried.evidenceId === evidence.id))) return entry;
+      return { ...entry, carried: false, reason: `evidence ${evidence.id} was produced on ${evidence.sha.slice(0, 12)}, not on the reviewed head ${from.sha.slice(0, 12)} tip ${speculation.tip.slice(0, 12)} was built from, and no recorded decision carried it there; fresh evidence for ${speculation.tip.slice(0, 12)} is required` };
+    });
+    return carry;
   }
   /**
    * Records what the control plane did about a base branch that moved under an in-flight

@@ -41,6 +41,24 @@ export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policy
   const speculation = work.queue?.speculation, candidate = work.candidate;
   return speculation && candidate && speculation.tip !== candidate.sha && speculation.policyRevision === work.policyRevision ? speculation.tip : null;
 }
+/** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's, or a tip's. */
+export function onto(work: Pick<Work, 'queue' | 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
+  return [work.queue?.speculation?.carry, work.baseRefresh?.carry].filter((carry): carry is QueueCarry => !!carry && carry.to.sha === sha && carry.policyRevision === work.policyRevision);
+}
+/**
+ * The files the review of `sha` read (GY-127): the pull request's files while `sha` is the head
+ * GitHub listed them for, and otherwise what the recorded decision that carried bindings from or
+ * onto it said they were. Never a later tip's pull-request files: GitHub lists those against the
+ * base branch, so a tip built behind an unlanded entry lists that entry's files as well. Only a
+ * decision that carried the approval is read: one that refused it may have been refused for not
+ * knowing the files at all. Null when nothing on record names them.
+ */
+export function reviewedFilesOf(work: Pick<Work, 'candidate' | 'observation' | 'queue' | 'baseRefresh' | 'policyRevision'>, sha: string): string[] | null {
+  const observation = work.observation;
+  if (observation && observation.candidate.sha === sha && work.candidate?.sha === sha && observation.candidate.baseSha === work.candidate.baseSha) return observation.files;
+  const recorded = [work.queue?.speculation?.carry, work.baseRefresh?.carry].find(carry => !!carry && carry.policyRevision === work.policyRevision && carry.approval.carried && (carry.from.sha === sha || carry.to.sha === sha));
+  return recorded ? recorded.reviewedFiles : null;
+}
 export interface IdentityCarryInput {
   from: { sha: string; baseSha: string }; to: { sha: string; baseSha: string }; policyRevision: number; at: string;
   /** `QueueSpeculation.baseChanges`: what the predicted base changed relative to the replaced tip's bound base, or null/absent when unlisted. */
