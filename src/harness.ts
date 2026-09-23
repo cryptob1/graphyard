@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { ChildProcessError, defaultChildRun } from './child-runner.js';
 import { chmod, lstat, readFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, resolve } from 'node:path';
@@ -113,8 +113,8 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
 }
 
 async function ignoredByGit(root: string, path: string) {
-  try { execFileSync('git', ['check-ignore', '--quiet', '--', path], { cwd: root, stdio: 'ignore' }); return true; }
-  catch (error: any) { if (error.status === 1) return false; throw new Error('Cannot verify that Git ignores the generated harness settings'); }
+  try { await defaultChildRun('git', ['check-ignore', '--quiet', '--', path], { cwd: root }); return true; }
+  catch (error) { if (error instanceof ChildProcessError && error.status === 1) return false; throw new Error('Cannot verify that Git ignores the generated harness settings'); }
 }
 async function assertIgnored(root: string, path: string) {
   if (await ignoredByGit(root, path)) return;
