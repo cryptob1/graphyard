@@ -60,6 +60,8 @@ export interface Decision {
   outcome: string | null; refusals: { approver: string; conflict: string; at: string }[];
   /** The decisions the requester cited and the context fingerprint it judged from; empty and null for a request that named none. */
   precedent: string[]; context: string | null;
+  /** For a request that cited nothing: whether any applied decision of its action (and trigger) was available to cite (GY-138). */
+  noPrecedent: string | null;
   /** Later requesters that followed the same precedent while this decision stood. */
   concurrences: { requester: string; reason: string; precedent: string[]; context: string | null; at: string }[];
 }
@@ -73,7 +75,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     if (event.kind === 'decision.requested') {
       decisions.set(details.id, { id: details.id, workId, action: details.action, input: details.input, reason: details.reason, requestedBy: event.actor, requestedAt: event.at, state: 'requested',
         approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [],
-        precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, concurrences: [] });
+        precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, noPrecedent: typeof details.noPrecedent === 'string' ? details.noPrecedent : null, concurrences: [] });
       continue;
     }
     const decision = decisions.get(details.id);

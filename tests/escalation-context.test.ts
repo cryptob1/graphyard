@@ -12,7 +12,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { GitHub } from '../src/github.js';
 import { Refusal, standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
-import { assembleEscalationContext, canonical, contextFingerprint, contextLadder, defaultContextBudget, followPrecedent, handleEscalation, type EscalationContext } from '../src/model/escalation-context.js';
+import { assembleEscalationContext, canonical, contextFingerprint, contextLadder, contextOverflowAttention, contextOverflows, contextSqueeze, defaultContextBudget, followPrecedent, handleEscalation, type ContextInputs, type EscalationContext } from '../src/model/escalation-context.js';
 import { launchEscalationHandler, masterConfigSchema, runAutonomyCommand, type AutonomyDependencies, type MasterConfig } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { Store } from '../src/store.js';
@@ -232,7 +232,9 @@ test('integration:context-deterministic-bounded — the same escalation and grap
   assert.notEqual(wide.body.fingerprint, context.fingerprint); assert.equal(wide.body.item.history.total, total);
   const narrow = await contextOf(master.token, work, '?budget=4000');
   assert.equal(narrow.status, 200, narrow.text);
-  if (Buffer.byteLength(narrow.text) > 4000) { assert.match(narrow.body.budget.exceeded, /summary floor/); assert.deepEqual(narrow.body.budget.level, contextLadder.at(-1)); }
+  // GY-138: a floor over budget is squeezed until it fits, and says so.
+  assert.ok(Buffer.byteLength(narrow.text) <= 4000, `${Buffer.byteLength(narrow.text)} bytes within the 4000-byte budget`);
+  if (narrow.body.budget.assembled !== null) { assert.match(narrow.body.budget.exceeded, /summary floor/); assert.deepEqual(narrow.body.budget.level, contextLadder.at(-1)); }
   else assert.equal(narrow.body.budget.exceeded, null);
   assert.equal(narrow.body.rules.text, projectRules(base), 'the rules layer is never shortened');
   // The assembly itself is a pure function: shuffled key order in its inputs changes nothing.
@@ -358,4 +360,148 @@ console.log(JSON.stringify({ result, reads }));
   assert.ok(!before.rules.text!.includes('<!-- graphyard'), 'no generated Graphyard block is mistaken for the project\'s rules');
   const digest = createHash('sha256').update(JSON.stringify(canonical({ ...before, fingerprint: undefined }))).digest('hex');
   assert.equal(digest, before.fingerprint);
+});
+
+/** Resolve decisions written straight into the ledger of one item: requested, approved and applied, oldest first. */
+async function appliedDecisions(work: Work, triggers: string[], label: string) {
+  const ids: string[] = [];
+  for (const [index, trigger] of triggers.entries()) {
+    const id = randomUUID(); ids.push(id);
+    await store.pool.query('INSERT INTO events(work_id, actor, kind, payload) VALUES ($1, $2, $3, $4), ($1, $5, $6, $7), ($1, $5, $8, $9)', [work.id,
+      master.id, 'decision.requested', JSON.stringify({ id, action: 'resolve', input: { trigger, expectedRevision: 1 }, reason: `${label} ${index}: ${'the ledger explains the lapse and the candidate is unchanged; '.repeat(4)}`, requester: { id: master.id, role: 'operator-agent' } }),
+      approver.id, 'decision.approved', JSON.stringify({ id, action: 'resolve', reason: `Approval ${index}`, requestedBy: master.id, approver: { id: approver.id, role: 'operator-agent' } }),
+      'decision.applied', JSON.stringify({ id, outcome: `Resolved ${trigger} on ${work.key}` })]);
+  }
+  return ids;
+}
+
+test('integration:precedent-survives-budget-squeeze — an over-budget context still lists a citable decision of its own trigger beside the rules, reports what it omitted and stays within the budget', async () => {
+  // A context whose natural size is far over a 4,000-byte budget: a long description, a busy graph, a long history and many decisions.
+  const work = await escalated('squeezed-item', { description: `Why squeezed-item matters: ${'the context must still name a decision to cite. '.repeat(40)}` });
+  for (let index = 0; index < 12; index++) await created(`squeeze-neighbour-${index}`);
+  await store.pool.query(`INSERT INTO events(work_id, actor, kind, payload) SELECT $1, 'implementer', 'blocked', jsonb_build_object('details', jsonb_build_object('reason', 'Typed row ' || n || ' ' || repeat('x', 200))) FROM generate_series(1, 80) AS n`, [work.id]);
+  // Precedent: applied decisions of the item's own trigger, then of another trigger recorded after them (so newer).
+  const ledger = await created('squeeze-precedent-ledger');
+  const own = await appliedDecisions(ledger, ['requirement-weakening', 'requirement-weakening'], 'Own trigger');
+  await appliedDecisions(ledger, Array.from({ length: 30 }, () => 'lease-loss'), 'Other trigger');
+  const newestOwn = own.at(-1)!;
+
+  const budget = 4000;
+  const response = await contextOf(master.token, work, `?budget=${budget}`);
+  assert.equal(response.status, 200, response.text);
+  const context: EscalationContext = response.body;
+  // The natural size — the ladder's first level, and even its summary floor — is over the budget.
+  const natural = await contextOf(master.token, work, '?budget=1000000');
+  assert.ok(Buffer.byteLength(natural.text) > budget, `natural size ${Buffer.byteLength(natural.text)} bytes`);
+  assert.ok(context.budget.assembled! > budget, `the summary floor is ${context.budget.assembled} bytes against ${budget}`);
+  // The document stays within the budget.
+  assert.ok(Buffer.byteLength(response.text) <= budget, `${Buffer.byteLength(response.text)} bytes within the ${budget}-byte budget`);
+  assert.equal(fingerprintOf(context), context.fingerprint);
+  // The rules layer and the citable precedent survive, before any other content.
+  assert.equal(context.rules.text, projectRules(base), 'the rules layer is never shortened');
+  assert.deepEqual(context.budget.level, contextLadder.at(-1));
+  const citable = context.precedent.detail.filter(entry => entry.trigger === 'requirement-weakening' && entry.state === 'applied');
+  assert.ok(citable.length >= 1, 'precedent.detail names at least one citable decision of the escalation\'s own trigger');
+  assert.equal(citable[0].id, newestOwn, 'the newest applied decision of that trigger');
+  assert.ok(context.precedent.total >= 32, `${context.precedent.total} decisions`);
+  assert.equal(context.precedent.omitted, context.precedent.total - context.precedent.detail.length, 'every other decision is still counted');
+  // budget.exceeded still reports the overflow and names every omitted section, dropped in the documented order.
+  assert.match(context.budget.exceeded!, new RegExp(`^The context is ${context.budget.assembled} bytes at the summary floor against a ${budget}-byte budget; kept the repository rules \\(\\d+ bytes, never shortened\\) and citable precedent ${newestOwn}; omitted `));
+  assert.ok(context.budget.omitted.length >= 1, 'the squeeze dropped at least one section');
+  const order = contextSqueeze.map(step => step.section);
+  assert.deepEqual(context.budget.omitted, order.filter(section => context.budget.omitted.includes(section)), 'sections are dropped in the documented order');
+  assert.ok(context.budget.exceeded!.includes(`omitted ${context.budget.omitted.join(', ')}.`), context.budget.exceeded!);
+  assert.ok(context.budget.omitted.includes('goals.graph') && context.goals.graph.length === 0 && context.goals.graphOmitted.reduce((sum, entry) => sum + entry.count, 0) > 12, 'the goals graph is counted by stage, not listed');
+  // The built-in judgement can follow it, and the command it forms carries an id the server accepts.
+  const judgement = followPrecedent(context)!;
+  assert.deepEqual(judgement.precedent, [newestOwn]);
+  const recorded = await decide(master.token, work, { action: 'resolve', input: { trigger: 'requirement-weakening', expectedRevision: (await reload(work.id)).revision }, reason: judgement.reason, precedent: judgement.precedent, context: context.fingerprint });
+  assert.equal(recorded.status, 200, recorded.text); assert.deepEqual(recorded.body.precedent, [newestOwn]); assert.equal(recorded.body.noPrecedent, null);
+  // A budget the floor fits in is not squeezed at all.
+  assert.equal(natural.body.budget.exceeded, null); assert.equal(natural.body.budget.assembled, null); assert.deepEqual(natural.body.budget.omitted, []);
+});
+
+test('integration:decision-without-precedent-accepted — a decision citing no precedent, for a trigger with none applied, is accepted and recorded as such; an id that is no decision of the same action is still refused', async () => {
+  // A security-concern escalation raised by the live attempt: no resolve decision of that trigger has ever been applied.
+  let work = await created('first-of-its-kind');
+  work = await engine.execute(operator, 'ready', work.id, { reason: 'Ready' }, randomUUID());
+  work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  work = await engine.execute(implementer, 'request', work.id, { type: 'escalation', epoch: work.epoch, trigger: 'security-concern', reason: 'A credential-shaped string is in the diff' }, randomUUID());
+  assert.ok(standingEscalations(work).some(entry => entry.trigger === 'security-concern'));
+  const applied = await store.pool.query("SELECT 1 FROM events requested JOIN events done ON done.kind='decision.applied' AND done.payload->>'id'=requested.payload->>'id' WHERE requested.kind='decision.requested' AND requested.payload->'input'->>'trigger'='security-concern'");
+  assert.equal(applied.rowCount, 0, 'no applied precedent of the trigger exists');
+  const context = (await contextOf(master.token, work, '?trigger=security-concern')).body as EscalationContext;
+  assert.ok(!context.precedent.detail.some(entry => entry.trigger === 'security-concern' && entry.state === 'applied'), 'the context has nothing of this trigger to cite');
+  const input = { trigger: 'security-concern', expectedRevision: (await reload(work.id)).revision };
+
+  // A cited id that is not a recorded decision of the same action is still refused: an invented one, and a real decision of another action.
+  const invented = randomUUID();
+  const refusedInvented = await decide(master.token, work, { action: 'resolve', input, reason: 'Cites nothing real', precedent: [invented] });
+  assert.equal(refusedInvented.status, 422); assert.match(refusedInvented.body.error, new RegExp(`${invented} is not a recorded resolve decision`));
+  const rework = randomUUID();
+  await store.pool.query('INSERT INTO events(work_id, actor, kind, payload) VALUES ($1, $2, $3, $4)', [work.id, master.id, 'decision.requested', JSON.stringify({ id: rework, action: 'rework', input: {}, reason: 'Another action', requester: { id: master.id, role: 'operator-agent' } })]);
+  const refusedOther = await decide(master.token, work, { action: 'resolve', input, reason: 'Cites a rework decision', precedent: [rework] });
+  assert.equal(refusedOther.status, 422); assert.match(refusedOther.body.error, new RegExp(`${rework} is not a recorded resolve decision`));
+
+  // Without --precedent the decision is accepted, and the ledger records that no precedent was available.
+  const accepted = await decide(master.token, work, { action: 'resolve', input, reason: 'The string is a test fixture, not a credential', context: context.fingerprint });
+  assert.equal(accepted.status, 200, accepted.text);
+  assert.deepEqual(accepted.body.precedent, []);
+  assert.equal(accepted.body.noPrecedent, 'No precedent was available: no applied resolve decision of the security-concern trigger had been recorded, so this decision was taken on the facts alone');
+  const row = (await events(work)).find(entry => entry.kind === 'decision.requested' && entry.payload.id === accepted.body.id)!;
+  assert.equal(row.payload.noPrecedent, accepted.body.noPrecedent); assert.equal(row.payload.precedent, undefined);
+  const listed = await ok(master.token, 'GET', `work/${work.key}/decisions`);
+  assert.equal(listed.decisions.find((entry: any) => entry.id === accepted.body.id).noPrecedent, accepted.body.noPrecedent);
+  // It is an ordinary decision: the independent approver applies it and the escalation is resolved.
+  const approval = await approve(approver.token, work, accepted.body.id, 'Checked the fixture');
+  assert.equal(approval.status, 200, approval.text); assert.equal(approval.body.state, 'applied');
+  assert.ok(!standingEscalations(await reload(work.id)).some(entry => entry.trigger === 'security-concern'));
+  // Once one exists, a later request citing nothing is still accepted, and the note says a precedent was there to cite.
+  let next = await created('second-of-its-kind');
+  next = await engine.execute(operator, 'ready', next.id, { reason: 'Ready' }, randomUUID());
+  next = await engine.execute(implementer, 'claim', next.id, {}, randomUUID());
+  next = await engine.execute(implementer, 'request', next.id, { type: 'escalation', epoch: next.epoch, trigger: 'security-concern', reason: 'Another credential-shaped string' }, randomUUID());
+  const second = await decide(master.token, next, { action: 'resolve', input: { trigger: 'security-concern', expectedRevision: (await reload(next.id)).revision }, reason: 'Also a fixture' });
+  assert.equal(second.status, 200, second.text);
+  assert.equal(second.body.noPrecedent, 'No precedent cited, though 1 applied resolve decision of the security-concern trigger was recorded');
+});
+
+test('unit:context-overflow-surfaced — master status names the item, its trigger and the assembled size against the budget whenever an escalation context overflows', async () => {
+  const escalation = { trigger: 'lease-loss' as const, reason: 'graphyard-claude-2 lost lease epoch 9', at: '2026-09-23T09:13:33.000Z', actor: 'graphyard' };
+  const gate = (name: string) => ({ name, passed: false, reasons: [`Unresolved lease-loss escalation requires operator resolution: ${escalation.reason}`] });
+  const work = { id: 'w-118', key: 'GY-118', title: 'Deployment cost', type: 'bug', description: 'd'.repeat(2000), stage: 'merge', ready: true, revision: 40, policyRevision: 1, epoch: 11, createdAt: '2026-09-20T00:00:00.000Z',
+    priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'c'.repeat(300), proofs: ['unit:x'] }], plannedFiles: ['src/x.ts'], policy: { checks: ['test'], review: true },
+    gates: ['ready', 'build', 'review', 'test', 'acceptance', 'merge'].map(gate), blocker: null, violations: [], candidate: null, submission: { epoch: 11, pr: 120 }, lease: null, implementers: ['graphyard-claude-2'],
+    escalation, escalations: [escalation] } as unknown as Work;
+  const graph = [work, ...Array.from({ length: 40 }, (_, index) => ({ ...work, id: `w-${index}`, key: `GY-${200 + index}`, title: `Neighbour ${index} ${'t'.repeat(80)}`, escalation: null, escalations: [] }) as unknown as Work)];
+  const decisions = Array.from({ length: 32 }, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, workId: 'w-1', workKey: 'GY-1', action: 'resolve' as const, input: { trigger: index % 2 ? 'lease-loss' : 'requirement-weakening' }, reason: `Reason ${index} ${'r'.repeat(300)}`,
+    requestedBy: 'master', requestedAt: '2026-09-22T00:00:00.000Z', state: 'applied' as const, approvedBy: 'approver', approvedAt: null, approvalReason: 'ok', outcome: 'Resolved', refusals: [], precedent: [], context: null, noPrecedent: null, concurrences: [], seq: index + 1 }));
+  const inputs = (budget: number): ContextInputs => ({ repository, work, trigger: 'lease-loss', rules: { path: 'AGENTS.md', ref: base, sha: rulesBlob, text: projectRules(base), unavailable: null }, graph,
+    history: { total: 80, kinds: [{ kind: 'blocked', count: 80, firstSeq: '1', lastSeq: '80', firstAt: '2026-09-20T00:00:00.000Z', lastAt: '2026-09-23T00:00:00.000Z' }], recent: [], intents: [] }, decisions, budget });
+  // Over budget: the attention item names the item, the trigger and the assembled size against the budget.
+  const over = assembleEscalationContext(inputs(6000));
+  assert.ok(over.budget.exceeded && over.budget.assembled! > 6000, `assembled ${over.budget.assembled}`);
+  const item = contextOverflowAttention(over)!;
+  assert.equal(item.subject, 'GY-118');
+  assert.equal(item.text.split(';')[0], `The lease-loss escalation context for GY-118 assembled to ${over.budget.assembled} bytes against its 6000-byte budget`);
+  assert.match(item.text, new RegExp(`; the squeeze omitted ${over.budget.omitted.join(', ')} and kept the rules and precedent ${decisions[31].id}$`));
+  assert.deepEqual({ role: item.role, human: item.human, humanOnly: item.humanOnly }, { role: 'master', human: false, humanOnly: null });
+  assert.equal(item.next, `Raise GRAPHYARD_ESCALATION_CONTEXT_BUDGET on the control plane, or run graphyard master escalation GY-118 lease-loss --budget N with N above ${over.budget.assembled}`);
+  // Within budget: nothing is raised.
+  const fitting = assembleEscalationContext(inputs(defaultContextBudget));
+  assert.equal(fitting.budget.exceeded, null); assert.equal(contextOverflowAttention(fitting), null);
+  // The status report reads the context of every standing escalation on open work, and raises one item per overflow.
+  const reads: string[] = [];
+  const read = async (path: string) => { reads.push(path); return JSON.parse(JSON.stringify(path.startsWith('work/GY-118/') ? over : fitting)); };
+  const done = { ...work, id: 'w-done', key: 'GY-5', stage: 'done' } as Work;
+  const raised = await contextOverflows(read, [work, graph[1], done]);
+  assert.deepEqual(reads, ['work/GY-118/context?trigger=lease-loss'], 'only standing escalations on open work are read');
+  assert.deepEqual(raised, [item]);
+  // An unreadable context is skipped rather than failing the whole report.
+  assert.deepEqual(await contextOverflows(async () => { throw new Error('offline'); }, [work]), []);
+  // master status carries it: the report adds these items to its attention list and its count.
+  const report = await readFile(join(root, 'src/cli/master-status.ts'), 'utf8');
+  assert.match(report, /const overflow = await contextOverflows\(masterApi, snapshot\.work\);/);
+  assert.match(report, /attentionItems\.push\(\.\.\.generatedFiles, \.\.\.overflow\)/);
+  assert.match(report, /\+ overflow\.length \+/);
 });

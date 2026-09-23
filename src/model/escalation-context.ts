@@ -15,7 +15,11 @@ import type { Escalation, EscalationTrigger, Work } from './work.js';
  * Assembly is a pure function of those inputs, so the same escalation and graph state yield a
  * byte-identical document, and it is bounded: when the document exceeds its budget the history
  * and precedent layers are summarised further — fewer rows in detail, every row still counted —
- * never cut mid-way. The rules layer is never shortened; a budget too small for it is reported.
+ * never cut mid-way. The rules layer is never shortened, and neither is the citable precedent
+ * (GY-138): the newest applied decision of the escalation's own trigger stays listed at every
+ * level, because a handler is told to cite a decision id and can only cite one it was shown.
+ * When even the summary floor does not fit, the squeeze drops whole sections in `contextSqueeze`
+ * order — each named in `budget.omitted` — until it does, and `budget.exceeded` says so.
  */
 export const contextVersion = 1;
 export const defaultContextBudget = 32_000;
@@ -78,7 +82,8 @@ export interface EscalationContext {
     history: { total: number; kinds: LedgerKindCount[]; recent: HistoryEntry[]; omitted: number };
   };
   precedent: { action: typeof escalationAction; total: number; matching: number; detail: PrecedentEntry[]; summary: { trigger: string | null; state: string; count: number }[]; omitted: number };
-  budget: { limit: number; level: { recent: number; detail: number }; exceeded: string | null };
+  /** `assembled` is the size at the summary floor when that did not fit; `omitted` names each section the squeeze dropped. */
+  budget: { limit: number; level: { recent: number; detail: number }; exceeded: string | null; assembled: number | null; omitted: string[] };
   fingerprint: string;
 }
 
@@ -113,6 +118,9 @@ export function orderPrecedent(decisions: PrecedentDecision[], trigger: Escalati
   const rank = (decision: PrecedentDecision) => decision.input?.trigger === trigger ? 0 : 1;
   return [...decisions].filter(decision => decision.action === escalationAction).sort((a, b) => rank(a) - rank(b) || b.seq - a.seq || (a.id < b.id ? -1 : 1));
 }
+/** The newest applied decision of the escalation's own trigger: the one line a handler can always cite. */
+export const citablePrecedent = <T extends { state: string }>(ordered: T[], trigger: string, triggerOf: (entry: T) => unknown) =>
+  ordered.find(entry => entry.state === 'applied' && triggerOf(entry) === trigger) ?? null;
 const byStage = (work: Work[]) => {
   const counts = new Map<string, number>();
   for (const item of work) counts.set(item.stage, (counts.get(item.stage) ?? 0) + 1);
@@ -130,9 +138,11 @@ export function assembleAt(inputs: ContextInputs, level: { recent: number; detai
   const recentRows = inputs.history.recent.slice(0, level.recent);
   const nonRoutine = inputs.history.kinds.filter(entry => !(routineLedgerKinds as readonly string[]).includes(entry.kind)).reduce((sum, entry) => sum + entry.count, 0);
   const ordered = orderPrecedent(inputs.decisions, trigger);
-  const detail = ordered.slice(0, level.detail);
+  // The citable precedent is listed at every level, the floor included; everything else is cut from the ordered list.
+  const citable = citablePrecedent(ordered, trigger, decision => decision.input?.trigger);
+  const detail = ordered.filter((decision, index) => index < level.detail || decision === citable);
   const summary = new Map<string, { trigger: string | null; state: string; count: number }>();
-  for (const decision of ordered.slice(level.detail)) {
+  for (const decision of ordered.filter(entry => !detail.includes(entry))) {
     const entryTrigger = typeof decision.input?.trigger === 'string' ? decision.input.trigger : null;
     const id = `${entryTrigger ?? ''}\0${decision.state}`;
     summary.set(id, { trigger: entryTrigger, state: decision.state, count: (summary.get(id)?.count ?? 0) + 1 });
@@ -154,20 +164,94 @@ export function assembleAt(inputs: ContextInputs, level: { recent: number; detai
     },
     precedent: { action: escalationAction, total: ordered.length, matching: ordered.filter(decision => decision.input?.trigger === trigger).length, detail: detail.map(precedentEntry),
       summary: [...summary.values()].sort((a, b) => (a.trigger ?? '').localeCompare(b.trigger ?? '', 'en') || a.state.localeCompare(b.state, 'en')), omitted: ordered.length - detail.length },
-    budget: { limit: inputs.budget, level, exceeded: null },
+    budget: { limit: inputs.budget, level, exceeded: null, assembled: null, omitted: [] },
   };
 }
 
-/** The bounded, deterministic document: the first level of the ladder that fits, fingerprinted. */
+type Draft = Omit<EscalationContext, 'fingerprint'>;
+/**
+ * What survives a budget squeeze, least essential dropped first. The repository rules and the
+ * citable precedent are never on this list: they are what a handler needs to act at all — the
+ * rules to judge by and a decision id to cite — so they are kept before any other content. The
+ * goals graph and history go first because they are context around the decision, and precedent
+ * outranks history: a handler that knows how the same incident was decided can follow that line,
+ * while one that knows the item's history but has nothing to cite cannot record anything. The
+ * item's own requirements and refusal go last. Each step drops one section whole and says whether it had anything.
+ */
+export const contextSqueeze: readonly { section: string; drop: (document: Draft) => boolean }[] = [
+  { section: 'goals.graph', drop: document => {
+    if (!document.goals.graph.length) return false;
+    const counts = new Map(document.goals.graphOmitted.map(entry => [entry.stage, entry.count]));
+    for (const row of document.goals.graph) counts.set(row.stage, (counts.get(row.stage) ?? 0) + 1);
+    document.goals.graph = []; document.goals.graphOmitted = [...counts].map(([stage, count]) => ({ stage, count })).sort((a, b) => a.stage < b.stage ? -1 : 1);
+    return true;
+  } },
+  { section: 'item.history.kinds', drop: document => !!document.item.history.kinds.length && !!(document.item.history.kinds = []) },
+  { section: 'goals.intents', drop: document => !!document.goals.intents.length && !!(document.goals.intents = []) },
+  { section: 'precedent.summary', drop: document => !!document.precedent.summary.length && !!(document.precedent.summary = []) },
+  { section: 'item.refusal.gates', drop: document => !!document.item.refusal.gates.length && !!(document.item.refusal.gates = []) },
+  { section: 'item.refusal.standing', drop: document => document.item.refusal.standing.length > 1 && !!(document.item.refusal.standing = [document.escalation]) },
+  { section: 'item.description', drop: document => !!document.item.description && !(document.item.description = '') },
+  { section: 'item.criteria', drop: document => !!document.item.criteria.length && !!(document.item.criteria = []) },
+  { section: 'item.candidate', drop: document => (!!document.item.candidate || !!document.item.submission) && !(document.item.candidate = document.item.submission = null) },
+];
+
+/**
+ * The bounded, deterministic document: the first level of the ladder that fits, fingerprinted.
+ * When the summary floor itself is over budget, the squeeze drops sections in `contextSqueeze`
+ * order until the document fits, and `budget.exceeded` names the size at the floor, what was kept
+ * and every section omitted, so a handler and `master status` see the overflow rather than a
+ * context that silently lost what the handler needed.
+ */
 export function assembleEscalationContext(inputs: ContextInputs): EscalationContext {
-  const fits = (document: Omit<EscalationContext, 'fingerprint'>) => Buffer.byteLength(serialiseContext({ ...document, fingerprint: 'f'.repeat(64) })) <= inputs.budget;
+  const size = (document: Draft) => Buffer.byteLength(serialiseContext({ ...document, fingerprint: 'f'.repeat(64) }));
+  const fits = (document: Draft) => size(document) <= inputs.budget;
   let document = assembleAt(inputs, contextLadder[0]);
   for (const level of contextLadder.slice(1)) { if (fits(document)) break; document = assembleAt(inputs, level); }
   if (!fits(document)) {
-    const rules = Buffer.byteLength(document.rules.text ?? '');
-    document.budget.exceeded = `The context is ${Buffer.byteLength(serialiseContext(document))} bytes at the summary floor (every history row and precedent decision counted, none listed) against a ${inputs.budget}-byte budget; the repository rules alone are ${rules} bytes and are never shortened. Raise ${contextBudgetVariable} or the budget parameter`;
+    const assembled = size(document), rules = Buffer.byteLength(document.rules.text ?? '');
+    const citable = citablePrecedent(document.precedent.detail, document.escalation.trigger, entry => entry.trigger);
+    const kept = citable ? `citable precedent ${citable.id}` : `no citable precedent (no applied ${escalationAction} decision of the ${document.escalation.trigger} trigger; the handler may decide without one)`;
+    const state = (fitted: boolean) => {
+      document.budget.assembled = assembled;
+      document.budget.exceeded = `The context is ${assembled} bytes at the summary floor against a ${inputs.budget}-byte budget; kept the repository rules (${rules} bytes, never shortened) and ${kept}${document.budget.omitted.length ? `; omitted ${document.budget.omitted.join(', ')}` : ''}${fitted ? '' : '; still over, since what is never dropped exceeds the budget'}. Raise ${contextBudgetVariable} or the budget parameter`;
+    };
+    state(false);
+    for (const step of contextSqueeze) {
+      if (fits(document)) break;
+      if (step.drop(document)) { document.budget.omitted.push(step.section); state(false); }
+    }
+    // The fitted wording is the shorter one, so a document that fits keeps fitting with it.
+    if (fits(document)) state(true);
   }
   return { ...document, fingerprint: contextFingerprint(document) };
+}
+
+/**
+ * The attention `master status` raises for an escalation whose context did not fit its budget
+ * (GY-138): the item, its trigger and the size at the summary floor against the budget, with what
+ * the squeeze omitted, so an operator sees the overflow before a handler declines on it.
+ */
+export function contextOverflowAttention(context: Pick<EscalationContext, 'key' | 'escalation' | 'budget' | 'precedent'>) {
+  if (!context.budget.exceeded) return null;
+  const citable = citablePrecedent(context.precedent.detail, context.escalation.trigger, entry => entry.trigger);
+  return { subject: context.key,
+    text: `The ${context.escalation.trigger} escalation context for ${context.key} assembled to ${context.budget.assembled ?? '?'} bytes against its ${context.budget.limit}-byte budget; the squeeze omitted ${context.budget.omitted.join(', ') || 'nothing it could drop'} and kept the rules and ${citable ? `precedent ${citable.id}` : 'no citable precedent (none of this trigger is applied)'}`,
+    role: 'master' as const, approvedBy: null, human: false, humanOnly: null,
+    next: `Raise ${contextBudgetVariable} on the control plane, or run graphyard master escalation ${context.key} ${context.escalation.trigger} --budget N with N above ${context.budget.assembled ?? context.budget.limit}` };
+}
+/** Read the context of every standing escalation on open work and return the overflow attention; an unreadable context is skipped. */
+export async function contextOverflows(read: (path: string) => Promise<any>, work: Work[]) {
+  const items: NonNullable<ReturnType<typeof contextOverflowAttention>>[] = [];
+  for (const item of work) {
+    if (item.stage === 'done') continue;
+    for (const escalation of standingEscalations(item)) {
+      const context = await read(`work/${encodeURIComponent(item.key)}/context?trigger=${escalation.trigger}`).catch(() => null);
+      const attention = context?.budget ? contextOverflowAttention(context) : null;
+      if (attention) items.push(attention);
+    }
+  }
+  return items;
 }
 
 /** Where the rules layer is read: the base tip the item was observed against, else its bound base, else the base branch name. */
