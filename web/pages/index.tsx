@@ -5,6 +5,7 @@ import ShippedPage from './shipped';
 import HumanRequestsPage from './human-requests';
 import GuidePage from './guide';
 import AutomationPage from './automation';
+import FleetPage from './fleet';
 import ScenarioLibrary from '../scenarios';
 import ValidationView from '../validation';
 import ReleasesView from '../releases';
@@ -55,7 +56,10 @@ export const views: readonly View[] = [
   { id: 'releases', icon: '⇈', label: 'Releases', section: 'insights', visible: dashboard => configured(dashboard.features.releases), render: dashboard => <ReleasesView api={dashboard.api} work={dashboard.work}/> },
   { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'settings', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
   { id: 'grants', icon: '⚷', label: 'Proof authority', section: 'settings', render: dashboard => <ProofGrantsView api={dashboard.api} work={dashboard.work} canEdit={role(dashboard) === 'admin'}/> },
-  { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError}/> },
+  { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
+  // Opened from the Work page's fleet line and from Operator automation, like the guide: the
+  // registry names hosts and login homes, so only the identities that may read it see it.
+  { id: 'fleet', icon: '⛭', label: 'Agent fleet', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status}/> },
   { id: 'guide', icon: '?', label: 'How Graphyard works', render: () => <GuidePage/> },
 ];
 
