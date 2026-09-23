@@ -188,7 +188,8 @@ export class GitHub {
       method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     });
-    if (response.status === 304 && cached) { this.rateFailures = 0; return structuredClone(cached.value); }
+    // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
+    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); return structuredClone(cached.value); }
     const refused = await this.refusal(response, `${method} ${path}`);
     if (refused) throw refused;
     this.rateFailures = 0;
@@ -198,7 +199,7 @@ export class GitHub {
       this.cache.delete(path);
       if (etag) {
         this.cache.set(path, { etag, value: structuredClone(value) });
-        if (this.cache.size > 256) this.cache.delete(this.cache.keys().next().value!);
+        if (this.cache.size > etagCacheEntries) this.cache.delete(this.cache.keys().next().value!);
       }
     }
     return value;
@@ -897,6 +898,14 @@ async function restoreBranch(engine: Engine, github: GitHub, work: Work, owed: B
 }
 /** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
 export const permissionHoldMs = 30 * 60_000;
+/**
+ * Conditional-request cache size. One observation round reads roughly ten paths per open PR; a cache
+ * smaller than a round evicts every entry before its reuse, so no request earns a free 304.
+ */
+export const etagCacheEntries = 4096;
+/** Seconds between observations: a merge-stage candidate needs a fresh one to merge; webhooks wake the rest on change. */
+export const mergeObservationSeconds = 20;
+export const idleObservationSeconds = 90;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
 export async function processJob(engine: Engine, github: GitHub) {
@@ -992,7 +1001,7 @@ export async function processJob(engine: Engine, github: GitHub) {
     }
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
-    else await engine.store.finishJob(job.work_id, job.token);
+    else await engine.store.finishJob(job.work_id, job.token, undefined, false, work?.stage === 'merge' ? mergeObservationSeconds : idleObservationSeconds);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];

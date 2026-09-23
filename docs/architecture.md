@@ -206,7 +206,7 @@ decide from evidence and verdicts alone.
 
 ## Reconciliation
 
-The server runs a non-overlapping tick every two seconds. It expires leases and reevaluates affected state, then processes up to four available GitHub jobs concurrently. A successful job becomes eligible again after 20 seconds; a failed job after 45 seconds. These timings are MVP defaults, not latency guarantees under a large backlog. Add replicas or adjust batching after measuring real load.
+The server runs a non-overlapping tick every two seconds. It expires leases and reevaluates affected state, then processes up to four available GitHub jobs concurrently. A successful job becomes eligible again after 20 seconds while its item is in the merge stage (a merge needs an observation under 25 seconds old) and after 90 seconds otherwise; a failed job after 45 seconds. A webhook wakes a job at once, so the slower cadence only bounds how long an unannounced change goes unseen. GET responses are cached by ETag with room for a whole observation round (`etagCacheEntries`), because GitHub does not count a 304 against the App's hourly request budget; a cache smaller than one round evicts every entry before it is reused and the budget runs out within the hour. These timings are MVP defaults, not latency guarantees under a large backlog. Add replicas or adjust batching after measuring real load.
 
 Signed webhooks deduplicate delivery IDs and wake jobs. Their payload is a notification, not trusted workflow truth: the worker refetches GitHub data. Periodic polling catches missed webhooks. Observation application compares the work revision read before external I/O to the current revision; concurrent changes force a retry.
 
