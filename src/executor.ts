@@ -218,6 +218,14 @@ export interface ReleaseGuard {
   /** Every claim this executor makes, so the record beside it says what release each ran on. */
   claimed?: (action: ActionRow) => Promise<unknown> | unknown;
   settled?: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown> | unknown;
+  /**
+   * The executor's half of the restart exclusion: `claiming` announces a claim before `fenced`
+   * looks for a restart under way (returning what stands, or null); a claim that finds a fence, or
+   * asks the queue and gets nothing, is `abandoned`, and one that gets a row is `claimed`.
+   */
+  claiming?: () => Promise<unknown> | unknown;
+  fenced?: () => Promise<unknown> | unknown;
+  abandoned?: () => Promise<unknown> | unknown;
 }
 export const staleReleaseReason = (loaded: ExecutorRelease, current: string | null) =>
   `this executor loaded ${loaded.commit ? loaded.commit.slice(0, 12) : 'an unknown commit'}${loaded.dirty ? ' (dirty)' : ''} at startup and its checkout now holds ${current ? current.slice(0, 12) : 'an unknown commit'}; it claims nothing more, so no row runs behaviour the repository no longer has`;
@@ -228,7 +236,8 @@ export const staleReleaseReason = (loaded: ExecutorRelease, current: string | nu
  * one place a stale executor must not go: an action already in flight finishes and settles under
  * the code it started with — the settlement is what the queue is owed — and only the next claim
  * is refused. An executor whose check reports no commit at all (no readable checkout) is not
- * stale; it simply cannot say, and its record shows that.
+ * stale; it simply cannot say, and its record shows that. The claim is also where a fleet restart
+ * is kept out: no claim starts while the restart fence stands.
  */
 export function releaseGuardedEffects(effects: ExecutorEffects, guard: ReleaseGuard): ExecutorEffects & { standingDown: () => boolean } {
   let standing = false;
@@ -243,8 +252,15 @@ export function releaseGuardedEffects(effects: ExecutorEffects, guard: ReleaseGu
         return { action: null, open: 0 };
       }
       if (standing) { standing = false; await guard.resumed?.(); }
-      const claimed = await effects.claim(request);
-      if (claimed.action) await guard.claimed?.(claimed.action);
+      // Announce, then look: a restart that raised its fence first is seen here, and one that
+      // raises it after this announcement waits for the claim to be recorded before it reads.
+      await guard.claiming?.();
+      let claimed: Awaited<ReturnType<ExecutorEffects['claim']>>;
+      try {
+        if (await guard.fenced?.()) { await guard.abandoned?.(); return { action: null, open: 0 }; }
+        claimed = await effects.claim(request);
+      } catch (error) { await guard.abandoned?.(); throw error; }
+      if (claimed.action) await guard.claimed?.(claimed.action); else await guard.abandoned?.();
       return claimed;
     },
     settle: async (action, result, reason) => {

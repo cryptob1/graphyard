@@ -11,7 +11,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { executorsCommand } from '../src/cli/master-executors.js';
 import { runExecutor, type ExecutorEffects } from '../src/auto-dispatch.js';
 import { releaseGuardedEffects, staleReleaseReason } from '../src/executor.js';
-import { detectSupervisorUnit, executorFleetReport, executorRegistrar, executorRestartCommand, executorsDirectory, readCommit, readExecutorRegistrations, readRelease, removeExecutorRegistration, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
+import { detectSupervisorUnit, executorFleetReport, executorRegistrar, executorRestartCommand, executorsDirectory, readCommit, readExecutorRegistrations, readRelease, readRestartFence, restartFenceFile, removeExecutorRegistration, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 import type { ActionRow } from '../src/model/actions.js';
 
 /**
@@ -57,7 +57,7 @@ const deadPid = 2_147_483_646;
 const registered = (master: MasterConfig, name: string, commit: string, overrides: Partial<ExecutorRegistration> = {}): ExecutorRegistration => ({
   version: 1, name, host: master.hostId, pid: process.pid, principal: 'graphyard-master', kinds: ['resync', 'merge'], intervalSeconds: 5, root: '/srv/graphyard',
   release: { commit, dirty: false }, supervisor: { unit: `graphyard-executor@${name}.service`, restart: `systemctl --user restart graphyard-executor@${name}.service` },
-  state: 'running', standDown: null, startedAt: new Date(Date.now() - 60_000).toISOString(), updatedAt: new Date().toISOString(), stoppedAt: null, claims: 3, lastClaim: null, inFlight: null, ...overrides });
+  state: 'running', standDown: null, startedAt: new Date(Date.now() - 60_000).toISOString(), updatedAt: new Date().toISOString(), stoppedAt: null, claims: 3, lastClaim: null, inFlight: null, claiming: null, ...overrides });
 
 test('unit:executor-release-reported — an executor records the commit it loaded, dirty or not, on each claim and in its registration, and master status lists each executor\'s commit beside the coordinator\'s', async () => {
   const { root, master, dispose } = await fixture();
@@ -134,6 +134,13 @@ test('unit:executor-release-reported — an executor records the commit it loade
     assert.equal(detectSupervisorUnit({ env: {}, cgroup: '0::/user.slice/user-1000.slice/user@1000.service/app.slice/herdr.service\n' }), null, 'a terminal multiplexer\'s unit is not this executor\'s supervisor');
     assert.equal(detectSupervisorUnit({ env: { GRAPHYARD_EXECUTOR_UNIT: 'graphyard-executor@custom.service' }, cgroup: null }), 'graphyard-executor@custom.service');
     assert.equal(detectSupervisorUnit({ env: {}, cgroup: null }), null);
+    assert.equal(detectSupervisorUnit({ named: 'graphyard-executor@by-hand.service', env: { GRAPHYARD_EXECUTOR_UNIT: 'graphyard-executor@custom.service' }, cgroup: null }), 'graphyard-executor@by-hand.service', '--unit names the unit over the environment');
+    // Every source is held to the same rule: a named unit that is not an executor's own is refused, never recorded.
+    assert.throws(() => detectSupervisorUnit({ env: { GRAPHYARD_EXECUTOR_UNIT: 'dbus.service' }, cgroup: null }), /dbus\.service is not a graphyard-executor service/);
+    assert.throws(() => detectSupervisorUnit({ named: 'pipewire.service', env: {}, cgroup: null }), /pipewire\.service is not a graphyard-executor service/);
+    assert.throws(() => detectSupervisorUnit({ named: 'graphyard-executorish.service', env: {}, cgroup: null }), /is not a graphyard-executor service/);
+    assert.equal(detectSupervisorUnit({ env: {}, cgroup: '0::/user.slice/app.slice/graphyard-executorish.service\n' }), null);
+    assert.throws(() => executorRegistrar(master, { name: 'exec-9', host: master.hostId, pid: process.pid, principal: 'graphyard-master', kinds: ['resync'], intervalSeconds: 5, root, release: first, supervisor: 'dbus.service' }), /dbus\.service is not a graphyard-executor service/);
   } finally { await dispose(); }
 });
 
@@ -269,8 +276,10 @@ test('integration:executor-restart-command — master executors restart refuses 
     assert.ok(!calls.some(call => call[0] === 'kill'), 'no process is signalled by this command');
     await removeExecutorRegistration(master, 'exec-3');
 
-    // A unit whose executor never registers again is named at the timeout, not reported as back.
-    await writeExecutorRegistration(master, registered(master, 'exec-1', otherCommit));
+    // A unit whose executor never registers again is named at the timeout, not reported as back —
+    // not even when the old process's own record was written moments before the restart.
+    await removeExecutorRegistration(master, 'exec-2');
+    await writeExecutorRegistration(master, registered(master, 'exec-1', otherCommit, { release: { commit: current, dirty: false }, startedAt: new Date().toISOString() }));
     const silent = await restartExecutors(master, { actions: idle, coordinatorCommit: current, run: supervisor('silent'), sleep: quick.sleep, timeoutMs: 30 });
     assert.equal(silent.result, 'incomplete');
     assert.match(silent.reason!, /exec-1 \(graphyard-executor@exec-1\.service\) did not register again on [0-9a-f]{12} within \d+s; read journalctl --user -u UNIT/);
@@ -288,6 +297,85 @@ test('integration:executor-restart-command — master executors restart refuses 
       assert.equal(refusal.result, 'refused');
       assert.equal(process.exitCode, 1);
     } finally { process.exitCode = before; }
+    await removeExecutorRegistration(master, 'exec-1');
+
+    // The claim/restart race: the restart raises a fence before it reads, an executor announces a
+    // claim before it looks for the fence, so neither order lets a claim slip between the reading
+    // and the restart.
+    const until = async (condition: () => boolean) => { for (let i = 0; i < 400 && !condition(); i++) await delay(5); assert.ok(condition(), 'condition never held'); };
+    const racer = executorRegistrar(master, { name: 'exec-5', host: master.hostId, pid: process.pid, principal: 'graphyard-master', kinds: ['merge'], intervalSeconds: 5, root, release: { commit: current, dirty: false }, supervisor: 'graphyard-executor@exec-5.service' });
+    await racer.started();
+    let asked = 0, answer: ((value: { action: ActionRow | null; open: number }) => void) | null = null;
+    const racing = releaseGuardedEffects({ claim: () => { asked += 1; return new Promise(resolve => { answer = resolve; }); }, settle: async () => ({}), handlers: {} }, {
+      loaded: { commit: current, dirty: false }, current: () => current, standDown: () => assert.fail('the executor is on the current commit'),
+      claimed: action => racer.claimed(action), settled: () => racer.settled(), claiming: () => racer.claiming(), abandoned: () => racer.abandoned(), fenced: () => readRestartFence(master),
+    });
+    // The executor announced first and is waiting on the queue: the restart reads nothing and
+    // restarts nothing until the claim is recorded, then refuses naming it.
+    const inClaim = racing.claim({ host: master.hostId, executor: 'exec-5', kinds: ['merge'] });
+    await until(() => asked === 1);
+    calls.length = 0;
+    let reads = 0;
+    const racingRestart = restartExecutors(master, { actions: async () => { reads += 1; return { queue: { executors: [] }, actions: [] }; }, coordinatorCommit: current, run: supervisor('reregister'), ...quick });
+    await delay(60);
+    assert.equal(reads, 0, 'the queue is not read while a claim is announced');
+    assert.equal(calls.length, 0, 'and nothing is restarted');
+    assert.ok(await readRestartFence(master), 'the fence stands while the restart waits');
+    answer!({ action: row('a5', 'GY-11', 'merge'), open: 0 });
+    const won = await inClaim;
+    assert.equal(won.action?.id, 'a5');
+    const raced = await racingRestart;
+    assert.equal(raced.result, 'refused');
+    assert.match(raced.reason!, /exec-5 holds merge for GY-11/);
+    assert.equal(calls.length, 0, 'the executor holding the claim was not restarted');
+    assert.equal(await readRestartFence(master), null, 'the fence is lowered with the refusal');
+    await racing.settle(won.action!, 'done', 'ok');
+
+    // The restart raised its fence first: an executor that reaches its claim meanwhile does not ask
+    // the queue, abandons the claim it announced, and the restart goes ahead.
+    asked = 0;
+    const fencedOut = await restartExecutors(master, { actions: async () => {
+      const attempt = await racing.claim({ host: master.hostId, executor: 'exec-5', kinds: ['merge'] });
+      assert.equal(attempt.action, null);
+      return { queue: { executors: [] }, actions: [] };
+    }, coordinatorCommit: current, run: supervisor('reregister'), ...quick });
+    assert.equal(asked, 0, 'a fenced executor never asks the queue');
+    assert.equal(fencedOut.result, 'restarted', fencedOut.reason ?? '');
+    assert.deepEqual(calls, [['systemctl', '--user', 'restart', 'graphyard-executor@exec-5.service']]);
+    assert.equal(await readRestartFence(master), null, 'the fence is lowered once the fleet is back');
+
+    // A claim announced by a live executor that never resolves refuses the restart at the claim wait.
+    await writeExecutorRegistration(master, registered(master, 'exec-5', current, { claiming: new Date().toISOString() }));
+    calls.length = 0;
+    const stuck = await restartExecutors(master, { actions: idle, coordinatorCommit: current, run: supervisor('reregister'), sleep: quick.sleep, timeoutMs: 40 });
+    assert.equal(stuck.result, 'refused');
+    assert.match(stuck.reason!, /exec-5 since .* is claiming|is claiming an action: exec-5 since/);
+    assert.equal(calls.length, 0);
+    await writeExecutorRegistration(master, registered(master, 'exec-5', current));
+
+    // Two restarts never run at once: a fence held by a live restart refuses the second; one left by
+    // a restart that exited stands for nothing.
+    const fence = (pid: number) => writeFile(restartFenceFile(master), JSON.stringify({ id: 'other', pid, host: master.hostId, at: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() }));
+    await fence(process.pid);
+    calls.length = 0;
+    const second = await restartExecutors(master, { actions: idle, coordinatorCommit: current, run: supervisor('reregister'), ...quick });
+    assert.equal(second.result, 'refused');
+    assert.match(second.reason!, new RegExp(`another restart on host-a \\(pid ${process.pid}, since`));
+    assert.equal(calls.length, 0);
+    assert.equal((await readRestartFence(master))?.id, 'other', 'the refused restart leaves the other one\'s fence standing');
+    await fence(deadPid);
+    const afterOrphan = await restartExecutors(master, { actions: idle, coordinatorCommit: current, run: supervisor('reregister'), ...quick });
+    assert.equal(afterOrphan.result, 'restarted', afterOrphan.reason ?? '');
+
+    // A record naming a unit that is not an executor's own is never restarted through it.
+    await writeExecutorRegistration(master, registered(master, 'exec-6', otherCommit, { supervisor: { unit: 'dbus.service', restart: 'systemctl --user restart dbus.service' } }));
+    calls.length = 0;
+    const foreign = await restartExecutors(master, { actions: idle, coordinatorCommit: current, run: supervisor('reregister'), ...quick });
+    assert.equal(foreign.result, 'incomplete');
+    assert.ok(!calls.some(call => call.includes('dbus.service')), `dbus.service was restarted: ${JSON.stringify(calls)}`);
+    assert.match(foreign.unsupervised.find(entry => entry.name === 'exec-6')!.instruction, /runs under dbus\.service, which is not a graphyard-executor service this command may restart/);
+    await removeExecutorRegistration(master, 'exec-6');
+
     await assert.rejects(executorsCommand(master, ['stop'], { actions: idle, coordinatorCommit: current }), /Use master executors, or master executors restart/);
   } finally { await dispose(); }
 });

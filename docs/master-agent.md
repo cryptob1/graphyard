@@ -891,7 +891,14 @@ It stops and starts every executor registered on this host through its superviso
 register again: a running record written after the restart, on the coordinator's commit. It
 refuses, naming the executor and the action, while any executor on this host holds a claimed
 action (`exec-1 holds merge for GY-7 since …`), because a restart would leave that row to expire
-and be run again by somebody else; wait for the settlement and run it again. The result says what
+and be run again by somebody else; wait for the settlement and run it again. That reading cannot go
+stale before the restart: the command first raises a fence beside the records (`restart.fence`,
+naming its pid and an expiry), and an executor marks its record `claiming` before it looks for the
+fence and claims nothing while one stands. So either the executor sees the fence and leaves the
+queue alone, or the command sees the mark and waits — up to thirty seconds — for the claim to be
+recorded (and refuses, naming it) or abandoned. The fence stands until the restarted executors have
+registered, so they claim only once the command is done; a second restart is refused while it
+stands, and a fence whose command has exited counts for nothing. The result says what
 each executor ran before and runs now (`restarted`), or names what never came back within the
 timeout and what runs unsupervised (`incomplete`, exit 1); a record whose process is gone and which
 no unit brings back is forgotten. An executor started by hand has no unit to restart, so it is
@@ -907,8 +914,11 @@ systemctl --user enable --now graphyard-executor@exec-1 graphyard-executor@exec-
 
 The template passes its own unit name to the executor (`GRAPHYARD_EXECUTOR_UNIT=%n`, or `--unit`
 by hand), which the executor also reads from its own cgroup; only a `graphyard-executor…` service
-counts, so an executor started inside a terminal multiplexer's unit is not restarted by restarting
-that unit. Its stop timeout gives the action in flight the room a worker launch may take.
+counts, whichever of the three names it, so an executor started inside a terminal multiplexer's
+unit is not restarted by restarting that unit. A `--unit` or `GRAPHYARD_EXECUTOR_UNIT` naming any
+other service stops the executor at startup with the reason, and the restart command checks each
+record's unit again before it runs `systemctl`: a record naming another service is reported as one
+to stop and start by hand, never restarted through that service. Its stop timeout gives the action in flight the room a worker launch may take.
 
 ### Workers pull their own work
 

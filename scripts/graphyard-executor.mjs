@@ -16,8 +16,9 @@
 // process records the release it loaded beside the coordinator credential, re-reads the checkout's
 // commit before every claim, and stands down — finishing what it runs, claiming nothing more,
 // saying why and how to restart it — the moment the two differ. `--unit` names the systemd user
-// unit it runs under when that cannot be read from the process itself; `graphyard master executors
-// restart` restarts every registered executor through that unit.
+// unit it runs under when that cannot be read from the process itself (only a graphyard-executor
+// service is accepted); `graphyard master executors restart` restarts every registered executor
+// through that unit, and no claim starts while its fence stands.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -122,11 +123,20 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // refreshed on every claim; the commit is re-read from the checkout in front of each claim.
   const release = f.readRelease(root);
   const registrar = f.executorRegistrar(config, { name: identity.id, host: identity.host, pid: process.pid, principal: status.actor.id, kinds: a.executorKinds(effects.handlers),
-    intervalSeconds: options.intervalSeconds, root, release, supervisor: options.unit ?? f.detectSupervisorUnit() });
+    intervalSeconds: options.intervalSeconds, root, release, supervisor: f.detectSupervisorUnit({ named: options.unit }) });
   await registrar.started();
+  let fenceSeen = null;
   const guarded = x.releaseGuardedEffects(effects, {
     loaded: release, current: () => f.readCommit(root),
     claimed: action => registrar.claimed(action), settled: () => registrar.settled(),
+    // A fleet restart raises a fence beside the records; no claim starts while it stands.
+    claiming: () => registrar.claiming(), abandoned: () => registrar.abandoned(),
+    fenced: async () => {
+      const fence = await f.readRestartFence(config);
+      if (fence && fence.id !== fenceSeen) console.error(`[graphyard-executor] ${identity.id} claims nothing while the restart by pid ${fence.pid} since ${fence.at} stands`);
+      fenceSeen = fence?.id ?? null;
+      return fence;
+    },
     standDown: detail => { console.error(`[graphyard-executor] ${identity.id} stands down: ${detail.reason}; restart it with ${registrar.registration.supervisor?.restart ?? f.executorRestartCommand}`); return registrar.standDown(detail); },
     resumed: () => { console.error(`[graphyard-executor] ${identity.id} claims again: its checkout is back on ${release.commit.slice(0, 12)}`); return registrar.resumed(); },
   });
