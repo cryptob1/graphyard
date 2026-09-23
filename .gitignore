@@ -11,3 +11,8 @@ coverage/
 playwright-report/
 test-results/
 .claude/settings.local.json
+
+# Test runs write these at the repository root; never commit them.
+/report.*.json
+/.graphyard-collector-test-*/
+/.graphyard-reporter-test-*/
