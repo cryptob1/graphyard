@@ -7,6 +7,7 @@ import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
+import { openPatternItems } from '../interventions.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider } from '../production-watch.js';
@@ -63,6 +64,9 @@ export async function main() {
   await validation.expireArtifacts();
   await validation.reconcile(true);
   let running = false;
+  // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
+  // it runs once a minute rather than every tick.
+  let patternsAt = 0;
   const timer = setInterval(async () => {
     if (running) return; running = true;
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
@@ -70,6 +74,10 @@ export async function main() {
     try {
       await validation.expireArtifacts(); await validation.reconcile(); await engine.reconcile(); await delivery.sweep();
       await projectFlow(engine.store, { batches: 4 });
+      if (Date.now() - patternsAt >= 60_000) {
+        patternsAt = Date.now();
+        for (const work of (await openPatternItems(engine, http.services.interventionPolicy)).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
+      }
       // Provider polling is bounded inside the watch to once a minute; incidents it raises
       // land in the ledger and in /api/status, and are announced here once each.
       const before = production.status().incidents.map(incident => incident.id);

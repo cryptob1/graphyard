@@ -27,6 +27,7 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 - [Scoped operator-agent automation](operator-automation.md) — least-privilege operator agents with server-enforced scope.
 - [Shipping pulse](shipping-pulse.md) — repository delivery flow: throughput, intent-to-merge, and deployment lag without rankings.
 - [Flow analytics](flow-analytics.md) — delivery bottlenecks, phase durations, and their data lineage.
+- [Interventions as product feedback](interventions.md) — every operator intervention as product feedback: what counts, the rate per delivery, how a pattern becomes work, and how to record judgement about delivered work.
 - [Pipeline-speed verification](pipeline-speed-verification.md) — post-merge verification of the pipeline-speed criteria: the commands that read the deployed control plane, and what they found.
 
 ## Build integrations
