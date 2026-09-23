@@ -21,6 +21,7 @@ import { ledgerRefusalAttention } from '../master-status.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
+import { throughputStatus } from '../throughput.js';
 import { setupHealth } from './master-setup.js';
 import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
@@ -179,16 +180,20 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: cli.commit ?? readCommit(root) }, { hostId: master.hostId });
   attentionItems.push(...releases.attention);
   const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
+  // GY-87's throughput claim against the release now serving: verified, or unverified with what
+  // missed. Delivered is not proven, and nothing else on this report would say which this is.
+  const throughput = await throughputStatus(root, coordinator, snapshot.work);
+  if (throughput.attention) attentionItems.push(throughput.attention);
   return { ...status, ...ledgerRefusalAttention({ work: status.work, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length, needsHuman: owed.rows.length,
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + owed.counted } }, snapshot.work),
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + (throughput.attention ? 1 : 0) + owed.counted } }, snapshot.work),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
     actionless: { bound: stallBoundMs, items: actionless },
-    terminalDecisions: decisions.listed, unansweredDecisions: decisions.unanswered,
+    terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',

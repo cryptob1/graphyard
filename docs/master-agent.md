@@ -2575,6 +2575,72 @@ regression is judged against: the CI job summary prints each run's measurement b
 suite refuses a timing-dependent assertion whose spread was never recorded. On a machine whose
 `/tmp` is under a quota, point `TMPDIR` at a sticky directory outside it for the run.
 
+## Throughput verification after deployment
+
+[Typed actions and stateless executors](#typed-next-actions-and-stateless-executors) shipped with a
+throughput claim: routine deliveries reach merge from their first submission in at most 30 minutes
+at the median, and nothing that has something to do waits longer than the five-minute idle bound
+for somebody to do it — with no master session running. That claim was demonstrated over a
+simulated fleet, which says the arithmetic holds and nothing about what the deployed release does.
+Delivered is not proven, so `master status` carries the claim in one of three states and never
+assumes it, under `throughput`:
+
+- `verified` — a recorded measurement of the revision now serving met both budgets.
+- `unverified`, with `shortfall` — a measurement of this revision missed one, with the values.
+- `unverified`, with the reason — the last measurement was of another release, or none was taken.
+
+Anything but `verified` raises an attention item owned by the master, with the command that
+measures it, as soon as the installation has delivered anything at all.
+
+The measurement is a separate run, because it reads the deployed release's own identity and the
+whole ledger:
+
+```sh
+GRAPHYARD_URL=… GRAPHYARD_TOKEN_FILE=… node scripts/measure-throughput.mjs \
+  --record .graphyard/measurements/throughput
+```
+
+It reads `/api/status` for the release actually serving — its release revision is the deployed
+commit the report names, or, for a build that never stamped one (`GRAPHYARD_BUILD_REVISION`), the
+build identity's `commit` that the platform injects and `/healthz` serves; the report's
+`revisionSource` says which named it, and with neither the claim stays unverified — and `/api/work-snapshot` for the ledger, checks that the deployed revision
+contains the claim's own merge commit (`git merge-base --is-ancestor`, from `--repository`, which
+defaults to the working directory), and judges the window that starts where a release carrying the
+claim began serving: the coordinator's [deployment observation](#deployment-verification) on the
+claim's delivery, or, when there is none, its merge instant — reported as the weaker basis it is,
+never moved later to improve a figure. `--since`, `--until` and `--claim` override the window and
+the item; `--json` prints the whole report; `--record DIR` writes it as one timestamped file, which
+is what `master status` reads. An unverified verdict exits 2, so a scheduled run cannot report a
+miss as a quiet success. A missing local commit, shallow checkout or other ancestry-check failure
+is unverified too: only a positive containment result can verify the claim, and `master status`
+rechecks that fact from the recorded report before displaying `verified`. The arithmetic is the
+module master status uses (`src/throughput.ts`), and the percentiles are the same nearest-rank
+estimator as [pipeline speed](#pipeline-speed).
+
+**The population rule is the delicate part, so it is written to be audited rather than trusted.** A
+delivery is counted when it is a merged pull request of this repository with a recorded submission,
+at most one rework round — the same routine population the speed target is stated over — at least
+one action an executor claimed and completed, and no trace of a coordinator on it: no
+action superseded before an executor ran it — the queue's own record of something outside it moving
+the item on — no coordination session recorded, and no blocked report or requirements revision while
+it was under way. Every delivery the window holds is listed either way, with the executor that
+claimed each of its actions, the host it ran on, its submit→merge time and its longest
+idle-but-actionable wait, and, when it is excluded, the reason. Deliberate waits are not idleness:
+the backoff after a failed attempt is subtracted, and the settle window a completed row holds never
+opens a wait.
+
+Narrowing a population until it passes is the failure this guards against, so the report also
+carries `all` — the same figures over every real delivery in the window, counted or not — and
+`populationEffect`, which says in words when the exclusions flatter the result and by how much.
+Nothing synthetic is admitted: an item with no merge commit, no pull request, no worker who held
+it, or no action an executor completed is refused before the coordinator rule is even asked.
+
+A miss is a finding about the design, never a reason to move a budget or shrink the window. The
+report records the measured values, what missed and by how much, and a follow-up naming it — an
+unnamed release is listed beside the population and budget misses, never instead of them, and a
+figure over no deliveries reads `n/a`, never zero minutes; raise
+that follow-up as a work item against the claim, the same as any other finding.
+
 ## Escalation context
 
 A master that carries the project's rules, an item's history and the precedent of earlier decisions in its own window hits a context ceiling, dies with its provider credits, and drifts between sessions. The control plane therefore assembles an escalation's context from the project, so a master spawned for one escalation decides as well as a long-lived one and precedent, not session continuity, keeps judgements consistent. `GET /api/work/GY-N/context?trigger=TRIGGER&budget=BYTES` returns it; `master context GY-N [TRIGGER] [--budget N]` prints the same document, read by key and nothing else, after verifying its fingerprint. It has four layers:
