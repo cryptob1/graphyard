@@ -32,8 +32,7 @@ import { attributionRoutes } from './routes/attribution.js';
 import { statusRoutes } from './routes/status.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
-import { interventionRoutes } from './routes/interventions.js';
-import { interventionPolicyFromEnv } from '../model/interventions.js';
+import { interventionPolicyFromEnv, interventionRoutes } from './routes/interventions.js';
 import { staticRoutes } from './static.js';
 
 export { principalSchema, type Credential } from './principals.js';

@@ -4,6 +4,9 @@ import { interventionKinds, interventionRecordSchema, interventionWindows, judge
 import { judgementToWork, openPatternItems, readInterventionReport, recordIntervention, recordJudgement } from '../../interventions.js';
 import { defineRoutes, parseJson } from '../routes.js';
 
+/** The recurrence policy the server reads at boot, beside the routes that apply it. */
+export { interventionPolicyFromEnv } from '../../model/interventions.js';
+
 const reportQuerySchema = z.object({
   window: z.coerce.number().int().refine(value => (interventionWindows as readonly number[]).includes(value), 'Window must be 7, 30, or 90 days').default(30),
   kind: z.enum(interventionKinds).nullish(), stage: z.enum(stages).nullish(), work: z.string().max(200).nullish(),
