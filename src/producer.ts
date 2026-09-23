@@ -8,7 +8,7 @@ import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
-import { readReviewLedger } from './reviewer.js';
+import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, type SessionLedgerSpec } from './reviewer.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -61,16 +61,19 @@ export const producerRecordSchema = z.object({
   checkoutFailure: z.string().min(1).max(500).optional(),
 }).strict();
 export type ProducerRecord = z.infer<typeof producerRecordSchema>;
-export const producerLedgerSchema = z.object({ version: z.literal(1), producers: z.array(producerRecordSchema).max(400).default([]) }).strict();
+// Bounded and reaped on write by the one implementation the review ledger uses (reviewer.ts
+// boundSessionLedger, GY-131): the same bound, the same retention, the same refusal.
+export const producerLedgerSchema = z.object({ version: z.literal(1), producers: z.array(producerRecordSchema).default([]) }).strict();
 export type ProducerLedger = z.infer<typeof producerLedgerSchema>;
+export const producerLedgerSpec: SessionLedgerSpec = { name: 'producer ledger', path: '.graphyard/producers.json', role: 'producer' };
 
-const ledgerFile = (root: string) => resolve(root, '.graphyard/producers.json');
+const ledgerFile = (root: string) => resolve(root, producerLedgerSpec.path);
 export async function readProducerLedger(root: string): Promise<ProducerLedger> {
   const file = ledgerFile(root);
   try { await privateFile(file); return producerLedgerSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; return { version: 1, producers: [] }; }
 }
-export const saveProducerLedger = (root: string, ledger: ProducerLedger) => atomicPrivateWrite(ledgerFile(root), producerLedgerSchema.parse({ ...ledger, producers: ledger.producers.slice(-400) }));
+export const saveProducerLedger = async (root: string, ledger: ProducerLedger) => atomicPrivateWrite(ledgerFile(root), producerLedgerSchema.parse({ ...ledger, producers: boundSessionLedger(ledger.producers, producerLedgerSpec) }));
 
 /** A finished session that submitted nothing for a proof is given this long to finish submitting before it is recorded as failed. */
 export const producerIdleGraceMs = 5 * 60_000;
@@ -181,6 +184,8 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const id = randomUUID();
   const agentName = sessionAgentName(profile, { id, requestId: request.id, attempt: prior.length + 1 });
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Producer agent ${agentName} is already visible in Herdr`);
+  // The ledger's room is local state, judged before any session exists (see launchReview).
+  assertSessionLedgerRoom(ledger.producers, producerLedgerSpec, `${binding.key} ${binding.group} proofs of ${binding.sha.slice(0, 12)}`);
   const sessions = profileSessions(profile, agents, ledger.producers);
   if (!sessions.free) throw new Error(profileAtLimit('Producer', profile, sessions));
   await readProducerCredential(root, profile.credentialFile);
@@ -219,7 +224,9 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     const record: ProducerRecord = producerRecordSchema.parse({ id, requestId: request.id, attempt: prior.length + 1, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
       group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName, pane: pane ?? null,
       requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + config.run.producerTimeoutMinutes * 60_000).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])), delivery, checkout: checkout.directory });
-    await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] });
+    // A record that cannot be written leaves no session behind.
+    try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
+    catch (error) { try { stopCreatedHerdrTab(pane, tabId, dependencies.run); } catch { /* the refusal below is the cause */ } await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); throw error; }
     return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
       profile: profile.name, principal: profile.principal, agentName, pane: record.pane, checkout: checkout.directory, expiresAt: record.expiresAt, approvals: launch.plan.approvals, delivery,
       account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,

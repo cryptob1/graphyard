@@ -1243,6 +1243,51 @@ the launcher reads it, and never after the launcher closed it — and classifies
   without an account hold records the notice itself as the refusal
   (`the session exited within seconds of its launch on its provider's limit notice: …`).
 
+### The session ledgers
+
+Two local files record the sessions this host launched, one record per session:
+
+| Ledger | Where it lives | Records |
+| --- | --- | --- |
+| review ledger | `.graphyard/reviews.json` under the repository root (mode 0600) | one per reviewer session |
+| producer ledger | `.graphyard/producers.json` under the repository root (mode 0600) | one per producer session |
+
+They are the working set the loop reconciles, not an archive — the event ledger on the control
+plane is the durable history — and both use one bounded, reaped implementation
+(`boundSessionLedger` in `src/reviewer.ts`), so neither can grow without limit and neither stops
+on a cap the other lacks.
+
+- **Live and terminal.** A record is live while its session is `pending`. `completed`, `failed`,
+  `cancelled` and `expired` are terminal.
+- **Bound.** Each ledger holds at most **200** records (`sessionLedgerBound`).
+- **Reaping.** Every write keeps every live record and drops terminal records beyond the
+  retention window. A session that settles is therefore reaped in the same write that resolves
+  it; no ledger fills with finished records, and nobody prunes one by hand.
+- **Retention for diagnostics.** The newest **50** terminal records, by when they settled
+  (`sessionLedgerRetention`), are kept. They are what `master status` lists as recently
+  completed sessions and what a request's attempt and retry counts are read from. A session reaped
+  out of the window no longer counts toward its request's attempts.
+- **Full ledger.** A write that would pass the bound gives up retained terminal records first, even
+  inside the window. It is refused only when all 200 records are live. A launch checks this before
+  it creates a pane, so a refused launch never leaves a running session holding the agent's name.
+  The refusal names the ledger, its bound and the live count:
+  `The review ledger (.graphyard/reviews.json) refused the write: its bound is 200 records and 200 are live sessions …`.
+  This is local state, not reviewer or producer capacity. `master status` attributes it that way.
+  The row's attention and a single attention item name the ledger, the bound, the live count and
+  the remedy. The item is never reported as waiting on a busy reviewer agent. The remedy is to settle the
+  live sessions: `master status` reconciles every pending record against its session and GitHub,
+  a session gone from Herdr settles on that pass, and the next write reaps it.
+- **Headroom.** `master status` reports both ledgers under `ledgers.reviews` and
+  `ledgers.producers`: `path`, `bound`, `retention`, `records`, `live`, `terminal` and
+  `headroom` (how many more live sessions the ledger can record, `bound − live`). A headroom
+  near zero means that many sessions are pending at once. Look at `reviews.pending` and
+  `producers.pending` for the ones that should have settled.
+
+Until GY-131 the review ledger was an append-only array capped at 200 by its schema, and the
+producer ledger was capped at 400 by truncation. Nothing reaped either one. On 2026-09-23 the
+review ledger held 200 finished records, and every review launch was refused for 1h49m while the
+board blamed a busy reviewer agent.
+
 ### Managing profiles
 
 Profiles change while the loop runs; it adopts each change on its next tick.

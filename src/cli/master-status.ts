@@ -6,12 +6,13 @@ import type { Work } from '../model.js';
 import { elapsed } from '../model/sessions.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
-import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
-import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
+import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
+import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
+import { ledgerRefusalAttention } from '../master-status.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
@@ -19,6 +20,7 @@ import type { LoopSupervisorHost } from '../supervisor.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
+export { ledgerRefusalAttention } from '../master-status.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
 
 /**
@@ -252,7 +254,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   }
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
-  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
+  // A launch refused by a full session ledger is named as that ledger, never as session capacity (GY-131).
+  const attributed = ledgerRefusalAttention({ work: status.work, attentionItems: [...attentionItems, ...decisions.attentionItems] }, snapshot.work);
+  return { ...status, work: attributed.work, attentionItems: attributed.attentionItems,
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, stalledActions: stalled.length, overlongSessions: overlong.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
@@ -262,6 +266,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       concurrency: master.reviewers.map(profile => ({ name: profile.name, agentName: profile.agentName, concurrency: profileConcurrency(profile) })) } : null,
     producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName, concurrency: profileConcurrency(profile) })),
     setup, administration, daemon, dispatch,
+    // Each session ledger's bound, retention and the room left for live sessions (GY-131).
+    ledgers: { reviews: sessionLedgerHeadroom(reviewRecords, reviewLedgerSpec), producers: sessionLedgerHeadroom(producerRecords, producerLedgerSpec) },
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: actionReport(snapshot), sessions: sessionReport(snapshot),
