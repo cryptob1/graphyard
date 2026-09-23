@@ -5,6 +5,7 @@ import type { Validation } from '../validation.js';
 import type { Delivery } from '../delivery.js';
 import type { OperatorAgents } from '../operator-agent.js';
 import type { ProofGrants } from '../proof-grants.js';
+import type { AgentRegistry } from '../agent-registry.js';
 import type { ProductionDelivery } from '../production-delivery.js';
 import type { delegationLimits } from '../delegation.js';
 import type { DelegationLimitReport } from './limits.js';
@@ -24,6 +25,8 @@ export interface Services {
   /** Production deployment observation, when the process hosts one. */
   production: ProductionWatch | null;
   validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents; proofGrants: ProofGrants; productionDelivery: ProductionDelivery;
+  /** The fleet: runtimes, accounts, models and roles, and the sessions chosen from them. */
+  agentRegistry: AgentRegistry;
 }
 
 /** The response was written by the handler itself (raw bytes, or a status other than 200). */
