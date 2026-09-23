@@ -3438,7 +3438,16 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
  * 33-character name no runtime would take and no approver could be launched at all. The key is
  * kept whole now and the decision id takes what the limit leaves.
  */
-export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) => distinctSessionName(['graphyard-approver', 'gy-approver'], work.key, decision);
+/**
+ * Two decisions whose fragments match are one session: the second launch is refused as already
+ * visible, or adopted as the first decision's approver. So the full role word is kept only while it
+ * leaves at least `approverDistinguisher` characters of the decision id (one collision in ~16
+ * million per pair, against one in 65,536 at the four the generic floor accepts); past that the
+ * role word gives way to `gy-approver`, which affords the full eight for any key up to GY-12345678.
+ */
+export const approverDistinguisher = 6;
+export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
+  distinctSessionName(sessionNameLimit - sessionName('graphyard-approver', work.key).length - 1 >= approverDistinguisher ? ['graphyard-approver'] : ['gy-approver'], work.key, decision);
 export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, probe: FleetProbe = {}) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');

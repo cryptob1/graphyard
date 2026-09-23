@@ -69,6 +69,15 @@ test('unit:approver-name-bounded-and-unique — an approver session name fits th
   // role word rather than itself, so the session list always says which item is being judged.
   for (const key of keys) assert.ok(approverSessionName({ key }, decision).includes(key.toLowerCase().slice(0, 9)), `${key}: ${approverSessionName({ key }, decision)} still shows its item`);
   assert.equal(approverSessionName({ key: 'GY-123456' }, decision), 'gy-approver-gy-123456-4cb51514');
+  // Two decisions on one item are told apart by at least six characters of the decision id, never
+  // the four that would collide once in 65,536: the role word gives way first.
+  for (const key of keys) {
+    const name = approverSessionName({ key }, decision), fragment = name.slice(name.lastIndexOf('-') + 1);
+    if (key.length <= 11) assert.ok(fragment.length >= 6 && decision.startsWith(fragment), `${key}: ${name} carries ${fragment.length} characters of the decision id`);
+  }
+  assert.equal(approverSessionName({ key: 'GY-101' }, decision), 'graphyard-approver-gy-101-4cb515');
+  assert.equal(approverSessionName({ key: 'GY-10000' }, decision), 'gy-approver-gy-10000-4cb51514');
+  assert.notEqual(approverSessionName({ key: 'GY-12345' }, decision), approverSessionName({ key: 'GY-12345' }, uuid('4cb5a000')), 'decisions sharing four leading characters are two sessions');
   assert.equal(sessionNameRefusal(approverSessionName({ key: 'GY-101' }, decision)), null);
   // Nothing Graphyard composes can leave the bounds, whatever it is composed from.
   assert.ok(launchable(sessionName('graphyard-approver', 'GY-101', decision)));
