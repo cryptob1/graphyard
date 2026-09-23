@@ -1,26 +1,29 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
+import { agentOwner, agentToken, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
-import { elapsed } from '../model/sessions.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
+import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type CycleMetrics, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
-import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
+import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
+import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
+import { consentHoldItems } from './consent-holds.js';
+import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
+export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
 
 /**
  * One attention item per open worker scope request whose epoch still holds the lease: addressed
@@ -62,30 +65,6 @@ export function approverLaunchAttention(daemon: {
 }
 
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
-
-/** Who answers a request whose session settled unanswered, and with which command. */
-export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
-  return request.kind === 'review'
-    ? agentOwner('master', `graphyard master review ${key} [PROFILE] forces the next attempt for the open request`)
-    : agentOwner('master', `graphyard master decide ${key} rework REASON, approved by the approver agent, so the group's proofs are requested afresh on the next head`, 'approver');
-}
-
-/**
- * One attention item per live request whose session settled without satisfying its gate. Such a
- * request is the one state `master status` used to show as nothing at all: no session running, no
- * launch refused, no failure — just a `sinceMs` climbing past the hour while the gate goes on
- * refusing. It is named here with the verdict that settled the session, how long the request has
- * stood, and the command that gets it answered, and counted apart from the requests with a
- * session actually running (`counts.dispatchRunning`).
- */
-export function unansweredRequestAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[]): AttentionItem[] {
-  return rows.flatMap(row => unansweredRequests(row.dispatch).map(request => {
-    const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
-    const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
-    return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
-      ...unansweredRequestOwner(row.key, request) };
-  }));
-}
 
 /**
  * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
@@ -168,7 +147,7 @@ async function terminalDecisions(masterApi: (path: string) => Promise<any>, work
  * overlap holds, and the conflict set of every open candidate probed over the fetched PR heads.
  */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost } = {}) {
-  const runtime = observeHerdrAgents();
+  const runtime = await observeHerdrAgents();
   const credentials = await inspectWorkerCredentials(root, master.workers);
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
   const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
@@ -186,15 +165,16 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // Status reads the cursor as the loop would, repairing an over-long string in memory; the loop
   // is what logs and persists that repair, so status reports the cursor rather than announcing it.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
-  const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000);
+  const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
+  const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000), stuck.stuck);
   // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
-  const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
+  const containment = await assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
   // filling is exactly the condition that stops it. The plan behind the number is the same one the
   // loop and `master reclaim` compute, so the attention item never promises room reclaiming cannot give.
   const worktrees = worktreesDirectory(root);
-  const reclaimPlan = planWorktreeReclaim(await inventoryWorktrees(root).catch(() => []), snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
+  const trees = await inventoryWorktrees(root).catch(() => []), reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
   // live there, and it is judged against its own minimum and budget, before a write there fails.
@@ -205,11 +185,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
   // The loop's own health comes before every work item: a coordinator that is absent or stalled is
-  // why nothing else on this list is moving, and no other attention item would say so. A cycle
-  // measured longer than its interval is raised here too, naming the step (`daemon.cost`) that
-  // took the time, so a slow step is never read as a loop that stopped.
+  // why nothing else on this list is moving, and no other attention item would say so; a cycle that
+  // outgrew its interval names its costly step and whether it computed or waited.
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, cost: cycling.cost, failures: cycling.failures }), ...approverLaunchAttention(cycling)]
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
@@ -218,25 +197,28 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, the sessions running against the declared limit and the longest wait for a slot.
-  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }),
+  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
   // A required check that failed on the clock says so, with the measurement against its budget.
   const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
+  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot), ...consentHoldItems(trees, snapshot)];
   // A session past its role's maximum: running but making no progress is as visible as one that died.
   const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
+  // A review every session settled on a dismissal for is the stronger statement of the same
+  // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
+  const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
   // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
   const conflicted = reviewConflictAttention(snapshot.work, reviewRecords).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
   // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
   const stalled = stalledActionAttention(snapshot);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stalled, ...overlong, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalled, ...overlong, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's.
   attentionItems.unshift(...loopItems, ...dispatchItems);
@@ -257,10 +239,12 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   }
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
-  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length, reviewConflicts: conflicted.length, stalledActions: stalled.length, overlongSessions: overlong.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+  return { ...status, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
+    // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
+    unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
@@ -270,6 +254,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: actionReport(snapshot), sessions: sessionReport(snapshot),
+    // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).
+    branches: branchReport(status.work),
     requests: agentRequestReport(snapshot),
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
     disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
@@ -287,10 +273,11 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
   const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
   const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
   const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
+  const describe = (m: CycleMetrics) => ({ cycle: m.cycle, at: m.at, durationMs: m.durationMs, childWaitMs: m.childWaitMs ?? null, workMs: m.workMs ?? null });
   return {
-    intervalMs, measured: metrics.length, lastCycle: last ? { cycle: last.cycle, at: last.at, durationMs: last.durationMs } : null,
+    intervalMs, measured: metrics.length, lastCycle: last ? describe(last) : null,
     withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
-    lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
+    lastOverrun: overruns.length ? describe(overruns.at(-1)!) : null,
   };
 }
 

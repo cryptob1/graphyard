@@ -3,12 +3,12 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, currentEvidence, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, type BaseRefresh, type QueueSpeculation } from './merge-queue.js';
+import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
@@ -87,7 +87,9 @@ const commands = {
   }).strict().optional(),
     // The CI producer names the workflow job that ran the contract; the control plane reads that
     // job back from GitHub and accepts the record only when it completed on this commit.
-    ciRun: ciRunBindingSchema.optional() }).strict(),
+    ciRun: ciRunBindingSchema.optional(),
+    // GY-135: the same proof run against a tree with its criterion's behaviour removed.
+    exercise: proofExerciseSchema.optional() }).strict(),
   // The coordinator's observation of the running release covering a delivered merge. It names the
   // serving commit and where it was read; whether it is exact is derived, never asserted.
   deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
@@ -98,6 +100,10 @@ const commands = {
   // A typed ask recorded instead of blocking on a prose question. The decider is derived, the
   // attempt ends in the same transaction, and the item is free again; see model/agent-requests.ts.
   request: agentRequestSchema,
+  // The coordinator asking the control plane to restore a branch found carrying another item's
+  // unlanded commits (GY-127). It carries no head: the restore is decided from the record and the
+  // observation, run by the reconciliation job, and recorded on `baseRefresh.restore`.
+  repair: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -442,6 +448,25 @@ export class Engine {
         // every superseded exhaustion record for this candidate.
         work.reviewFailovers = (work.reviewFailovers ?? []).filter(failover => failover.sha !== work.candidate?.sha
           || failover.baseSha !== work.candidate?.baseSha || failover.policyRevision !== work.policyRevision);
+      }
+      if (command === 'repair') {
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.submission && !work.observation?.merged && work.stage !== 'done', 'Open submitted work is required');
+        demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
+        demand(work.observation?.candidate.sha === work.candidate?.sha && work.observation?.prState === 'open' && work.observation.draft === false, 'An open pull request observed at the current head is required');
+        demand(!work.queue, `${work.key} is a live merge-queue entry; its tip is rebuilt from its own reviewed head when the queue changes, and is not repaired by hand`);
+        // Decided from the record and the observation alone; the command asserts nothing.
+        const contamination = branchContamination(work, all);
+        demand(contamination, `${work.key} head ${work.candidate!.sha.slice(0, 12)} carries no other item's unlanded commits; there is nothing to repair`);
+        demand(!pendingRestore(work), `A repair of ${work.key} head ${work.candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
+        const performed = currentRestore(work);
+        demand(!performed || performed.restore!.contaminated !== work.candidate!.sha || performed.restore!.outcome !== 'unrepairable',
+          `${work.key} head ${work.candidate!.sha.slice(0, 12)} was found unrepairable: the foreign commits sit under something the record cannot move; request rework instead`);
+        const candidate = work.candidate!, observation = work.observation!;
+        work.baseRefresh = { from: { sha: candidate.sha, baseSha: candidate.baseSha }, base: observation.baseTip ?? candidate.baseSha, baseTree: observation.baseTree ?? '', policyRevision: work.policyRevision, at: now.toISOString(),
+          head: null, conflict: null, merge: null, carry: null,
+          restore: { contaminated: candidate.sha, foreign: contamination!.foreign, own: contamination!.own, cause: 'repair', requested: { by: actor.id, at: now.toISOString(), reason: data.reason },
+            reason: `head ${candidate.sha.slice(0, 12)} carries the unlanded commits of ${contamination!.foreign.join(', ')} (${contamination!.source.join(' and ')})`, performedAt: null, outcome: null } };
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
@@ -854,7 +879,12 @@ export class Engine {
             `${deploySmokeProof} evidence must name the observed deployed commit ${work.delivery!.deployment!.sha} as sha and merge commit ${work.delivery!.mergeSha} as baseSha`);
           demand(data.policyRevision === work.policyRevision, 'Policy revision does not match this delivery');
         }
-        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString(), ...(ciRun ? { ciRun } : {}) };
+        // GY-135: a pass is trusted only beside a recorded run that fails with the criterion's
+        // behaviour removed; otherwise it is kept, untrusted, as not exercising its criterion.
+        const unexercised = trusted && data.proof !== deploySmokeProof ? exerciseRefusal(work, all, data) : null;
+        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(ciRun ? { ciRun } : {}), ...(unexercised ? { unexercised } : {}) };
+        if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'evidence.exercise.refused',
+          JSON.stringify({ details: { proof: data.proof, criteria: attachedCriteria(work, all, data.proof), behaviour: data.exercise?.behaviour ?? null, sha: data.sha, reason: unexercised } })]);
         work.evidence.push(evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
@@ -1261,13 +1291,19 @@ export class Engine {
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
       demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
-      const carry = work.candidate && speculation.tip !== work.candidate.sha ? this.decideTipCarry(work, all, speculation, now) : null;
+      // A tip re-bound to a tree-identical prediction keeps the carry it was first bound with (GY-100).
+      const kept = keptTipCarry(work, speculation);
+      const carry = kept === undefined ? this.decideTipCarry(work, all, speculation, now) : kept;
       work.queue!.speculation = { ...speculation, carry };
-      work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip }].slice(-queueHistoryLimit);
+      // The prediction names what the tip was built behind and from, so the restore an ejection
+      // owes (see merge-queue.ts ejectedTipRestore) reads it from the record alone.
+      work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip,
+        predecessors: speculation.predecessors, from: speculation.reviewedHead ?? speculation.merge?.from ?? speculation.tip }].slice(-queueHistoryLimit);
       this.evaluate(work, all, now);
-      if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
+      if (carry && kept === undefined) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors,
+        ...(kept !== undefined && speculation.carriedBase ? { carriedBase: speculation.carriedBase } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
       return work;
@@ -1275,20 +1311,50 @@ export class Engine {
   }
   /** The carry decision for a tip that replaced the candidate's head; see model/carry.ts for the rule. */
   private decideTipCarry(work: Work, all: Work[], speculation: QueueSpeculation, now: Date) {
-    const candidate = work.candidate!, observation = work.observation;
+    const candidate = work.candidate!;
     const aheadKey = speculation.predecessors.at(-1) ?? null;
     const ahead = aheadKey ? all.find(item => item.key === aheadKey) : undefined;
     // The base branch is validated by definition. A queue entry is validated when every gate
     // passes on exactly the tip predicted here, the merge gate refusing only for its turn.
     const validated = !aheadKey ? true : !!ahead && ahead.stage === 'merge' && ahead.candidate?.sha === speculation.base && !ahead.violations.length
       && ahead.gates.every(gate => gate.passed || gate.name === 'merge' && gate.reasons.every(queueSequencingReason));
-    const observed = !!observation && observation.candidate.sha === candidate.sha && observation.candidate.baseSha === candidate.baseSha;
-    return decideCarry({
-      from: { sha: candidate.sha, baseSha: candidate.baseSha }, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
-      merge: speculation.merge, predecessor: { key: aheadKey, validated }, reviewedFiles: observed ? observation!.files : [],
-      approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
-      app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane',
+    // A tip is built from the item's own reviewed head (GY-127): the replaced head when the worker
+    // pushed it, or the head under the tip it replaces. The bindings carried are the ones that
+    // bind the replaced head now — exact on it, or already carried onto it. `from` is that
+    // reviewed head in every case; a record that predates `reviewedHead` names the merge's own.
+    const from = { sha: speculation.reviewedHead ?? speculation.merge?.from ?? candidate.sha, baseSha: candidate.baseSha };
+    // What the reviewer read is the reviewed head's own change, never the replaced tip's pull
+    // request diff: GitHub lists that against the base branch, so a tip built behind an entry that
+    // has not landed lists the entry's files too, and a rebuild after the entry is ejected would
+    // then be refused for files nobody reviewed.
+    const reviewedFiles = reviewedFilesOf(work, from.sha);
+    const approval = bindingApproval(work);
+    const input = {
+      from, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
+      predecessor: { key: aheadKey, validated }, reviewedFiles: reviewedFiles ?? [],
+      approval, proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
+    };
+    // A tip that is the reviewed head itself — no merge, because the head already contained its
+    // predicted base — is decided as an identity carry on the files the predicted base changed,
+    // never refused for lacking a merge (see merge-queue.ts decideIdentityCarry).
+    const carry = !speculation.merge && speculation.tip === from.sha ? decideIdentityCarry({ ...input, baseChanges: speculation.baseChanges })
+      : decideCarry({ ...input, merge: speculation.merge, app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane' });
+    // A binding carries only from the head the tip was built from. One given on another commit —
+    // the replaced head, when the walk to the reviewed head stepped past it — never saw the
+    // content the tip holds, unless a recorded decision already carried it onto that head.
+    const reaches = onto(work, from.sha);
+    if (carry.approval.carried && approval && approval.sha !== from.sha && !reaches.some(entry => entry.approval.carried && entry.approval.originalSha === approval.sha)) {
+      carry.approval = { carried: false, reason: `the approval by ${approval.reviewer} was given on ${approval.sha.slice(0, 12)}, not on the reviewed head ${from.sha.slice(0, 12)} tip ${speculation.tip.slice(0, 12)} was built from, and no recorded decision carried it there; a fresh independent approval of ${speculation.tip.slice(0, 12)} is required` };
+    }
+    if (carry.approval.carried && reviewedFiles === null) {
+      carry.approval = { carried: false, reason: `the files the reviewed head ${from.sha.slice(0, 12)} changed are not recorded, so its independence from what the predicted base changed cannot be shown; a fresh independent approval of ${speculation.tip.slice(0, 12)} is required` };
+    }
+    carry.evidence = carry.evidence.map(entry => {
+      const evidence = entry.carried ? work.evidence.find(item => item.id === entry.evidenceId) : undefined;
+      if (!evidence || evidence.sha === from.sha || reaches.some(decision => decision.evidence.some(carried => carried.carried && carried.evidenceId === evidence.id))) return entry;
+      return { ...entry, carried: false, reason: `evidence ${evidence.id} was produced on ${evidence.sha.slice(0, 12)}, not on the reviewed head ${from.sha.slice(0, 12)} tip ${speculation.tip.slice(0, 12)} was built from, and no recorded decision carried it there; fresh evidence for ${speculation.tip.slice(0, 12)} is required` };
     });
+    return carry;
   }
   /**
    * Records what the control plane did about a base branch that moved under an in-flight
@@ -1331,6 +1397,73 @@ export class Engine {
       approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
       app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane',
     });
+  }
+  /**
+   * Records what the control plane did about a branch found carrying another item's unlanded
+   * commits (GY-127): the head it restored — the item's own reviewed head merged onto the base —
+   * or the conflict or the missing own head that stopped it. Nothing carries across a restore:
+   * the contaminated head's bindings were bindings of foreign content, and the restored head is
+   * observed, checked, reviewed and proved as any new head is.
+   */
+  async bindBranchRestore(id: string, expectedRevision: number, refresh: BaseRefresh, jobToken: string) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the branch was restored');
+      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
+      const restore = refresh.restore;
+      requireCurrent(!work.queue && !!restore && restore.contaminated === work.candidate?.sha && refresh.policyRevision === work.policyRevision, 'Candidate, queue entry or policy changed while the branch was restored');
+      work.baseRefresh = { ...refresh, carry: null };
+      this.evaluate(work, all, now);
+      await this.recordDispatch(db, work, now);
+      await save(db, work, 'graphyard', restore!.outcome === 'restored' ? 'branch.restored' : restore!.outcome === 'conflict' ? 'branch.restore-conflict' : 'branch.unrepairable', now,
+        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason, ...(refresh.conflict ? { conflict: refresh.conflict } : {}) });
+      await wakeJob(db, work.id);
+      return work;
+    });
+  }
+  /**
+   * Restores an approval GitHub dismissed for a merge-base change while the head was unchanged
+   * (GY-127) as the binding one, carried from the head to itself: the reviewed content is exactly
+   * what the reviewer approved, so no review round and no reviewer attempt is spent on it, and the
+   * merge broker re-posts it through the reviewer App before the merge as it re-posts any carried
+   * approval. Decided before the gates are evaluated, so no review request is ever opened for it.
+   */
+  private restoreDismissedApproval(work: Work, now: Date): RestoredApproval | null {
+    if (exactApproval(work) || carriedApproval(work)) return null;
+    const dismissed = dismissedApproval(work);
+    if (!dismissed) return null;
+    const candidate = work.candidate!, observation = work.observation!, at = now.toISOString();
+    const short = candidate.sha.slice(0, 12);
+    const approval: CarriedApproval = { provider: 'github', reviewer: dismissed.reviewer, sha: candidate.sha, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), carried: true, originalSha: candidate.sha,
+      reason: `approval of ${short} by ${dismissed.reviewer}${dismissed.reviewId !== undefined ? ` (review ${dismissed.reviewId})` : ''} restored: GitHub dismissed it with "${dismissed.dismissal.reason}" while the head was unchanged, so the reviewed content is exactly what was approved; the reviewer App re-posts it before the merge` };
+    const restored: RestoredApproval = { reviewer: dismissed.reviewer, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), sha: candidate.sha, dismissal: dismissed.dismissal, at };
+    const same = { sha: candidate.sha, baseSha: candidate.baseSha };
+    const carry = (existing: BaseRefresh['carry'] | undefined) => existing && existing.to.sha === candidate.sha && existing.to.baseSha === candidate.baseSha && existing.policyRevision === work.policyRevision
+      ? { ...existing, approval }
+      : { from: same, to: same, policyRevision: work.policyRevision, at, predecessor: 'base branch', changedFiles: [], reviewedFiles: observation.files, approval, evidence: [] };
+    const speculation = work.queue?.speculation;
+    if (speculation && speculation.tip === candidate.sha && speculation.policyRevision === work.policyRevision) {
+      speculation.carry = carry(speculation.carry); speculation.restoredApproval = restored;
+    } else if (work.baseRefresh && work.baseRefresh.head === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
+      work.baseRefresh.carry = carry(work.baseRefresh.carry); work.baseRefresh.restoredApproval = restored;
+    } else if (work.baseRefresh && work.baseRefresh.head === null && work.baseRefresh.from.sha === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
+      // A record of this very head that republished nothing — a refresh whose merge conflicted, or
+      // a repair the coordinator requested that has not run yet — is left as it says, and nothing
+      // is restored: such a head is replaced before it could land (the worker resolves the
+      // conflict, the repair moves the branch), and replacing the record would drop the conflict
+      // the worker owes or the pending repair, and have the refresh retried for a conflict already
+      // recorded. No review is asked for it meanwhile: the head does not contain the base tip.
+      return null;
+    } else {
+      // The head is neither a queue tip nor a refreshed head: the restored binding is recorded as
+      // a refresh of the head onto the base it is bound to, which republished nothing.
+      work.baseRefresh = { from: same, base: candidate.baseSha, baseTree: observation.baseTip === candidate.baseSha ? observation.baseTree ?? '' : '', policyRevision: work.policyRevision, at,
+        head: candidate.sha, conflict: null, merge: null, carry: carry(undefined), restoredApproval: restored };
+    }
+    return restored;
   }
   /** Removes an entry whose speculative validation cannot succeed, with the reason on the record. */
   async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string) {
@@ -1402,7 +1535,10 @@ export class Engine {
     }
     // What the exact head still needs from a launched reviewer or producer, decided from the
     // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
-    this.dispatchTransitions.set(work, reconcileAutoDispatch(work, all, now));
+    // A queued entry whose published tip is not this head is being replaced by it (GY-127): the
+    // tip is observed and bound on the next reconciliation, and a request opened for the replaced
+    // head now would be cancelled as stale then — after a session had been launched for it.
+    this.dispatchTransitions.set(work, tipReplacesHead(work) ? [] : reconcileAutoDispatch(work, all, now));
     // The typed instruction the inverted loop runs on: what this item needs next, named from the
     // gates just evaluated, and the durable row that says whether an executor has it.
     // The queue's own transitions are recorded on each row's history and travel to the ledger
@@ -1609,6 +1745,7 @@ export class Engine {
           }
         }
       }
+      const previousObservation = work.observation;
       work.candidate = observation.candidate;
       work.observation = observation;
       // Snapshot all provider review identities after the revision. Approvals in this
@@ -1618,7 +1755,21 @@ export class Engine {
         && observation.reviews.every(r => Number.isSafeInteger(r.id) && observation.reviewIds!.includes(r.id!))) {
         work.formalReviewBaseline = { pr: observation.candidate.pr, policyRevision: work.policyRevision, reviewIds: [...observation.reviewIds] };
       }
+      // An approval GitHub withdrew for a merge-base change on this unchanged head binds again
+      // before the gates read the record, so no review request is opened for it (GY-127).
+      const restoredApproval = observation.merged ? null : this.restoreDismissedApproval(work, now);
       this.evaluate(work, all, now);
+      if (restoredApproval) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.restored',
+        JSON.stringify({ details: { ...restoredApproval, baseSha: observation.candidate.baseSha, policyRevision: work.policyRevision } })]);
+      // A head found carrying another item's unlanded commits is named on the ledger once per head
+      // and per set of items, with what restores it; master status reads the same record.
+      const contamination = observation.merged ? null : branchContamination(work, all);
+      const previouslyNamed = previousObservation && previousObservation.candidate.sha === observation.candidate.sha
+        ? branchContamination({ ...work, observation: previousObservation }, all) : null;
+      if (contamination && JSON.stringify(previouslyNamed?.foreign ?? null) !== JSON.stringify(contamination.foreign)) {
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'branch.contaminated',
+          JSON.stringify({ details: { ...contamination, ejected: work.queueEjection?.sha === contamination.head, at: now.toISOString() } })]);
+      }
       // The base branch advanced to a commit whose tree is the bound base's tree — an earlier
       // queue merge — so the published tip and every binding on it stand. The advance is written
       // to the record and the ledger with both shas and the tree, and nothing is republished.

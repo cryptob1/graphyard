@@ -1,10 +1,12 @@
-import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, statfs, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
+import { childRunner, defaultChildRun, defaultChildTimeoutMs, type BoundChildRun, type ChildRun, type ChildRunOptions } from './child-runner.js';
+export { childRunner, defaultChildRun, type ChildRun, type ChildRunOptions } from './child-runner.js';
 import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameField, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError } from './session-name.js';
 export { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, sessionNameRule, suffixedSessionName } from './session-name.js';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
@@ -12,14 +14,15 @@ import { launchAuthorization, loadConnection, managedInstructions, serverOrigin 
 import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
-import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
-import { probeSupervisorAbsence } from './containment-probe.js';
+import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
+import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
-import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, refusedReconciliation, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
+import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
 import { allocateSessionCheckout, inspectWorktreeRoot, reclaimCommand, removeSessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootConcerns, worktreeRootMinFreeBytes, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout, type WorktreeRootHealth } from './install/worktree-root.js';
@@ -377,7 +380,7 @@ async function readMasterConfig(root: string): Promise<MasterConfig> {
 async function repositoryWorktrees(root: string) {
   let worktrees: string[];
   try {
-    const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\0');
+    const records = (await defaultChildRun('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: root })).split('\0');
     worktrees = records.filter(record => record.startsWith('worktree ')).map(record => resolve(record.slice('worktree '.length)));
   } catch { throw new Error('Cannot verify credential location because the complete Git worktree inventory is unavailable'); }
   if (!worktrees.length) throw new Error('Cannot verify credential location because Git returned an empty worktree inventory');
@@ -1012,8 +1015,8 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
 }
 
 /** The Git directory every worktree of the repository commits into. */
-export function sharedGitDirectory(root: string) {
-  try { return execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; }
+export async function sharedGitDirectory(root: string) {
+  try { return (await defaultChildRun('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root })).trim() || null; }
   catch { return null; }
 }
 
@@ -1078,18 +1081,18 @@ export function roleCapacity(role: CapacityRole, profiles: { name: string }[], h
  * it cannot be committed is the worktree reset, and the record says discarded: an attempt never
  * ends with changes that are neither kept nor gone.
  */
-export function preservePartialWork(path: string, label: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 })): PartialWork {
-  const git = (...args: string[]) => run('git', ['-C', path, ...args]).trim();
-  const branch = (() => { try { return git('rev-parse', '--abbrev-ref', 'HEAD'); } catch { return undefined; } })();
+export async function preservePartialWork(path: string, label: string, run: ChildRun = childRunner({ timeoutMs: 60_000 })): Promise<PartialWork> {
+  const git = async (...args: string[]) => (await run('git', ['-C', path, ...args])).trim();
+  const branch = await git('rev-parse', '--abbrev-ref', 'HEAD').catch(() => undefined);
   const described = { path, ...(branch && branch !== 'HEAD' ? { branch } : {}) };
-  if (!git('status', '--porcelain')) return { state: 'clean', commit: git('rev-parse', 'HEAD'), ...described, detail: 'the worktree held no uncommitted change; every commit of the attempt is on its branch' };
+  if (!await git('status', '--porcelain')) return { state: 'clean', commit: await git('rev-parse', 'HEAD'), ...described, detail: 'the worktree held no uncommitted change; every commit of the attempt is on its branch' };
   try {
-    git('add', '-A');
-    git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@localhost', 'commit', '--no-verify', '-m', `WIP: ${label}`);
-    return { state: 'committed', commit: git('rev-parse', 'HEAD'), ...described, detail: 'uncommitted changes were committed on the attempt branch, unpushed' };
+    await git('add', '-A');
+    await git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@localhost', 'commit', '--no-verify', '-m', `WIP: ${label}`);
+    return { state: 'committed', commit: await git('rev-parse', 'HEAD'), ...described, detail: 'uncommitted changes were committed on the attempt branch, unpushed' };
   } catch (error) {
-    git('reset', '--hard'); git('clean', '-fd');
-    return { state: 'discarded', commit: git('rev-parse', 'HEAD'), ...described, detail: `uncommitted changes could not be committed and were discarded: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) };
+    await git('reset', '--hard'); await git('clean', '-fd');
+    return { state: 'discarded', commit: await git('rev-parse', 'HEAD'), ...described, detail: `uncommitted changes could not be committed and were discarded: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) };
   }
 }
 
@@ -1193,15 +1196,22 @@ export const runtimeScreens: Record<string, RegExp> = {
   claude: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
   codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\bOpenCode\b/, gemini: /\bGemini\b/,
 };
-export type StartState = 'ready' | 'starting' | 'absent' | 'blocked';
-export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string }
-export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; wait?: (ms: number) => void; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[] }
+export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent';
+export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
+export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[];
+  /** Whether a session stopped on a consent prompt the launcher does not answer is held for a human (a worker, whose supervisor bounds the hold) rather than refused. */ holdConsent?: boolean }
 export class SessionStartError extends Error {
-  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
+  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked' | 'awaiting consent', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
 }
+/**
+ * How many times the launcher answers one allow-listed prompt before it treats the prompt as one it
+ * cannot answer, and how long an answered dialog is given to close before it is answered again — a
+ * second keystroke into a dialog that was already closing would land in the runtime's input.
+ */
+export const consentAnswerAttempts = 2, consentSettleMs = 5_000;
 /** The pane's terminal as text, unwrapped; null when Herdr cannot read it. */
-export function readPaneScreen(pane: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), lines = 40) {
-  try { return String(run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
+export async function readPaneScreen(pane: string, run: ChildRun = defaultChildRun, lines = 40) {
+  try { return String(await run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
 }
 /** The pane's last non-empty line, bounded for a record. */
 export function paneLastLine(text: string | null, limit = paneLineLimit) {
@@ -1210,11 +1220,20 @@ export function paneLastLine(text: string | null, limit = paneLineLimit) {
 }
 /** Whether the pane's last line is the launch command itself — typed, or still being typed — and not yet answered: it opens with the stem binding and names the runtime. */
 export const commandEchoing = (line: string, command: string) => !!line && (line.includes(command.slice(0, 24)) || (line.includes(`${launchVariable}=`) && line.includes(` ${command.replace(/^GY=\S+; /, '').split(' ')[0]}`)));
-export function observeStart(pane: string, kind: string, command: string, run?: (command: string, args: string[]) => string, readyStates = startedStates): StartObservation {
+export async function observeStart(pane: string, kind: string, command: string, run?: ChildRun, readyStates = startedStates): Promise<StartObservation> {
   let agent: HerdrAgent | null = null;
-  try { const raw = herdrJson(['agent', 'get', pane], run); agent = raw?.agent ?? raw ?? null; } catch { agent = null; }
+  try { const raw = await herdrJson(['agent', 'get', pane], run); agent = raw?.agent ?? raw ?? null; } catch { agent = null; }
+  // A runtime Herdr sees `working` is at work on its request. Any other state is read off the
+  // screen too: a runtime stopped on a first-run consent prompt is `idle` to Herdr, just as a
+  // started one is, and has not read its request (GY-130).
+  if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
+  const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
+  const prompt = detectConsentPrompt(screen);
+  if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
+  // An unread pane rules nothing out: an idle runtime may be sitting on a consent prompt, so it is
+  // polled again until a read shows its screen, never taken as ready without one.
+  if (screen === null && agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'starting', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status} but its pane could not be read, so a consent prompt is not ruled out`, line };
   if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
-  const screen = readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
   const showing = screen !== null && !!runtimeScreens[kind]?.test(screen);
   if (agent?.agent === kind && agent.agent_status === 'blocked') return { state: 'blocked', agent, detail: 'Herdr reports it blocked', line };
   // Herdr sees the runtime's process and its screen is showing: a session at work that Herdr has
@@ -1225,21 +1244,45 @@ export function observeStart(pane: string, kind: string, command: string, run?: 
   if (showing) return { state: 'starting', agent: null, detail: `the ${kind} banner is on screen`, line };
   return { state: 'absent', agent: null, line, detail: commandEchoing(last, command) ? 'command still echoing' : agent?.agent ? `the pane holds ${agent.agent}, not ${kind}` : 'no runtime under the pane' };
 }
-export function awaitRuntimeStart(pane: string, kind: string, command: string, run?: (command: string, args: string[]) => string, bounds: StartBounds = {}) {
+export async function awaitRuntimeStart(pane: string, kind: string, command: string, run?: ChildRun, bounds: StartBounds = {}) {
   const timeoutMs = bounds.timeoutMs ?? agentStartTimeoutMs, ceilingMs = Math.max(timeoutMs, bounds.ceilingMs ?? agentStartCeilingMs), pollMs = bounds.pollMs ?? startPollMs;
-  const clock = bounds.clock ?? Date.now, wait = bounds.wait ?? ((ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); });
+  // The poll pause is awaited on the event loop, never spun on Atomics.wait: a launch that takes
+  // the whole ceiling holds up only the launcher (GY-125).
+  const clock = bounds.clock ?? Date.now, wait = bounds.wait ?? ((ms: number) => sleep(ms));
   const startedAt = clock();
   const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
   let extended: string | null = null;
+  const consent: ConsentAnswer[] = [];
   for (;;) {
-    const observed = observeStart(pane, kind, command, run, bounds.readyStates), waitedMs = clock() - startedAt;
-    if (observed.state === 'ready') return { ...observed, waitedMs, extended };
+    const observed = await observeStart(pane, kind, command, run, bounds.readyStates), waitedMs = clock() - startedAt;
+    if (observed.state === 'ready') return { ...observed, waitedMs, extended, consent, awaiting: null };
+    if (observed.state === 'consent') {
+      const prompt = observed.prompt!, rule = prompt.rule;
+      // Answers are counted per dialog, not per rule: a second dialog the same rule matches (a
+      // crash-report question after a usage-statistics one) gets its own bounded attempts.
+      const answered = consent.filter(answer => answer.rule === rule?.id && sameConsentPrompt({ kind: answer.kind, prompt: answer.prompt }, prompt));
+      const answeredAt = answered.at(-1)?.at;
+      if (answeredAt && clock() - Date.parse(answeredAt) < consentSettleMs && waitedMs < ceilingMs) { await wait(pollMs); continue; }
+      // An allow-listed prompt is answered with its least-privilege option, and the answer is
+      // recorded; the start bound keeps running, so a prompt that returns is not answered forever.
+      if (rule && prompt.keys && answered.length < consentAnswerAttempts && waitedMs < ceilingMs) {
+        await herdrRun(['pane', 'send-keys', pane, ...prompt.keys], run);
+        consent.push({ rule: rule.id, kind: prompt.kind, prompt: prompt.text, answer: rule.answer, keys: prompt.keys, at: new Date(clock()).toISOString() });
+        await wait(pollMs);
+        continue;
+      }
+      const why = rule ? `the launcher answered it ${consentAnswerAttempts} times and it is still showing` : `it is outside the launcher's consent allow-list`;
+      // A session held for a human is reported, not refused: it has not taken its request, and it
+      // is never counted as started. Everything else refuses the launch with the prompt's own text.
+      if (bounds.holdConsent) return { ...observed, waitedMs, extended, consent, awaiting: { prompt: prompt.text, kind: prompt.kind, why } };
+      throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime is awaiting consent in pane ${pane} on a ${prompt.kind} prompt, and ${why}: "${prompt.text}"`);
+    }
     const quoted = observed.line ? `; the pane last showed: "${observed.line}"` : '; the pane showed nothing';
     if (observed.state === 'blocked') throw new SessionStartError('blocked', pane, observed.line, waitedMs, `the ${kind} runtime is blocked before it is ready in pane ${pane} (${observed.detail})${quoted}`);
     if (waitedMs >= timeoutMs && observed.state !== 'starting') throw new SessionStartError('never started', pane, observed.line, waitedMs, `the ${kind} runtime never started within ${seconds(timeoutMs)} in pane ${pane} (${observed.detail})${quoted}`);
     if (waitedMs >= ceilingMs) throw new SessionStartError('still starting', pane, observed.line, waitedMs, `the ${kind} runtime was still starting after ${seconds(ceilingMs)} in pane ${pane} (${observed.detail})${quoted}`);
     if (waitedMs >= timeoutMs) extended ??= `${observed.detail} at ${seconds(timeoutMs)}; waiting up to ${seconds(ceilingMs)}`;
-    wait(pollMs);
+    await wait(pollMs);
   }
 }
 
@@ -1255,22 +1298,31 @@ export function awaitRuntimeStart(pane: string, kind: string, command: string, r
  * the runtime says about its arguments (GY-101).
  */
 export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string }
-export function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ((command: string, args: string[]) => string) | undefined, options: SessionStart) {
+export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
   assertSessionName(name, options.retry);
   const delivery = launchDelivery(kind);
   const files = writeLaunchFiles(options.directory, name, { role: options.role, request: delivery === 'request' ? text : null });
   const command = launchCommand(kind, args, files, options.prefix);
-  herdrRun(['pane', 'run', pane, command], run);
-  const started = awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });
-  try { herdrJson(['agent', 'rename', pane, name], run); }
+  await herdrRun(['pane', 'run', pane, command], run);
+  const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });
+  let named = true;
+  try { await herdrJson(['agent', 'rename', pane, name], run); }
   catch (error) {
     // A runtime whose own naming rules are narrower than the ones checked above says so in its
     // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
     if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
-    throw error;
+    // A held session is still named so a human can find it, but a runtime that will not take the
+    // name before its dialog is answered does not turn the hold into a failed start.
+    // The hold records it unnamed, so the watch supervisor retries the name before it clears.
+    if (!started.awaiting) throw error;
+    named = false;
   }
-  if (delivery === 'paste') deliverPrompt(name, text, run, options);
-  return { delivery, command, files, started: { detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
+  // A session awaiting consent has not read its request, so a paste would land in the dialog: the
+  // request waits in its launch file instead, for whoever clears the hold to deliver.
+  if (delivery === 'paste' && !started.awaiting) await deliverPrompt(name, text, run, options);
+  const pending = delivery === 'paste' && started.awaiting ? writeLaunchFiles(options.directory, name, { request: text }).request : null;
+  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: pending, named } : undefined,
+    started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
 /**
@@ -1298,7 +1350,7 @@ export function nameRefusedByRuntime(error: unknown) {
   return /\b(?:agent|session) name\b|\binvalid (?:agent |session )?name\b/i.test(herdrErrorText(error));
 }
 export interface PromptDelivery { attempts?: number; acceptMs?: number; pauseMs?: number }
-export function deliverPrompt(target: string, text: string, run?: (command: string, args: string[]) => string, options: PromptDelivery & { confirm?: 'inline' | 'follow' } = {}) {
+export async function deliverPrompt(target: string, text: string, run?: ChildRun, options: PromptDelivery & { confirm?: 'inline' | 'follow' } = {}) {
   const attempts = options.attempts ?? promptAttempts, acceptMs = options.acceptMs ?? promptAcceptMs, pauseMs = options.pauseMs ?? promptRetryPauseMs;
   const accepted = ['--until', 'working', '--until', 'blocked', '--timeout', String(acceptMs)];
   const stalls: string[] = [];
@@ -1306,14 +1358,15 @@ export function deliverPrompt(target: string, text: string, run?: (command: stri
     try {
       // Herdr takes options only after the prompt text; 'follow' submits it and then waits for the
       // agent to leave idle, which is the same confirmation for a caller whose text must come last.
-      if (options.confirm === 'follow') { herdrJson(['agent', 'prompt', target, text], run); herdrJson(['agent', 'wait', target, ...accepted], run); }
-      else herdrJson(['agent', 'prompt', target, text, '--wait', ...accepted], run);
+      if (options.confirm === 'follow') { await herdrJson(['agent', 'prompt', target, text], run); await herdrJson(['agent', 'wait', target, ...accepted], run); }
+      else await herdrJson(['agent', 'prompt', target, text, '--wait', ...accepted], run);
       return { attempts: attempt, accepted: true as const };
     } catch (error) {
       const code = herdrErrorCode(error);
       if (code !== 'agent_prompt_stalled' && code !== 'timeout') throw error;
       stalls.push(code);
-      if (attempt < attempts) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pauseMs);
+      // The pause is awaited on the event loop: nothing else in the process waits with it.
+      if (attempt < attempts) await sleep(pauseMs);
     }
   }
   throw new PromptNotAcceptedError(`${target} did not visibly accept its prompt after ${attempts} deliveries (${stalls.join(', ')}); the session is closed and relaunched rather than left idle`);
@@ -1347,9 +1400,11 @@ export const sessionActivity = (record: Pick<LaunchAcknowledgement, 'acknowledge
 export const activeStates = ['working', 'blocked'];
 export const screenDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 32);
 /** The session's terminal, as text; null when Herdr cannot read it. */
-export function readSessionScreen(target: string, run: (command: string, args: string[]) => string = agentRuntimeRun(), lines = 80) {
-  try { return String(run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
+export async function readSessionScreen(target: string, run: ChildRun = defaultChildRun, lines = 80): Promise<string | null> {
+  try { return String(await run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
 }
+/** How a session's screen is read when the judgement needs it: a stub in a test, one Herdr read in the process. */
+export type ScreenReader = () => string | null | Promise<string | null>;
 const screenDecoration = /^[\s─━═╌┄┈│┃╭╮╰╯┌┐└┘├┤=_*·•-]*$|^[❯⏵✻✶✳✢·]|bypass permissions on|shift\+tab to cycle|for shortcuts|esc to interrupt|\? for help/;
 /** The session's own last words: the tail of its screen without the runtime's frame, bounded for a ledger record. */
 export function sessionWords(text: string | null, limit = 400) {
@@ -1357,7 +1412,7 @@ export function sessionWords(text: string | null, limit = 400) {
   const words = lines.slice(-8).join(' ').replace(/\s+/g, ' ').trim();
   return words.length > limit ? `…${words.slice(-limit)}` : words;
 }
-export function acknowledgeLaunch(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number; result: boolean; screen: () => string | null }) {
+export async function acknowledgeLaunch(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number; result: boolean; screen: ScreenReader }) {
   if (record.acknowledgedAt) return { changed: false, reprompt: false };
   const at = new Date(observed.now).toISOString();
   const confirm = () => { record.acknowledgedAt = at; delete record.activeSince; delete record.screen; return { changed: true, reprompt: false }; };
@@ -1367,7 +1422,7 @@ export function acknowledgeLaunch(record: LaunchAcknowledgement, agent: Pick<Her
   let changed = false;
   let active = !!agent && activeStates.includes(agent.agent_status ?? '');
   if (agent && !active) {
-    const text = observed.screen();
+    const text = await observed.screen();
     if (text !== null) {
       const digest = screenDigest(text);
       // The first screen read is a baseline: it shows no change, so it is not activity.
@@ -1407,8 +1462,8 @@ export function settlementDue(record: LaunchAcknowledgement, agent: Pick<HerdrAg
  * the work, or enough of it, and failed. Both reasons carry the session's last words.
  */
 export const neverStartedReason = 'never started';
-export function settlementReason(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number; screen: () => string | null }, failure: string) {
-  const words = agent ? sessionWords(observed.screen()) : '';
+export async function settlementReason(record: LaunchAcknowledgement, agent: Pick<HerdrAgent, 'agent_status'> | undefined, observed: { now: number; ackMs: number; screen: ScreenReader }, failure: string) {
+  const words = agent ? sessionWords(await observed.screen()) : '';
   const quoted = words ? ` Its last words: "${words}"` : '';
   const unstarted = !record.acknowledgedAt && (!agent || (!!record.repromptedAt && observed.now - Date.parse(record.repromptedAt) >= observed.ackMs));
   if (!unstarted) return `${failure}.${quoted}`;
@@ -1618,10 +1673,10 @@ export type LiveMasterConfig = ReturnType<typeof liveMasterConfig>;
  * The configured Herdr workspace, checked against Herdr's own inventory: a workspace closed since
  * `master init` makes every launch refuse, so status names it before a launch does.
  */
-export function herdrWorkspaceHealth(config: Pick<MasterConfig, 'herdrWorkspace'>, run?: (command: string, args: string[]) => string) {
+export async function herdrWorkspaceHealth(config: Pick<MasterConfig, 'herdrWorkspace'>, run?: ChildRun) {
   if (!config.herdrWorkspace) return { workspace: null, exists: null as boolean | null, reason: null as string | null };
   let workspaces: any[];
-  try { const listed = herdrJson(['workspace', 'list'], run); workspaces = Array.isArray(listed?.workspaces) ? listed.workspaces : []; }
+  try { const listed = await herdrJson(['workspace', 'list'], run); workspaces = Array.isArray(listed?.workspaces) ? listed.workspaces : []; }
   catch { return { workspace: config.herdrWorkspace, exists: null, reason: 'Herdr could not list workspaces, so the configured workspace is unverified' }; }
   const exists = workspaces.some(entry => entry?.workspace_id === config.herdrWorkspace);
   return { workspace: config.herdrWorkspace, exists, reason: exists ? null : `Herdr workspace ${config.herdrWorkspace} configured in .graphyard/master.json no longer exists (Herdr lists ${workspaces.map(entry => entry?.workspace_id).filter(Boolean).join(', ') || 'none'}); every launch into it will refuse. Set herdrWorkspace to a live workspace, or rerun master init --herdr-workspace ID` };
@@ -1697,10 +1752,10 @@ export async function snapshotWithClock<T extends { now: string }>(read: () => P
  * Verify on this host that a quarantined supervisor is gone, and say why not when it cannot.
  * The assessment is a proposal: the control plane re-evaluates the same refusals itself.
  */
-export function verifyContainmentDeath(
+export async function verifyContainmentDeath(
   work: Work,
-  options: { observedAt: string; hostId: string; clockOffset: { min: number; max: number }; localNow?: Date; probe?: typeof probeSupervisorAbsence },
-): ContainmentAssessment {
+  options: { observedAt: string; hostId: string; clockOffset: { min: number; max: number }; localNow?: Date; probe?: SupervisorProbe },
+): Promise<ContainmentAssessment> {
   const quarantine = work.containmentQuarantine!;
   const workspace = work.workspaces.find(item => item.epoch === quarantine?.epoch) ?? null;
   const assessment: ContainmentAssessment = {
@@ -1717,17 +1772,17 @@ export function verifyContainmentDeath(
     return { ...assessment, refusals: ['The control-plane clock could not be compared with this host'] };
   // The probe is told the exact scope the launch recorded, so it can hold everything that
   // scope still contains and attribute a neighbour's scope to its own live supervisor.
-  const probe = (options.probe ?? probeSupervisorAbsence)({ key: work.key, epoch: quarantine.epoch, workspacePath: workspace.path, scope: quarantine.scope ?? null });
+  const probe = await (options.probe ?? probeSupervisorAbsence)({ key: work.key, epoch: quarantine.epoch, workspacePath: workspace.path, scope: quarantine.scope ?? null });
   const verification = containmentVerificationSchema.parse({ ...probe, host: options.hostId, observedAt: (options.localNow ?? new Date()).toISOString(), clockOffset: options.clockOffset });
   const refusals = containmentSettlementRefusals(work, verification, { now: Date.parse(options.observedAt) });
   return { ...assessment, settleable: !refusals.length, refusals, verification };
 }
 /** Verify every lapsed quarantine this host is responsible for, keyed by work id; a live worker's is not probed. */
-export function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; probe?: typeof probeSupervisorAbsence }) {
+export async function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; probe?: SupervisorProbe }) {
   const assessments: Record<string, ContainmentAssessment> = {};
   for (const item of containmentQuarantines(work, options.hostId)) {
     if (containmentPhase(item, Date.parse(options.observedAt))?.state === 'live') continue;
-    try { assessments[item.id] = verifyContainmentDeath(item, options); }
+    try { assessments[item.id] = await verifyContainmentDeath(item, options); }
     catch (error) {
       assessments[item.id] = { key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch, owner: item.containmentQuarantine!.owner, at: item.containmentQuarantine!.at,
         host: options.hostId, workspacePath: item.workspaces.find(workspace => workspace.epoch === item.containmentQuarantine!.epoch)?.path ?? null, scope: item.containmentQuarantine!.scope ?? null,
@@ -1773,8 +1828,19 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'contaminated' | 'gate'): AttentionOwner {
   const key = work.key;
+  // A branch carrying another item's unlanded commits is the control plane's to restore (GY-127):
+  // an ejected tip is restored on its own, any other contaminated head on the coordinator's
+  // request, and a head nothing can move goes back to a worker as a fresh attempt.
+  if (cause === 'contaminated') {
+    const restore = currentRestore(work)?.restore ?? null;
+    if (restore?.outcome === 'unrepairable') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION: the foreign commits sit under something the control plane cannot move, so a fresh attempt on a fresh branch is the way back`, 'approver');
+    if (restore && !restore.performedAt) return agentOwner('master', `Nothing to run: the reconciliation job restores ${key} to its own reviewed head merged onto the base and reports the result here`);
+    return work.queueEjection?.sha === work.candidate?.sha
+      ? agentOwner('master', `Nothing to run: the control plane restores an ejected tip on its own, to ${key}'s own reviewed head merged onto the base; graphyard master repair ${key} REASON requests it again if the record shows no restore`)
+      : agentOwner('master', `graphyard master repair ${key} REASON: the control plane resets the branch to ${key}'s own reviewed head and merges the base onto it; no worker force-push and no shell`);
+  }
   // The one attention item no agent may clear: the three human decisions, answered by the human.
   if (cause === 'human-request') {
     const request = work.humanRequest!;
@@ -2088,7 +2154,7 @@ export async function allocateManagedCheckout(root: string, config: MasterConfig
   return checkout;
 }
 /** Remove a settled session's checkout; the reason when it could not be, never a throw. */
-export async function settleCheckout(root: string, directory: string | undefined, run?: (command: string, args: string[]) => string): Promise<string | null> {
+export async function settleCheckout(root: string, directory: string | undefined, run?: ChildRun): Promise<string | null> {
   if (!directory) return null;
   try { await removeSessionCheckout(root, dirname(directory), directory, run); return null; }
   catch (error) { return writeFailure(error, 'Removing the ephemeral checkout', directory).message.slice(0, 500); }
@@ -2260,7 +2326,7 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard') {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
@@ -2318,6 +2384,16 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const dispatch = describeDispatch(work, reviews, sessions, now);
     const baseRefresh = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);
     const refreshCarry = currentBaseRefreshCarry(work);
+    // A branch found carrying another item's unlanded commits, with the restore the control plane
+    // owes, requested or ran for it (GY-127); and an approval GitHub dismissed for a merge-base
+    // change on an unchanged head that the control plane restored rather than re-requesting.
+    const contaminated = branchContamination(work, snapshot.work);
+    const restore = currentRestore(work);
+    const contamination = contaminated || restore?.restore ? { head: contaminated?.head ?? restore!.restore!.contaminated, foreign: contaminated?.foreign ?? restore!.restore!.foreign, source: contaminated?.source ?? [],
+      restore: restore?.restore ? { cause: restore.restore.cause, requested: restore.restore.requested, performedAt: restore.restore.performedAt, outcome: restore.restore.outcome, own: restore.restore.own, head: restore.head, conflict: restore.conflict } : null } : null;
+    const restored = restoredApproval(work);
+    const approvalRestored = restored ? { reviewer: restored.reviewer, reviewId: restored.reviewId ?? null, sha: restored.sha, dismissal: restored.dismissal, at: restored.at,
+      line: `${restored.reviewer}'s approval of ${restored.sha.slice(0, 12)} was dismissed by GitHub for a merge-base change while the head was unchanged (${restored.dismissal.reason ?? 'reason unread'}${restored.dismissal.at ? ` at ${restored.dismissal.at}` : ''}); the control plane restored it as the binding approval, requested no review, spent no attempt, and re-posts it through the reviewer App before the merge` } : null;
     // A role with no account left is one line for the whole repository (`capacity` below), never a
     // launch refusal or a session retry repeated on every item that waits for it.
     const paused = new Set(standingCapacity(work).map(entry => entry.role));
@@ -2345,6 +2421,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         ? `removed by merge ${merged.reverted.removedBy.mergeSha?.slice(0, 12) ?? 'commit unknown'} of ${merged.reverted.removedBy.key ? `${merged.reverted.removedBy.key}, ` : ''}pull request #${merged.reverted.removedBy.pr}${merged.reverted.removedBy.commit ? ` (commit ${merged.reverted.removedBy.commit.slice(0, 12)})` : ', whose head carried this item\'s commits without their content'}`
         : 'and the merge that removed them could not be identified from the branch history'}. This is a reverted delivery, not an unreconciled merge: nothing is delivered until the content is restored${merged.refusal ? `; the last reconciliation was refused — ${merged.refusal}` : ''}`, 'merged-reverted']
       : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) without a valid merge execution: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.queue ? `its merge queue entry (sequence ${merged.queue.sequence}, position ${merged.queue.position} of ${merged.queue.size}) can never publish a speculative tip because the pull request is already merged${merged.queue.behind.length ? `, and ${merged.queue.behind.join(', ')} wait behind it` : ''}; ` : ''}${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : `a two-party merge decision requested now reconciles it if every gate passed and every required proof was live at the merge cutoff${merged.queue ? ', and a refused one removes the entry without delivering' : ''}`}`, 'merged-unauthorized']
+      // A branch carrying another item's unlanded commits blocks the candidate whatever else stands
+      // (GY-127): the restore is the control plane's, and the row says whether it is owed, requested or ran.
+      : contaminated && !(contamination?.restore && contamination.restore.performedAt && contamination.restore.head !== contaminated.head) ? [`${work.key} branch head ${contaminated.head.slice(0, 12)} carries the unlanded commits of ${contaminated.foreign.join(', ')} (${contaminated.source.includes('ejection') ? `a speculative tip published behind ${contaminated.foreign.join(', ')} and ejected from the merge queue` : 'found in its history by GitHub'}): kept, it is refused as an out-of-scope regression; landed, it would record ${contaminated.foreign.join(', ')} merged without ${contaminated.foreign.length === 1 ? 'its' : 'their'} content. ${contamination?.restore?.outcome === 'unrepairable' ? 'A restore found no own reviewed head under it: the foreign commits sit under something the control plane cannot move' : contamination?.restore && !contamination.restore.performedAt ? `A restore is requested (${contamination.restore.cause}) and runs on the next reconciliation` : work.queueEjection?.sha === contaminated.head ? 'The control plane restores it to its own reviewed head merged onto the base on the next reconciliation' : `graphyard master repair ${work.key} REASON restores it to its own reviewed head merged onto the base`}`, 'contaminated']
       : active && (!session || !['working', 'idle'].includes(session.state)) ? [`Assigned worker session is ${session?.state ?? 'offline'}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
@@ -2372,6 +2451,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         refreshed: refreshCarry ? { from: refreshCarry.from.sha, head: refreshCarry.to.sha, base: refreshCarry.to.baseSha,
           approval: { carried: refreshCarry.approval.carried, reason: refreshCarry.approval.reason },
           evidence: refreshCarry.evidence.map(entry => ({ proof: entry.proof, carried: entry.carried, reason: entry.reason })) } : null } : null,
+      // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
+      // an approval GitHub dismissed for a merge-base change that the control plane restored.
+      contamination, restoredApproval: approvalRestored,
       scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason } : { held: false, ahead: [], reason: null }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now) };
@@ -2398,8 +2480,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
+  // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
+  const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
+  const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
+    ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
@@ -2408,16 +2494,37 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length },
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length,
+      contaminatedBranches: rows.filter(row => row.contamination && row.contamination.source.length).length, restoredApprovals: rows.filter(row => row.restoredApproval).length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
     // What waits on the human, longest first, with how to answer; the roles out of capacity; and
     // each role's sessions against its concurrency limit with the longest wait for a slot.
-    humanRequests, capacity, concurrency,
+    humanRequests, capacity, concurrency, unrunnableRemedies: remedies,
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
 
+/**
+ * What the merge queue's own pushes did to pull-request branches and their approvals (GY-127),
+ * in one place: every branch found carrying another item's unlanded commits, with the restore
+ * the control plane owes, requested or ran for it, and every approval GitHub dismissed for a
+ * merge-base change on an unchanged head that the control plane restored instead of asking the
+ * reviewer again. The rows carry the same facts under `contamination` and `restoredApproval`;
+ * this is the list a master reads before it wonders why a reviewer approved the same commit twice.
+ */
+export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work']) {
+  const contaminated = rows.flatMap(row => row.contamination ? [{ key: row.key, head: row.contamination.head, foreign: row.contamination.foreign, source: row.contamination.source,
+    restore: row.contamination.restore ? { cause: row.contamination.restore.cause, requestedBy: row.contamination.restore.requested?.by ?? null, performedAt: row.contamination.restore.performedAt, outcome: row.contamination.restore.outcome, own: row.contamination.restore.own, head: row.contamination.restore.head } : null,
+    line: row.contamination.restore?.outcome === 'restored' && row.contamination.restore.head !== row.contamination.head
+      ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carried ${row.contamination.foreign.join(', ')}; restored to own reviewed head ${row.contamination.restore.own?.slice(0, 12) ?? '(unknown)'} merged onto the base as ${row.contamination.restore.head!.slice(0, 12)}`
+      : row.contamination.restore?.outcome === 'conflict' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carried ${row.contamination.foreign.join(', ')}; reset to own reviewed head ${row.contamination.restore.own?.slice(0, 12) ?? '(unknown)'}, whose merge onto the base conflicts and is the worker's`
+      : row.contamination.restore?.outcome === 'unrepairable' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')} under something the control plane cannot move; request rework`
+      : row.contamination.restore ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; a ${row.contamination.restore.cause} restore is requested and runs on the next reconciliation`
+      : `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; ${row.attention ?? 'a restore is owed'}` }] : []);
+  const restoredApprovals = rows.flatMap(row => row.restoredApproval ? [{ key: row.key, reviewer: row.restoredApproval.reviewer, sha: row.restoredApproval.sha, reason: row.restoredApproval.dismissal.reason, at: row.restoredApproval.at, line: `${row.key}: ${row.restoredApproval.line}` }] : []);
+  return { contaminated, restoredApprovals };
+}
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
  * would be offered (smallest planned scope first within a priority), the ones held behind a
@@ -2493,40 +2600,40 @@ function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null)
     enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, reasons: placement.reasons, binding };
 }
 /**
- * Every call into the agent runtime is bounded (GY-114). These are synchronous subprocess calls:
- * while one is outstanding the caller's event loop runs nothing, so a runtime that never answers
- * does not merely slow a step down - it wedges the whole cycle and leaves the process unable to
- * answer the SIGTERM its own supervisor sends. A timeout turns that into a failed step, which the
- * cycle records and moves past, well inside the unit's stop timeout.
+/**
+ * Every Herdr call the coordinator makes. `run` is the asynchronous runner (child-runner.ts) —
+ * or a test's stub — and is always awaited: a session start that takes its whole thirty-second
+ * bound, or the start bound's 120-second ceiling (awaitRuntimeStart), delays only the launch
+ * that asked for it, never the cycle's reads beside it (GY-125).
  *
- * The bound is the same 90s the coordination loop already applies to the commands it runs itself,
- * and it sits above every inner wait Herdr is asked for (a 30s `agent start`, three 20s prompt
- * deliveries), so it can only fire on a runtime that has stopped answering.
+ * Every call is also bounded (GY-114): a runtime that accepts a call and never answers must fail
+ * that step rather than hold it, so the cycle records the failure, moves past it, and the process
+ * still answers the SIGTERM its supervisor sends. The bound is the same 90s the runner applies to
+ * every child, and it sits above every inner wait Herdr is asked for (a 30s `agent start`, three
+ * 20s prompt deliveries), so it can only fire on a runtime that has stopped answering.
  */
-export const agentRuntimeTimeoutMs = 90_000;
-export const agentRuntimeRun = (timeoutMs: number = agentRuntimeTimeoutMs) => (command: string, args: string[]) =>
-  String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL' }));
-
-export function herdrJson(args: string[], run: (command: string, args: string[]) => string = agentRuntimeRun()) {
-  const parsed = JSON.parse(run('herdr', args));
+export const agentRuntimeTimeoutMs = defaultChildTimeoutMs;
+export const agentRuntimeRun = (timeoutMs: number = agentRuntimeTimeoutMs): BoundChildRun => childRunner({ timeoutMs });
+export async function herdrJson(args: string[], run: ChildRun = defaultChildRun) {
+  const parsed = JSON.parse(await run('herdr', args));
   if (parsed.error) throw Object.assign(new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`), { herdrCode: typeof parsed.error.code === 'string' ? parsed.error.code : undefined });
   return parsed.result ?? parsed;
 }
-function herdrRun(args: string[], run: (command: string, args: string[]) => string = agentRuntimeRun()) { run('herdr', args); }
-export function listHerdrAgents(run?: (command: string, args: string[]) => string): HerdrAgent[] { return herdrJson(['agent', 'list'], run).agents ?? []; }
-export function observeHerdrAgents(run?: (command: string, args: string[]) => string) {
-  try { return { agents: listHerdrAgents(run), available: true, reason: null }; }
+async function herdrRun(args: string[], run: ChildRun = defaultChildRun) { await run('herdr', args); }
+export async function listHerdrAgents(run?: ChildRun): Promise<HerdrAgent[]> { return (await herdrJson(['agent', 'list'], run)).agents ?? []; }
+export async function observeHerdrAgents(run?: ChildRun) {
+  try { return { agents: await listHerdrAgents(run), available: true, reason: null }; }
   catch { return { agents: [] as HerdrAgent[], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' }; }
 }
 
-export function closeHerdrPane(pane: string, run?: (command: string, args: string[]) => string, timeoutMs = 5_000) {
-  herdrJson(['pane', 'close', pane], run);
+export async function closeHerdrPane(pane: string, run?: ChildRun, timeoutMs = 5_000) {
+  await herdrJson(['pane', 'close', pane], run);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const result = herdrJson(['pane', 'list'], run);
+    const result = await herdrJson(['pane', 'list'], run);
     if (!Array.isArray(result.panes)) throw new Error('Herdr did not return a pane inventory after close');
     if (!result.panes.some((candidate: any) => candidate.pane_id === pane)) return;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    await sleep(100);
   }
   throw new Error(`Herdr still reports pane ${pane} after close`);
 }
@@ -2538,16 +2645,16 @@ export function createdHerdrTab(result: any) {
   return { pane, tab: typeof tab === 'string' && tab.trim() ? tab : undefined };
 }
 
-export function stopCreatedHerdrTab(pane: string | undefined, tab: string | undefined, run?: (command: string, args: string[]) => string, timeoutMs = 5_000) {
+export async function stopCreatedHerdrTab(pane: string | undefined, tab: string | undefined, run?: ChildRun, timeoutMs = 5_000) {
   if (pane) return closeHerdrPane(pane, run);
   if (!tab) throw new Error('Herdr did not identify the created tab, so cleanup cannot be confirmed');
-  herdrJson(['tab', 'close', tab], run);
+  await herdrJson(['tab', 'close', tab], run);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const result = herdrJson(['tab', 'list'], run);
+    const result = await herdrJson(['tab', 'list'], run);
     if (!Array.isArray(result.tabs)) throw new Error('Herdr did not return a tab inventory after close');
     if (!result.tabs.some((candidate: any) => candidate.tab_id === tab)) return;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    await sleep(100);
   }
   throw new Error(`Herdr still reports tab ${tab} after close`);
 }
@@ -2691,7 +2798,7 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
   // role file and the command line loads that file (GY-121), never the text itself.
   return { plan, file, args: ['--setting-sources', 'user', '--settings', file], role: launchAuthorization.replace(/\s+/g, ' ') as string | null };
 }
-export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
+export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: ChildRun) {
   if (!kind) throw new Error('Choose a supported master agent kind');
   const config = await loadMasterConfig(root);
   const masterRetry = `graphyard master start ${kind}, once masterAgentName in .graphyard/master.json is a name Herdr can launch`;
@@ -2702,7 +2809,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   const harness = await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
-    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run));
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
     // The master runs with its runtime's broadest approval mode too; the harness rules above, not
     // runtime prompts, say what it may do. Codex's sandbox is widened to the private state the
@@ -2720,17 +2827,18 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it.
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
-    if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
+    if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Master startup failed'}; Herdr could not confirm cleanup of the created tab`); }
     throw error;
   }
   return { agentName: name, kind, pane: pane!, status: delivery === 'request' ? 'started on its request' : 'started and prompted', delivery, focusChanged: false, harness };
 }
 
-type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
+/** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
+type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
 type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies };
 
 export interface DispatchOptions { allowOverlap?: boolean; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds }
@@ -2753,7 +2861,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (overlap.length && !options.allowOverlap) throw new Error(`Dispatch held by planned-file overlap with ${describeOverlap(overlap)}; whichever lands second re-integrates the other. Wait for it to merge, or pass --allow-overlap to dispatch anyway`);
 }
 
-export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, allWork: Work[] = [work], prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker> = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
+export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker> = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
   assertDispatchable(work, allWork, observedAt, options);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
@@ -2761,6 +2869,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   let dependencies: PreparedWorker['dependencies'] | null = null;
   let delivery: RequestDelivery | null = null;
+  let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -2770,12 +2879,12 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // The account is chosen before anything is claimed: a profile whose accounts are all logged out
     // or out of quota claims nothing, and the refusal names every account it skipped and why.
     selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });
-    const launch = accountLaunch(profile, selected.account, { writable: [sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    const launch = accountLaunch(profile, selected.account, { writable: [await sharedGitDirectory(root)].filter((path): path is string => !!path) });
     launched = launch;
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
-      try { ({ target, harness, dependencies, delivery } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start)); break; }
+      try { ({ target, harness, dependencies, delivery, started, consent } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start)); break; }
       catch (error) {
         if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
         // The registry session chosen for this launch never ran; its account is free again at once.
@@ -2787,11 +2896,18 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery,
+    // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
+    started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds) {
+export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
+export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
+  return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
+}
+
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds) {
   const prepared = await prepare(root, work.key, profile.name);
   // The worker's own rules go into its worktree before the session starts, so pushing its
   // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
@@ -2802,17 +2918,23 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   let pane: string | undefined, tabId: string | undefined;
   try {
     const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
-    const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
+    const created = createdHerdrTab(await herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request, on the runtime's command line under
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
-    const started = startAgentSession(profile.agentName, launch.kind!, pane, [...launch.args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'] });
-    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery };
+    const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...launch.args, ...sessionHarness.args], prompt, run,
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true });
+    // A worker stopped on a prompt the launcher does not answer is held for a human rather than
+    // closed: its record beside the launch files is what master status raises and what the watch
+    // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
+    const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
+    if (hold) writeConsentHold(started.files.stem, hold);
+    return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery,
+      started: started.started.state, consent: { answered: started.consent, awaiting: hold } };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) {
-      try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
+      try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
       catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
     }
     try { await release(root, work.key, prepared.epoch, profile.name); }
@@ -2856,16 +2978,16 @@ function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
   return env;
 }
 // A worker launch runs the Graphyard CLI to claim and to build the assigned worktree, which on a
-// large repository is the slowest thing the dispatcher waits on; it is bounded well above that
-// rather than at the runtime bound, so a slow checkout is never mistaken for a hung one.
+// large repository is the slowest thing the dispatcher waits on; it is bounded well above the
+// runtime bound, so a slow checkout is never mistaken for a hung one (GY-114).
 export const workerLaunchTimeoutMs = 600_000;
-const workerCommand: WorkerCommand = (command, args, options = {}) => execFileSync(command, args, { timeout: workerLaunchTimeoutMs, ...options, encoding: 'utf8', stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] });
+const workerCommand: WorkerCommand = (command, args, options = {}) => defaultChildRun(command, args, { cwd: options.cwd, env: options.env, timeoutMs: workerLaunchTimeoutMs, stdout: options.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' });
 
 export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readWorkerCredential(root, profile.credentialFile);
-  run(process.execPath, [config.cliPath, 'release', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
+  await run(process.execPath, [config.cliPath, 'release', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
 }
 
 export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand): Promise<PreparedWorker> {
@@ -2876,21 +2998,21 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   if (!detected.repository) throw new Error('Worker launcher requires a recognized GitHub origin');
   assertRepository(detected.repository, config.repository);
   const env = workerEnvironment(config, profile);
-  run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'inherit'] });
-  const base = String(run('git', ['rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`], { cwd: root, env })).trim();
+  await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'inherit'] });
+  const base = String(await run('git', ['rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`], { cwd: root, env })).trim();
   if (!/^[0-9a-f]{40}$/i.test(base)) throw new Error('Worker launcher could not resolve the current managed base branch');
-  const claim = JSON.parse(String(run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
+  const claim = JSON.parse(String(await run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
   const claimedEpoch = Number.isSafeInteger(claim.epoch) && claim.epoch > 0 ? claim.epoch as number : null;
   try {
     if (claim.lease?.owner !== profile.principal || claimedEpoch === null) throw new Error('Worker launcher acquired an unexpected assignment identity');
-    const workspace = JSON.parse(String(run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
+    const workspace = JSON.parse(String(await run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
     if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
     // The checkout is the attempt's; the dependency tree does not have to be. Sharing is a
     // convenience for the session that follows, so a refusal is reported, never fatal.
     const dependencies: SharedDependencies = await shareDependencies(root, workspace.path).catch(error => ({ shared: [], skipped: [{ name: dependencyDirectories[0], reason: failureText(error) }] }));
     return { epoch: claimedEpoch, path: workspace.path, base, dependencies, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}) };
   } catch (error) {
-    if (claimedEpoch !== null) try { run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
+    if (claimedEpoch !== null) try { await run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`); }
     throw error;
   }
@@ -2976,8 +3098,8 @@ export function assertMergeProtection(protection: any, config: MasterConfig, wor
  * pre-merge base and would refuse every follower in the queue. The landing check therefore
  * never reads it: the server-side observation reads the ref (GY-57) and the broker does the same.
  */
-export function readBaseTip(repository: string, baseBranch: string, run: (command: string, args: string[]) => string): string {
-  const ref = JSON.parse(run('gh', ['api', `repos/${repository}/git/ref/heads/${baseBranch.split('/').map(encodeURIComponent).join('/')}`]));
+export async function readBaseTip(repository: string, baseBranch: string, run: ChildRun): Promise<string> {
+  const ref = JSON.parse(await run('gh', ['api', `repos/${repository}/git/ref/heads/${baseBranch.split('/').map(encodeURIComponent).join('/')}`]));
   const tip = ref?.object?.sha;
   if (ref?.object?.type !== 'commit' || typeof tip !== 'string' || !/^[a-f0-9]{40}$/.test(tip)) throw new Error(`GitHub did not return a readable head for refs/heads/${baseBranch} of ${repository}`);
   return tip;
@@ -2990,12 +3112,12 @@ export function readBaseTip(repository: string, baseBranch: string, run: (comman
  * real base tip and the validated base with their trees. The base tip is `refs/heads/<base>` as
  * GitHub serves it now, never the pull request's cached `baseRefOid`.
  */
-export function assertQueuedLanding(work: Work, authorization: { sha: string; baseSha: string }, baseBranch: string, repository: string, run: (command: string, args: string[]) => string): { baseTip: string; baseTree: string | null } {
+export async function assertQueuedLanding(work: Work, authorization: { sha: string; baseSha: string }, baseBranch: string, repository: string, run: ChildRun): Promise<{ baseTip: string; baseTree: string | null }> {
   const speculation = work.queue?.speculation;
   if (!speculation || speculation.tip !== authorization.sha || speculation.base !== authorization.baseSha || !speculation.baseTree) throw new Error(`${work.key} has no published merge-queue tip for the authorized commit; the queue is the only path onto the base branch`);
-  const baseTip = readBaseTip(repository, baseBranch, run);
+  const baseTip = await readBaseTip(repository, baseBranch, run);
   if (baseTip === authorization.baseSha) return { baseTip, baseTree: null };
-  const commit = JSON.parse(run('gh', ['api', `repos/${repository}/commits/${baseTip}`]));
+  const commit = JSON.parse(await run('gh', ['api', `repos/${repository}/commits/${baseTip}`]));
   const baseTree = commit?.commit?.tree?.sha;
   if (typeof baseTree !== 'string' || !/^[a-f0-9]{40}$/.test(baseTree)) throw new Error(`GitHub did not return a tree for ${baseBranch} head ${baseTip} of ${repository}`);
   if (baseTree !== speculation.baseTree) throw new Error(`${work.key} base branch ${baseBranch} advanced outside the merge queue: its head ${baseTip} (tree ${baseTree}) is not tree-identical to validated base ${authorization.baseSha} (tree ${speculation.baseTree}); the validated tip would no longer land its tested tree`);
@@ -3013,7 +3135,7 @@ export type CarriedApprovalRepost = { posted: boolean; reviewId: number | null; 
  * review the record already accepts. A verdict the reviewer has since changed is never replaced.
  */
 export async function repostCarriedApproval(config: MasterConfig, work: Work, carried: CarriedApproval, dependencies: {
-  run: (command: string, args: string[]) => string;
+  run: ChildRun;
   mint?: (credentialFile: string, repository: string) => Promise<{ token: string }>;
   fetcher?: typeof fetch;
 }): Promise<CarriedApprovalRepost> {
@@ -3021,7 +3143,7 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
   if (carried.provider !== 'github') return { posted: false, reviewId: null, reason: `the carried ${carried.provider} approval needs no native review re-post` };
   const identity = config.reviewer ? `${config.reviewer.slug}[bot]` : null;
   if (!identity || identity.toLowerCase() !== carried.reviewer.toLowerCase()) return { posted: false, reviewId: null, reason: `the approval of ${carried.originalSha.slice(0, 12)} was posted by ${carried.reviewer}, not by the bound reviewer App${identity ? ` ${identity}` : ''}; only the identity that approved it may re-post it, so the provider may still require a fresh native approval` };
-  const reviews = JSON.parse(dependencies.run('gh', ['api', '--paginate', `repos/${config.repository}/pulls/${candidate.pr}/reviews`]));
+  const reviews = JSON.parse(await dependencies.run('gh', ['api', '--paginate', `repos/${config.repository}/pulls/${candidate.pr}/reviews`]));
   if (!Array.isArray(reviews)) throw new Error(`GitHub did not return a review list for ${work.key}`);
   const own = reviews.filter((review: any) => String(review?.user?.login ?? '').toLowerCase() === identity.toLowerCase() && verdictStates.includes(review?.state));
   const latest = own.at(-1);
@@ -3035,7 +3157,12 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
     return mintReviewerToken(reviewerCredentialSchema.parse(JSON.parse(await readFile(file, 'utf8'))), repository, dependencies.fetcher);
   });
   const { token } = await mint(config.reviewer!.credentialFile, config.repository);
-  const body = `Graphyard carried this identity's approval of ${carried.originalSha} (review ${carried.reviewId ?? 'n/a'}) to Graphyard-authored merge-queue tip ${candidate.sha}: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval after the control plane's own tip publication.`;
+  // The approval binds the very commit it was given on when GitHub dismissed it for a merge-base
+  // change on an unchanged head, or when the reviewed head was republished as the tip itself;
+  // the recorded reason says which.
+  const body = carried.originalSha === candidate.sha
+    ? `Graphyard restored this identity's approval of ${candidate.sha} (review ${carried.reviewId ?? 'n/a'}) to the commit it was given on: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval of the same commit again.`
+    : `Graphyard carried this identity's approval of ${carried.originalSha} (review ${carried.reviewId ?? 'n/a'}) to Graphyard-authored merge-queue tip ${candidate.sha}: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval after the control plane's own tip publication.`;
   const response = await (dependencies.fetcher ?? fetch)(`https://api.github.com/repos/${config.repository}/pulls/${candidate.pr}/reviews`, {
     method: 'POST', signal: AbortSignal.timeout(15_000),
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
@@ -3073,7 +3200,7 @@ function recordedVerification(execution: MergeExecution) {
   if (!Number.isFinite(verifiedAt) || !execution.clockOffset) throw Object.assign(new Error('Resumed merge execution carries an incomplete verification record'), { confirmedRefusal: true });
   return { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt!, providerDelayMs: providerDelayAfterVerification(verifiedAt, execution.clockOffset), clockOffset: execution.clockOffset };
 }
-export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }), executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>) {
+export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: ChildRun = defaultChildRun, executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>) {
   const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
@@ -3083,9 +3210,9 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   if (current.mergeExecution?.committingAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'the provider commit was already recorded; Graphyard retained the execution until GitHub reconciles the provider outcome and refuses a new attempt until then' };
   // The pull request answers for its own head, base branch name and state; the base tip is read
   // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
-  const pr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
+  const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
-  assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
+  await assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
   // An approval the control plane carried onto its authored tip is re-posted through the
   // reviewer App before any authority is acquired, so a native review requirement that GitHub
   // re-armed on the tip publication is met by the same identity that gave the approval.
@@ -3102,12 +3229,12 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   let providerStarted = false; let cancelled = false;
   let verificationStarted = false; let verificationCompleted = false;
   try {
-    const lockedPr = JSON.parse(run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
+    const lockedPr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
     if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
-    assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
+    await assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
     const remaining = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
     if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
-    const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
+    const protection = JSON.parse(await run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
     assertMergeProtection(protection, config, latest);
     // A broker that stopped between merge-verify and merge-commit resumes here holding a verified
     // execution. The verification is a durable fact of that execution — the record carries its
@@ -3124,7 +3251,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // timestamp interval and the accepted offset width, or a slow but successful provider merge
     // just inside the deadline would be permanently classified as unauthorized.
     const providerReserve = 90_000 + 1000 + (verified.clockOffset.max - verified.clockOffset.min);
-    const githubClock = run('gh', ['api', '--include', 'rate_limit']);
+    const githubClock = await run('gh', ['api', '--include', 'rate_limit']);
     const delay = githubProviderDelay(verifiedTime, verified.providerDelayMs, githubClock);
     if (delay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - delay <= providerReserve) throw new Error('Clock uncertainty leaves insufficient merge authority; refresh and retry');
     if (delay) await new Promise(resolve => setTimeout(resolve, delay));
@@ -3157,7 +3284,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // GitHub reports merged_at only to whole-second precision. Cross a provider-clock
     // boundary after the transactional commit so a fast successful merge cannot appear
     // to predate the authority that serialized it against revocation.
-    const commitClock = run('gh', ['api', '--include', 'rate_limit']);
+    const commitClock = await run('gh', ['api', '--include', 'rate_limit']);
     const commitDelay = githubProviderDelay(committingTime, 0, commitClock, verified.clockOffset.min);
     if (commitDelay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - commitDelay <= providerReserve) throw new Error('Clock uncertainty leaves insufficient committed merge authority; wait for observation or expiry');
     if (commitDelay) await new Promise(resolve => setTimeout(resolve, commitDelay));
@@ -3168,7 +3295,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // mutation; the mutation is refused on any missing, fenced or expired authority. The base
     // branch is re-read from its ref for the same reason: a base that advanced outside the
     // queue during the wait would land a different tree than the one the tip was tested on.
-    assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
+    await assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
     const preProvider = await freshSnapshot();
     const finalExecution = preProvider.work.find(item => item.id === work.id)?.mergeExecution;
     const remainingBeforeProvider = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
@@ -3176,7 +3303,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
       || finalExecution.sha !== authorization.sha || Date.parse(finalExecution.expiresAt) <= Date.parse(preProvider.now)
       || !Number.isFinite(remainingBeforeProvider) || remainingBeforeProvider <= providerReserve)
       throw new Error(`${work.key} merge execution expired, was fenced or was superseded during the provider clock wait; the provider merge is refused${finalExecution?.fenced ? `: ${finalExecution.fenced.reason}` : ''}`);
-    const provider = JSON.parse(run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
+    const provider = JSON.parse(await run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]));
     if (provider.merged !== true || typeof provider.sha !== 'string') {
       await cancel(latest, granted.execution, provider.message || 'GitHub confirmed that it did not merge the candidate'); cancelled = true;
       throw new Error(provider.message || 'GitHub did not merge the candidate');
@@ -3203,7 +3330,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
  * repeat. The interactive command and the durable loop share it so neither can drift into a
  * different merge path.
  */
-export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ work: Work[]; now: string }>, mutation: (path: string, data: unknown, requestId?: string) => Promise<any>, executor: MergeExecutor, outerRequest: string, run?: (command: string, args: string[]) => string) {
+export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ work: Work[]; now: string }>, mutation: (path: string, data: unknown, requestId?: string) => Promise<any>, executor: MergeExecutor, outerRequest: string, run?: ChildRun) {
   const stepKey = (item: Work, step: string, executionId = '') => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}\0${executionId}`).digest('hex');
   // Every step names the executor instance; the engine binds it to the principal and refuses a
   // step — cancel above all — from any other instance, so the owner the broker resumes on is
@@ -3214,7 +3341,7 @@ export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ wo
     (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason, executor: instance }, stepKey(latest, 'cancel', execution.id)),
     (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id, executor: instance }, stepKey(latest, 'verify', execution.id)), run, mergeExecutionOwner(executor),
     (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id, executor: instance }, stepKey(latest, 'commit', execution.id)),
-    (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 })) }));
+    (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? defaultChildRun }));
 }
 
 // ---- Autonomy ----------------------------------------------------------------------------------
@@ -3254,27 +3381,67 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
 
 /**
  * A worker session's own rules, written into its assigned worktree: it runs its item's commands,
- * pushes its assigned branch and opens the pull request without a keypress, and can never push
- * the base branch, force-push, rebase, merge, review, or read a credential.
+ * pushes its assigned branch and opens the pull request without a keypress, and is denied pushing
+ * the base branch, force-pushing, deleting a ref, rebasing, merging, reviewing and reading a
+ * credential, in every spelling a rule names; a spelling no rule names is unmatched, not denied.
+ *
+ * The one history rewrite it may make goes through `restore-branch GY-N EPOCH`, never a raw push:
+ * the recovery of an ejected or contaminated tip resets the assigned branch to the item's reviewed
+ * head, syncs it onto the base and pushes, and the rework the control plane authorizes must be
+ * executable by the session it dispatches (GY-128). A permission glob cannot say "this ref and no
+ * other", and a Claude worker runs under bypassPermissions, where a command no rule matches runs.
+ * So every raw `--force*` push is denied, the lease push included, and the CLI makes the one lease
+ * push itself: to the branch registered for the caller's live lease, conditional on the tip it
+ * fetched (`--force-with-lease=refs/heads/BRANCH:TIP`), so it replaces only what it saw.
  */
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
-    ...['status', 'sync', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
+    ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
     { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
     { rule: `Bash(git push -u origin ${input.branch})`, why: 'Publish the assigned branch the first time.' },
     { rule: `Bash(git push origin HEAD:${input.branch})`, why: 'Push the current head to the assigned branch.' },
+    { rule: 'Bash(git fetch origin)', why: 'Read the remote tips restore-branch and sync compare against.' },
+    { rule: 'Bash(git reset --hard *)', why: 'Move the assigned branch back to the reviewed head before sync; it changes only this worktree.' },
     { rule: 'Bash(gh pr create:*)', why: 'Open the pull request the worker submits with complete.' },
     { rule: 'Bash(gh pr view:*)', why: 'Read the pull request number and state before submitting.' },
     { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for the worker\'s own candidate.' },
     { rule: `Bash(git merge origin/${input.baseBranch})`, why: 'sync merges the base branch; the worker never rebases.' },
   ];
+  // Every rewrite, in each spelling a rule can name: `--force`, `--force-with-lease` (bare or
+  // `=REF:SHA`) and `--force-if-includes` alike, and the abbreviations git accepts for them. The
+  // lease push of the assigned branch is restore-branch's, which checks the ref itself; no rule may
+  // end in `:*` or ` *` where the bare prefix would match an allowed push, because Claude Code reads
+  // both as "this prefix, with or without more" (` :**` ends in neither). Each rule also has a twin
+  // for a push behind git's global options (`git -C DIR push`, `git -c KEY=VALUE push`).
+  const push: [string, string][] = [
+    ['*--force*', 'A raw force push, the lease form included, could rewrite any ref: a glob cannot limit it to the assigned branch. The one restoration push is restore-branch.'],
+    ['*--f*', 'Any abbreviation git accepts for --force, --force-with-lease or --force-if-includes.'],
+    ['-f*', 'Short form of a force push.'],
+    ['* -f*', 'Short form of a force push.'],
+    ['*-*f *', 'A force flag bundled with other short flags (-uf).'],
+    ['*-*f', 'A force flag bundled with other short flags, last on the line.'],
+    ['*+*', 'A leading + refspec is a force push.'],
+    ['*--mirror*', 'Mirroring rewrites every ref on the remote.'],
+    ['*--m*', 'An abbreviation of --mirror.'],
+    ['*--all*', 'The worker pushes its assigned branch, never every branch.'],
+    ['*--al*', 'An abbreviation of --all.'],
+    ['*--delete*', 'Deleting a remote ref is never part of an attempt.'],
+    ['*--de*', 'An abbreviation of --delete.'],
+    ['*--pru*', 'Pruning deletes every remote ref the local side lacks.'],
+    ['-d*', 'Short form of deleting a remote ref, alone or first in a bundle (-du).'],
+    ['* -d*', 'Short form of deleting a remote ref, alone or first in a bundle (-du).'],
+    ['*-*d *', 'A delete flag bundled with other short flags (-ud).'],
+    ['*-*d', 'A delete flag bundled with other short flags, last on the line.'],
+    ['* :**', 'An empty source refspec deletes the ref it names, whatever the name.'],
+    [`*:${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
+    [`origin ${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
+    [`* ${input.baseBranch}`, 'The base branch moves only through the guarded merge.'],
+    [`* ${input.baseBranch} *`, 'The base branch moves only through the guarded merge.'],
+    [`*refs/heads/${input.baseBranch}*`, 'The base branch moves only through the guarded merge, in its full ref spelling too.'],
+  ];
   const deny: HarnessRule[] = [
-    { rule: 'Bash(git push *--force*)', why: 'History on a submitted branch is never rewritten; the review and proofs are bound to its heads.' },
-    { rule: 'Bash(git push * -f*)', why: 'Short form of a force push.' },
-    { rule: 'Bash(git push *+*)', why: 'A leading + refspec is a force push.' },
-    { rule: `Bash(git push *:${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
-    { rule: `Bash(git push origin ${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
+    ...push.flatMap(([form, why]) => [{ rule: `Bash(git push ${form})`, why }, { rule: `Bash(git -* push ${form})`, why: `${why} Also behind git's global options.` }]),
     { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
     { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },
@@ -3284,10 +3451,66 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
   ];
   return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
 }
+/**
+ * How a worker restores its assigned branch after an ejected or contaminated tip, as the exact
+ * commands a rework reason carries: fetch, reset to the item's reviewed head, sync onto the base,
+ * restore-branch (the lease push of the leased branch), complete. Every one is permitted by the
+ * worker's own harness, so the rework the control plane authorizes is carried out by the attempt it
+ * dispatches, with no human shell.
+ */
+export function branchRestoration(input: { cliPath: string; key: string; epoch: number; pr: number; reviewedHead: string }) {
+  const cli = `node ${input.cliPath}`;
+  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} ${input.pr}`];
+}
+/**
+ * The shell commands a blocker names: each backtick-quoted command line, or, in a blocker that
+ * quotes none, each `git push …` clause. The worker's blocker instruction asks for the exact
+ * command that was refused, so this is where it is written.
+ */
+export function blockerCommands(text: string) {
+  const quoted = [...text.matchAll(/`([^`\n]+)`/g)].map(match => match[1].trim()).filter(command => /^[a-z][\w.-]*\s+\S/.test(command));
+  const found = quoted.length ? quoted : [...text.matchAll(/\bgit push\b[^\n;,'"]*/g)].map(match => match[0].replace(/\s+(?:was|were|is|failed|fails|because|but)\b.*$/, '').trim().replace(/[.:]$/, ''));
+  return [...new Set(found)];
+}
+export interface UnrunnableRemedy { key: string; epoch: number; command: string; role: 'worker'; rule: string; why: string; deniedBy: { role: string; rule: string }[]; text: string }
+/**
+ * A blocker whose remedy no session Graphyard launches may run is a defect of Graphyard, not a
+ * wait on a human shell (GY-128): Graphyard authorized work that none of its own sessions can
+ * carry out. Every command a blocker names is judged against each launched role's harness —
+ * the item's worker on its assigned branch, reviewer, producer and master — and reported when
+ * every one of them denies it, naming the command, the role that would need it (the worker that
+ * raised the blocker) and the rule in that role's harness that denies it.
+ */
+export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseBranch: string; repository?: string; workerKinds?: string[] }): UnrunnableRemedy[] {
+  const shared = { cliPath: input.cliPath, repository: input.repository ?? 'OWNER/REPOSITORY', baseBranch: input.baseBranch, credentialHome: '/graphyard-credentials', credentialDirectories: [] as string[] };
+  const others = [
+    { role: 'reviewer', plan: sessionHarnessPlan({ ...shared, role: 'reviewer', kind: 'claude' }) },
+    { role: 'producer', plan: sessionHarnessPlan({ ...shared, role: 'producer', kind: 'claude' }) },
+    { role: 'master', plan: masterHarnessPlan({ ...shared, harness: 'claude', root: '/repository' }) },
+  ];
+  // A worker runtime other than Claude loads no generated rules, so a rework dispatched to it may
+  // run the command: only when every configured worker runtime denies it is the remedy unrunnable.
+  const workerKinds = [...new Set(input.workerKinds?.length ? input.workerKinds : ['claude'])];
+  if (workerKinds.some(kind => kind !== 'claude')) return [];
+  return work.filter(item => item.stage !== 'done' && item.blocker).flatMap(item => {
+    const epoch = item.workspaces.at(-1)?.epoch ?? item.epoch;
+    const branch = item.workspaces.at(-1)?.branch ?? `graphyard/${item.key.toLowerCase()}-${epoch}`;
+    const worker = sessionHarnessPlan({ ...shared, role: 'worker', kind: 'claude', branch });
+    return blockerCommands(item.blocker!).flatMap(command => {
+      const own = harnessDecision(worker, command);
+      if (own.decision !== 'deny') return [];
+      const deniedBy = others.map(({ role, plan }) => ({ role, judged: harnessDecision(plan, command) }));
+      if (deniedBy.some(entry => entry.judged.decision !== 'deny')) return [];
+      return [{ key: item.key, epoch, command, role: 'worker' as const, rule: own.rule!.rule, why: own.rule!.why,
+        deniedBy: deniedBy.map(entry => ({ role: entry.role, rule: entry.judged.rule!.rule })),
+        text: `${item.key}'s blocker names \`${command}\`, which no session Graphyard launches may run: the worker that needs it is denied by its harness rule ${own.rule!.rule} (${own.rule!.why}), and ${deniedBy.map(entry => `the ${entry.role} by ${entry.judged.rule!.rule}`).join(', ')}. This is a Graphyard defect, not a wait on a human shell` }];
+    });
+  });
+}
 /** Install the worker rules in a freshly prepared worktree, only where Git already ignores them. */
 export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker) {
   if (profile.kind !== 'claude') return { applied: false, reason: `No generated worker rules for ${profile.kind}` };
-  try { execFileSync('git', ['check-ignore', '--quiet', '--', '.claude/settings.local.json'], { cwd: prepared.path, stdio: 'ignore' }); }
+  try { await defaultChildRun('git', ['check-ignore', '--quiet', '--', '.claude/settings.local.json'], { cwd: prepared.path }); }
   catch { return { applied: false, reason: 'The worktree does not ignore .claude/settings.local.json, so no rules were written into it' }; }
   const plan = workerHarnessPlan({ cliPath: config.cliPath, branch: `graphyard/${key.toLowerCase()}-${prepared.epoch}`, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)) });
   const written = await writeHarnessPermissions(prepared.path, plan, true);
@@ -3439,7 +3662,7 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
  * kept whole now and the decision id takes what the limit leaves.
  */
 export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) => distinctSessionName(['graphyard-approver', 'gy-approver'], work.key, decision);
-export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: (command: string, args: string[]) => string, probe: FleetProbe = {}) {
+export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
@@ -3459,11 +3682,11 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, do not approve; state the reason in this tab. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
   let pane: string | undefined, tabId: string | undefined;
   try {
-    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry }));
   } catch (error) {
-    if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
+    if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
@@ -3486,7 +3709,7 @@ export function verifiedContext(context: EscalationContext) {
  * loop state, reads nothing else, and records its decision with `master decide … --precedent
  * --context`, so the ledger carries the reason, the precedent it relied on and what it saw.
  */
-export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: (command: string, args: string[]) => string) {
+export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: ChildRun) {
   await agentToken(root, config, 'operatorAgent');
   const escalationRetry = `graphyard master escalation ${context.key} ${context.escalation.trigger} ${kind}`;
   const name = nameForLaunch(escalationRetry, () => distinctSessionName(['graphyard-escalation', 'graphyard-esc', 'gy-esc'], context.key, context.escalation.trigger));
@@ -3499,26 +3722,27 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which. If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once; an independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
-    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry }));
   } catch (error) {
-    if (pane || tabId) try { stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
+    if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
   }
   return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false };
 }
 
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'repair', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
-  agents: () => HerdrAgent[];
+  agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   daemonLock: () => Promise<{ pid: number; host: string; heartbeatAt: string } | null>;
   fetcher?: typeof fetch;
-  run?: (command: string, args: string[], options?: any) => string | Buffer;
+  /** Runs the roster applier; the default is the asynchronous runner with the applier's output passed through. */
+  run?: (command: string, args: string[], options?: ChildRunOptions) => string | Buffer | Promise<string | Buffer>;
 }
 const words = (args: string[]) => args.join(' ').trim();
 async function jsonArgument(value: string) { return JSON.parse(value.startsWith('@') ? await readFile(value.slice(1), 'utf8') : value); }
@@ -3562,6 +3786,16 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     const work = await item(args[0]);
     return call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: reason(args.slice(1)) });
   }
+  if (id === 'repair') {
+    // The coordinator's own request (GY-127): the control plane resets a branch found carrying
+    // another item's unlanded commits to the item's own reviewed head and merges the base onto it.
+    // The command records the request; the reconciliation job runs it and master status reports it.
+    const work = await item(args[0]);
+    const contamination = branchContamination(work, (await deps.coordinator('work-snapshot')).work as Work[]);
+    if (!contamination) throw new Error(`${work.key} head ${work.candidate?.sha.slice(0, 12) ?? '(none)'} carries no other item's unlanded commits; there is nothing to repair`);
+    if (pendingRestore(work)) throw new Error(`A repair of ${work.key} is already requested; graphyard master status reports it under contamination.restore`);
+    return call(await readCredentialFile(config.credentialFile), `work/${work.id}/repair`, { reason: reason(args.slice(1)) });
+  }
   if (id === 'requirements') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master requirements GY-N FILE REASON');
     return call(await operator(), `work/${work.id}/requirements`, { ...decisionInput('requirements', work, await jsonArgument(`@${args[1]}`)), reason: reason(args.slice(2)) });
@@ -3593,7 +3827,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     if (id === 'context') return context;
     const handler = rest.find(value => value !== trigger) ?? 'precedent';
     if (handler === 'precedent') return handleEscalation(context, followPrecedent, async request => call(await operator(), `work/${encodeURIComponent(context.key)}/decide`, request));
-    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), deps.agents());
+    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), await deps.agents());
   }
   if (id === 'decisions') return deps.coordinator(`work/${encodeURIComponent((await item(args[0])).id)}/decisions`);
   if (id === 'approve') {
@@ -3608,7 +3842,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'approver') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
-    return launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, deps.agents());
+    return launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents());
   }
   if (id === 'principals') {
     const live = (await deps.coordinator('principals')).principals;
@@ -3617,7 +3851,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     if (!preview.applicable) throw new Error(`Roster rotation refused: ${preview.refusals.join('; ')}`);
     const applier = resolve(root, 'scripts/provision-railway.mjs');
     try { await lstat(applier); } catch { throw new Error('This repository has no roster applier (scripts/provision-railway.mjs); deploy GRAPHYARD_PRINCIPALS with the configured provider'); }
-    (deps.run ?? ((command, commandArgs, options) => execFileSync(command, commandArgs, options)))(process.execPath, [applier], { cwd: root, env: { ...process.env, GRAPHYARD_URL: config.url }, stdio: ['ignore', 'inherit', 'inherit'] });
+    await (deps.run ?? defaultChildRun)(process.execPath, [applier], { cwd: root, env: { ...process.env, GRAPHYARD_URL: config.url }, stdout: 'inherit', stderr: 'inherit' });
     return { ...preview, applied: true, next: 'Redeploy the service so the roster takes effect, then graphyard master status' };
   }
   return restartMasterLoop(root, config, await deps.daemonLock());

@@ -54,10 +54,11 @@ export class Store {
       RETURNING *`, [token]);
     return result.rows[0] as { work_id: string; token: string; attempts: number } | undefined;
   }
-  async finishJob(id: string, token: string, error?: string, retry = false) {
+  /** `settleSeconds` is the re-poll delay after a success; the caller slows it for candidates not about to merge. */
+  async finishJob(id: string, token: string, error?: string, retry = false, settleSeconds = 20) {
     await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END,
-      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry]);
+      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $3::text IS NULL THEN make_interval(secs => $5::int) ELSE interval '45 seconds' END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, settleSeconds]);
   }
   /**
    * Parks a job that needs a permission the App does not hold. Webhook wakeups move
