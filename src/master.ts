@@ -18,6 +18,7 @@ import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } f
 import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
+import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue, refusedReconciliation, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
@@ -468,7 +469,11 @@ async function atomicPrivateText(file: string, value: string) {
   await chmod(file, 0o600);
 }
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser }, fetcher: typeof fetch = fetch, dependencies: { probe?: FilesystemProbe } = {}) {
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser;
+  /** Install the loop's supervisor (GY-114). Explicit, never implied: only `master init` passes it. */
+  installSupervisor?: boolean;
+  /** Replace an installed unit that runs a different loop; `master init --replace-supervisor`. */
+  replaceSupervisor?: boolean }, fetcher: typeof fetch = fetch, dependencies: { probe?: FilesystemProbe; supervisorHost?: LoopSupervisorHost } = {}) {
   const url = serverOrigin(input.url); const token = input.token.trim();
   const workerConnection = await loadConnection(root);
   if (workerConnection && workerConnection.url !== url) throw new Error('Worker connection uses another Graphyard server; migrate the repository connection before master setup');
@@ -516,9 +521,38 @@ export async function setupMaster(root: string, input: { url: string; token: str
   const { writeFile, rename } = await import('node:fs/promises');
   await writeFile(temporary, instructions, { mode, flag: 'wx' }); await rename(temporary, instructionsFile); await chmod(instructionsFile, mode);
   await saveDiscovery(root);
+  /**
+   * The loop's supervisor is installed here, by setup, rather than left to a guide somebody may
+   * follow end to end and still finish with an unsupervised loop (GY-114). The unit is written
+   * from this installation's own checkout, launcher and interval, enabled so it returns after a
+   * reboot, and started now; a second run of setup finds the same content and changes nothing.
+   *
+   * A host that cannot be given one is told so, with what its operator must run instead. Neither
+   * outcome fails setup: the configuration is already written, and an install that refused here
+   * would leave the master with no configuration at all rather than with an honest gap.
+   *
+   * Installing it is an explicit operator action and never a side effect: it happens only when
+   * the caller passed `installSupervisor: true`, which `master init` does and nothing else — not
+   * a library caller that omitted the option, not the test suite, not a worker, reviewer or
+   * producer checkout. The installer itself refuses, by name, a WorkingDirectory that is not this
+   * configured coordinator checkout on a durable path, an installed unit that runs a different
+   * loop unless `replaceSupervisor` was passed, and any test-suite reach outside the temporary
+   * directory. A refusal is reported like every other outcome and never fails setup.
+   * `master status` verifies supervision on the host itself either way.
+   */
+  const supervisor: LoopSupervisorInstallation | null = input.installSupervisor === true ? await installLoopSupervisor(
+    { root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds }, dependencies.supervisorHost ?? {}, { replace: input.replaceSupervisor === true },
+  ).catch(error => ({ supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
+    reason: `Installing the loop's supervisor failed: ${error instanceof Error ? error.message : String(error)}`,
+    instruction: unsupervisedInstruction({ root, cliPath: config.cliPath }) })) : null;
   // A permission the installed App lacks is announced here with its exact migration steps, not
   // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
   const { attention, appPermissions, delegationLimits, production } = controlPlaneAttention(status);
+  // A loop nothing restarts is an installation fact like any other, so it is stated where the rest
+  // are — in the same words `master status` will keep using — rather than left for whoever
+  // eventually notices the silence. A refused install is stated with what the operator runs.
+  const supervision = !supervisor ? [] : supervisor.wrote === 'refused' ? [`${supervisor.reason}: ${supervisor.instruction}`] : loopSupervisionAttention(supervisor).map(gap => `${gap.text}: ${gap.next}`);
+  attention.push(...supervision);
   // Each installation fact keeps its own remedy: a permission shortfall is a GitHub migration, a
   // capacity variable is a deployment setting, and production lag is a deploy to confirm.
   const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? 'Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps)'
@@ -535,7 +569,10 @@ export async function setupMaster(root: string, input: { url: string; token: str
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
-    next: `${remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1)}; give the master its agent identities once with graphyard master autonomy --admin-token-stdin --apply` };
+    // What setup installed for the loop, in the words of the commands it ran.
+    supervisor: supervisor ? { supported: supervisor.supported, unit: supervisor.unit, unitPath: supervisor.unitPath, installed: supervisor.installed, enabled: supervisor.enabled,
+      active: supervisor.active, linger: supervisor.linger, state: supervisor.wrote, refused: supervisor.refused, performed: supervisor.performed, reason: supervisor.reason, instruction: supervisor.instruction } : null,
+    next: `${supervision.length ? `${supervision[0]}. Then ${remedy ? `${remedy}, then ${start}` : start}` : remedy ? `${remedy}, then ${start}` : start[0].toUpperCase() + start.slice(1)}; give the master its agent identities once with graphyard master autonomy --admin-token-stdin --apply` };
 }
 
 export async function saveWorkerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
@@ -1310,7 +1347,7 @@ export const sessionActivity = (record: Pick<LaunchAcknowledgement, 'acknowledge
 export const activeStates = ['working', 'blocked'];
 export const screenDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 32);
 /** The session's terminal, as text; null when Herdr cannot read it. */
-export function readSessionScreen(target: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), lines = 80) {
+export function readSessionScreen(target: string, run: (command: string, args: string[]) => string = agentRuntimeRun(), lines = 80) {
   try { return String(run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
 }
 const screenDecoration = /^[\s─━═╌┄┈│┃╭╮╰╯┌┐└┘├┤=_*·•-]*$|^[❯⏵✻✶✳✢·]|bypass permissions on|shift\+tab to cycle|for shortcuts|esc to interrupt|\? for help/;
@@ -2455,12 +2492,27 @@ function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null)
     predictedTip: placement.tip, validated: placement.current, waitMs: placement.waitMs, waitMinutes: Math.floor(placement.waitMs / 60_000),
     enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, reasons: placement.reasons, binding };
 }
-export function herdrJson(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) {
+/**
+ * Every call into the agent runtime is bounded (GY-114). These are synchronous subprocess calls:
+ * while one is outstanding the caller's event loop runs nothing, so a runtime that never answers
+ * does not merely slow a step down - it wedges the whole cycle and leaves the process unable to
+ * answer the SIGTERM its own supervisor sends. A timeout turns that into a failed step, which the
+ * cycle records and moves past, well inside the unit's stop timeout.
+ *
+ * The bound is the same 90s the coordination loop already applies to the commands it runs itself,
+ * and it sits above every inner wait Herdr is asked for (a 30s `agent start`, three 20s prompt
+ * deliveries), so it can only fire on a runtime that has stopped answering.
+ */
+export const agentRuntimeTimeoutMs = 90_000;
+export const agentRuntimeRun = (timeoutMs: number = agentRuntimeTimeoutMs) => (command: string, args: string[]) =>
+  String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL' }));
+
+export function herdrJson(args: string[], run: (command: string, args: string[]) => string = agentRuntimeRun()) {
   const parsed = JSON.parse(run('herdr', args));
   if (parsed.error) throw Object.assign(new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`), { herdrCode: typeof parsed.error.code === 'string' ? parsed.error.code : undefined });
   return parsed.result ?? parsed;
 }
-function herdrRun(args: string[], run: (command: string, args: string[]) => string = (command, commandArgs) => execFileSync(command, commandArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) { run('herdr', args); }
+function herdrRun(args: string[], run: (command: string, args: string[]) => string = agentRuntimeRun()) { run('herdr', args); }
 export function listHerdrAgents(run?: (command: string, args: string[]) => string): HerdrAgent[] { return herdrJson(['agent', 'list'], run).agents ?? []; }
 export function observeHerdrAgents(run?: (command: string, args: string[]) => string) {
   try { return { agents: listHerdrAgents(run), available: true, reason: null }; }
@@ -2516,6 +2568,7 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessP
     { rule: 'Read(./.graphyard/master.json)', why: 'Read the master configuration the loop runs from: profiles, agent environments, run settings. It holds paths to credentials, never their values. Changing it goes through master config, which writes only the fields the master owns.' },
     { rule: 'Bash(systemctl --user restart graphyard-master.service)', why: 'Restart the durable loop after a configuration or CLI change; it resumes from its persisted cursors. The unit is exact, so no other unit can be named.' },
     { rule: 'Bash(systemctl --user start graphyard-master.service)', why: 'Start the durable loop when master status reports it is not running.' },
+    { rule: 'Bash(systemctl --user enable --now graphyard-master.service)', why: 'Re-enable and start the loop\'s own supervisor when master status reports the unit installed but disabled; without it nothing restarts the loop after a crash or a reboot. The unit is exact, so no other unit can be enabled.' },
     { rule: 'Bash(systemctl --user stop graphyard-master.service)', why: 'Stop the durable loop before an upgrade; nothing is lost, its cursors are persisted before every action.' },
     { rule: 'Bash(systemctl --user status graphyard-master.service)', why: 'Read whether the durable loop is running.' },
     { rule: 'Bash(systemctl --user daemon-reload)', why: 'Reload the loop\'s user unit after it is edited.' },
@@ -2802,7 +2855,11 @@ function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
   delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_MASTER_TOKEN; delete env.GRAPHYARD_REQUEST_ID;
   return env;
 }
-const workerCommand: WorkerCommand = (command, args, options = {}) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] });
+// A worker launch runs the Graphyard CLI to claim and to build the assigned worktree, which on a
+// large repository is the slowest thing the dispatcher waits on; it is bounded well above that
+// rather than at the runtime bound, so a slow checkout is never mistaken for a hung one.
+export const workerLaunchTimeoutMs = 600_000;
+const workerCommand: WorkerCommand = (command, args, options = {}) => execFileSync(command, args, { timeout: workerLaunchTimeoutMs, ...options, encoding: 'utf8', stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'] });
 
 export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);

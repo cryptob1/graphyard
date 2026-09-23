@@ -1821,7 +1821,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 
 | Command | Purpose |
 | --- | --- |
-| `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
+| `master init --token-stdin [--browser-profile PROFILE] [--replace-supervisor]` | Install the operating mode and, run by an operator from the coordinator checkout, the loop's systemd user unit; name the operator's browser profile; `--replace-supervisor` takes over a unit that runs another checkout or launcher |
 | `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
 | `master registry` | The fleet the control plane holds: every account with its runtime, model, roles, live sessions, quota, reset and ineligible reason ([the agent registry](#the-agent-registry)) |
 | `master registry propose [--directory DIR] [--apply]` | Discover the agent CLIs logged in on this host and propose (or store) the runtimes, models, accounts and roles for them |
