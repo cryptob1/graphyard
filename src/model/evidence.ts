@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Work } from './work.js';
 import type { CiRun } from './ci-proofs.js';
 import { evidenceBindsCandidate } from './carry.js';
+import { reservedForAttestation, type ClosedQuestionRecord } from './closed-question.js';
 import { inheritedObligations } from './bootstrap.js';
 
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
@@ -47,6 +48,13 @@ export interface Evidence {
    * collected; `sourceSha` is the head it measured. A later live attempt for the same proof
    * supersedes the selection this entry is bound to, so a later failure always wins.
    */
+  /**
+   * GY-109: this record is a closed-question answer the control plane asked for, not a producer's
+   * measurement: the question, the answers offered, the hash of the bound state, the responder and
+   * its version, the answer, its probability and the threshold applied. `producer` names the
+   * responder. It is evidence only — see `answerCounts` and model/closed-question.ts.
+   */
+  closedQuestion?: ClosedQuestionRecord;
   reuse?: { decisionId: string; evidenceId: string; candidateId: string; requestId: string; attemptId: string; sequence: number; sourceSha: string; observedAt: string; policy: { id: string; revision: number } };
   /**
    * GY-135: the producer's run of the same proof against a tree with its criterion's behaviour
@@ -102,13 +110,24 @@ export function evidenceIndependenceRefusals(work: Work, now = new Date()): stri
   return refusals;
 }
 
+/**
+ * A closed-question answer counts only as the verdict it claims to be: confident against the
+ * threshold recorded with it, and never for a proof that only an approved attest decision — a
+ * two-party decision — may establish. Every other record is unaffected.
+ */
+export function answerCounts(work: Pick<Work, 'producerProofs'>, evidence: Evidence) {
+  const answer = evidence.closedQuestion;
+  if (!answer) return true;
+  return answer.verdict === 'decided' && answer.probability >= answer.threshold && !reservedForAttestation(work, evidence.proof);
+}
+
 // Shared by gates and human-facing proof previews. A record binds the candidate exactly, or
 // carried across a Graphyard-authored tip (see carry.ts); nothing else applies.
 export function currentEvidence(work: Work, proof: string, now = new Date()): Evidence | undefined {
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
   const validation = work.validation?.[proof];
   const implementers = implementerIdentities(work);
-  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !e.revocation && !implementers.includes(e.producer) && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision
+  const latest = work.evidence.filter(e => e.proof === proof && e.trusted && !e.revocation && answerCounts(work, e) && !implementers.includes(e.producer) && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;

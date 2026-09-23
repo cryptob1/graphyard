@@ -12,6 +12,7 @@ import type { DelegationLimitReport } from './limits.js';
 import type { BuildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import type { Principal } from '../model.js';
+import type { Responder } from '../closed-question.js';
 
 /** Everything the assembled control plane owns, handed to every route. */
 export interface Services {
@@ -27,6 +28,8 @@ export interface Services {
   validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents; proofGrants: ProofGrants; productionDelivery: ProductionDelivery;
   /** The fleet: runtimes, accounts, models and roles, and the sessions chosen from them. */
   agentRegistry: AgentRegistry;
+  /** The closed-question responder (GY-109), or null when none is configured and every such proof takes its ordinary path. */
+  responder: Responder | null;
 }
 
 /** The response was written by the handler itself (raw bytes, or a status other than 200). */

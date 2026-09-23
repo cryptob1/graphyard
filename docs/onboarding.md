@@ -303,6 +303,58 @@ accounts have quota left, or add a profile on another account. See
 [per-role concurrency](master-agent.md#automatic-dispatch-at-submit) for what the dispatcher does
 with the limit.
 
+### Judge mechanical criteria with a closed question
+
+Some criteria are mechanical — "does the diff add the flag the criterion names", "does the guide
+state the timeout the code uses" — and a producer session spends most of an hour reading the
+repository to answer a yes-or-no question. An item may declare such a proof answerable as a
+closed question in its `closedQuestions` list: the criterion and proof, the question, the closed
+set of answers offered (`criteria`), which of them means the proof passes (`pass`), and the state
+it is asked against (`state`: a `file` in the candidate's tree, the `changed-files` list, the
+`criterion` text). Before the loop launches a producer session for a proof group, it asks the
+control plane (`POST /api/work/GY-N/closed-question`) to judge each declared proof. The control
+plane reads that state at the exact candidate head, hashes it, asks the configured responder,
+and records the answer as evidence carrying the question, the answers offered, the state hash,
+the responder and its version, the answer, its probability and the threshold applied — enough
+for anyone to assemble the same state, check the hash and ask again. A confident answer decides
+the proof and no session is launched for it.
+
+An answer below the threshold (0.9 unless the responder sets another; a question may raise it,
+never lower it) is never a verdict. It is recorded untrusted, with an escalation that names its
+probability, and the proof takes the path it would otherwise have used: the producer session is
+launched for it. An answer is evidence, never an approval: a `manual:` proof that only an
+approved `attest` decision establishes is never judged by one, an item parked on a human-only
+decision refuses judgement until the human answers, and an item with an open scope request its
+criteria do not name refuses it until an operator decides the scope.
+
+The responder is configuration, not a vendor dependency. Set `GRAPHYARD_RESPONDER` on the control
+plane to a JSON object naming it: a local program, run without a shell, that reads one request on
+stdin and writes `{"answer": …, "probability": …}` on stdout —
+
+```json
+{ "kind": "command", "id": "local-rules", "version": "2026.09.1", "command": ["/opt/judge/bin/judge", "--model", "/opt/judge/model"] }
+```
+
+— or an in-house or chosen HTTP endpoint (`{"kind": "http", "id": …, "version": …, "url": …,
+"tokenVariable": "JUDGE_TOKEN"}`, the bearer read from that variable, never stored in the
+configuration). Replacing it is changing the variable; with none set, every closed-question proof
+takes its ordinary path and delivery never depends on the responder being up.
+
+**State the responder may never see.** Anything an untrusted party authored is excluded by
+configuration: `exclude.sources` defaults to `pull-request-body` and `comments` — text anyone who
+can open or comment on a pull request writes — and `exclude.paths` lists repository paths
+(exact, or a directory ending in `/`) such as vendored third-party code. A question whose state
+includes an excluded source is refused before the responder is asked, naming the exclusion, and
+the proof takes its ordinary path. Admit an untrusted source only deliberately, by listing
+`exclude.sources` without it.
+
+Measure before adopting. `accuracyStudy` in `src/model/closed-question.ts` takes past candidates
+of this repository whose real outcome is known, the responder's answer for each, and what the
+producer session concluded, and reports agreement, disagreement, how many answers escalated and
+every case where the answer was confident and wrong. It recommends adoption only over at least
+twenty candidates with no confident wrong answer and agreement at least as high as the sessions'
+— this repository's number, not the vendor's.
+
 ### Profiles by hand
 
 For a trusted worker on the coordinator host, start from a template:

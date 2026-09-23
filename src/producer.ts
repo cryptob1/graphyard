@@ -10,6 +10,7 @@ import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { readReviewLedger } from './reviewer.js';
+import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 
 /**
@@ -138,6 +139,41 @@ export function independentProducerProfiles(work: Work, profiles: ProducerProfil
 }
 
 /**
+ * Closed-question proofs (GY-109). Before a session is launched for a group, every proof of it
+ * that its criterion declares answerable as a closed question is put to the control plane, which
+ * asks the configured responder against the bound candidate state and records the answer as
+ * evidence. A decided proof needs no session. An answer below the threshold — or no answer at all:
+ * no responder configured, a refusal, an unreachable server — leaves the proof on its ordinary
+ * path, so the session is launched for exactly the proofs no answer decided.
+ */
+export type ClosedQuestionJudge = (proof: string) => Promise<{ verdict: 'decided' | 'escalated'; escalation?: { reason: string } | null }>;
+export async function judgeClosedQuestions(work: Work, binding: Pick<ProducerBinding, 'proofs'>, judge: ClosedQuestionJudge) {
+  const decided: string[] = [], escalated: { proof: string; reason: string }[] = [];
+  for (const proof of binding.proofs.filter(entry => closedQuestionFor(work, entry))) {
+    try {
+      const judged = await judge(proof);
+      if (judged.verdict === 'decided') decided.push(proof);
+      else escalated.push({ proof, reason: judged.escalation?.reason ?? 'the answer was below the threshold' });
+    } catch (error) { escalated.push({ proof, reason: error instanceof Error ? error.message : String(error) }); }
+  }
+  return { decided, escalated, remaining: binding.proofs.filter(proof => !decided.includes(proof)) };
+}
+/** The control plane's judge, called with the producer's own credential: it triggers the judgement and supplies nothing it rests on. */
+export const httpClosedQuestionJudge = (url: string, token: string, binding: Pick<ProducerBinding, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, fetcher: typeof fetch = fetch): ClosedQuestionJudge => async proof => {
+  const response = await fetcher(`${url}/api/work/${encodeURIComponent(binding.key)}/closed-question`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `closed-question:${binding.key}:${binding.sha}:${binding.baseSha}:${binding.policyRevision}:${proof}` },
+    body: JSON.stringify({ proof, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision }), signal: AbortSignal.timeout(150_000),
+  });
+  const body = await response.json().catch(() => ({})) as any;
+  if (!response.ok) throw new Error(`closed question for ${proof} refused (${response.status}): ${body?.error ?? 'no reason given'}`);
+  return body;
+};
+/** Thrown instead of launching when every proof of the group was decided by a closed-question answer. */
+export class ClosedQuestionsDecided extends Error {
+  constructor(readonly work: string, readonly proofs: string[]) { super(`No producer session launched for ${work}: ${proofs.join(', ')} ${proofs.length === 1 ? 'was' : 'were'} decided by a closed-question answer recorded as evidence`); }
+}
+
+/**
  * `checkout` is the session directory a launch allocated under the managed worktree root; a
  * session record carries its own, so the request rebuilt from a record (the GY-93 re-prompt) names
  * the directory the session was launched into. Without either the prompt names the directory a
@@ -168,10 +204,12 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   start?: StartBounds;
   /** How the managed worktree root's volume is read; the kernel's own answer by default. */
   filesystem?: FilesystemProbe;
+  /** How closed-question proofs are judged before the launch (GY-109); the control plane's route by default. */
+  judge?: ClosedQuestionJudge;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   const config = await loadMasterConfig(root);
-  const binding = assertProducerCandidate(work, request, observedAt);
+  let binding = assertProducerCandidate(work, request, observedAt);
   if (!config.producers.some(item => item.name === profile.name)) throw new Error(`Unknown producer profile ${profile.name}`);
   if (!independentProducerProfiles(work, [profile]).length) throw new Error(`Producer principal ${profile.principal} has held an assignment on ${work.key}; its evidence would not be trusted`);
   const ledger = await readProducerLedger(root);
@@ -189,7 +227,14 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Producer agent ${agentName} is already visible in Herdr`);
   const sessions = profileSessions(profile, agents, ledger.producers);
   if (!sessions.free) throw new Error(profileAtLimit('Producer', profile, sessions));
-  await readProducerCredential(root, profile.credentialFile);
+  const credential = await readProducerCredential(root, profile.credentialFile);
+  // A closed question answers in seconds what a session takes most of an hour to; the session is
+  // launched only for the proofs no confident answer decided.
+  if (binding.proofs.some(proof => closedQuestionFor(work, proof))) {
+    const judged = await judgeClosedQuestions(work, binding, dependencies.judge ?? httpClosedQuestionJudge(config.url, credential, binding));
+    if (!judged.remaining.length) throw new ClosedQuestionsDecided(work.key, judged.decided);
+    binding = { ...binding, proofs: judged.remaining };
+  }
   // The group is part of the request: a producer session answers one proof group of one item, so a
   // relaunch for that group replaces its own predecessor instead of being refused by it.
   const selected = await selectAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key, group: binding.group });
