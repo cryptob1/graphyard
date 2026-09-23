@@ -14,6 +14,7 @@ import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
+import { stalledItems } from './model/action-account.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, saveReviewLedger } from './reviewer.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
@@ -799,6 +800,11 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
   context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals'] } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail });
+  // An open item the control plane names no action for and nothing is moving. The loop cannot
+  // clear it — that is what makes it a subject rather than an action: counted here, its wait
+  // accumulates against the silence bound instead of being absent from every measure the loop
+  // keeps, which is how an item used to hold a failing gate for hours with nobody told (GY-106).
+  const stalled = new Map(stalledItems(work, new Date(now), 0).map(entry => [entry.key, entry]));
   for (const item of work) {
     // A routine decision is the one subject a delivered item can still raise: containment recovery.
     // It stays a subject until it is applied. A decision sitting with an approver is the pipeline
@@ -812,6 +818,8 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
     if (withheld) add('decision', item, withheld.reason.slice(0, 500));
     if (item.stage === 'done') continue;
+    const stall = stalled.get(item.key);
+    if (stall) add('escalation', item, `${item.key} holds its ${stall.gate ?? 'unevaluated'} gate with no action, no dependency and no recorded human need: ${stall.refusal ?? stall.detail}`);
     try { assertDispatchable(item, work, new Date(now).toISOString()); add('dispatch', item, `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
     if (request && !request.decision && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)

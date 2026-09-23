@@ -9,6 +9,7 @@ import { age } from '../format';
 import { formatAge, formatDuration } from '../duration';
 import { homeNumbers } from '../home-numbers';
 import { byAttention, phaseLabel, phaseOf, phases, plainStatus, statusHeld, type Phase } from '../plain-status';
+import { stalledCards } from './actionless';
 import type { Dashboard } from './dashboard';
 
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -29,7 +30,12 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const numbers = homeNumbers(work, now);
   const match = (w: Work) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase()) && (!phase || phaseOf(w, now) === phase) && (!filter || w.stage === filter);
-  const open = byAttention(work.filter(w => w.stage !== 'done' && match(w)), now);
+  const openAll = work.filter(w => w.stage !== 'done' && match(w));
+  // Items nobody has worked out a next step for, and nothing else is moving: listed first and on
+  // their own, because every other list on this page is a list of work that is going somewhere.
+  const stalls = stalledCards(openAll, now);
+  const stalled = new Set(stalls.map(card => card.item.id));
+  const open = byAttention(openAll.filter(w => !stalled.has(w.id)), now);
   const stuck = open.filter(w => plainStatus(w, now).tone === 'stuck');
   const moving = open.filter(w => plainStatus(w, now).tone !== 'stuck');
   const inProgress = moving.filter(w => !['needs-worker', 'not-started'].includes(phaseOf(w, now)));
@@ -65,6 +71,14 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
     </div>)}</div><p className="muted">Independent review/proof sessions ({status.delegation.reviewers.length}): {status.delegation.reviewers.length ? status.delegation.reviewers.map((agent: any) => <span className="session" key={agent.id}>{agent.displayName ?? agent.id} <SessionBadge kind={agent.sessionKind}/></span>) : 'none configured'}</p></section>}
     <div className="list-tools"><button className="text-button" onClick={() => setTimings(v => !v)} aria-expanded={timings}>{timings ? 'Hide times' : 'Show times'}</button>{(phase || filter) && <button className="text-button" onClick={() => { setPhase(null); setFilter(null); }}>Clear filter ×</button>}<input aria-label="Search work" placeholder="Search work…" value={query} onChange={e => setQuery(e.target.value)}/><button className="text-button" aria-pressed={board} onClick={() => setBoard(v => !v)}>{board ? 'List view' : 'Board view'}</button></div>
     <div className="home-columns"><div>
+    {stalls.length > 0 && <section className="work-list attention" aria-label="Nothing is happening">
+      <h2>Nothing is happening <span className="count">{stalls.length}</span></h2>
+      <p className="muted">No next step has been worked out for these, and nothing else is waiting to move them. Somebody has to look.</p>
+      <ul className="shipped-list">{stalls.map(card => <li key={card.item.id}>
+        <button className="text-button" onClick={() => setSelected(card.item.id)}>{card.item.key} <span data-title>{card.item.title}</span></button>
+        <span className="danger-text">{card.missing} — stuck at “{phaseLabel[phaseOf(card.item, now)]}” for {formatDuration((now - Date.parse(card.heldSince)) / 60000)} with nothing to do next</span>
+      </li>)}</ul>
+    </section>}
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>Create the first work item</button>}</div>
       : board ? <div className="board">{openPhases.map(p => <div className="column" key={p}><h3>{phaseLabel[p]}</h3>{open.filter(w => phaseOf(w, now) === p).map(card)}</div>)}</div>
       : <>{list('Stuck', stuck, undefined, true)}{list('In progress', inProgress)}{list('Needs a worker', waiting)}

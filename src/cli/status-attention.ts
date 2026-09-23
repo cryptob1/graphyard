@@ -1,0 +1,58 @@
+import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
+import type { Work } from '../model.js';
+import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
+import { elapsed } from '../model/sessions.js';
+
+// The orphaned-supervisor builders live in their own module (GY-138); they are read from here too.
+export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
+
+/**
+ * Who is told what, and with which command.
+ *
+ * `master status` is an assembler over ledgers and snapshots; this is the part of it that turns
+ * one observed situation into one line addressed to somebody. Each builder answers the same three
+ * questions — what is true, how long it has been true, and whose command changes it — and keeping
+ * them together is what stops two readers of the same situation saying different things about it.
+ * Nothing here decides anything: every situation below was already decided by the control plane.
+ */
+
+/**
+ * One attention item per open worker scope request whose epoch still holds the lease: addressed
+ * to the master, naming the requested paths and the worker's reason, with the one command that
+ * approves it. A request from a lease that ended is never surfaced.
+ */
+export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
+  return snapshot.work.flatMap(work => {
+    const request = work.scopeRequest;
+    const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
+    return live ? [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}`, ...agentOwner('master', `graphyard master scope ${work.key}`) }] : [];
+  });
+}
+
+/**
+ * What an item with no action is missing, in one clause: the refusal its failing gate raised, or
+ * the account itself when no gate said anything.
+ */
+const missingFrom = (entry: ActionlessItem) => entry.refusal ?? entry.detail;
+
+/**
+ * One attention item per open item the control plane names no action for and nothing is moving.
+ *
+ * This is the state with no other reporter. An item waiting on a dependency, on the entry ahead
+ * of it in the merge queue, or on the session already building it has somewhere to be seen and
+ * something that will move it; `actionlessItems` counts those separately and they raise nothing
+ * here. What is left is an item holding a failing gate past the idle bound with no action, no
+ * dependency and no recorded human need — which was, until this, exactly as visible as an item
+ * that was fine. It is named with the gate, how long it has held it, what is missing, and who
+ * answers: the operator for a decision the project reserves for a person, and the master for the
+ * control-plane defect that a state produced no answer at all.
+ */
+export function stalledItemAttention(snapshot: { work: Work[]; now: string }, thresholdMs = stallBoundMs): AttentionItem[] {
+  return stalledItems(snapshot.work, new Date(snapshot.now), thresholdMs).map(entry => {
+    const held = `has held its ${entry.gate ?? 'unevaluated'} gate for ${elapsed(entry.heldMs)} with no action named and nothing moving it`;
+    return entry.outcome === 'human'
+      ? { subject: entry.key, text: `${entry.key} ${held}: ${missingFrom(entry)} — ${entry.detail}`, ...humanOwner('goals and priorities', entry.detail) }
+      : { subject: entry.key, text: `${entry.key} ${held}: ${missingFrom(entry)} — the control plane computed neither an action, a dependency nor a human need for this state, which is a defect in the control plane rather than in the item (${entry.detail})`,
+        ...agentOwner('master', `graphyard master create files the control-plane defect that left ${entry.key} without an action; until it is fixed, graphyard master status names no step for this item and nothing will claim it`) };
+  });
+}

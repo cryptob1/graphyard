@@ -8,6 +8,8 @@ import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type 
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { actionlessItems, stallBoundMs } from '../model/action-account.js';
+import { nameOrphanSupervisors, scopeRequestAttention, stalledItemAttention } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -18,29 +20,17 @@ import { setupHealth } from './master-setup.js';
 import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
-import { nameOrphanSupervisors } from './orphan-supervisors.js';
 import { contextOverflows } from '../model/escalation-context.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { terminalDecisions } from './decision-report.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+// The attention builders live beside each other in `status-attention.ts`; the report reads them
+// from here, as does everything that was reading them from here before the split.
+export { nameOrphanSupervisors, orphanSupervisorAttention, scopeRequestAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
-export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
 export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
-
-/**
- * One attention item per open worker scope request whose epoch still holds the lease: addressed
- * to the master, naming the requested paths and the worker's reason, with the one command that
- * approves it. A request from a lease that ended is never surfaced.
- */
-export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
-  return snapshot.work.flatMap(work => {
-    const request = work.scopeRequest;
-    const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
-    return live ? [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}`, ...agentOwner('master', `graphyard master scope ${work.key}`) }] : [];
-  });
-}
 
 /**
  * One attention item per requested decision whose approver could not be launched (GY-101). A
@@ -140,10 +130,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
+  // An open item the control plane names no action for. Those waiting on another item or on a
+  // live session are accounted and raise nothing; what is left is named, with what is missing.
+  const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
+  const stalledItems = stalledItemAttention(snapshot);
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
   // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
   const stalled = stalledActionAttention(snapshot);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...stuck.attentionItems, ...stalled, ...overlong, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...stuck.attentionItems, ...stalledItems, ...stalled, ...overlong, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's.
   attentionItems.unshift(...loopItems, ...dispatchItems);
@@ -168,7 +162,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
   return { ...status, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + overflow.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      // Items with no action, split the way a reader has to read them: one waiting on another
+      // item is the pipeline working, one with nothing moving it is the pipeline stopped.
+      actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + overflow.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    // Every open item the control plane names no action for, with the account it names instead
+    // and how long it has held its failing gate; the bound the stalled ones were judged against.
+    actionless: { bound: stallBoundMs, items: actionless },
     terminalDecisions: decisions.listed, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
