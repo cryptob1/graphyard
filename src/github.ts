@@ -74,6 +74,7 @@ export class GitHub {
     this.usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map(), remaining: u.remaining, reset: u.reset };
   }
   private blobs = new Map<string, string | null>();
+  private histories = new Map<string, Set<string> | null>();
   private preflightState: AppPermissionReport | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
@@ -291,6 +292,27 @@ export class GitHub {
     }
     return contained;
   }
+  /**
+   * The commits `head` holds that `base` does not, or null when GitHub's list is truncated and
+   * ancestry must be asked per commit. Immutable for a pair of SHAs, so asked once.
+   */
+  async historySince(base: string, head: string): Promise<Set<string> | null> {
+    const key = `${base}...${head}`;
+    const pinned = /^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key);
+    if (pinned && this.histories.has(key)) return this.histories.get(key)!;
+    const shas = new Set<string>(); let total = 0;
+    for (let page = 1; page <= 3; page++) {
+      const comparison = await this.request(`/compare/${base}...${head}?per_page=100&page=${page}`);
+      // No commit list means no shortcut: containment is then asked per commit, exactly as before.
+      if (!Array.isArray(comparison?.commits) || !Number.isSafeInteger(comparison?.total_commits)) return null;
+      total = comparison.total_commits;
+      for (const commit of comparison.commits) if (typeof commit?.sha === 'string') shas.add(commit.sha);
+      if (comparison.commits.length < 100 || shas.size >= total) break;
+    }
+    const result = shas.size >= total ? shas : null;
+    if (pinned) { this.histories.set(key, result); if (this.histories.size > 2048) this.histories.delete(this.histories.keys().next().value!); }
+    return result;
+  }
   /** The base a published speculative tip was built on, when the head is that tip; otherwise null. */
   private speculativeBase(work: Work, headSha: string): string | null {
     const speculation = work.queue?.speculation;
@@ -424,9 +446,17 @@ export class GitHub {
     const ahead = new Set(predicted ? speculation!.predecessors : []);
     // One compare per peer, asked a few at a time: asked in turn they held an observation past the
     // merge window's 25 seconds, so a candidate with many open peers could never be authorized in time.
+    // One compare lists what the head adds over the base; a peer head is in the head's history when it
+    // is on that list, or else only when the base itself holds it — a question every candidate on the
+    // same base shares. Asked per peer against each head, this was ~N² compares per observation round.
+    const added = await this.historySince(base, head);
     const containment = await boundedMap(open, peerContainmentConcurrency, async peer => {
       if (ahead.has(peer.key)) return false;
-      for (const sha of ownHeads(peer)) if (await this.contains(sha, head)) return true;
+      for (const sha of ownHeads(peer)) {
+        if (!added) { if (await this.contains(sha, head)) return true; continue; }
+        if (added.has(sha)) return true;
+        if (await this.contains(sha, base) && await this.contains(sha, head)) return true;
+      }
       return false;
     });
     for (const [index, peer] of open.entries()) {

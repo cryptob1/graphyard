@@ -180,3 +180,18 @@ test('a suspended installation holds every feature and a permission refusal repo
   assert.match(github.permissionShortfall('observation')!, /installation is suspended; restore it at https:\/\/github\.com\/settings\/installations\/2/);
   await assert.rejects(github.request('/pulls/1'), /403.*installation is suspended/);
 });
+
+test('a head\'s added history is one compare per SHA pair, and a truncated list falls back to per-commit ancestry', async t => {
+  const github = client(); const base = 'a'.repeat(40), head = 'b'.repeat(40), peer = 'c'.repeat(40); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: unknown) => {
+    calls++; assert.match(String(url), new RegExp(`/compare/${base}\\.\\.\\.${head}\\?per_page=100&page=1$`));
+    return new Response(JSON.stringify({ total_commits: 2, commits: [{ sha: peer }, { sha: head }] }));
+  });
+  const added = await github.historySince(base, head);
+  assert.deepEqual([...added!].sort(), [head, peer].sort());
+  assert.equal(await github.historySince(base, head), added, 'a SHA pair is asked once');
+  assert.equal(calls, 1);
+  t.mock.restoreAll();
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ total_commits: 500, commits: [{ sha: peer }] })));
+  assert.equal(await github.historySince(head, base), null, 'a truncated list gives no shortcut');
+});
