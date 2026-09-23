@@ -1406,7 +1406,39 @@ The trade-off is real: an `auto` session runs whatever it decides to run inside 
 
 `master worker add` and `master reviewer add` print the resolved launch contract, so what a profile will start with is visible before it starts.
 
-Each of these is the runtime's broadest non-interactive mode. Codex keeps its sandbox, widened to exactly what the role needs: network access for every role, the repository's shared Git directory for a worker (its worktree commits there), and its own session directory under the [managed worktree root](#the-managed-worktree-root) plus that Git directory for a producer or a reviewer (a producer builds in a detached worktree there; a reviewer may read the exact head from one). The master session gets the same treatment: `master start` launches it with its runtime's broadest mode, Codex widened to the private state beside the coordinator credential. Role credentials do not change with it — a worker still holds only its worker credential file, a reviewer only its hour-long reviewer token, a producer only its producer credential.
+Each of these is the runtime's broadest non-interactive mode. Codex keeps its sandbox, widened to exactly what the role needs: network access for every role, its worktree's own Git admin directory and the repository's shared Git directory for a worker (see [Worker sandbox](#worker-sandbox)), and its own session directory under the [managed worktree root](#the-managed-worktree-root) plus that Git directory for a producer or a reviewer (a producer builds in a detached worktree there; a reviewer may read the exact head from one). The master session gets the same treatment: `master start` launches it with its runtime's broadest mode, Codex widened to the private state beside the coordinator credential. Role credentials do not change with it — a worker still holds only its worker credential file, a reviewer only its hour-long reviewer token, a producer only its producer credential.
+
+### Worker sandbox
+
+A worker must be able to run every command Graphyard requires of it: edit and commit, `graphyard sync GY-N` before every push, and push. Those commands write three places, and a linked worktree keeps two of them outside itself:
+
+| Path | Written by |
+| --- | --- |
+| the assigned worktree, `.graphyard/worktrees/GY-N-E` | edits, generated files, the session's launch files |
+| its Git admin directory, `.git/worktrees/GY-N-E` in the repository | the worktree's index (`git add`), `HEAD` and its reflog (every commit), `FETCH_HEAD` (`git fetch`), `MERGE_HEAD` (`git merge`) |
+| the shared Git directory, `.git` | objects and refs of every commit, fetch and push |
+
+What each runtime needs, and how the launcher grants it:
+
+| Runtime | Sandbox | How the three paths are granted |
+| --- | --- | --- |
+| Codex | `--sandbox workspace-write` | The session starts in the worktree, which is the sandbox's own workspace root. The launcher adds `--add-dir` for the worktree's admin directory and for the shared Git directory, each written relative to the worktree (`../../../.git/worktrees/GY-N-E`, `../../../.git`) so the typed launch line stays inside its 512-byte bound. Both grants are needed: Codex keeps every `.git` under a writable root read-only, following a worktree's `gitdir:` pointer, so granting `.git` alone leaves `.git/worktrees/GY-N-E` read-only, and only a grant of that exact path lifts it. |
+| Claude Code, Cursor, opencode | none; the session runs as the operator's user | Nothing to grant. The paths only have to be writable by that user. |
+| Muse | Muse's own OS sandbox, configured by the profile's `agentArgs` | Graphyard generates nothing; the profile must let it write all three paths. |
+
+A profile that sets its own Codex sandbox flags keeps them: the grants are added only under `workspace-write`, and a profile using `danger-full-access` needs none.
+
+The launcher proves the grant instead of assuming it. After the worktree exists and before the Herdr tab is created, it writes and removes a probe file in each of the three paths inside the sandbox the launch just built: for Codex it runs `codex sandbox` with a permissions profile stating the same policy (the workspace root and every `--add-dir` writable, `/` readable), under the account's own `CODEX_HOME`; for a runtime without a sandbox it writes from the launcher itself. A path the probe cannot write fails the launch: `master dispatch` and the loop report `Worker launch failed: the codex sandbox cannot write PATH (…)`, the claim is released like any other failed launch, and no worker session is started.
+
+A required command that fails on a refused write inside a running worker is attributed to the environment, not to the item. When `graphyard sync` fails with `Read-only file system`, `Permission denied` or `Operation not permitted`, it records the item's blocker itself — `Environment, not the item: the codex sandbox cannot write PATH, so required command 'sync GY-N' failed: …` — so the item shows that blocker, not a ready-gate refusal or an unexplained lease lapse, and `master status` names the fix: grant PATH to the worker's sandbox, then `master unblock GY-N` and dispatch again.
+
+To diagnose a worker whose required commands fail on a read-only path:
+
+1. Read the blocker (`graphyard status GY-N`) or the launch failure: both name the runtime and the exact path.
+2. Find which of the three paths it is. A path under `.git/worktrees/` is the worktree's admin directory; under `.git/objects` or `.git/refs` it is the shared Git directory.
+3. Compare the session's command line (`herdr pane read`, or the line the launcher typed) with the table above. On Codex, check an `--add-dir` resolves, from the worktree, to that path; a profile's own `--sandbox` or `-c sandbox_workspace_write.*` flags replace the generated ones.
+4. Reproduce outside the worker: from the worktree, `codex sandbox -P probe -C . -c 'permissions.probe.filesystem={":workspace_roots"="write", "PATH"="write", "/"="read"}' -- touch PATH/probe` fails the same way when PATH is not granted. The same command unsandboxed succeeding confirms it is the sandbox policy, not the filesystem.
+5. Fix the grant or the profile, then `master unblock GY-N REASON`; the next dispatch probes again before it starts the worker.
 
 ## Independent review
 

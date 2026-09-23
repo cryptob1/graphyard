@@ -11,6 +11,7 @@ import { assertRepository, discover, localDirectory, saveDiscovery } from './onb
 import { launchAuthorization, loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
 import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
+import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
 import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
@@ -1809,6 +1810,8 @@ export function workAttentionOwner(work: Work, cause: 'human-request' | 'contain
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
   const escalation = standingEscalations(work)[0];
   if (escalation) return agentOwner('master', `graphyard master decide ${key} resolve '{"trigger":"${escalation.trigger}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  // A required command the worker's sandbox refused is the launcher's to fix, never the item's (GY-134).
+  if (environmentBlocked(work.blocker)) return agentOwner('master', `Grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent.md "Worker sandbox"), then graphyard master unblock ${key} REASON and dispatch it again`);
   // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
   const first = work.gates.find(gate => !gate.passed);
   const manual = first?.name === 'acceptance' ? /(manual:[\w./-]+)/.exec(first.reasons.join(' '))?.[1] : undefined;
@@ -2733,7 +2736,11 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 type WorkerCommand = (command: string, args: string[], options?: any) => string | Buffer;
 type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies };
 
-export interface DispatchOptions { allowOverlap?: boolean; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds }
+/**
+ * `sandbox` runs the launch's sandbox probe (GY-134). The worktree prepareWorkerLaunch creates is
+ * always probed; a worktree an injected preparer supplies is probed only when a runner is given.
+ */
+export interface DispatchOptions { allowOverlap?: boolean; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec }
 export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
   const now = Date.parse(observedAt);
@@ -2760,7 +2767,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   let dependencies: PreparedWorker['dependencies'] | null = null;
-  let delivery: RequestDelivery | null = null;
+  let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -2770,12 +2777,13 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // The account is chosen before anything is claimed: a profile whose accounts are all logged out
     // or out of quota claims nothing, and the refusal names every account it skipped and why.
     selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });
-    const launch = accountLaunch(profile, selected.account, { writable: [sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    // The Git directories the worker writes are granted once its worktree exists (launchWorker).
+    const launch = accountLaunch(profile, selected.account);
     launched = launch;
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
-      try { ({ target, harness, dependencies, delivery } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start)); break; }
+      try { ({ target, harness, dependencies, delivery, sandbox } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null))); break; }
       catch (error) {
         if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
         // The registry session chosen for this launch never ran; its account is free again at once.
@@ -2786,29 +2794,37 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   }
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery,
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox,
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null) {
   const prepared = await prepare(root, work.key, profile.name);
+  // The worker writes its worktree, the worktree's own Git admin directory and the shared one;
+  // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
+  const paths = workerPaths(prepared.path);
+  const writable = writablePaths({ ...paths, commonDir: paths.commonDir ?? sharedGitDirectory(root) });
+  const args = grantWorkerPaths(launch.kind, launch.args, writable, prepared.path);
   // The worker's own rules go into its worktree before the session starts, so pushing its
   // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
   const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
   const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null);
   // The worker loads its own role rules, never the master's: it may push its assigned branch.
   const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
-  let pane: string | undefined, tabId: string | undefined;
+  let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   try {
+    // A sandbox that cannot write them is a launch failure naming the path, not a worker that
+    // fails at its first sync; the claim is released below like any other failed launch.
+    if (sandboxProbe) sandbox = verifyWorkerSandbox({ ...launch, args }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
     const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
     const created = createdHerdrTab(herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request, on the runtime's command line under
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
-    const started = startAgentSession(profile.agentName, launch.kind!, pane, [...launch.args, ...sessionHarness.args], prompt, run,
+    const started = startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
       { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'] });
-    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery };
+    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) {

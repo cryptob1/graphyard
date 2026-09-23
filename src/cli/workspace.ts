@@ -11,6 +11,8 @@ import { managedInstructions } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
+import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
+import type { CliContext } from './context.js';
 import { defineCommands, workMutation } from './registry.js';
 
 /**
@@ -44,6 +46,82 @@ async function agentsRenderers(cwd: string) {
   return { managedInstructions, managedMasterInstructions, source: 'cli' };
 }
 
+const quietBranch = () => spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).stdout.trim();
+
+async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) {
+  // The canonical way to take the base branch: a merge keeps the worker's history and makes every
+  // resolution visible, and the same classifier the control plane applies at complete runs here,
+  // against the fetched tip, before anything is pushed. Files the repository declares generated
+  // are rendered afresh from the merged sources rather than merged by hand; every other conflict
+  // is the worker's, reported with the shipped items that landed it.
+  const baseBranch = String((await api('status')).baseBranch ?? 'main');
+  const cwd = process.cwd();
+  // Git's own diagnostics still reach the worker, and a failure carries them, so a refused write names its path.
+  const git = (...gitArgs: string[]) => {
+    const result = spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (result.stderr) process.stderr.write(result.stderr);
+    if (result.error || result.status !== 0) throw Object.assign(new Error(`git ${gitArgs.join(' ')} failed: ${result.stderr?.trim() || result.error?.message || `exit ${result.status}`}`), { stderr: result.stderr });
+    return result.stdout.trim();
+  };
+  const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const branch = git('symbolic-ref', '--short', 'HEAD');
+  if (!work.workspaces.some((w: any) => w.branch === branch)) throw new Error(`Run sync from a workspace branch registered for ${work.key}; ${branch} is not one`);
+  const unmerged = () => quietly('diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
+  const generated = await localGeneratedManifest(cwd);
+  // A merge the previous sync left for the worker to resolve is continued, not restarted.
+  const continuing = quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0;
+  let baseTip: string, mergeBase: string, detail = '';
+  if (continuing) { baseTip = git('rev-parse', 'MERGE_HEAD'); mergeBase = git('merge-base', 'HEAD', baseTip); }
+  else {
+    git('fetch', '--quiet', 'origin');
+    baseTip = git('rev-parse', `refs/remotes/origin/${baseBranch}`); mergeBase = git('merge-base', 'HEAD', baseTip);
+    const merge = quietly('merge', '--no-commit', '--no-edit', `refs/remotes/origin/${baseBranch}`);
+    detail = `${merge.stdout}${merge.stderr}`.trim();
+    if (merge.status !== 0 && !unmerged().length) throw new Error(`git merge failed without a conflict to resolve: ${detail}`);
+  }
+  const regenerated: string[] = [];
+  let conflicts = unmerged();
+  if (conflicts.length && generated && conflicts.some(path => generated.files.includes(path))) {
+    regenerateGenerated(cwd, generated);
+    for (const path of conflicts.filter(path => generated.files.includes(path))) {
+      if (hasConflictMarkers(await readFile(resolve(cwd, path), 'utf8'))) continue;
+      git('add', '--', path); regenerated.push(path);
+    }
+  }
+  if (conflicts.includes('AGENTS.md') && !conflicts.some(path => agentsTemplateSources.includes(path))) {
+    const conflicted = await readFile(resolve(cwd, 'AGENTS.md'), 'utf8');
+    const url = managedServerUrl(quietly('show', `${baseTip}:AGENTS.md`).stdout) ?? managedServerUrl(conflicted) ?? serverUrl;
+    const renderers = await agentsRenderers(cwd);
+    const rendered = regenerateManagedBlocks(conflicted, text => { const worker = renderers.managedInstructions(text, url); return worker.includes('<!-- graphyard-master -->') ? renderers.managedMasterInstructions(worker) : worker; });
+    if (rendered !== null) { await writeFile(resolve(cwd, 'AGENTS.md'), rendered); git('add', '--', 'AGENTS.md'); regenerated.push(`AGENTS.md (managed blocks rendered from the ${renderers.source} templates)`); }
+  }
+  conflicts = unmerged();
+  if (conflicts.length) {
+    const landed = new Set(git('rev-list', `${mergeBase}..${baseTip}`).split('\n').filter(Boolean));
+    // Attribution is a courtesy: an unreadable snapshot never hides the conflict list.
+    const all: Work[] = await api('work-snapshot').then((snapshot: any) => Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
+    const remaining = attributeConflicts(conflicts, all, sha => landed.has(sha), generated?.files ?? []);
+    print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
+      next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
+    process.exitCode = 1; return;
+  }
+  // The merged sources decide what the generated files say, whether or not they conflicted.
+  if (generated) {
+    regenerateGenerated(cwd, generated);
+    for (const path of generated.files) if (quietly('diff', '--quiet', '--', path).status !== 0 || quietly('ls-files', '--error-unmatch', '--', path).status !== 0) { git('add', '--', path); if (!regenerated.includes(path)) regenerated.push(path); }
+  }
+  if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) git('commit', '--no-edit', '--quiet');
+  else if (quietly('diff', '--cached', '--quiet').status !== 0) git('commit', '--quiet', '-m', `Regenerate generated files after sync ${work.key}`);
+  const raw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), numstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
+  const findings = localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? []);
+  const refused = findings.filter(finding => finding.refused);
+  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
+    files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
+    next: refused.length ? `Restore each listed file to origin/${baseBranch} (git checkout ${baseTip.slice(0, 12)} -- PATH; for a rename, restore the original path), commit, and rerun sync ${work.key}. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
+      : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
+  if (refused.length) process.exitCode = 1;
+}
+
 /** Local worktrees and the supervised worker launch. */
 export const workspaceCommands = defineCommands([
   {
@@ -56,72 +134,18 @@ export const workspaceCommands = defineCommands([
       '                                list every file outside plannedFiles that no longer matches',
       '                                the base; run before every push',
     ],
-    async run({ api, print, base: serverUrl }, work) {
-      // The canonical way to take the base branch: a merge keeps the worker's history and makes every
-      // resolution visible, and the same classifier the control plane applies at complete runs here,
-      // against the fetched tip, before anything is pushed. Files the repository declares generated
-      // are rendered afresh from the merged sources rather than merged by hand; every other conflict
-      // is the worker's, reported with the shipped items that landed it.
-      const baseBranch = String((await api('status')).baseBranch ?? 'main');
-      const cwd = process.cwd();
-      const git = (...gitArgs: string[]) => execFileSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
-      const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      const branch = git('symbolic-ref', '--short', 'HEAD');
-      if (!work.workspaces.some((w: any) => w.branch === branch)) throw new Error(`Run sync from a workspace branch registered for ${work.key}; ${branch} is not one`);
-      const unmerged = () => quietly('diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
-      const generated = await localGeneratedManifest(cwd);
-      // A merge the previous sync left for the worker to resolve is continued, not restarted.
-      const continuing = quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0;
-      let baseTip: string, mergeBase: string, detail = '';
-      if (continuing) { baseTip = git('rev-parse', 'MERGE_HEAD'); mergeBase = git('merge-base', 'HEAD', baseTip); }
-      else {
-        git('fetch', '--quiet', 'origin');
-        baseTip = git('rev-parse', `refs/remotes/origin/${baseBranch}`); mergeBase = git('merge-base', 'HEAD', baseTip);
-        const merge = quietly('merge', '--no-commit', '--no-edit', `refs/remotes/origin/${baseBranch}`);
-        detail = `${merge.stdout}${merge.stderr}`.trim();
-        if (merge.status !== 0 && !unmerged().length) throw new Error(`git merge failed without a conflict to resolve: ${detail}`);
+    async run(context, work) {
+      // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
+      // so the item never presents as a ready-gate refusal or an unexplained lapse (GY-134).
+      try { await syncWork(context, work); }
+      catch (error) {
+        const failure = environmentFailure(error);
+        const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
+        if (!failure || epoch === undefined) throw error;
+        const reason = environmentBlocker(`sync ${work.key}`, process.env.GRAPHYARD_HERDR_AGENT_KIND, failure);
+        await workMutation(context, work)('blocked', { epoch, reason });
+        throw new Error(`${reason} Recorded as the blocker on ${work.key}.`);
       }
-      const regenerated: string[] = [];
-      let conflicts = unmerged();
-      if (conflicts.length && generated && conflicts.some(path => generated.files.includes(path))) {
-        regenerateGenerated(cwd, generated);
-        for (const path of conflicts.filter(path => generated.files.includes(path))) {
-          if (hasConflictMarkers(await readFile(resolve(cwd, path), 'utf8'))) continue;
-          git('add', '--', path); regenerated.push(path);
-        }
-      }
-      if (conflicts.includes('AGENTS.md') && !conflicts.some(path => agentsTemplateSources.includes(path))) {
-        const conflicted = await readFile(resolve(cwd, 'AGENTS.md'), 'utf8');
-        const url = managedServerUrl(quietly('show', `${baseTip}:AGENTS.md`).stdout) ?? managedServerUrl(conflicted) ?? serverUrl;
-        const renderers = await agentsRenderers(cwd);
-        const rendered = regenerateManagedBlocks(conflicted, text => { const worker = renderers.managedInstructions(text, url); return worker.includes('<!-- graphyard-master -->') ? renderers.managedMasterInstructions(worker) : worker; });
-        if (rendered !== null) { await writeFile(resolve(cwd, 'AGENTS.md'), rendered); git('add', '--', 'AGENTS.md'); regenerated.push(`AGENTS.md (managed blocks rendered from the ${renderers.source} templates)`); }
-      }
-      conflicts = unmerged();
-      if (conflicts.length) {
-        const landed = new Set(git('rev-list', `${mergeBase}..${baseTip}`).split('\n').filter(Boolean));
-        // Attribution is a courtesy: an unreadable snapshot never hides the conflict list.
-        const all: Work[] = await api('work-snapshot').then((snapshot: any) => Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
-        const remaining = attributeConflicts(conflicts, all, sha => landed.has(sha), generated?.files ?? []);
-        print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
-          next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
-        process.exitCode = 1; return;
-      }
-      // The merged sources decide what the generated files say, whether or not they conflicted.
-      if (generated) {
-        regenerateGenerated(cwd, generated);
-        for (const path of generated.files) if (quietly('diff', '--quiet', '--', path).status !== 0 || quietly('ls-files', '--error-unmatch', '--', path).status !== 0) { git('add', '--', path); if (!regenerated.includes(path)) regenerated.push(path); }
-      }
-      if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) git('commit', '--no-edit', '--quiet');
-      else if (quietly('diff', '--cached', '--quiet').status !== 0) git('commit', '--quiet', '-m', `Regenerate generated files after sync ${work.key}`);
-      const raw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), numstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
-      const findings = localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? []);
-      const refused = findings.filter(finding => finding.refused);
-      print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
-        files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
-        next: refused.length ? `Restore each listed file to origin/${baseBranch} (git checkout ${baseTip.slice(0, 12)} -- PATH; for a rename, restore the original path), commit, and rerun sync ${work.key}. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
-          : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
-      if (refused.length) process.exitCode = 1;
     },
   },
   {
