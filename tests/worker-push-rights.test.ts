@@ -53,7 +53,11 @@ test('unit:worker-may-force-with-lease-its-own-branch — the worker restores it
   for (const command of ['git push origin :foo', 'git push --del origin foo', 'git push --de origin foo', 'git push --mirr origin', 'git push --m origin', 'git push --al origin',
     `git push --fo origin ${branch}`, `git push --force-w origin ${branch}`, `git push -uf origin ${branch}`, `git push -fu origin ${branch}`, `git push origin ${branch} -uf`, `git push -ud origin ${branch}`,
     "git push --pru origin 'refs/heads/*:refs/heads/*'", `git -C . push --force origin ${branch}`, `git -c k=v push --force origin ${branch}`, 'git -C . push origin :foo', 'git -C . push --del origin foo',
-    'git -C /tmp/x push origin main', `git -C . push -f origin ${branch}`])
+    'git -C /tmp/x push origin main', `git -C . push -f origin ${branch}`,
+    // -d the way -f is matched: alone, first or last in a bundle, before or after the refs.
+    `git push -fu origin ${branch}`, 'git push origin other -fu',
+    'git push -du origin other', `git push origin ${branch} -d`, 'git push origin other -du', 'git push origin other -ud',
+    'git -C . push -du origin other', `git -C . push origin ${branch} -d`, 'git -c k=v push origin other -ud', 'git -C . push -d origin other'])
     assert.equal(decision(command), 'deny', command);
   // The base branch: denied in every form, its full ref spelling and a lease push included.
   for (const command of ['git push origin main', 'git push --force-with-lease origin main', 'git push --force-with-lease origin HEAD:main', 'git push origin HEAD:main', 'git push -u origin main',
