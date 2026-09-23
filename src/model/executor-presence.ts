@@ -1,4 +1,5 @@
 import { openActions } from './actions.js';
+import { executorRunnableKinds } from './action-kinds.js';
 import type { NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
 
@@ -17,6 +18,13 @@ import type { Work } from './work.js';
  * A pending row is *unserved* when no executor seen inside the liveness window can run its kind.
  * That is reported apart from a row waiting its turn behind other work, with how long it has
  * waited and what to start.
+ *
+ * Only a kind an executor may run at all is judged that way. `escalate` and `request-rework` are
+ * `in-step` judgments (`action-kinds.ts`): an executor is forbidden a handler for either, and the
+ * shipped one refuses the kind outright. A standing escalation is therefore never a fleet failure
+ * however long it waits — it waits on the judgment it names, which master status already reports
+ * with the command that answers it — and naming it here would report a healthy fleet as broken and
+ * offer a start command the executor rejects.
  */
 
 export interface ExecutorPresence { executor: string; host: string; principal: string; kinds: NextActionKind[]; seenAt: string; claims: number }
@@ -74,13 +82,14 @@ export const startExecutorFor = (kind: NextActionKind) => `start an executor tha
  * The pending rows nobody alive can run, judged against the executors seen inside the window. A
  * row a live executor of its kind could take is waiting its turn and is not listed, however long
  * it has waited: that is the queue's own idle report (`idleActionable`), which names a different
- * failure. Only a kind with no live executor at all is unserved.
+ * failure. A row whose kind no executor may ever run is not listed either — no fleet serves it by
+ * design. Only an executor-runnable kind with no live executor at all is unserved.
  */
 export function executorReport(all: Work[], registry: ExecutorRegistry, now: Date, liveMs = executorLiveMs): ExecutorReport {
   const live = registry.live(now, liveMs);
   const served = [...new Set(live.flatMap(entry => entry.kinds))].sort() as NextActionKind[];
   const unserved = openActions(all, now)
-    .filter(({ row }) => !served.includes(row.kind))
+    .filter(({ row }) => (executorRunnableKinds as readonly NextActionKind[]).includes(row.kind) && !served.includes(row.kind))
     .map(({ row }) => ({ key: row.key, work: row.work, id: row.id, kind: row.kind, reason: row.reason, waitedMs: Math.max(0, now.getTime() - Date.parse(row.requestedAt)), since: row.requestedAt, start: startExecutorFor(row.kind) }))
     .sort((a, b) => b.waitedMs - a.waitedMs);
   return { live, liveMs, served, unserved };

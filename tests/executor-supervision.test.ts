@@ -314,6 +314,18 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
   assert.deepEqual(before.executors.unserved.map((entry: any) => [entry.key, entry.kind]), [[item.key, 'dispatch']]);
   assert.match(before.executors.unserved[0].start, /systemctl --user start graphyard-executor@1/);
 
+  // A kind no executor may ever run is not a fleet failure. `escalate` and `request-rework` are
+  // in-step judgments: `executorRunnableKinds` forbids a handler for either and the shipped
+  // executor refuses the kind outright, so however long such a row waits it is never reported as
+  // unserved and the start command it would have carried is never offered.
+  assert.deepEqual(['escalate', 'request-rework'].filter(kind => (executorRunnableKinds as readonly string[]).includes(kind)), [], 'no executor may run an in-step judgment');
+  const backlog = await ok(operator, 'POST', 'work', { title: 'held in backlog', plannedFiles: ['src/held-in-backlog.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
+  const held = await reload(backlog.id);
+  assert.equal(held.nextAction!.kind, 'escalate', 'an item nobody released needs a judgment, not an executor');
+  assert.ok(held.actionQueue!.actions.some(entry => entry.kind === 'escalate'), 'the control plane keeps an open row for that escalation');
+  const withEscalation = await ok(coordinator, 'GET', 'actions');
+  assert.deepEqual(withEscalation.executors.unserved.map((entry: any) => [entry.key, entry.kind]), [[item.key, 'dispatch']], 'the standing escalation is not an unserved kind, however dead the fleet');
+
   // An executor that serves merge and resync polls. It is alive and visible, and the dispatch row
   // is still unserved: its kind is what nobody runs, not its place in the queue.
   const stopping = new AbortController();
@@ -377,6 +389,7 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
   assert.deepEqual(report.live, []);
   assert.deepEqual(report.served, []);
   assert.ok(report.unserved.some(entry => entry.key === item.key), 'the dispatch row is unserved once nobody alive can take it');
+  assert.deepEqual([...new Set(report.unserved.map(entry => entry.kind))], ['dispatch'], 'with the whole fleet dead the escalation is still not reported as something to start an executor for');
   const [line] = describeUnserved(report);
   assert.match(line.text, /and no executor is alive\. It is not queued behind other work — start an executor that serves/);
   // The model's own bound on the presence window, so a poll interval that fits it keeps a live
