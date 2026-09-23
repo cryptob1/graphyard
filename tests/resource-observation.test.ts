@@ -102,7 +102,7 @@ const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human
 const credential = (principal: Principal): Credential => ({ ...principal, token: `${principal.id}-${'t'.repeat(32)}` });
 let database: EmbeddedPostgres, store: Store, databaseUrl: string;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_RESOURCE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 81);
+  const port = Number(process.env.GRAPHYARD_RESOURCE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 83);
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-resources-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('resources_test');
   databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/resources_test`;
