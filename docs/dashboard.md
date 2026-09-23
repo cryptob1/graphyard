@@ -9,7 +9,7 @@ The sidebar has at most four entries.
 
 | Entry | What it holds |
 | --- | --- |
-| **Work** | The home page: open items, grouped by what needs attention; and **Needs you**, the requests only a human may answer, as a tab. |
+| **Work** | The home page: open items, grouped by what needs attention; **Needs you**, the requests only a human may answer; and **Workers**, every agent session across every item, as tabs. |
 | **Shipped** | Every delivered item, newest first, with its pull request and whether the deployment serves it. |
 | **Insights** | Shipping pulse, Flow analytics, Validation and Releases, as tabs. |
 | **Settings** | Test cases, Proof authority and Operator automation, as tabs. |
@@ -23,6 +23,25 @@ The **Agent fleet** page is opened from the fleet line under the Work heading, o
 **Work → Needs you** lists every open human-only request — a decision about goals and priorities, spending money or opening a third-party account, or issuing a credential to a person — longest wait first. Each card shows the item, the exact thing needed, which of the three decisions it is, who asked and why, how long it has waited, and the terminal command that answers it (`graphyard answer GY-N REQUEST ANSWER`). An item listed here holds no worker and delays nothing else.
 
 A declared human `admin` session gets an answer box on the card. **Answer and resume** posts `work/GY-N/answer`; the item returns to the master loop, which dispatches it on its next cycle with the answer in the new worker's prompt — no master session is involved. **Decline** keeps it parked with your words as its blocker. Agent sessions see the requests but never the form, and the server refuses their answers. Recently answered requests stay listed underneath with the answer and how long it waited. On the home page a parked item reads `Stuck: Waiting on a human-only decision (…): NEEDED`.
+
+## Workers
+
+**Work → Workers** lists every agent session the control plane has a handle for, across every work item, in one table: worker, reviewer, producer, approver, escalation handler and master sessions alike. It is the page for "who is doing what, and how do I watch one" — the sidebar keeps its four entries, so the page is a tab of the Work section, registered beside Shipped and Insights in `web/pages/index.tsx`.
+
+**What a row is.** A row is one [session handle](master-agent.md#session-handles): the durable record a launcher writes on the item when it starts a session, and the session itself fills in. The data comes from the handles on the work items the dashboard already polls, not from Herdr: the page never lists panes or asks a runtime anything, so it shows exactly what the control plane recorded, on every host, and nothing a launcher did not record. A row carries the agent name and principal, the role kind (worker, reviewer, producer, approver, escalation handler or master, derived from the handle's kind and role slot), the work key and attempt epoch as a link that opens the item, the subject line, the host and runtime, the recorded state, when it started, and the time spent. Time spent is live for a running handle — now minus its start, ticking once a second between polls without a reload — and fixed for a finished one, its end minus its start.
+
+**Organised for triage.** Running sessions come first, longest time spent first. Finished sessions are collapsed below with their count, newest end first. Above both, a per-principal summary lists each worker, reviewer and producer principal once, with the item and epoch it currently holds (or *idle*), how long it has been on it, and how many of its sessions were running at any point in the last 24 hours. Approver, escalation and master sessions appear in the table but not in the summary: they belong to the loop, not to a seat that is busy or idle.
+
+**Stale means not seen, not dead.** A handle's `updatedAt` moves when its launcher records it, when the session fills in its own tab and transcript, and when it ends. A handle recorded running whose `updatedAt` is older than the stale threshold — **15 minutes** by default, `sessionStaleThresholdMs` in `src/model/sessions.ts` — is shown as *recorded running, not seen since <updatedAt>* with a distinct amber badge, and counted in the Running heading. It is never silently shown as live. Nothing on this page ends a session: GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted), the sweep on every automatic-dispatch tick, is what ends a dead handle, and a row it closed shows *ended by liveness reconciliation* with the rule that closed it (vanished, superseded, or the runtime's own ended state) and the recorded outcome saying why.
+
+**Two attach forms, one click each.** Every running row offers the attach command in two forms, each copied exactly as shown, with no prose around it:
+
+- **Copy local** — the command the handle recorded, as run on the host that launched it, for example `herdr pane attach w1V:pJD --workspace w1V`.
+- **Copy remote** — the same command run from another machine through Herdr's remote machinery. The installed `herdr --help` documents `herdr --machine <label-or-id> <command>` ("Run an API command on a saved SSH machine") as the way to run a subcommand against a remote server, and `herdr --remote <target>` as attaching the whole TUI through SSH; so the remote form is the local command with the handle's recorded host as the machine selector: `herdr --machine vishrog pane attach w1V:pJD --workspace w1V`. The selector must be a saved Herdr machine profile whose label is the host name the handle records (`herdr machine list` shows them). A recorded command that is not Herdr's has no remote form, and the row says so.
+
+A finished row offers its transcript path instead, since there is nothing left to attach to; a row with neither says so rather than offering a command that cannot work.
+
+The derivation — stale, the two forms, the order and the per-principal summary — is `workersView` in `src/model/sessions.ts`, and `tests/workers-tab.test.ts` renders the page over a fixture and asserts each of them.
 
 ## The status sentence
 
