@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { linuxProcessRecord } from './supervisor.js';
@@ -25,7 +25,7 @@ export interface SupervisorProbeDeps {
   readParent?: (pid: number) => number;
   readCgroup?: (controlGroup: string) => string;
   resolvePath?: (path: string) => string;
-  run?: (command: string, args: string[]) => string;
+  run?: ChildRun;
 }
 
 /**
@@ -60,7 +60,10 @@ const liveScope = ['active', 'activating', 'deactivating', 'reloading'];
  * owner; working directories and containment scopes are readable only for the probing
  * user's own processes and user manager, which is the boundary local dispatch uses.
  */
-export function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: SupervisorProbeDeps = {}) {
+/** What one probe reports; a test's stub may answer synchronously, the host's probe asynchronously. */
+export type SupervisorProbeReport = Awaited<ReturnType<typeof probeSupervisorAbsence>>;
+export type SupervisorProbe = (target: SupervisorProbeTarget, deps?: SupervisorProbeDeps) => SupervisorProbeReport | Promise<SupervisorProbeReport>;
+export async function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: SupervisorProbeDeps = {}) {
   const platform = deps.platform ?? process.platform;
   const uid = deps.uid ?? (typeof process.getuid === 'function' ? process.getuid()! : 0);
   const processes: { pid: number; evidence: 'command' | 'workspace' }[] = [];
@@ -89,7 +92,7 @@ export function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: Supe
     return status.ppid;
   });
   const readCgroup = deps.readCgroup ?? ((controlGroup: string) => readFileSync(join('/sys/fs/cgroup', controlGroup, 'cgroup.procs'), 'utf8'));
-  const run = deps.run ?? ((command: string, args: string[]) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 })));
+  const run = deps.run ?? ((command: string, args: string[]) => defaultChildRun(command, args, { timeoutMs: 15_000 }));
   const resolvePath = deps.resolvePath ?? ((path: string) => { try { return realpathSync(path); } catch { return path; } });
   const workspace = resolvePath(target.workspacePath);
   // The kernel separates command-line arguments with NUL, and an argument may itself
@@ -159,14 +162,14 @@ export function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: Supe
     if (membership === 'inside') { processes.push({ pid, evidence: 'workspace' }); describe(pid, null); }
     if (membership === 'unreadable') inaccessible++;
   }
-  try { run('systemctl', ['--user', 'show-environment']); }
+  try { await run('systemctl', ['--user', 'show-environment']); }
   catch (error) {
     unverifiable.push(`systemd user manager is unavailable, so containment scopes cannot be queried: ${detail(error)}`);
     return record();
   }
   let units: string[] = [];
   try {
-    units = [...new Set(run('systemctl', ['--user', 'list-units', '--all', '--plain', '--no-legend', '--type=scope', 'graphyard-watch-*.scope'])
+    units = [...new Set(String(await run('systemctl', ['--user', 'list-units', '--all', '--plain', '--no-legend', '--type=scope', 'graphyard-watch-*.scope']))
       .split(/\r?\n/).map(line => line.trim().replace(/^[^A-Za-z0-9]+/, '').split(/\s+/)[0]).filter(unit => scopePattern.test(unit)))];
   } catch (error) { unverifiable.push(`Containment scope query failed: ${detail(error)}`); return record(); }
   // The scope this quarantine recorded is queried even when systemd no longer lists it, so the
@@ -192,7 +195,7 @@ export function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: Supe
   };
   for (const unit of units) {
     try {
-      const properties = run('systemctl', ['--user', 'show', '--property=LoadState', '--property=ActiveState', '--property=ControlGroup', unit]).split(/\r?\n/);
+      const properties = String(await run('systemctl', ['--user', 'show', '--property=LoadState', '--property=ActiveState', '--property=ControlGroup', unit])).split(/\r?\n/);
       const property = (name: string) => properties.find(line => line.startsWith(`${name}=`))?.slice(name.length + 1).trim() ?? '';
       const activeState = property('ActiveState'), controlGroup = property('ControlGroup');
       const recorded = recordedScope?.unit === unit;
