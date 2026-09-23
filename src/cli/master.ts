@@ -1,15 +1,14 @@
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
 import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { bindReviewer, removeReviewerProfile, reviewCommand, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
+import { reviewCommand } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -18,7 +17,10 @@ import { defineCommands } from './registry.js';
 import { approveScopeRequest, cycleBudget, masterStatusReport } from './master-status.js';
 import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
+import { executorHostHeader } from '../model/registry.js';
 import { readSecretFromStdin } from './context.js';
+import { reviewerCommand } from './master-reviewer.js';
+import { initialFleetProposal, registryCommand, registryHelp } from './master-registry.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -80,6 +82,7 @@ export const masterCommands = defineCommands([
       '  master restart                Restart this host\'s master loop detached',
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
+      ...registryHelp,
     ],
     async run(context) {
       const { id, args, base, print } = context;
@@ -95,7 +98,10 @@ export const masterCommands = defineCommands([
           ...(values['dispatch-interval'] ? { dispatchIntervalSeconds: Number(values['dispatch-interval']) } : {}), ...(values['reviewer-profile'] ? { reviewerProfile: values['reviewer-profile'] } : {}), ...(values['producer-timeout'] ? { producerTimeoutMinutes: Number(values['producer-timeout']) } : {}) };
         if (values['browser-executable'] && !values['browser-profile']) throw new Error('--browser-executable requires --browser-profile');
         const browser = values['browser-profile'] ? { profile: values['browser-profile'], ...(values['browser-executable'] ? { executable: values['browser-executable'] } : {}) } : undefined;
-        return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) }));
+        const installed = await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) });
+        // Setup proposes the fleet from the agent CLIs already logged in on this host; nothing is stored until accepted.
+        const fleet = await initialFleetProposal(await loadMasterConfig(root), masterToken);
+        return print({ ...installed, fleet });
       }
       const master = await loadMasterConfig(root);
       const masterToken = await readCredentialFile(master.credentialFile);
@@ -107,7 +113,8 @@ export const masterCommands = defineCommands([
         const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
         const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
       };
-      const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
+      // The host is named so the control plane judges fleet placement for this executor.
+      const coordinator = await masterApi('status', masterToken, 30_000, { [executorHostHeader]: master.hostId }); assertMasterBinding(master, coordinator);
       // The CLI's own commit, for the version-skew guard.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
@@ -123,31 +130,8 @@ export const masterCommands = defineCommands([
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
       if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
       if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
-      if (id === 'reviewer') {
-        if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
-        if (args[0] === 'remove' && args[1]) return print(await removeReviewerProfile(root, args[1]));
-        if (args[0] === 'bind' && args[1]) {
-          const { values, positionals } = parseArgs({ args: args.slice(1), options: { 'key-stdin': { type: 'boolean' } }, allowPositionals: true });
-          if (!values['key-stdin']) throw new Error('Use master reviewer bind FILE --key-stdin so the reviewer private key is not stored in shell history');
-          const input = await readSecretFromStdin(20_000, 'Reviewer key input is too large');
-          const identity = JSON.parse(await readFile(positionals[0], 'utf8'));
-          return print(await bindReviewer(root, { appId: Number(identity.appId), installationId: Number(identity.installationId), slug: String(identity.slug), privateKey: input }, verifyReviewerInstallation));
-        }
-        if (args[0] === 'setup') {
-          const { values } = parseArgs({ args: args.slice(1), options: { deployment: { type: 'string' }, port: { type: 'string' }, name: { type: 'string' } }, allowPositionals: false });
-          const deployment = values.deployment ?? master.url;
-          if (!deployment.startsWith('https://')) throw new Error('Reviewer App registration needs the deployed HTTPS origin; pass --deployment https://YOUR-GRAPHYARD-HOST');
-          const registrations = reviewerCredentialDirectory(master);
-          await mkdir(registrations, { recursive: true, mode: 0o700 });
-          const setup = await startGithubSetup(root, master.repository, deployment, Number(values.port ?? 4312), {
-            file: resolve(registrations, `${master.repository.replace('/', '-')}-registration.json`),
-            record: async app => { await bindReviewer(root, { appId: app.appId, installationId: app.installationId, slug: app.slug, privateKey: app.privateKey }, verifyReviewerInstallation); },
-          }, values.name ?? 'reviewer');
-          console.log(`Open ${setup.url} in your browser and register the reviewer App. It is a second App, separate from the Graphyard control-plane App, and it cannot write code. Credentials stay outside this repository with mode 0600. Press Ctrl+C when the page reports the installation is verified.`);
-          const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
-        }
-        throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, or master reviewer add FILE');
-      }
+      if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
+      if (id === 'reviewer') return reviewerCommand(root, master, args, print);
       if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
