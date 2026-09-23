@@ -172,8 +172,8 @@ function tip(work: Work, candidate: { sha: string; baseSha: string }, extra: Par
 /** A candidate approved and proven on its own head, with every proof declaring its scope. */
 async function validated(work: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}) {
   let observed = await engine.observe(work.id, work.revision, tip(work, candidate, extra));
-  observed = await engine.execute(producer, 'evidence', observed.id, { proof: 'unit:queue', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, scopeFiles: ['src/queue.ts', 'tests/'] }, randomUUID());
-  return engine.execute(producer, 'evidence', observed.id, { proof: 'integration:docs', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, scopeFiles: ['docs/'] }, randomUUID());
+  observed = await engine.execute(producer, 'evidence', observed.id, { proof: 'unit:queue', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/queue.ts', 'tests/'] }, randomUUID());
+  return engine.execute(producer, 'evidence', observed.id, { proof: 'integration:docs', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['docs/'] }, randomUUID());
 }
 async function onlyJob(work: Work) {
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");

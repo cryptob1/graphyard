@@ -131,7 +131,7 @@ test('integration:agent-approval-flow — release, unblock, requirement rewrite,
   // Manual attestation, merge approval with automatic merging off, and rework, on a candidate.
   let item = await candidate('candidate-by-agents');
   const binding = { sha: head, baseSha: base, policyRevision: item.policyRevision };
-  requested = await decide(master.token, item, 'attest', { proof: 'manual:audit', ...binding, result: 'pass', executed: 1, skipped: 0 }, 'Audited the diff against the goal');
+  requested = await decide(master.token, item, 'attest', { proof: 'manual:audit', ...binding, result: 'pass', executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, 'Audited the diff against the goal');
   approved = await approve(approver.token, item, requested.body.id, 'Re-read the audit notes');
   assert.equal(approved.body.state, 'applied', JSON.stringify(approved.body));
   item = await reload(item.id);
@@ -160,7 +160,7 @@ test('integration:agent-approval-flow — release, unblock, requirement rewrite,
 test('integration:agent-approval-separation — self-approval and conflicted approval are refused, naming the conflict', async () => {
   const item = await candidate('separated-approvals');
   // Evidence from the producer makes it conflicted on merge approval.
-  await engine.execute(producer, 'evidence', item.id, { proof: 'unit:works', sha: head, baseSha: base, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+  await engine.execute(producer, 'evidence', item.id, { proof: 'unit:works', sha: head, baseSha: base, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   const requested = await decide(dual.token, item, 'merge', { sha: head, baseSha: base, policyRevision: item.policyRevision }, 'Gates pass');
   assert.equal(requested.status, 200, JSON.stringify(requested.body));
   // The requester cannot approve its own request, even holding decision:approve.

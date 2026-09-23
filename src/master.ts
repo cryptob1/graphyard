@@ -14,12 +14,13 @@ import { launchAuthorization, loadConnection, managedInstructions, serverOrigin 
 import { dispatchOrder, dispatchOverlap, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { mergeOrder } from './delegation.js';
-import { launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
+import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
 import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
@@ -1195,12 +1196,19 @@ export const runtimeScreens: Record<string, RegExp> = {
   claude: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
   codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\bOpenCode\b/, gemini: /\bGemini\b/,
 };
-export type StartState = 'ready' | 'starting' | 'absent' | 'blocked';
-export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string }
-export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[] }
+export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent';
+export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
+export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[];
+  /** Whether a session stopped on a consent prompt the launcher does not answer is held for a human (a worker, whose supervisor bounds the hold) rather than refused. */ holdConsent?: boolean }
 export class SessionStartError extends Error {
-  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
+  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked' | 'awaiting consent', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
 }
+/**
+ * How many times the launcher answers one allow-listed prompt before it treats the prompt as one it
+ * cannot answer, and how long an answered dialog is given to close before it is answered again — a
+ * second keystroke into a dialog that was already closing would land in the runtime's input.
+ */
+export const consentAnswerAttempts = 2, consentSettleMs = 5_000;
 /** The pane's terminal as text, unwrapped; null when Herdr cannot read it. */
 export async function readPaneScreen(pane: string, run: ChildRun = defaultChildRun, lines = 40) {
   try { return String(await run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
@@ -1215,8 +1223,17 @@ export const commandEchoing = (line: string, command: string) => !!line && (line
 export async function observeStart(pane: string, kind: string, command: string, run?: ChildRun, readyStates = startedStates): Promise<StartObservation> {
   let agent: HerdrAgent | null = null;
   try { const raw = await herdrJson(['agent', 'get', pane], run); agent = raw?.agent ?? raw ?? null; } catch { agent = null; }
-  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
+  // A runtime Herdr sees `working` is at work on its request. Any other state is read off the
+  // screen too: a runtime stopped on a first-run consent prompt is `idle` to Herdr, just as a
+  // started one is, and has not read its request (GY-130).
+  if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
+  const prompt = detectConsentPrompt(screen);
+  if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
+  // An unread pane rules nothing out: an idle runtime may be sitting on a consent prompt, so it is
+  // polled again until a read shows its screen, never taken as ready without one.
+  if (screen === null && agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'starting', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status} but its pane could not be read, so a consent prompt is not ruled out`, line };
+  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
   const showing = screen !== null && !!runtimeScreens[kind]?.test(screen);
   if (agent?.agent === kind && agent.agent_status === 'blocked') return { state: 'blocked', agent, detail: 'Herdr reports it blocked', line };
   // Herdr sees the runtime's process and its screen is showing: a session at work that Herdr has
@@ -1235,9 +1252,31 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
   const startedAt = clock();
   const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
   let extended: string | null = null;
+  const consent: ConsentAnswer[] = [];
   for (;;) {
     const observed = await observeStart(pane, kind, command, run, bounds.readyStates), waitedMs = clock() - startedAt;
-    if (observed.state === 'ready') return { ...observed, waitedMs, extended };
+    if (observed.state === 'ready') return { ...observed, waitedMs, extended, consent, awaiting: null };
+    if (observed.state === 'consent') {
+      const prompt = observed.prompt!, rule = prompt.rule;
+      // Answers are counted per dialog, not per rule: a second dialog the same rule matches (a
+      // crash-report question after a usage-statistics one) gets its own bounded attempts.
+      const answered = consent.filter(answer => answer.rule === rule?.id && sameConsentPrompt({ kind: answer.kind, prompt: answer.prompt }, prompt));
+      const answeredAt = answered.at(-1)?.at;
+      if (answeredAt && clock() - Date.parse(answeredAt) < consentSettleMs && waitedMs < ceilingMs) { await wait(pollMs); continue; }
+      // An allow-listed prompt is answered with its least-privilege option, and the answer is
+      // recorded; the start bound keeps running, so a prompt that returns is not answered forever.
+      if (rule && prompt.keys && answered.length < consentAnswerAttempts && waitedMs < ceilingMs) {
+        await herdrRun(['pane', 'send-keys', pane, ...prompt.keys], run);
+        consent.push({ rule: rule.id, kind: prompt.kind, prompt: prompt.text, answer: rule.answer, keys: prompt.keys, at: new Date(clock()).toISOString() });
+        await wait(pollMs);
+        continue;
+      }
+      const why = rule ? `the launcher answered it ${consentAnswerAttempts} times and it is still showing` : `it is outside the launcher's consent allow-list`;
+      // A session held for a human is reported, not refused: it has not taken its request, and it
+      // is never counted as started. Everything else refuses the launch with the prompt's own text.
+      if (bounds.holdConsent) return { ...observed, waitedMs, extended, consent, awaiting: { prompt: prompt.text, kind: prompt.kind, why } };
+      throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime is awaiting consent in pane ${pane} on a ${prompt.kind} prompt, and ${why}: "${prompt.text}"`);
+    }
     const quoted = observed.line ? `; the pane last showed: "${observed.line}"` : '; the pane showed nothing';
     if (observed.state === 'blocked') throw new SessionStartError('blocked', pane, observed.line, waitedMs, `the ${kind} runtime is blocked before it is ready in pane ${pane} (${observed.detail})${quoted}`);
     if (waitedMs >= timeoutMs && observed.state !== 'starting') throw new SessionStartError('never started', pane, observed.line, waitedMs, `the ${kind} runtime never started within ${seconds(timeoutMs)} in pane ${pane} (${observed.detail})${quoted}`);
@@ -1266,15 +1305,24 @@ export async function startAgentSession(name: string, kind: string, pane: string
   const command = launchCommand(kind, args, files, options.prefix);
   await herdrRun(['pane', 'run', pane, command], run);
   const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });
+  let named = true;
   try { await herdrJson(['agent', 'rename', pane, name], run); }
   catch (error) {
     // A runtime whose own naming rules are narrower than the ones checked above says so in its
     // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
     if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
-    throw error;
+    // A held session is still named so a human can find it, but a runtime that will not take the
+    // name before its dialog is answered does not turn the hold into a failed start.
+    // The hold records it unnamed, so the watch supervisor retries the name before it clears.
+    if (!started.awaiting) throw error;
+    named = false;
   }
-  if (delivery === 'paste') await deliverPrompt(name, text, run, options);
-  return { delivery, command, files, started: { detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
+  // A session awaiting consent has not read its request, so a paste would land in the dialog: the
+  // request waits in its launch file instead, for whoever clears the hold to deliver.
+  if (delivery === 'paste' && !started.awaiting) await deliverPrompt(name, text, run, options);
+  const pending = delivery === 'paste' && started.awaiting ? writeLaunchFiles(options.directory, name, { request: text }).request : null;
+  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: pending, named } : undefined,
+    started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
 /**
@@ -2278,7 +2326,7 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard') {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
@@ -2432,8 +2480,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
+  // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
+  const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
+  const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
+    ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
-    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
+    counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
       // merged without a valid execution, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
@@ -2442,13 +2494,13 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length,
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length,
       contaminatedBranches: rows.filter(row => row.contamination && row.contamination.source.length).length, restoredApprovals: rows.filter(row => row.restoredApproval).length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
     // What waits on the human, longest first, with how to answer; the roles out of capacity; and
     // each role's sessions against its concurrency limit with the longest wait for a slot.
-    humanRequests, capacity, concurrency,
+    humanRequests, capacity, concurrency, unrunnableRemedies: remedies,
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
@@ -2817,6 +2869,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   let dependencies: PreparedWorker['dependencies'] | null = null;
   let delivery: RequestDelivery | null = null;
+  let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -2831,7 +2884,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
-      try { ({ target, harness, dependencies, delivery } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start)); break; }
+      try { ({ target, harness, dependencies, delivery, started, consent } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start)); break; }
       catch (error) {
         if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
         // The registry session chosen for this launch never ran; its account is free again at once.
@@ -2843,8 +2896,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   const overlap = dispatchOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery,
+    // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
+    started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
     overlap: overlap.length ? { allowed: true, ahead: overlap, note: `Dispatched over a planned-file overlap with ${describeOverlap(overlap)}; expect a sync → review → proof round for whichever lands second` } : null };
+}
+
+export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
+export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
+  return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
 async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds) {
@@ -2863,8 +2923,14 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...launch.args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'] });
-    return { target: { name: profile.agentName, pane_id: pane, agent_status: 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery };
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true });
+    // A worker stopped on a prompt the launcher does not answer is held for a human rather than
+    // closed: its record beside the launch files is what master status raises and what the watch
+    // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
+    const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
+    if (hold) writeConsentHold(started.files.stem, hold);
+    return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery,
+      started: started.started.state, consent: { answered: started.consent, awaiting: hold } };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) {
@@ -3315,27 +3381,67 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
 
 /**
  * A worker session's own rules, written into its assigned worktree: it runs its item's commands,
- * pushes its assigned branch and opens the pull request without a keypress, and can never push
- * the base branch, force-push, rebase, merge, review, or read a credential.
+ * pushes its assigned branch and opens the pull request without a keypress, and is denied pushing
+ * the base branch, force-pushing, deleting a ref, rebasing, merging, reviewing and reading a
+ * credential, in every spelling a rule names; a spelling no rule names is unmatched, not denied.
+ *
+ * The one history rewrite it may make goes through `restore-branch GY-N EPOCH`, never a raw push:
+ * the recovery of an ejected or contaminated tip resets the assigned branch to the item's reviewed
+ * head, syncs it onto the base and pushes, and the rework the control plane authorizes must be
+ * executable by the session it dispatches (GY-128). A permission glob cannot say "this ref and no
+ * other", and a Claude worker runs under bypassPermissions, where a command no rule matches runs.
+ * So every raw `--force*` push is denied, the lease push included, and the CLI makes the one lease
+ * push itself: to the branch registered for the caller's live lease, conditional on the tip it
+ * fetched (`--force-with-lease=refs/heads/BRANCH:TIP`), so it replaces only what it saw.
  */
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
-    ...['status', 'sync', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
+    ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
     { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
     { rule: `Bash(git push -u origin ${input.branch})`, why: 'Publish the assigned branch the first time.' },
     { rule: `Bash(git push origin HEAD:${input.branch})`, why: 'Push the current head to the assigned branch.' },
+    { rule: 'Bash(git fetch origin)', why: 'Read the remote tips restore-branch and sync compare against.' },
+    { rule: 'Bash(git reset --hard *)', why: 'Move the assigned branch back to the reviewed head before sync; it changes only this worktree.' },
     { rule: 'Bash(gh pr create:*)', why: 'Open the pull request the worker submits with complete.' },
     { rule: 'Bash(gh pr view:*)', why: 'Read the pull request number and state before submitting.' },
     { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for the worker\'s own candidate.' },
     { rule: `Bash(git merge origin/${input.baseBranch})`, why: 'sync merges the base branch; the worker never rebases.' },
   ];
+  // Every rewrite, in each spelling a rule can name: `--force`, `--force-with-lease` (bare or
+  // `=REF:SHA`) and `--force-if-includes` alike, and the abbreviations git accepts for them. The
+  // lease push of the assigned branch is restore-branch's, which checks the ref itself; no rule may
+  // end in `:*` or ` *` where the bare prefix would match an allowed push, because Claude Code reads
+  // both as "this prefix, with or without more" (` :**` ends in neither). Each rule also has a twin
+  // for a push behind git's global options (`git -C DIR push`, `git -c KEY=VALUE push`).
+  const push: [string, string][] = [
+    ['*--force*', 'A raw force push, the lease form included, could rewrite any ref: a glob cannot limit it to the assigned branch. The one restoration push is restore-branch.'],
+    ['*--f*', 'Any abbreviation git accepts for --force, --force-with-lease or --force-if-includes.'],
+    ['-f*', 'Short form of a force push.'],
+    ['* -f*', 'Short form of a force push.'],
+    ['*-*f *', 'A force flag bundled with other short flags (-uf).'],
+    ['*-*f', 'A force flag bundled with other short flags, last on the line.'],
+    ['*+*', 'A leading + refspec is a force push.'],
+    ['*--mirror*', 'Mirroring rewrites every ref on the remote.'],
+    ['*--m*', 'An abbreviation of --mirror.'],
+    ['*--all*', 'The worker pushes its assigned branch, never every branch.'],
+    ['*--al*', 'An abbreviation of --all.'],
+    ['*--delete*', 'Deleting a remote ref is never part of an attempt.'],
+    ['*--de*', 'An abbreviation of --delete.'],
+    ['*--pru*', 'Pruning deletes every remote ref the local side lacks.'],
+    ['-d*', 'Short form of deleting a remote ref, alone or first in a bundle (-du).'],
+    ['* -d*', 'Short form of deleting a remote ref, alone or first in a bundle (-du).'],
+    ['*-*d *', 'A delete flag bundled with other short flags (-ud).'],
+    ['*-*d', 'A delete flag bundled with other short flags, last on the line.'],
+    ['* :**', 'An empty source refspec deletes the ref it names, whatever the name.'],
+    [`*:${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
+    [`origin ${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
+    [`* ${input.baseBranch}`, 'The base branch moves only through the guarded merge.'],
+    [`* ${input.baseBranch} *`, 'The base branch moves only through the guarded merge.'],
+    [`*refs/heads/${input.baseBranch}*`, 'The base branch moves only through the guarded merge, in its full ref spelling too.'],
+  ];
   const deny: HarnessRule[] = [
-    { rule: 'Bash(git push *--force*)', why: 'History on a submitted branch is never rewritten; the review and proofs are bound to its heads.' },
-    { rule: 'Bash(git push * -f*)', why: 'Short form of a force push.' },
-    { rule: 'Bash(git push *+*)', why: 'A leading + refspec is a force push.' },
-    { rule: `Bash(git push *:${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
-    { rule: `Bash(git push origin ${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
+    ...push.flatMap(([form, why]) => [{ rule: `Bash(git push ${form})`, why }, { rule: `Bash(git -* push ${form})`, why: `${why} Also behind git's global options.` }]),
     { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
     { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },
@@ -3344,6 +3450,62 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
   ];
   return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
+}
+/**
+ * How a worker restores its assigned branch after an ejected or contaminated tip, as the exact
+ * commands a rework reason carries: fetch, reset to the item's reviewed head, sync onto the base,
+ * restore-branch (the lease push of the leased branch), complete. Every one is permitted by the
+ * worker's own harness, so the rework the control plane authorizes is carried out by the attempt it
+ * dispatches, with no human shell.
+ */
+export function branchRestoration(input: { cliPath: string; key: string; epoch: number; pr: number; reviewedHead: string }) {
+  const cli = `node ${input.cliPath}`;
+  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} ${input.pr}`];
+}
+/**
+ * The shell commands a blocker names: each backtick-quoted command line, or, in a blocker that
+ * quotes none, each `git push …` clause. The worker's blocker instruction asks for the exact
+ * command that was refused, so this is where it is written.
+ */
+export function blockerCommands(text: string) {
+  const quoted = [...text.matchAll(/`([^`\n]+)`/g)].map(match => match[1].trim()).filter(command => /^[a-z][\w.-]*\s+\S/.test(command));
+  const found = quoted.length ? quoted : [...text.matchAll(/\bgit push\b[^\n;,'"]*/g)].map(match => match[0].replace(/\s+(?:was|were|is|failed|fails|because|but)\b.*$/, '').trim().replace(/[.:]$/, ''));
+  return [...new Set(found)];
+}
+export interface UnrunnableRemedy { key: string; epoch: number; command: string; role: 'worker'; rule: string; why: string; deniedBy: { role: string; rule: string }[]; text: string }
+/**
+ * A blocker whose remedy no session Graphyard launches may run is a defect of Graphyard, not a
+ * wait on a human shell (GY-128): Graphyard authorized work that none of its own sessions can
+ * carry out. Every command a blocker names is judged against each launched role's harness —
+ * the item's worker on its assigned branch, reviewer, producer and master — and reported when
+ * every one of them denies it, naming the command, the role that would need it (the worker that
+ * raised the blocker) and the rule in that role's harness that denies it.
+ */
+export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseBranch: string; repository?: string; workerKinds?: string[] }): UnrunnableRemedy[] {
+  const shared = { cliPath: input.cliPath, repository: input.repository ?? 'OWNER/REPOSITORY', baseBranch: input.baseBranch, credentialHome: '/graphyard-credentials', credentialDirectories: [] as string[] };
+  const others = [
+    { role: 'reviewer', plan: sessionHarnessPlan({ ...shared, role: 'reviewer', kind: 'claude' }) },
+    { role: 'producer', plan: sessionHarnessPlan({ ...shared, role: 'producer', kind: 'claude' }) },
+    { role: 'master', plan: masterHarnessPlan({ ...shared, harness: 'claude', root: '/repository' }) },
+  ];
+  // A worker runtime other than Claude loads no generated rules, so a rework dispatched to it may
+  // run the command: only when every configured worker runtime denies it is the remedy unrunnable.
+  const workerKinds = [...new Set(input.workerKinds?.length ? input.workerKinds : ['claude'])];
+  if (workerKinds.some(kind => kind !== 'claude')) return [];
+  return work.filter(item => item.stage !== 'done' && item.blocker).flatMap(item => {
+    const epoch = item.workspaces.at(-1)?.epoch ?? item.epoch;
+    const branch = item.workspaces.at(-1)?.branch ?? `graphyard/${item.key.toLowerCase()}-${epoch}`;
+    const worker = sessionHarnessPlan({ ...shared, role: 'worker', kind: 'claude', branch });
+    return blockerCommands(item.blocker!).flatMap(command => {
+      const own = harnessDecision(worker, command);
+      if (own.decision !== 'deny') return [];
+      const deniedBy = others.map(({ role, plan }) => ({ role, judged: harnessDecision(plan, command) }));
+      if (deniedBy.some(entry => entry.judged.decision !== 'deny')) return [];
+      return [{ key: item.key, epoch, command, role: 'worker' as const, rule: own.rule!.rule, why: own.rule!.why,
+        deniedBy: deniedBy.map(entry => ({ role: entry.role, rule: entry.judged.rule!.rule })),
+        text: `${item.key}'s blocker names \`${command}\`, which no session Graphyard launches may run: the worker that needs it is denied by its harness rule ${own.rule!.rule} (${own.rule!.why}), and ${deniedBy.map(entry => `the ${entry.role} by ${entry.judged.rule!.rule}`).join(', ')}. This is a Graphyard defect, not a wait on a human shell` }];
+    });
+  });
 }
 /** Install the worker rules in a freshly prepared worktree, only where Git already ignores them. */
 export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker) {
