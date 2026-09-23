@@ -205,11 +205,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
   // The loop's own health comes before every work item: a coordinator that is absent or stalled is
-  // why nothing else on this list is moving, and no other attention item would say so. A cycle
-  // measured longer than its interval is raised here too, naming the step (`daemon.cost`) that
-  // took the time, so a slow step is never read as a loop that stopped.
+  // why nothing else on this list is moving, and no other attention item would say so.
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, cost: cycling.cost, failures: cycling.failures }), ...approverLaunchAttention(cycling)]
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures }), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
