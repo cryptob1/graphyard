@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { defaultChildRun, runChild, type ChildRun } from '../child-runner.js';
 import { lstat, mkdir, readdir, rm, rmdir, statfs } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -111,8 +111,8 @@ export async function allocateSessionCheckout(base: string, kind: CheckoutKind, 
   return checkout;
 }
 
-type Run = (command: string, args: string[]) => string;
-const git = (repository: string): Run => (command, args) => execFileSync(command, args, { cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+type Run = ChildRun;
+const git = (repository: string): Run => (command, args) => defaultChildRun(command, args, { cwd: repository });
 /**
  * Remove one session's checkout: the worktree's registration in the repository, then the whole
  * session directory with its dependency tree and evidence files. Git is asked first so the
@@ -122,9 +122,9 @@ const git = (repository: string): Run => (command, args) => execFileSync(command
 export async function removeSessionCheckout(repository: string, base: string, directory: string, run?: Run) {
   assertManaged(base, directory);
   const execute = run ?? git(repository);
-  try { execute('git', ['-C', repository, 'worktree', 'remove', '--force', resolve(directory, 'checkout')]); } catch { /* never created, or already gone */ }
+  try { await execute('git', ['-C', repository, 'worktree', 'remove', '--force', resolve(directory, 'checkout')]); } catch { /* never created, or already gone */ }
   await rm(directory, { recursive: true, force: true });
-  try { execute('git', ['-C', repository, 'worktree', 'prune']); } catch { /* a stale registration is harmless and pruned next time */ }
+  try { await execute('git', ['-C', repository, 'worktree', 'prune']); } catch { /* a stale registration is harmless and pruned next time */ }
   // An installation with no session leaves nothing behind, not even its empty root.
   await rmdir(base).catch(() => {});
 }
@@ -183,11 +183,11 @@ export async function sweepAbandonedRoots(base: string, options: { now?: number;
 }
 
 /** What the root itself holds, as `du` counts it; null when it cannot be measured in time. */
-export function directoryBytes(path: string, timeoutMs = 10_000): Promise<number | null> {
-  return new Promise(done => execFile('du', ['-sk', path], { timeout: timeoutMs, encoding: 'utf8' }, (error, stdout) => {
-    const kilobytes = Number.parseInt(String(stdout ?? '').split(/\s/)[0] ?? '', 10);
-    done(error || !Number.isFinite(kilobytes) ? null : kilobytes * 1024);
-  }));
+export async function directoryBytes(path: string, timeoutMs = 10_000): Promise<number | null> {
+  try {
+    const kilobytes = Number.parseInt((await runChild('du', ['-sk', path], { timeoutMs })).split(/\s/)[0] ?? '', 10);
+    return Number.isFinite(kilobytes) ? kilobytes * 1024 : null;
+  } catch { return null; }
 }
 
 export interface WorktreeRootHealth {

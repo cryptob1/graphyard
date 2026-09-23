@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
+import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
@@ -159,7 +159,7 @@ export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
 }
 
 export async function launchProducer(root: string, work: Work, request: DispatchRequest, profile: ProducerProfile, agents: { name?: string }[], observedAt: string, dependencies: {
-  run?: (command: string, args: string[]) => string;
+  run?: ChildRun;
   now?: () => Date;
   /** How the profile's agent accounts are checked before the launch, and how its prompt is confirmed. */
   probe?: FleetProbe;
@@ -201,24 +201,24 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     // session directory is allocated under the managed worktree root — durable storage with room
     // left, outside every worktree — and is the only place beside the Git directory it may write.
     const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, id, dependencies.filesystem);
-    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
     // The producer loads its own role rules, never the master's. The harness follows the account's
     // runtime, so a cross-runtime failover keeps its role rules.
     let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
     try {
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
       const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
-      const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
+      const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
         '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
       pane = created.pane; tabId = created.tab;
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery } = startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
+      ({ delivery } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
       const malformedTab = (error as any)?.herdrTab as string | undefined;
-      if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
+      if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
         catch { throw new Error(`${error instanceof Error ? error.message : 'Producer launch failed'}; Herdr could not confirm cleanup of the created tab`); }
       // A launch that failed for want of room says so, with the path and the reclaim command.
       throw writeFailure(error, `Launching the ${binding.key} producer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
@@ -231,7 +231,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
     catch (error) {
       // A pane Herdr could not confirm closed keeps its checkout and is named in the refusal, so it is not lost with the record.
-      if (!unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
+      if (!await unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); throw error;
     }
     return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
@@ -265,15 +265,15 @@ export function proofOutcome(work: Work | undefined, record: Pick<ProducerRecord
  */
 /** `agents` is null when Herdr could not be read: a session is then never judged finished. */
 export async function reconcileProducers(root: string, config: MasterConfig, work: Work[], agents: HerdrAgent[] | null, dependencies: {
-  run?: (command: string, args: string[]) => string;
+  run?: ChildRun;
   now?: () => Date;
   /** Re-prompts a quiet session with its request; the default delivers it in Herdr. */
-  reprompt?: (record: ProducerRecord, message: string) => void;
+  reprompt?: (record: ProducerRecord, message: string) => void | Promise<void>;
 } = {}) {
   const ledger = await readProducerLedger(root);
   const now = (dependencies.now ?? (() => new Date()))();
-  const run = dependencies.run ?? ((command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
-  const reprompt = dependencies.reprompt ?? ((record: ProducerRecord, message: string) => { deliverPrompt(record.agentName, message, run); });
+  const run = dependencies.run ?? defaultChildRun;
+  const reprompt = dependencies.reprompt ?? (async (record: ProducerRecord, message: string) => { await deliverPrompt(record.agentName, message, run); });
   const ackMs = acknowledgementMs(config);
   let changed = 0;
   for (const record of ledger.producers) {
@@ -289,11 +289,11 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     // Acknowledgement is judged only from a Herdr that could be read; a submitted proof is the
     // strongest acknowledgement of all.
     if (agents !== null) {
-      const judged = acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: results.some(result => result !== 'missing'), screen });
+      const judged = await acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: results.some(result => result !== 'missing'), screen });
       if (judged.changed) changed++;
       if (judged.reprompt) {
         markReprompted(record, now.getTime()); changed++;
-        try { reprompt(record, repromptText(producerPrompt(config, record, record), ackMs)); }
+        try { await reprompt(record, repromptText(producerPrompt(config, record, record), ackMs)); }
         catch { /* the settlement below records a session the re-prompt could not reach */ }
       }
     }
@@ -310,7 +310,7 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
         const failure = agent?.agent_status === 'blocked'
           ? `the session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without trusted evidence for ${missing}`
           : `the session finished (${agent?.agent_status ?? 'gone from Herdr'}) without trusted evidence for ${missing}`;
-        next = { state: 'failed', resolution: settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, failure) };
+        next = { state: 'failed', resolution: await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, failure) };
       }
     } else if (record.idleSince) { delete record.idleSince; changed++; }
     if (!next) continue;
@@ -318,7 +318,7 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     // A pane that is already gone is the state the close wanted (GY-137), so it settles the record
     // with the absence named on the resolution; any other close failure keeps it pending and retried.
     // A session Herdr no longer reports is not closed at all, so an expired request settles as expired.
-    try { if (record.pane && (agent || agents === null)) closeHerdrPane(record.pane, run); }
+    try { if (record.pane && (agent || agents === null)) await closeHerdrPane(record.pane, run); }
     catch (error) { if (paneAlreadyGone(error)) paneGone = true; else closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
     record.closeFailure = closeFailure;
     if (!closeFailure) {

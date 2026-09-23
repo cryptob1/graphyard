@@ -377,12 +377,16 @@ test('integration:ledger-refusal-attributed — master status names a full ledge
   } finally { await cleanup(); }
 });
 
-test('integration:full-ledger-still-launches — a refused record write whose pane Herdr cannot confirm closed names that pane instead of reporting the session removed', () => {
+test('integration:full-ledger-still-launches — a refused record write whose pane Herdr cannot confirm closed names that pane instead of reporting the session removed', async () => {
   const refusal = new SessionLedgerFullError(reviewLedgerSpec, sessionLedgerBound, sessionLedgerBound), original = refusal.message;
-  assert.equal(unrecordedPaneStopped(refusal, undefined, undefined, 'review-claude-1', () => { throw new Error('unreachable'); }), true, 'no pane, nothing to stop');
-  assert.equal(unrecordedPaneStopped(refusal, 'w1:p2', 'w1:t2', 'review-claude-1', () => {}), true, 'a confirmed stop lets the caller remove the checkout');
+  assert.equal(await unrecordedPaneStopped(refusal, undefined, undefined, 'review-claude-1', () => { throw new Error('unreachable'); }), true, 'no pane, nothing to stop');
+  assert.equal(await unrecordedPaneStopped(refusal, 'w1:p2', 'w1:t2', 'review-claude-1', () => {}), true, 'a confirmed stop lets the caller remove the checkout');
   assert.equal(refusal.message, original);
-  assert.equal(unrecordedPaneStopped(refusal, 'w1:p2', 'w1:t2', 'review-claude-1', () => { throw new Error('herdr: connection refused'); }), false, 'the checkout stays with the running pane');
+  assert.equal(await unrecordedPaneStopped(refusal, 'w1:p2', 'w1:t2', 'review-claude-1', () => { throw new Error('herdr: connection refused'); }), false, 'the checkout stays with the running pane');
   assert.ok(refusal instanceof SessionLedgerFullError, 'still the ledger refusal');
+  // Herdr is driven asynchronously: a stop that rejects is as unconfirmed as one that throws.
+  const rejected = new SessionLedgerFullError(reviewLedgerSpec, sessionLedgerBound, sessionLedgerBound);
+  assert.equal(await unrecordedPaneStopped(rejected, 'w1:p3', undefined, 'review-claude-2', async () => { throw new Error('herdr: timed out'); }), false, 'a rejected asynchronous stop keeps the checkout');
+  assert.match(rejected.message, /could not confirm the created pane w1:p3 closed \(herdr: timed out\)/);
   assert.match(refusal.message, /refused the write: its bound is 200 records and 200 are live[^]*; Herdr could not confirm the created pane w1:p2 closed \(herdr: connection refused\), so agent review-claude-1 may still be running with no ledger record/);
 });
