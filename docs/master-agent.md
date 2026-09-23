@@ -10,7 +10,7 @@ Graphyard remains the source of truth. Herdr only reports live session health. T
 Autonomy is the default. The master acts without asking; the human operator sets goals and priorities, and keeps only two other decisions: spending money or opening third-party accounts, and issuing credentials to people (approving a GitHub sudo prompt on their own device is one). Every other decision names the agent that makes it and the independent agent that approves it ([who decides](glossary.md#who-decides)):
 
 - **Intent the master applies alone**, as its own operator-agent identity: `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, and `master requirements GY-N FILE REASON` for additions. None of it weakens anything, and the reviewer and proof producers judge every candidate that follows.
-- **Two-party decisions**, requested by the master and approved by the separate approver agent: requirement rewrites and removals, escalation resolution, `manual:` attestation, rework and containment recovery (attesting the previous worker stopped), proof grants to a producer, and merge approval when automatic merging is off. Request with `master decide GY-N ACTION [JSON|@FILE] REASON`, launch the approver session with `master approver GY-N DECISION`, and read the outcome with `master decisions GY-N`. The approver runs `master approve GY-N DECISION REASON` from its own session; the server refuses self-approval and any approver that held an assignment on the item, produced the evidence the decision rests on, or would receive the grant, naming the conflict. See [two-party decisions](operator-automation.md#two-party-decisions).
+- **Two-party decisions**, requested by the master and approved by the separate approver agent: requirement rewrites and removals, escalation resolution, `manual:` attestation, rework and containment recovery (attesting the previous worker stopped), proof grants to a producer, and merge approval when automatic merging is off. Request with `master decide GY-N ACTION [JSON|@FILE] REASON`, launch the approver session with `master approver GY-N DECISION`, and read the outcome with `master decisions GY-N`. The approver runs `master approve GY-N DECISION REASON` from its own session, or `master refuse GY-N DECISION REASON` to decline it: a decline is recorded, never expressed by exiting. The server refuses self-approval and any approver that held an assignment on the item, produced the evidence the decision rests on, or would receive the grant, naming the conflict. See [two-party decisions](operator-automation.md#two-party-decisions).
 - **Routine operations**: principal-roster rotation for agent principals (`master principals` previews it and refuses to drop a live principal or change its role; `--apply` deploys it), restarting the durable loop (`master restart`), GitHub administration through the API and the browser flows, dispatch, review and proof shepherding, and the guarded merge.
 
 Onboarding provides the identities once: `master autonomy --admin-token-stdin --apply` provisions the master's operator-agent identity and the approver identity and installs the master's harness rules; dispatch installs each worker's own rules in its worktree, so a worker pushes its assigned branch and opens its pull request without a keypress. Every attention item in `master status` carries `attentionOwner` — the resolving `role` (`master`, `reviewer`, `control plane`, or `human` only for the three human-only decisions), whether the approver agent must approve, and the `next` command — and `attentionItems` lists them all. Never ask a human to run a command an agent identity is permitted to run.
@@ -350,6 +350,36 @@ It never approves what it requested: the approver session judges from its own id
 server refuses self-approval, an approver that held an assignment on the item, and one that
 produced the evidence the decision rests on.
 
+### Refused and unanswered decisions
+
+An approver has two writes, and a decline is one of them: **a decline is recorded, never expressed
+by exiting.** `master refuse GY-N DECISION REASON` (`POST /api/work/GY-N/approve` with
+`{ action: "refuse", decision, reason }`) moves a `requested` decision to the terminal `refused`
+state, carrying `refusal: { approver, reason, at }` in `master decisions GY-N` and a
+`decision.declined` ledger entry. Like `master approve` it runs only in the approver session, under
+its own `GRAPHYARD_TOKEN_FILE`: the master's session and the master's own credentials are refused
+before anything is sent, and the server refuses the requester — which takes its own request back
+with `master withdraw` instead — and every identity that could not have approved it.
+
+A refused decision is not re-requestable unchanged. A new request of the same action and input is
+refused, naming the refusal, the approver and its reason, unless its `REASON` cites the refused
+decision's id and says something the refused request did not — the same rule as answering a
+refused reconciliation. `master status` lists it under `terminalDecisions` (`state: refused`, the
+reason, `refusedBy`), counts it in `counts.refusedDecisions` while it is the latest decision of its
+action, and raises it for the master: `Decision … was refused by APPROVER: REASON. Answer the
+refusal: …`, whose `next` is a request citing it — or acting on the refusal instead. The durable
+loop never re-requests a refused decision — it settles its watch and leaves the answer to the master
+— and any unchanged re-request is refused the same way, so a refusal is never silently retried. The
+approver session's own request names `master refuse` for a decline; it is never told to state its
+reason in its tab and stop.
+
+A decision still `requested` whose approver session is not running — gone from Herdr, or `done` —
+with no outcome recorded is **unanswered**: a stall, not a refusal. `master status` lists each under
+`unansweredDecisions` with the session it was put to and its age, counts them in
+`counts.unansweredDecisions`, and raises `Decision … is unanswered after AGE: approver session NAME is
+not running and recorded no outcome — a stall, not a refusal`, whose `next` puts it to a fresh
+approver. Nothing is concluded while Herdr cannot be read.
+
 **A request is not the end of it.** The approver is a launched session like any other: it can die,
 drop its prompt, hit an account limit, decline, or hang. The loop keeps a watch per requested
 decision (`daemon.approvals` in `master status`) and on every cycle reads the decision back from the
@@ -358,8 +388,9 @@ control plane and the session back from Herdr:
 | What it sees | What it does |
 | --- | --- |
 | The decision is `applied` | Closes the approver's finished tab and retires the watch once the item has moved on |
+| The decision ended `refused` | Closes the approver's tab and settles the watch: no replacement session and no re-request. Escalates once with the approver's reason; `master status` names the refusal and the next step is the master's: answer it (see [refused and unanswered decisions](#refused-and-unanswered-decisions)) |
 | Still `requested` (or `approved` but not yet applied) and the session is working, inside ten minutes | Waits |
-| The session is gone, ended `idle`/`done`/`blocked` without approving (a decline is only ever visible this way), or has worked past ten minutes | Closes it and launches a replacement — at most three sessions per decision |
+| The session is gone, ended `idle`/`done`/`blocked` without approving or refusing — a stall, never a decline — or has worked past ten minutes | Closes it and launches a replacement — at most three sessions per decision |
 | The decision ended `failed`, `stale` or `withdrawn`, or the server no longer holds it, and the item still needs it | Requests it again — at most three requests per binding, on the usual widening retry interval |
 | Three sessions spent and still unjudged | Escalates once with the decision, how each session ended, and `master approver GY-N DECISION`; stops spending sessions; leaves the request standing |
 | A `merge` decision standing for an earlier candidate | Withdraws it as its requester — it can never apply, and the server refuses a second request while it stands — then requests one for the current candidate |
@@ -2281,6 +2312,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
 | `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision, on the registry's `approver` role (KIND overrides the runtime) |
 | `master approve GY-N DECISION REASON` | Approve, from the approver session only |
+| `master refuse GY-N DECISION REASON` | Record a considered refusal, from the approver session only; the decision ends `refused` with the reason |
 | `master principals [--apply]` | Preview or apply an agent-principal roster rotation that keeps every live principal |
 | `master restart` | Stop this host's durable loop and start it again detached |
 | `master run [--once]` | The durable coordination loop, with the dispatcher that launches requested reviews and producers; its cycle also reclaims [worktree disk](#worktree-disk) |
