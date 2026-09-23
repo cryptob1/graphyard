@@ -33,6 +33,7 @@ import { attributionRoutes } from './routes/attribution.js';
 import { statusRoutes } from './routes/status.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
+import { interventionPolicyFromEnv, interventionRoutes } from './routes/interventions.js';
 import { staticRoutes } from './static.js';
 
 export { principalSchema, type Credential } from './principals.js';
@@ -47,7 +48,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes]
 export const apiRoutes: readonly RouteModule[] = [
   operatorAgentRoutes, proofGrantRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes,
+  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, interventionRoutes, actionRoutes, statusRoutes, workRoutes,
 ];
 
 async function body(req: IncomingMessage, limit = 1_000_000) {
@@ -71,10 +72,9 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const env = options.env ?? process.env;
   const delegationLimits = assembleDelegationLimits(credentials, env, options.knownPrincipals);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
-  // The engine is constructed with the repository that this control plane is
-  // authorized to coordinate.  GITHUB_REPOSITORY is merely a process default
-  // (and is automatically set to the CI checkout), so it must not override an
-  // explicit engine binding or scope validation becomes environment-dependent.
+  // The engine is constructed with the repository this control plane is authorized to coordinate.
+  // GITHUB_REPOSITORY is merely a process default (automatically set to the CI checkout), so it
+  // must not override an explicit engine binding or scope validation becomes environment-dependent.
   const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
   demand(!engine.repository || !github || engine.repository.toLowerCase() === github.config.repository.toLowerCase(),
     'Engine and GitHub repositories must match');
@@ -98,7 +98,7 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const configured = credentials.map(({ token, ...actor }) => actor);
   engine.principals = configured;
   const proofGrants = new ProofGrants(engine.store, configured);
-  return { engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  return { engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
 }
 
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {

@@ -21,6 +21,7 @@ import { ledgerRefusalAttention } from '../master-status.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
+import { interventionSummary } from './intervention-status.js';
 import { setupHealth } from './master-setup.js';
 import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
@@ -173,6 +174,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // An escalation context over its budget (GY-138), named before a handler declines on it.
   const overflow = await contextOverflows(masterApi, snapshot.work);
   attentionItems.push(...generatedFiles, ...overflow);
+  // What the product made people do by hand this week (GY-98).
+  const interventions = await interventionSummary(masterApi);
+  attentionItems.push(...interventions.attentionItems);
   // The fleet against the release this CLI runs (GY-126): every executor registered on this host
   // with the commit it loaded beside the coordinator's, and one item naming each that has stood
   // down, or will at its next claim, because the checkout moved on under it.
@@ -188,6 +192,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
     actionless: { bound: stallBoundMs, items: actionless },
+    interventions: interventions.summary,
     terminalDecisions: decisions.listed, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),

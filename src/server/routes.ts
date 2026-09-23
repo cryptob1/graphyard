@@ -13,6 +13,7 @@ import type { BuildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import type { Principal } from '../model.js';
 import type { Responder } from '../closed-question.js';
+import type { InterventionPolicy } from '../model/interventions.js';
 
 /** Everything the assembled control plane owns, handed to every route. */
 export interface Services {
@@ -26,6 +27,8 @@ export interface Services {
   /** Production deployment observation, when the process hosts one. */
   production: ProductionWatch | null;
   validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents; proofGrants: ProofGrants; productionDelivery: ProductionDelivery;
+  /** When a recurring intervention becomes work (GY-98): the threshold and window read at boot. */
+  interventionPolicy: InterventionPolicy;
   /** The fleet: runtimes, accounts, models and roles, and the sessions chosen from them. */
   agentRegistry: AgentRegistry;
   /** The closed-question responder (GY-109), or null when none is configured and every such proof takes its ordinary path. */
