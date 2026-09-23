@@ -7,7 +7,7 @@ import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, type BaseRefresh, type CarriedCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery } from './merge-queue.js';
+import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -293,6 +293,11 @@ export class GitHub {
     ]);
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
+    // A dismissed review is recorded with GitHub's reason for dismissing it and the head it was
+    // given on (GY-127): the review list alone cannot tell a reviewer withdrawing a verdict from
+    // GitHub withdrawing an approval because the merge base moved under an unchanged head.
+    const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null };
+    const dismissalOf = (id: number): ReviewDismissal | undefined => dismissals.read.get(id) ?? (dismissals.unread ? { reason: null, mergeBase: false, verdict: null, commit: null, at: null, by: null, unread: dismissals.unread } : undefined);
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges. A
     // head that already contains the branch tip is up to date and binds to it, as it always did.
@@ -338,7 +343,8 @@ export class GitHub {
         ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
-      reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at })),
+      reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
+        ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, scopeFiles,
@@ -366,10 +372,13 @@ export class GitHub {
     if (!peers) return landing;
     const open = peers.filter(peer => peer.id !== work.id && peer.stage !== 'done' && !!peer.submission && !!peer.candidate && peer.candidate.sha !== head
       && !!peer.observation && !peer.observation.merged && peer.observation.prState !== 'closed' && peer.observation.candidate.sha === peer.candidate.sha);
-    landing.examined = open.map(peer => `${peer.key}@${peer.candidate!.sha}`).sort();
+    // A peer is in this head's history by its current head, or by the reviewed head under a tip
+    // of its own: the tip a queue republishes changes, the reviewed head under it does not.
+    landing.examined = open.map(peer => `${peer.key}@${ownHeads(peer).join('+')}`).sort();
     const previous = work.observation && work.observation.candidate.sha === head ? work.observation.landing : undefined;
-    if (previous?.carried && previous.base === base && JSON.stringify(previous.examined) === JSON.stringify(landing.examined) && !previous.carried.some(entry => entry.unverified)) return { ...landing, carried: previous.carried };
+    if (previous?.carried && previous.foreign && previous.base === base && JSON.stringify(previous.examined) === JSON.stringify(landing.examined) && !previous.carried.some(entry => entry.unverified)) return { ...landing, carried: previous.carried, foreign: previous.foreign };
     const carried: CarriedCandidate[] = [];
+    const foreign: ForeignCandidate[] = [];
     // The entries ahead are in a predicted base by construction, so their files standing in this
     // head as they stand there is the ordinary state of a queued tip and says nothing: two entries
     // ahead that both change one file leave it merged in the tip behind them. What such a tip would
@@ -378,7 +387,11 @@ export class GitHub {
     // there, and `carried` judges the candidates the landing commit does not hold.
     const ahead = new Set(predicted ? speculation!.predecessors : []);
     for (const peer of open) {
-      if (ahead.has(peer.key) || !await this.contains(peer.candidate!.sha, head)) continue;
+      if (ahead.has(peer.key)) continue;
+      let contained = false;
+      for (const sha of ownHeads(peer)) if (await this.contains(sha, head)) { contained = true; break; }
+      if (!contained) continue;
+      foreign.push({ key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha });
       const entry: CarriedCandidate = { key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, dropped: [] };
       for (const file of peer.observation!.scopeFiles ?? []) {
         // A file this item planned is its own to change, whoever else touched it.
@@ -393,7 +406,7 @@ export class GitHub {
       }
       if (entry.dropped.length || entry.unverified) carried.push(entry);
     }
-    return { ...landing, carried };
+    return { ...landing, carried, foreign };
   }
   /** True when the commit took the path from the content the pull request delivered: one of its parents still holds that exact blob. */
   private async revertsDelivered(commit: string, path: string, files: any[]): Promise<boolean> {
@@ -557,6 +570,64 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     demand(comment.performed_via_github_app?.id === this.config.appId && comment.user?.type === 'Bot' && comment.body === body && Number.isSafeInteger(comment.id) && Number.isFinite(Date.parse(comment.created_at)), 'Review dispatch did not return an authenticated Graphyard comment', 502);
     return { commentId: comment.id, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, body, createdAt: comment.created_at };
   }
+  /**
+   * Why GitHub dismissed each dismissed review of a pull request, from the issue timeline's
+   * `review_dismissed` events, keyed by review id. The verdict the dismissed review carried is
+   * read from the event too (`dismissed_review.state`): the review list reports a dismissed
+   * change request and a dismissed approval with the same `DISMISSED` state, and only the latter
+   * is an approval anyone can restore. A timeline that cannot be read leaves the dismissal
+   * recorded as unread rather than failing the observation: the review gate already refuses a
+   * dismissed approval, and nothing is inferred from a reason nobody could read.
+   */
+  async reviewDismissals(pr: number): Promise<{ read: Map<number, ReviewDismissal>; unread: string | null }> {
+    const read = new Map<number, ReviewDismissal>();
+    try {
+      for (const event of await this.pages(`/issues/${pr}/timeline`)) {
+        if (event?.event !== 'review_dismissed' || !Number.isSafeInteger(event?.dismissed_review?.review_id)) continue;
+        const reason = typeof event.dismissed_review.dismissal_message === 'string' ? event.dismissed_review.dismissal_message : null;
+        read.set(event.dismissed_review.review_id, { reason, mergeBase: !!reason && mergeBaseDismissalPattern.test(reason), verdict: dismissedVerdict(event.dismissed_review.state),
+          commit: typeof event.dismissed_review.dismissal_commit_id === 'string' ? event.dismissed_review.dismissal_commit_id : null,
+          at: typeof event.created_at === 'string' ? event.created_at : null, by: typeof event.actor?.login === 'string' ? event.actor.login : null });
+      }
+    } catch (error) {
+      return { read, unread: error instanceof Error ? error.message : 'the pull request timeline could not be read' };
+    }
+    return { read, unread: null };
+  }
+  /**
+   * The item's own reviewed head under a branch head (GY-127): the last commit a worker pushed or
+   * the control plane brought onto the base, found by walking first parents through this item's
+   * own speculative-tip merges. The record names it for a tip the queue published; the walk reads
+   * GitHub's account of each commit for a tip built before the record did, or over a tip. A base
+   * refresh or a branch restore is landed content and is kept.
+   *
+   * A commit is stepped past only when it is provably one of this item's own tips: a tip the
+   * queue history recorded, or a commit GitHub attributes to the control-plane App that carries
+   * the tip message. A message alone proves nothing — any worker can write it — and a commit the
+   * walk stops at is kept, so its content is in every tip built from it. The walk decides what a
+   * tip is built from, never what carries onto it: the carry refuses an approval that was not
+   * given on the head the walk returned (see Engine.decideTipCarry).
+   */
+  async ownReviewedHead(work: Work, head: string): Promise<string> {
+    const speculation = work.queue?.speculation;
+    let sha = speculation?.tip === head ? speculation.reviewedHead ?? speculation.merge?.from ?? head : head;
+    const marker = new RegExp(`^Graphyard speculative tip for ${work.key.replace(/[^A-Za-z0-9-]/g, '')} behind `, 'i');
+    const recorded = new Map((work.queueHistory ?? []).filter(entry => entry.event === 'predicted' && entry.tip && entry.from && entry.from !== entry.tip).map(entry => [entry.tip!, entry.from!]));
+    const login = await this.controlPlaneLogin();
+    for (let hops = 0; hops < 25; hops++) {
+      const from = recorded.get(sha);
+      if (from) { sha = from; continue; }
+      const commit = await this.request(`/commits/${sha}`);
+      const first = Array.isArray(commit?.parents) ? commit.parents[0]?.sha : undefined;
+      if (!marker.test(typeof commit?.commit?.message === 'string' ? commit.commit.message : '') || !appAuthored(commit, login) || typeof first !== 'string' || !/^[a-f0-9]{40}$/.test(first)) return sha;
+      sha = first;
+    }
+    return sha;
+  }
+  /** Moves a pull-request branch to a commit the control plane chose; the branch is unprotected and the move is deliberate. */
+  async updateBranch(branch: string, sha: string) {
+    await this.request(`/git/refs/heads/${branch.split('/').map(encodeURIComponent).join('/')}`, 'PATCH', { sha, force: true });
+  }
   async commitTree(sha: string): Promise<string> {
     const commit = await this.request(`/commits/${sha}`);
     const tree = commit?.commit?.tree?.sha;
@@ -591,17 +662,25 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const files = comparison?.files;
     demand(Array.isArray(files), `GitHub did not list the files changed between ${from.slice(0, 12)} and ${to.slice(0, 12)}`, 502);
     if (files.length >= compareFileCap) return null;
-    return [...new Set(files.flatMap((file: any) => [file.filename, ...(typeof file.previous_filename === 'string' ? [file.previous_filename] : [])]).filter((path: unknown): path is string => typeof path === 'string'))];
+    const paths = (listed: any[]) => listed.flatMap((file: any) => [file.filename, ...(typeof file.previous_filename === 'string' ? [file.previous_filename] : [])]).filter((path: unknown): path is string => typeof path === 'string');
+    // A comparison lists what `to` changed against the merge base. A predicted base that moved
+    // backwards or sideways — the entry between this one and its new base was ejected — has changes
+    // on the `from` side too, and a tip rebuilt onto it no longer holds them; both sides are listed.
+    if (comparison.status === 'behind' || comparison.status === 'diverged') {
+      const reverse = await this.request(`/compare/${to}...${from}`);
+      demand(Array.isArray(reverse?.files), `GitHub did not list the files changed between ${to.slice(0, 12)} and ${from.slice(0, 12)}`, 502);
+      if (reverse.files.length >= compareFileCap) return null;
+      return [...new Set([...paths(files), ...paths(reverse.files)])];
+    }
+    return [...new Set(paths(files))];
   }
   /** How GitHub describes the tip Graphyard's merge produced: parents, author, and whether the author is this App. */
   private async describeMerge(from: string, tip: string, boundBase: string, predictedBase: string): Promise<TipMerge> {
     const commit = await this.request(`/commits/${tip}`);
     const parents = Array.isArray(commit?.parents) ? commit.parents.map((parent: any) => parent?.sha).filter((sha: unknown) => typeof sha === 'string') : [];
-    const login = await this.controlPlaneLogin();
     const author = typeof commit?.author?.login === 'string' ? commit.author.login : null;
     const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';
-    const authoredByApp = author !== null ? author.toLowerCase() === login.toLowerCase() && commit.author?.type === 'Bot'
-      : new RegExp(`^\\d+\\+${login.replace(/[[\]]/g, '\\$&')}@users\\.noreply\\.github\\.com$`, 'i').test(email);
+    const authoredByApp = appAuthored(commit, await this.controlPlaneLogin());
     // The provider merge never resolves a conflict: a conflicting merge is refused with 409 and
     // ejects the entry (see mergeBranch), so a tip that exists was produced without one.
     return { from, parents, author: author ?? (email || null), authoredByApp, conflicts: false, baseChanges: await this.changedFiles(boundBase, predictedBase) };
@@ -630,6 +709,14 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * branch plus every entry ahead of it) with this candidate merged in. The result is published
    * under a Graphyard-owned ref and pushed onto the candidate branch, so the PR head, the
    * required checks, the review, and every proof all bind to that one exact commit.
+   *
+   * Every tip is built from the item's own reviewed head, never from the tip it replaces (GY-127).
+   * A tip merged over an earlier tip kept that tip's predecessor in the branch history for good:
+   * when the predecessor was ejected, or this entry was, the branch went on carrying commits of an
+   * item that had not landed, and no head the worker could push would pass. So a branch whose
+   * head is a tip is first moved back to the reviewed head under it, and the predicted base is
+   * merged onto that; the tip's parents are exactly the reviewed head and its predicted base, which
+   * is also what lets the carry rule in model/carry.ts accept it.
    */
   async publishSpeculativeTip(work: Work, placement: QueuePlacement, beforeWrite: () => Promise<void> = async () => {}): Promise<QueueSpeculation> {
     demand(work.candidate && work.queue && placement.predictedBase, 'A queued candidate with a predicted base is required');
@@ -642,15 +729,62 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const branch = await this.baseBranch();
     requireCurrent(!!placement.base && (branch.tip === placement.base.sha || branch.tree === placement.base.tree), `Base branch ${this.config.base} moved before speculative prediction; retry`);
     const baseTree = await this.commitTree(placement.predictedBase!);
+    const reviewedHead = await this.ownReviewedHead(work, pr.head.sha);
     await beforeWrite();
+    // The branch is moved by a forced ref update after the head was read above, not compared and
+    // swapped in one request. A worker push landing in that window is overwritten; the window is
+    // one request wide, the item is queued (a worker push at that point is a new head the queue
+    // would eject for anyway), and the next observation reads the branch afresh, so the worker's
+    // head is at worst reported as replaced rather than silently kept. Narrow, and accepted.
+    if (reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
     const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
-    const tip = merged ?? pr.head.sha;
+    const tip = merged ?? reviewedHead;
     const ref = queueRef(work.key);
     await this.publishRef(ref, tip);
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
-    const merge = merged ? await this.describeMerge(pr.head.sha, merged, work.candidate!.baseSha, placement.predictedBase!) : null;
-    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge };
+    const merge = merged ? await this.describeMerge(reviewedHead, merged, work.candidate!.baseSha, placement.predictedBase!) : null;
+    // A reviewed head that already contains its new predicted base is the tip itself, replacing
+    // an earlier tip with no commit produced: the carry is then decided on the files that changed
+    // between the replaced tip's bound base and the predicted base, listed here from GitHub.
+    const baseChanges = merged || tip === work.candidate!.sha ? undefined : await this.changedFiles(work.candidate!.baseSha, placement.predictedBase!);
+    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead,
+      ...(baseChanges !== undefined ? { baseChanges } : {}) };
+  }
+  /**
+   * Restores a pull-request branch that carries another item's unlanded commits (GY-127): moves it
+   * back to the item's own reviewed head, then merges the base branch onto it exactly as a base
+   * refresh does. The ejection of a queued tip runs this on its own; the coordinator requests it
+   * for a branch found contaminated any other way. No worker pushes for it and nobody opens a
+   * shell: the control-plane App moves the branch, and the record says what it did and why.
+   */
+  async restoreBranch(work: Work, restore: { contaminated: string; foreign: string[]; own: string | null; cause: BranchRestore['cause']; requested: BranchRestore['requested']; reason: string }, beforeWrite: () => Promise<void> = async () => {}): Promise<BaseRefresh> {
+    const candidate = work.candidate;
+    demand(candidate && !work.queue && restore.contaminated === candidate.sha, 'An unqueued candidate whose head is the contaminated one is required');
+    const pr = await this.request(`/pulls/${candidate!.pr}`);
+    requireCurrent(pr.head.sha === candidate!.sha && pr.base.ref === this.config.base && pr.state === 'open' && pr.draft === false, 'Pull request changed before the branch restore; retry');
+    const branch = await this.baseBranch();
+    const at = new Date().toISOString();
+    const own = restore.own ?? await this.ownReviewedHead(work, pr.head.sha);
+    const record = (fields: Partial<BaseRefresh>, outcome: BranchRestore['outcome'], own: string | null): BaseRefresh => ({
+      from: { sha: own ?? candidate!.sha, baseSha: candidate!.baseSha }, base: branch.tip, baseTree: branch.tree, policyRevision: work.policyRevision, at,
+      head: own ?? candidate!.sha, conflict: null, merge: null, carry: null, ...fields, restore: { ...restore, own, performedAt: at, outcome } });
+    // A head that is not a tip of this item's own has the foreign commits under something a worker
+    // pushed, or under nothing the record can name: nothing is moved, and the item says so.
+    if (own === pr.head.sha) return record({}, 'unrepairable', null);
+    await beforeWrite();
+    // The same one-request window as in publishSpeculativeTip: a worker push between the head
+    // check above and this forced update is overwritten by the restore. The head being restored
+    // is one no worker may push over (a contaminated tip), the record names the head it moved
+    // from, and the next observation reads the branch afresh.
+    await this.updateBranch(pr.head.ref, own);
+    let merged: string | null;
+    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
+    catch (error) {
+      if (!(error instanceof SpeculativeConflict)) throw error;
+      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', own);
+    }
+    return record({ head: merged ?? own, merge: merged ? await this.describeMerge(own, merged, own, branch.tip) : null }, 'restored', own);
   }
   /**
    * Brings one in-flight candidate onto a base branch that moved under it, without a rework round.
@@ -701,6 +835,13 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
 }
+/** Whether GitHub attributes a commit to the control-plane App's bot account: by the linked author, or by the App's noreply address. */
+function appAuthored(commit: any, login: string): boolean {
+  const author = typeof commit?.author?.login === 'string' ? commit.author.login : null;
+  const email = typeof commit?.commit?.author?.email === 'string' ? commit.commit.author.email : '';
+  return author !== null ? author.toLowerCase() === login.toLowerCase() && commit.author?.type === 'Bot'
+    : new RegExp(`^\\d+\\+${login.replace(/[[\]]/g, '\\$&')}@users\\.noreply\\.github\\.com$`, 'i').test(email);
+}
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
@@ -741,6 +882,19 @@ async function refreshBase(engine: Engine, github: GitHub, work: Work, job: { wo
   const updated = await engine.bindBaseRefresh(work.id, work.revision, refresh, job.token);
   return { work: updated, published: !!refresh.head && refresh.head !== refresh.from.sha, held: null };
 }
+/**
+ * Restores one branch found carrying another item's unlanded commits, and records what the restore
+ * did. The record's own answer decides the restore an ejection owes; a repair the coordinator
+ * requested is already on the record and is run from it.
+ */
+async function restoreBranch(engine: Engine, github: GitHub, work: Work, owed: BranchRestore | ReturnType<typeof ejectedTipRestore>, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
+  const held = hold('merge-queue');
+  if (held) return { work, published: false, held };
+  const request = 'cause' in owed! ? owed : { ...owed!, cause: 'ejection' as const, requested: null };
+  const refresh = await github.restoreBranch(work, { contaminated: request.contaminated, foreign: request.foreign, own: request.own, cause: request.cause, requested: request.requested, reason: request.reason }, guard(work, false));
+  const updated = await engine.bindBranchRestore(work.id, work.revision, refresh, job.token);
+  return { work: updated, published: refresh.head !== null && refresh.head !== request.contaminated, held: null };
+}
 /** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
 export const permissionHoldMs = 30 * 60_000;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
@@ -772,6 +926,15 @@ export async function processJob(engine: Engine, github: GitHub) {
       if (held) { await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn()); return; }
       const observation = await github.observe(work, all);
       work = await engine.observe(work.id, work.revision, observation, job.token);
+      // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):
+      // on its own for a tip the queue ejected, on the coordinator's request otherwise. The restored
+      // head is a new candidate, so the job requeues onto it before anything else is dispatched.
+      const owed = pendingRestore(work) ?? ejectedTipRestore(work, all);
+      if (owed) {
+        const restored = await restoreBranch(engine, github, work, owed, job, guard, hold);
+        work = restored.work; held ??= restored.held;
+        if (restored.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return; }
+      }
       // A base branch that moved under this candidate is Graphyard's to absorb, not the worker's.
       // The republished head is what the review, the checks and the proofs then bind to, so the
       // refresh runs before any review is dispatched and the job requeues onto the new head.
