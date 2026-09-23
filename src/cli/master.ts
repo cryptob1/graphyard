@@ -21,6 +21,7 @@ import { executorHostHeader } from '../model/registry.js';
 import { readSecretFromStdin } from './context.js';
 import { reviewerCommand } from './master-reviewer.js';
 import { registryCommand, registryHelp } from './master-registry.js';
+import { executorsCommand, executorsHelp } from './master-executors.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -82,6 +83,7 @@ export const masterCommands = defineCommands([
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
       ...registryHelp,
+      ...executorsHelp,
     ],
     async run(context) {
       const { id, args, print } = context;
@@ -118,6 +120,8 @@ export const masterCommands = defineCommands([
       if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
       if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
       if (id === 'reviewer') return reviewerCommand(root, master, args, print);
+      // The fleet on this host against the CLI checkout's commit: the release a restart would load.
+      if (id === 'executors') return print(await executorsCommand(master, args, { actions: () => masterApi('actions'), coordinatorCommit: cli.commit }));
       if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });

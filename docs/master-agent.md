@@ -740,6 +740,10 @@ node scripts/graphyard-executor.mjs --once               # one claim-run-settle 
 node scripts/graphyard-executor.mjs --kinds merge,resync  # a narrower one; run several with different kinds
 ```
 
+Each one records the release it loaded beside the coordinator credential and stands down when its
+checkout moves on; see [executors run the release they loaded](#executors-run-the-release-they-loaded)
+for the record, the status line and the one command that restarts the fleet.
+
 It reads this host's `.graphyard/master.json` for the launch profiles the dispatching actions need
 and authenticates with the coordinator credential named there — the same credential `master run`
 uses, and nothing broader. Run as many as you like, on as many hosts; none of them is a master, and
@@ -836,6 +840,75 @@ inside what an action starts — implementing, reviewing, producing evidence, ap
 decision, resolving an escalation — and never in the loop that starts it. That is what the master
 session is now for: the escalations, the findings and the two-party decisions, outside the
 critical path.
+
+### Executors run the release they loaded
+
+An executor is a thin entry point over TypeScript modules it imports once, at startup. The checkout
+it loaded them from keeps moving — a fix is merged and pulled — and the process keeps running the
+code it had when it booted, claiming rows with behaviour the repository no longer has. On 22
+September 2026 two executors ran for a day on a commit the repository had left behind, and nothing
+said so: a claim named an executor and a host, never a release, and `master status` reported the
+fleet as one thing.
+
+**Every executor reports the release it runs.** At startup it reads the repository commit of the
+checkout it loaded from, and whether that checkout was dirty, and registers on its host — a record
+beside the coordinator credential and the loop's own cursor, `<credential stem>.executors/NAME.json`
+— with its name, pid, principal, kinds, supervisor unit and that release. Every claim rewrites the
+record with the action and the release it runs on; the last write on the way out marks it stopped.
+`master status` reads those records under `executors`, one line per executor with its commit beside
+the coordinator's own — the commit the CLI checkout holds, which is what a freshly started loop or
+executor would load — so a split fleet reads in one line:
+
+```
+exec-1 on host-a runs 0ea7ab5c0ea7 beside the coordinator's fdd31388fdd3 — split, standing down
+exec-2 on host-a runs fdd31388fdd3 beside the coordinator's fdd31388fdd3
+```
+
+`master executors` prints the same lines on their own. A record on this host is checked against
+its process: one whose process is gone reads as `gone`, not as an executor.
+
+**A stale executor stands down.** Before every claim the executor re-reads the commit its checkout
+holds now. When that differs from the commit it loaded it claims nothing more: the action already
+in flight finishes and settles under the code it started with — the settlement is what the queue
+is owed — and only the next claim is refused, before the queue is asked. The record says why
+(`this executor loaded 0ea7ab5c0ea7 at startup and its checkout now holds fdd31388fdd3; it claims
+nothing more, so no row runs behaviour the repository no longer has`) and names the command that
+restarts it; the process log says the same. A checkout that returns to the loaded commit — a branch
+checked out and put back — is not stale, and claiming resumes. Every executor that has stood down,
+or runs another commit and will at its next claim, is named in one `master status` attention item
+with the fleet restart as its next command; an executor with no supervisor unit is named there as
+one that must be stopped and started by hand. A dirty checkout is reported, never judged: it says
+the executor runs code no commit names, and the restart brings it onto what the checkout holds.
+
+**One command restarts the fleet:**
+
+```sh
+graphyard master executors restart [--timeout SECONDS]
+```
+
+It stops and starts every executor registered on this host through its supervisor — `systemctl
+--user restart UNIT` for each executor's unit, never a signal to a process — and waits for each to
+register again: a running record written after the restart, on the coordinator's commit. It
+refuses, naming the executor and the action, while any executor on this host holds a claimed
+action (`exec-1 holds merge for GY-7 since …`), because a restart would leave that row to expire
+and be run again by somebody else; wait for the settlement and run it again. The result says what
+each executor ran before and runs now (`restarted`), or names what never came back within the
+timeout and what runs unsupervised (`incomplete`, exit 1); a record whose process is gone and which
+no unit brings back is forgotten. An executor started by hand has no unit to restart, so it is
+named with the instruction instead — stop it, and it finishes the action in flight and records
+itself stopped; start it again from the checkout — and the packaged template unit is what makes
+the command reach it next time:
+
+```sh
+cp examples/master/graphyard-executor@.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now graphyard-executor@exec-1 graphyard-executor@exec-2
+```
+
+The template passes its own unit name to the executor (`GRAPHYARD_EXECUTOR_UNIT=%n`, or `--unit`
+by hand), which the executor also reads from its own cgroup; only a `graphyard-executor…` service
+counts, so an executor started inside a terminal multiplexer's unit is not restarted by restarting
+that unit. Its stop timeout gives the action in flight the room a worker launch may take.
 
 ### Workers pull their own work
 
@@ -1829,8 +1902,10 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master registry account quota NAME exhausted\|available\|unknown [--resets-at ISO] --reason R` | Mark an account's quota by hand; an exhausted mark holds until its reset or until cleared |
 | `master registry runtime\|model\|account\|role remove NAME --reason R` | Remove an entry; removing a runtime removes its accounts, and roles fall back in order |
 | `master registry history [--limit N]` | Every registry change and selection, newest first |
+| `master executors` | Every executor registered on this host with the release it loaded beside the coordinator's own, and which of them stand down ([executors run the release they loaded](#executors-run-the-release-they-loaded)) |
+| `master executors restart [--timeout SECONDS]` | Stop and start every executor registered on this host through its supervisor and wait for each to register again on the current release; refused, naming the executor and the action, while any executor holds a claimed action |
 | `master start KIND` | Launch the visible master session with its harness rules |
-| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
+| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), `disk` (free space and what a reclaim would return), `executors` (each executor's release beside the coordinator's), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
 | `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
 | `master producer replace FILE` | Replace the producer profile of the same name, verified like `add` |

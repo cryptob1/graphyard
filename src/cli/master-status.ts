@@ -12,6 +12,7 @@ import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '.
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
+import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
@@ -251,17 +252,22 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
   }
   attentionItems.push(...generatedFiles);
+  // The fleet against the release this CLI runs (GY-126): every executor registered on this host
+  // with the commit it loaded beside the coordinator's, and one item naming each that has stood
+  // down, or will at its next claim, because the checkout moved on under it.
+  const executors = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: cli.commit ?? readCommit(root) }, { hostId: master.hostId });
+  attentionItems.push(...executors.attention);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, stalledActions: stalled.length, overlongSessions: overlong.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length + executors.attention.length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
       concurrency: master.reviewers.map(profile => ({ name: profile.name, agentName: profile.agentName, concurrency: profileConcurrency(profile) })) } : null,
     producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName, concurrency: profileConcurrency(profile) })),
-    setup, administration, daemon, dispatch,
+    setup, administration, daemon, dispatch, executors,
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: actionReport(snapshot), sessions: sessionReport(snapshot),

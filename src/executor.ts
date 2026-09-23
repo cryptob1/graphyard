@@ -7,6 +7,7 @@ import type { SessionHandleInput } from './model/sessions.js';
 import { independentProducerProfiles } from './producer.js';
 import { profileHealth, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
+import type { ExecutorRelease } from './executor-fleet.js';
 import type { HerdrAgent, MasterConfig, MergeExecutor, ProducerProfile, WorkerProfile } from './master.js';
 
 /**
@@ -195,6 +196,62 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
 export function judgmentInExecutorLoop(handlers: ExecutorEffects['handlers']): string | null {
   const judgments = (Object.keys(handlers) as NextActionKind[]).filter(kind => handlers[kind] && actionJudgment[kind] === 'in-step');
   return judgments.length ? `${judgments.join(', ')} ${judgments.length === 1 ? 'is a judgment made in the step itself' : 'are judgments made in the step itself'}; an executor may start the session that makes one, never make it` : null;
+}
+
+/**
+ * What an executor knows about the release it runs (GY-126).
+ *
+ * The modules a stateless executor imports are read once, at startup; the checkout they came from
+ * keeps moving. `loaded` is the release read then, `current` re-reads the checkout's commit before
+ * every claim, and the two disagreeing is the one condition under which an executor stops
+ * claiming: it would otherwise run behaviour the repository no longer has, on rows the queue
+ * offers it as if it were current.
+ */
+export interface ReleaseGuard {
+  loaded: ExecutorRelease;
+  /** The commit the checkout holds now, or null when it cannot be read (which is not a change). */
+  current: () => string | null;
+  /** Called once when the checkout has moved on: the executor records why it claims nothing more. */
+  standDown: (detail: { loaded: ExecutorRelease; current: string | null; reason: string }) => Promise<unknown> | unknown;
+  /** Called once if the checkout returns to the loaded commit; claiming resumes. */
+  resumed?: () => Promise<unknown> | unknown;
+  /** Every claim this executor makes, so the record beside it says what release each ran on. */
+  claimed?: (action: ActionRow) => Promise<unknown> | unknown;
+  settled?: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown> | unknown;
+}
+export const staleReleaseReason = (loaded: ExecutorRelease, current: string | null) =>
+  `this executor loaded ${loaded.commit ? loaded.commit.slice(0, 12) : 'an unknown commit'}${loaded.dirty ? ' (dirty)' : ''} at startup and its checkout now holds ${current ? current.slice(0, 12) : 'an unknown commit'}; it claims nothing more, so no row runs behaviour the repository no longer has`;
+
+/**
+ * The same effects, with the release check in front of every claim and the record behind every
+ * claim and settlement. The check sits on the claim rather than in the loop because that is the
+ * one place a stale executor must not go: an action already in flight finishes and settles under
+ * the code it started with — the settlement is what the queue is owed — and only the next claim
+ * is refused. An executor whose check reports no commit at all (no readable checkout) is not
+ * stale; it simply cannot say, and its record shows that.
+ */
+export function releaseGuardedEffects(effects: ExecutorEffects, guard: ReleaseGuard): ExecutorEffects & { standingDown: () => boolean } {
+  let standing = false;
+  return {
+    ...effects,
+    standingDown: () => standing,
+    claim: async request => {
+      const current = guard.current();
+      const stale = !!guard.loaded.commit && !!current && current !== guard.loaded.commit;
+      if (stale) {
+        if (!standing) { standing = true; await guard.standDown({ loaded: guard.loaded, current, reason: staleReleaseReason(guard.loaded, current) }); }
+        return { action: null, open: 0 };
+      }
+      if (standing) { standing = false; await guard.resumed?.(); }
+      const claimed = await effects.claim(request);
+      if (claimed.action) await guard.claimed?.(claimed.action);
+      return claimed;
+    },
+    settle: async (action, result, reason) => {
+      try { return await effects.settle(action, result, reason); }
+      finally { await guard.settled?.(action, result, reason); }
+    },
+  };
 }
 
 export { message as executorFailureMessage };

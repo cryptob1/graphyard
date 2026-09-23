@@ -3,7 +3,7 @@
 // list, so any number of these run on any number of hosts against the same queue; none of them is
 // a master, and killing one costs the claim it held and nothing else.
 //
-//   node scripts/graphyard-executor.mjs [--once] [--interval SECONDS] [--kinds a,b] [--name NAME]
+//   node scripts/graphyard-executor.mjs [--once] [--interval SECONDS] [--kinds a,b] [--name NAME] [--unit UNIT]
 //
 // It reads this host's .graphyard/master.json for the launch profiles the dispatching actions
 // need and authenticates with the coordinator credential named there — the same credential
@@ -11,12 +11,19 @@
 // default is every kind it has a handler for. Two kinds can never be among them: `escalate` and
 // `request-rework` are judgments made in the step itself, and the process refuses to start with a
 // handler for either, which is what keeps a language model out of the loop rather than inside it.
+//
+// The modules are loaded once, here, and the checkout they came from keeps moving (GY-126). The
+// process records the release it loaded beside the coordinator credential, re-reads the checkout's
+// commit before every claim, and stands down — finishing what it runs, claiming nothing more,
+// saying why and how to restart it — the moment the two differ. `--unit` names the systemd user
+// unit it runs under when that cannot be read from the process itself; `graphyard master executors
+// restart` restarts every registered executor through that unit.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 export function parseArguments(argv) {
-  const options = { once: false, intervalSeconds: 5, kinds: null, name: null };
+  const options = { once: false, intervalSeconds: 5, kinds: null, name: null, unit: null };
   for (let i = 0; i < argv.length; i++) {
     const argument = argv[i];
     const value = () => { const next = argv[++i]; if (next === undefined) throw new Error(`${argument} needs a value`); return next; };
@@ -24,6 +31,7 @@ export function parseArguments(argv) {
     else if (argument === '--interval') options.intervalSeconds = Number(value());
     else if (argument === '--kinds') options.kinds = value().split(',').map(kind => kind.trim()).filter(Boolean);
     else if (argument === '--name') options.name = value();
+    else if (argument === '--unit') options.unit = value();
     else throw new Error(`Unknown argument ${argument}`);
   }
   if (!Number.isInteger(options.intervalSeconds) || options.intervalSeconds < 1 || options.intervalSeconds > 900) throw new Error('--interval takes whole seconds between 1 and 900');
@@ -34,18 +42,18 @@ export function parseArguments(argv) {
 export async function load() {
   const { tsImport } = await import('tsx/esm/api');
   const here = import.meta.url;
-  const [master, daemon, dispatch, executor, reviewer, producer, actions, view] = await Promise.all([
+  const [master, daemon, dispatch, executor, reviewer, producer, actions, view, fleet] = await Promise.all([
     tsImport('../src/master.ts', here), tsImport('../src/master-daemon.ts', here), tsImport('../src/auto-dispatch.ts', here),
     tsImport('../src/executor.ts', here), tsImport('../src/reviewer.ts', here), tsImport('../src/producer.ts', here),
-    tsImport('../src/model/next-action.ts', here), tsImport('../src/server/work-view.ts', here),
+    tsImport('../src/model/next-action.ts', here), tsImport('../src/server/work-view.ts', here), tsImport('../src/executor-fleet.ts', here),
   ]);
-  return { master, daemon, dispatch, executor, reviewer, producer, actions, view };
+  return { master, daemon, dispatch, executor, reviewer, producer, actions, view, fleet };
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const options = parseArguments(argv);
   const modules = await load();
-  const { master: m, daemon: d, dispatch: a, executor: x, reviewer: r, producer: pr, actions: k, view: v } = modules;
+  const { master: m, daemon: d, dispatch: a, executor: x, reviewer: r, producer: pr, actions: k, view: v, fleet: f } = modules;
   const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
   const config = await m.loadMasterConfig(root);
   const token = await m.readCredentialFile(config.credentialFile);
@@ -110,16 +118,34 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     handlers: options.kinds ? Object.fromEntries(options.kinds.filter(kind => handlers[kind]).map(kind => [kind, handlers[kind]])) : handlers,
   };
   const identity = { id: options.name ?? `${status.actor.id}@${config.hostId}:${process.pid}`, host: config.hostId };
+  // The release these modules were loaded from, recorded on this host before the first claim and
+  // refreshed on every claim; the commit is re-read from the checkout in front of each claim.
+  const release = f.readRelease(root);
+  const registrar = f.executorRegistrar(config, { name: identity.id, host: identity.host, pid: process.pid, principal: status.actor.id, kinds: a.executorKinds(effects.handlers),
+    intervalSeconds: options.intervalSeconds, root, release, supervisor: options.unit ?? f.detectSupervisorUnit() });
+  await registrar.started();
+  const guarded = x.releaseGuardedEffects(effects, {
+    loaded: release, current: () => f.readCommit(root),
+    claimed: action => registrar.claimed(action), settled: () => registrar.settled(),
+    standDown: detail => { console.error(`[graphyard-executor] ${identity.id} stands down: ${detail.reason}; restart it with ${registrar.registration.supervisor?.restart ?? f.executorRestartCommand}`); return registrar.standDown(detail); },
+    resumed: () => { console.error(`[graphyard-executor] ${identity.id} claims again: its checkout is back on ${release.commit.slice(0, 12)}`); return registrar.resumed(); },
+  });
+  console.error(`[graphyard-executor] ${identity.id} runs ${release.commit ? release.commit.slice(0, 12) : 'an unknown commit'}${release.dirty ? ' (dirty)' : ''} from ${root}${registrar.registration.supervisor ? ` under ${registrar.registration.supervisor.unit}` : ' with no supervisor unit'}; registered at ${registrar.file}`);
   const stopping = new AbortController();
   const stop = () => stopping.abort();
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, stop);
   try {
-    const result = await a.runExecutor(identity, effects, { intervalMs: options.intervalSeconds * 1000, once: options.once, signal: stopping.signal, log: line => console.error(line) });
+    const result = await a.runExecutor(identity, guarded, { intervalMs: options.intervalSeconds * 1000, once: options.once, signal: stopping.signal, log: line => console.error(line) });
     const report = { executor: identity.id, host: identity.host, repository: config.repository, kinds: a.executorKinds(effects.handlers), intervalSeconds: options.intervalSeconds,
+      release, supervisor: registrar.registration.supervisor, standingDown: guarded.standingDown(), registration: registrar.file,
       steps: result.steps.length, ran: result.steps.filter(step => step.action).length, failed: result.steps.filter(step => step.result === 'failed').length, last: result.steps.at(-1) ?? null };
     console.log(JSON.stringify(report, null, 2));
     return report;
-  } finally { for (const signal of ['SIGINT', 'SIGTERM']) process.off(signal, stop); }
+  } finally {
+    for (const signal of ['SIGINT', 'SIGTERM']) process.off(signal, stop);
+    // The last write: a restart's wait tells the process that came back from the one that left by it.
+    await registrar.stopped().catch(() => {});
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error.message); process.exitCode = 1; });

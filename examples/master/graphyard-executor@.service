@@ -1,0 +1,42 @@
+# A supervised Graphyard stateless executor (GY-126). One instance per executor name:
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/master/graphyard-executor@.service ~/.config/systemd/user/
+#   # edit WorkingDirectory and ExecStart to your coordinator checkout and node
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now graphyard-executor@exec-1 graphyard-executor@exec-2
+#   journalctl --user -u graphyard-executor@exec-1 -f
+#
+# The executor loads its modules once, at startup, and records the release it loaded beside the
+# coordinator credential. When the checkout moves on it stands down and claims nothing more;
+# `graphyard master executors restart` restarts every executor on the host through these units
+# and waits for each to register again on the current release. The unit name is passed in so the
+# record names the exact unit that restarts it.
+#
+# It authenticates with the coordinator credential `master init` stored outside the repository.
+# Never add a worker, producer, or operator credential: an executor must not be able to claim work,
+# publish evidence, or revise requirements.
+[Unit]
+Description=Graphyard stateless executor %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/graphyard
+ExecStart=/usr/bin/node %h/code/graphyard/scripts/graphyard-executor.mjs --name %i
+Environment=GRAPHYARD_EXECUTOR_UNIT=%n
+Restart=always
+RestartSec=5
+# A stop lets the action in flight finish: a dispatch waits on a runtime and a guarded merge
+# chains provider calls, so the executor is given the same room a worker launch may take.
+TimeoutStopSec=900
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+# No PrivateTmp: sessions this executor launches create proof and review worktrees under the shared /tmp.
+PrivateTmp=no
+
+[Install]
+WantedBy=default.target
