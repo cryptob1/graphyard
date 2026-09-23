@@ -10,7 +10,7 @@ Backlog → Ready → Build → Review → Test → Acceptance → Merge → Don
 
 A card stops at its first refusing gate and explains what is missing. `graphyard complete` submits an implementation; only an observed, authorized merge makes work Done.
 
-[How it works](docs/how-graphyard-works.md) · [Glossary](docs/glossary.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
+[Install](docs/install.md) · [How it works](docs/how-graphyard-works.md) · [Glossary](docs/glossary.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
 
 ## Why Graphyard
 
@@ -46,28 +46,45 @@ Graphyard currently governs work through a verified GitHub merge. The packaged P
 
 Herdr is the first packaged runtime integration. Codex, Claude Code, opencode, custom agents, and human operators can use the same CLI and HTTP protocol.
 
-## Try it locally
+## Install
 
-Requires Node 24, Git, Docker Engine, and Docker Compose.
+One command installs a complete control plane for a GitHub repository — Postgres, the
+application, an HTTPS URL, every credential, the GitHub App and webhook, branch protection,
+agent profiles, and a verification pass.
 
 ```sh
-git clone https://github.com/cryptob1/graphyard.git
-cd graphyard
-npm ci
-cp .env.example .env
-# Replace every example credential in .env.
-docker compose up -d db
-npm run build
-npm start
+export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
+cd /path/to/your-repository
+
+node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --plan
+node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply
 ```
 
-Open `http://localhost:4310`. Sign in with the `admin` token from `.env`.
+`--plan` prints every action and value with secrets redacted and changes nothing; `--apply`
+executes the same plan and is idempotent. Providers are `railway`, `hetzner`, `docker-host`,
+and `compose`. A person is asked for four things: which provider, the provider login, one
+GitHub App confirmation click, and approval of the plan.
 
-For a real repository with Railway, GitHub protection, Herdr, a master, and workers, follow [repository onboarding](docs/onboarding.md). The package is not published to npm yet; run the CLI from a Graphyard checkout.
+**[docs/install.md](docs/install.md) is the primary install path.** It is an
+agent-executable runbook, so `install Graphyard for OWNER/REPO on railway following
+docs/install.md` is a complete instruction for a coding agent. Graphyard is not published to
+npm yet; run the CLI from a Graphyard checkout.
 
-## Deploy
+Graphyard is one application container plus Postgres. Every release publishes a versioned
+image; the installer runs it on Railway, a Hetzner or Docker host, or Docker Compose, and
+the ledger is backed up, upgraded and restored with the shipped `graphyard db` commands. It
+does not require Temporal, LangGraph, Redis, or a hosted account; Kubernetes is supported
+through the Helm chart, not required. [Deployment](docs/deployment.md) is the provider
+reference behind the installer, including the full variables table and a manual fallback.
 
-Graphyard is one application container plus Postgres. Every release publishes a versioned image; run it with [Railway, Docker Compose, or the Helm chart](docs/deployment.md), and back up, upgrade and restore the ledger with the shipped `graphyard db` commands. It does not require Temporal, LangGraph, Redis, or a hosted account; Kubernetes is supported, not required.
+## Evaluate it on one machine
+
+```sh
+node "$GRAPHYARD_CLI" install --provider compose --repo OWNER/REPO --apply
+```
+
+See the [quickstart](docs/quickstart.md) for the local loop, and [repository
+onboarding](docs/onboarding.md) for Herdr, a master, workers, and the first PR.
 
 ## Documentation
 

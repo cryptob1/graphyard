@@ -172,13 +172,16 @@ test('integration:dispatch-read-resilience — a dispatcher tick whose read time
     launchReview: async () => {}, launchProducer: async () => {},
     persist: async state => { persisted.push(structuredClone(state)); if (state.lastSuccessAt) stopping.abort(); },
   };
+  // Generous above the two-second p95 the latency test bounds a real read at: a slow but
+  // correct read must count as success, not as a failure that spins extra retries.
+  const readTimeoutMs = 2_500, retryMinMs = 100;
   const started = performance.now();
-  const run = await runAutoDispatch(config, cursor, effects, { intervalMs, signal: stopping.signal, log: line => log.push(line), readTimeoutMs: 300, retryMinMs: 100 });
+  const run = await runAutoDispatch(config, cursor, effects, { intervalMs, signal: stopping.signal, log: line => log.push(line), readTimeoutMs, retryMinMs });
   const elapsed = performance.now() - started;
   // Two failures and a success, well inside one interval: nothing waited a whole interval to retry.
   assert.equal(reads, 3); assert.equal(run.ticks.length, 1);
   assertTiming({ name: 'dispatch-read-resilience.recovery', test: 'integration:dispatch-read-resilience', statistic: 'elapsed', budgetMs: Math.min(10_000, intervalMs), samples: [elapsed] });
-  assert.match(log[0], /tick failed \(1 in a row, retrying in 100ms\): work snapshot read timed out after 300ms/);
+  assert.match(log[0], new RegExp(`tick failed \\(1 in a row, retrying in 100ms\\): work snapshot read timed out after ${readTimeoutMs}ms`));
   assert.match(log[1], /tick failed \(2 in a row, retrying in 200ms\): fetch failed/);
   const failing = persisted.find(state => state.consecutiveFailures === 2)!;
   assert.ok(failing, 'the failure streak is persisted before the retry');

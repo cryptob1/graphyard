@@ -107,7 +107,7 @@ The page tells two empty states apart, because they call for different actions.
 
 This control plane runs on Railway, and Railway does not call `POST /api/production-observations` on its own. To make the metric measurable:
 
-1. Add a `producer` principal to `GRAPHYARD_PRINCIPALS` ([deployment](deployment.md#railway)) with `"deploymentProviders": ["railway"]` and no `proofs`, then redeploy. The `producer` role alone is refused; the allowlist is the authority, and it is granted to a credential of its own rather than by widening an acceptance collector's grants.
+1. Add a `producer` principal to `GRAPHYARD_PRINCIPALS` ([deployment](deployment.md#railway-by-hand)) with `"deploymentProviders": ["railway"]` and no `proofs`, then redeploy. The `producer` role alone is refused; the allowlist is the authority, and it is granted to a credential of its own rather than by widening an acceptance collector's grants.
 2. Run a collector with that credential that, after each successful Railway deployment of the base branch, posts one observation naming the deployment, its finish time, the clock bracket it measured against the repository clock (within twenty seconds), the deployed commit, and every merge commit the deployment contains. The request shape and the refusals are in [Shipping pulse](shipping-pulse.md#source-and-definitions).
 3. Until the collector exists, `graphyard master verify-deployment GY-N` on each delivered item gives it a production instant, and the master loop runs that step on its own.
 

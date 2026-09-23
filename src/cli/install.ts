@@ -4,6 +4,8 @@ import { parseArgs } from 'node:util';
 import { availableRuntimes, discover } from '../onboarding.js';
 import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
+import { applyInstall, buildPlan, prepareInstall, providers, type InstallInputs } from '../install/index.js';
+import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
 import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
@@ -45,8 +47,62 @@ export async function capacityForPrincipals(principalsFile: string, status: () =
     next: `Set ${limits.lines.join(' ')} beside GRAPHYARD_PRINCIPALS on the Graphyard deployment${limits.drift.length ? ` (drift: ${limits.drift.map(entry => entry.reason).join(' ')})` : error ? `; no drift can be reported because ${error}` : ''}` };
 }
 
-/** Repository onboarding: propose and apply the delivery workflow, register Apps, inspect readiness. */
+/** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
+  {
+    name: 'install',
+    help: [
+      '  install --provider railway|hetzner|docker-host|compose --repo OWNER/NAME',
+      '          [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]',
+      '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]',
+      '          [--ssh-key NAME] [--port N] [--workspace NAME-OR-ID] [--image REF]',
+      '                                Install or reconcile a complete control plane.',
+      '                                --plan prints every action with secrets redacted and',
+      '                                changes nothing; --apply executes the same plan.',
+      '                                See docs/install.md for the agent-executable runbook.',
+    ],
+    // The installer creates the connection file; it must never read a stale one.
+    readsConnection: () => false,
+    async run(context) {
+      const { values } = parseArgs({ args: context.rest, options: {
+        provider: { type: 'string' }, repo: { type: 'string' }, plan: { type: 'boolean' }, apply: { type: 'boolean' },
+        domain: { type: 'string' }, workers: { type: 'string' }, reviewer: { type: 'string' }, image: { type: 'string' },
+        'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
+        'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
+        'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
+        'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
+      }, allowPositionals: false });
+      if (!values.repo) throw new Error('Use --repo OWNER/NAME');
+      if (!values.provider || !providers.includes(values.provider as any)) throw new Error(`Use --provider ${providers.join('|')}`);
+      if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
+      const reviewPolicy = values['review-policy'];
+      if (reviewPolicy && !['github', 'agent'].includes(reviewPolicy)) throw new Error('Use --review-policy github or agent');
+      // A count that silently became NaN would install a control plane with no worker principal
+      // or an unusable port, so a non-numeric value stops the command instead.
+      const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
+      const inputs: InstallInputs = { repository: values.repo, provider: values.provider as InstallInputs['provider'],
+        ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
+        ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
+        ...(values.port ? { port: count('port', values.port) } : {}),
+        ...(values.reviewer ? { reviewer: values.reviewer } : {}), ...(values.image ? { image: values.image } : {}),
+        ...(values['producer-proof']?.length ? { producerProofs: values['producer-proof'] } : {}),
+        ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'github' | 'agent' } : {}),
+        ...(values['required-check']?.length ? { requiredChecks: values['required-check'] } : {}),
+        ...(values['review-count'] ? { reviewCount: count('review-count', values['review-count']) } : {}),
+        ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
+        ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}),
+        ...(values['server-name'] ? { serverName: values['server-name'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
+        ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}) };
+      const session = await prepareInstall(process.cwd(), inputs, {
+        cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
+        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), dependencies: { file: request.file } }),
+      }, values.apply ? 'apply' : 'plan');
+      if (values.logs) return console.log(await session.adapter.logs(session.context));
+      const plan = await buildPlan(session);
+      if (!values.apply) return context.print(plan);
+      return context.print(await applyInstall(session, plan));
+    },
+  },
   {
     name: 'init',
     help: [

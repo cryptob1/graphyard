@@ -1,7 +1,11 @@
-<!-- page: Start here | 3 | Railway, GitHub, Herdr, master, workers, and the first PR. -->
+<!-- page: Start here | 3 | the human prompts, more machines, the master, and the first PR. -->
 # Onboard a repository
 
-This is the supported path from an existing GitHub repository to Graphyard, Herdr, one master, and one worker. Start with one worker; add capacity after the first PR reaches Done. Roles are defined in the [glossary](glossary.md).
+This is the supported path from an existing GitHub repository to a working fleet. One
+command installs the control plane — see [install](install.md) for the full runbook — and
+this guide covers what surrounds it: the human prompts, adding machines, starting the
+master, and proving the first pull request. Start with one worker; add capacity after the
+first PR reaches Done. Roles are defined in the [glossary](glossary.md).
 
 ![Who holds which authority in Graphyard: the human operator sends human-only decisions to the Graphyard control plane; the Herdr runtime hosts the master, slice lead, and worker sessions, each with one credential; the reviewer, proof producer, and optional operator agent sit beside them; sessions send authenticated commands to Graphyard, the worker pushes its branch and opens the pull request on GitHub, the reviewer approves the exact head, and Graphyard observes GitHub facts and merges only through the guarded path.](diagrams/roles-and-authority.svg)
 
@@ -11,11 +15,15 @@ You keep talking directly to the master. GitHub owns code review and CI facts; p
 
 The initial setup works with one worker. Add more workers or machines only after the first PR has completed the full loop.
 
-Do not create an operator-agent credential during this bootstrap. After the repository is connected and its gates have completed the protected loop, the human operator may optionally configure [scoped operator automation](operator-automation.md). That mode keeps operator agent, master, worker, and reviewer/proof producer as four distinct AI agent sessions; it does not replace human goals, approvals, exceptions, or oversight.
-
 ## Before you start
 
-You need Node 24, Git, Docker, Herdr 0.7.1+, a Graphyard checkout, a GitHub repository, and a Railway account or another Docker host. The agent CLIs (Claude Code, Codex, OpenCode, Cursor) must be installed on the machine that runs them; each provider account is logged in once, in its own [agent environment](#agent-environments). The coordinator also needs GitHub CLI authenticated as an identity allowed to merge the protected base branch.
+You need Node 24, Git, a Graphyard checkout, a GitHub repository you administer, and access
+to one supported provider — a Railway account, a Hetzner account, any Docker host, or Docker
+locally for the `compose` provider. The GitHub CLI must be authenticated as an identity that
+administers the base branch. The agent CLIs (Claude Code, Codex, OpenCode, Cursor) must be
+installed on the machine that runs them, and each provider account is logged in once, in its
+own [agent environment](#agent-environments); Herdr 0.7.1+ is optional and is bound
+automatically when it is installed.
 
 Graphyard is not published to npm yet. In the commands below:
 
@@ -23,46 +31,74 @@ Graphyard is not published to npm yet. In the commands below:
 export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 ```
 
-For every `--token-stdin` prompt, paste the token, press Enter, then press Ctrl-D to send EOF.
+## 1. Install the control plane
 
-## 1. Deploy one control plane
-
-Use one Graphyard server and one Postgres database for all workers. Follow [deployment](deployment.md) for Railway or Docker Compose.
-
-Create one principal with a separate cryptographically random token of at least 32 characters for each role:
-
-| Role | Held by | Use |
-| --- | --- | --- |
-| `admin` | The human operator; declare `sessionKind: "human"` | Setup, work creation, requirements, and recovery |
-| `coordinator` | The master | Master status and guarded merge authority |
-| `worker` | One worker session each | One principal per concurrent worker session |
-| `reader` | Dashboards | Read-only dashboards |
-| `producer` | A proof producer (CI or trusted runner) | Only the proof names its grant allows |
-
-Set `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH`, and `GITHUB_CI_APP_IDS` on the server. Never give a worker an `admin`, `coordinator`, or `producer` token.
-
-Open the Graphyard URL and sign in with the admin token.
-
-## 2. Connect GitHub
-
-From the repository being managed:
+One command replaces the former sequence of deploying a server, generating a token per role,
+setting eleven variables, creating a domain, running the GitHub App flow, configuring the
+webhook and branch protection, discovering CI App IDs, connecting a worker, and initializing
+the master.
 
 ```sh
 cd /path/to/your-repository
-node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST
+node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --plan
+node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply
 ```
 
-This guided flow supports personal-account Apps. For organization-owned repositories, create the App manually using [GitHub enforcement](github.md#create-and-install-the-app).
+Follow [install](install.md) for the full runbook: preconditions, per-step verification, and
+failure handling. Providers are `railway`, `hetzner`, `docker-host`, and `compose`.
 
-The manifest requests exactly the [declared control-plane permission set](github.md#app-permissions); an App registered before the merge queue must be [migrated](github.md#migrating-an-existing-app) to Contents: read and write. Install the App only on the managed repository and copy its private values into the Graphyard service. Configure normal CI and review protection now. The new `Graphyard / merge` check may appear only after the first linked PR; require it as soon as Graphyard publishes it, before merging.
+You are prompted for exactly four things:
 
-Later permission changes to this App, and the installation's acceptance of them, are the master's job, not yours: once the master is started with a browser profile it performs them with `master browser app-permissions` and `master browser installation-accept`.
+| Prompt | What to do |
+| --- | --- |
+| Which provider | Already answered by `--provider`; on Railway, add `--workspace NAME-OR-ID` when the account belongs to several workspaces |
+| Provider login | Run the login command the installer prints, once |
+| The GitHub App confirmation | Open the printed page, confirm the App, install it on this repository |
+| Plan approval | Read the plan, then rerun with `--apply` |
 
-Confirm the exact CI check names and their GitHub App IDs. GitHub Actions uses App ID `15368`; other CI providers do not.
+The App manifest the installer opens requests exactly the
+[declared control-plane permission set](github.md#app-permissions), and the App is installed
+only on the managed repository. An App registered before the merge queue must be
+[migrated](github.md#migrating-an-existing-app) to Contents: read and write; the
+[upgrade order](install.md#upgrading-an-existing-installation) covers that. Later permission
+changes to the control-plane App, and the installation's acceptance of them, are the master's
+job, not yours: once the master runs with a browser profile it
+performs them with `master browser app-permissions` and `master browser installation-accept`
+(see [step 4](#4-start-the-master)).
 
-## 3. Connect a worker and Herdr
+The installer reads the CI check names and their GitHub App IDs from the checks already
+published on the base branch and prints them in the plan; confirm them there. GitHub Actions
+uses App ID `15368`; other CI providers do not.
 
-On a worker machine, from a worker-only checkout:
+The installer generates one credential per role, stores each under
+`~/.config/graphyard/<install>/` with mode `0600`, and never prints one. Add
+`--producer-proof NAME` for each proof a CI runner may submit; without it no producer
+principal is created, which is the safe default. Add `--reviewer NAME` to also register a
+separate reviewer GitHub App for [agent review](github.md#identity-bound-agent-review-providers).
+
+Do not create an operator-agent credential during this bootstrap. After the repository is
+connected and its gates have completed the protected loop, the human operator may
+optionally configure [scoped operator automation](operator-automation.md). That mode keeps
+operator agent, master, worker, and reviewer/proof producer as four distinct AI agent
+sessions; it does not replace human goals, approvals, exceptions, or oversight.
+
+## 2. Read the summary
+
+`--apply` ends with a redacted summary. Confirm `health`, `status.role`, `status.repository`,
+`webhook.delivered`, `protection`, and the registered profiles, then work through its
+`nextSteps`. Those steps are generated from what actually happened, so they are the
+authoritative list of anything still missing — commonly a rerun once Graphyard has published
+`Graphyard / merge` on the first pull request.
+
+Open the Graphyard URL and sign in with the admin credential named in the summary.
+
+## 3. Add machines and capacity
+
+The installer configures this machine: the repository connection, the Herdr plugin when
+Herdr is present, the master profile, and one worker profile per `--workers`.
+
+For another worker machine, rerun the installer there with a higher `--workers` count, or
+connect that machine alone against the existing control plane:
 
 ```sh
 cd /path/to/your-repository
@@ -73,127 +109,17 @@ node "$GRAPHYARD_CLI" init \
   --token-stdin
 ```
 
-Supply that worker's token on standard input. Setup:
-
-- verifies the repository and worker identity;
-- updates one managed section in `AGENTS.md`;
-- adds the `.graphyard/` ignore rule;
-- stores the private connection locally;
-- links and enables the Herdr plugin.
-
-Commit `AGENTS.md` and `.gitignore`. Never commit `.graphyard/`. Repeat on each worker machine with a different worker identity and host ID.
+Supply that machine's own worker token on standard input; paste it, press Enter, then
+Ctrl-D. Setup verifies the repository and worker identity, updates one managed section in
+`AGENTS.md`, adds the `.graphyard/` ignore rule, stores the private connection locally, and
+links and enables the Herdr plugin. Commit `AGENTS.md` and `.gitignore`. Never commit
+`.graphyard/`. Give every concurrent session a different worker identity and host ID.
 
 ### What the generated instructions authorize
 
 The managed `AGENTS.md` section is the coordination contract every agent runtime reads from the repository (Codex, Cursor and OpenCode natively; Claude Code where the project has no `CLAUDE.md`), and it carries one statement the launched sessions need in order to start on their own: **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text — and the one message it may later receive as a paste comes from that same launcher, repeating the session's own request, and is to be acted on without waiting for confirmation.**
 
 It is generated because of how sessions used to fail. Herdr types a prompt into a running session through bracketed paste, and a coding agent treats pasted text as untrusted data rather than as a request from its operator — the right behaviour against prompt injection, and the wrong outcome for a launch: a producer, reviewer or approver session would end its first turn having refused to act, until a human typed `go` into its tab, and the loop would record the attempt as failed and spend a retry on work that was never attempted. The launchers now put the request on the runtime's command line ([the request is the session's first message](master-agent.md#the-request-is-the-sessions-first-message)), so a new installation's producer, reviewer and approver sessions start without anybody sending `go`; the generated statement is what lets the two pastes a session can still receive — the loop's single re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged — be taken as the operator's instruction. A Claude Code session that the master launches under a role file loads only the user settings, which leaves `AGENTS.md` out, so the launcher writes the same statement to that session's role file (`.graphyard/launch/NAME.role` in the session's checkout) and loads it on the command line (`--append-system-prompt-file`); the request itself reaches the runtime the same way, from `NAME.request`, so what is typed into the pane stays short whatever the request holds ([how the request reaches the runtime](master-agent.md#how-the-request-reaches-the-runtime)). Nothing else pasted into a session carries that authority, and no other generated file grants any: the role files under `.graphyard/harness/` hold permissions, not instructions.
-
-## 4. Start the master
-
-Use a clean checkout under a dedicated coordinator OS identity or machine. It must not contain a worker connection or expose its merge-capable GitHub CLI credentials to worker sessions.
-
-```sh
-cd /path/to/coordinator-checkout
-herdr workspace list
-node "$GRAPHYARD_CLI" master init \
-  --url https://YOUR-GRAPHYARD-HOST \
-  --herdr-workspace HERDR_WORKSPACE_ID \
-  --browser-profile Default \
-  --token-stdin
-node "$GRAPHYARD_CLI" master start codex
-```
-
-Supply the coordinator token. Use `master start claude` if preferred. Commit the managed `AGENTS.md` update.
-
-`--browser-profile` names the Chrome profile on this machine that is signed in to GitHub as the repository administrator (`agent-browser profiles` lists them). With it, the master administers the control-plane App, its installation, and branch protection itself — through the API where one exists and otherwise through that profile, headless, with every step recorded, verified, and audited (see [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser)). The profile is your identity: the master never stores or exports its cookies and uses it only for those flows. The one thing it still needs from you is approving GitHub's *Confirm access* prompt on your device when a page asks for it; `master status` shows the two-digit GitHub Mobile code to choose.
-
-The master reads Graphyard truth, watches runtime health, routes work, requests guarded merges, and administers GitHub for the managed repository. It does not implement work or submit evidence.
-
-### Executors, supervised
-
-After the cutover to typed actions the executors are the only thing that moves work: they claim each item's next action from the control plane and run it. They must outlive a reboot, a crash and a closed terminal, so they run under systemd, and connecting the coordinator host installs that supervision. From the same coordinator checkout, after `master init`:
-
-```sh
-node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST
-```
-
-`init` takes a worker credential or none — never the coordinator token, which it refuses — and a checkout already connected as a worker keeps that connection. On a host that `master init` configured it writes `.graphyard/executors.json`, installs the shipped template [`examples/master/graphyard-executor@.service`](../examples/master/graphyard-executor@.service) as a systemd user unit bound to this checkout, and enables and starts one instance per declared slot. A new installation therefore has running executors without a hand-typed command; `master status` lists them under `executors`, and `journalctl --user -u 'graphyard-executor@*' -f` follows them.
-
-**How a host declares how many executors it runs and of which kinds** is that one file:
-
-```json
-{ "version": 1, "count": 2, "kinds": null, "intervalSeconds": 5 }
-```
-
-`count` is the number of slots (`graphyard-executor@1` … `graphyard-executor@N`); `kinds` is the action kinds every slot on this host claims — `null` for every kind an executor can run, or a list such as `["dispatch", "request-review", "merge"]` to split kinds across hosts; `intervalSeconds` is the poll interval (at most 60). Change it with the installer, which rewrites the declaration and reconciles the units — enabling new slots, disabling the ones above the count:
-
-```sh
-node scripts/graphyard-executor.mjs --install --count 2
-node scripts/graphyard-executor.mjs --install --kinds dispatch,request-review,merge
-```
-
-Each slot authenticates with the coordinator credential `master init` stored and claims under `master@HOST/N`; it never holds a worker, producer or operator credential. Every unit restarts its executor after any exit and answers systemd's watchdog on every poll, so a killed executor loses only the one claim it held, which another executor takes within two minutes. A host without a systemd user manager (macOS, a container without one) keeps its declaration, and the installer prints the unit to install by hand. The full account — the unit's policy, the presence the control plane keeps, and how an action nobody can claim is reported — is in [running executors under supervision](master-agent.md#running-executors-under-supervision).
-
-`master start claude` also writes the master's own harness permissions to `.claude/settings.local.json` before the session starts, so routine master commands do not stop for an approval keypress and the auto-mode classifier does not refuse the GitHub administration flows as permission grants or CI bypasses. Review them with `master harness claude`; every rule is printed with the reason it exists. The generated rules grant no merge path and no credential read, and no direct edit of `.graphyard/master.json`: the master tunes the settings it owns (loop and dispatch cadence, proof and smoke workflows, deployment URL and SHA field, reviewer profile, producer timeout, quota ceiling, and a profile's account order) through `master config FIELD=VALUE…`, while `autoMerge`, the merge method, and every credential and identity path stay operator-only. For Codex, `master harness codex` prints the `trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit that shared user file for you.
-
-### The loop must be supervised
-
-The coordination loop (`master run`) is a process, and a process that is not supervised stays down. Graphyard reports a loop that is absent or stalled as its top attention item with the command that restarts it, but nothing acts on that item unless a supervisor does: on 2026-09-21 an unsupervised loop was down for four hours, twenty-one requests queued behind it, and the pipeline still read as busy. Treat an unsupervised loop as an incomplete installation.
-
-`master init`, run by you from the coordinator checkout, installs the supervisor. On a Linux host with a systemd user manager it writes `~/.config/systemd/user/graphyard-master.service` from this installation's own checkout, launcher, and cycle interval, reloads systemd if the file changed, runs `systemctl --user enable --now graphyard-master.service`, and runs `loginctl enable-linger` so this user's manager starts at boot. The unit restarts the loop after a crash (`Restart=always` with no start limit), after a reboot (`WantedBy=default.target` plus lingering), and after a *hang*: the loop sends systemd a keep-alive at the end of every cycle, so `WatchdogSec` restarts it when the cycles stop rather than only when the process does. Re-running `master init` is idempotent — an unchanged unit is left alone and nothing is reloaded; a unit rewritten for a changed interval is reloaded and restarted — and setup prints exactly what it did under `supervisor.performed`.
-
-Installing the unit is that explicit operator action and never a side effect. Nothing else writes it: not a library call, not the test suite (which is refused, by one shared guard, any home outside the system temporary directory; the guard reads the test runner's mark from its own process, so nothing a test passes or omits can switch it off), and not a worker, reviewer, or producer checkout. `master init` itself refuses, by name and without failing the rest of setup, a checkout under the system temporary directory (`/tmp`, `/var/tmp`, `$TMPDIR`), a checkout inside a managed `.graphyard` directory (an assignment worktree or session checkout), and a directory that holds no `.graphyard/master.json`. It also refuses to replace a unit that already runs a different checkout or launcher: if that unit is the coordinator you mean to replace, re-run `master init --token-stdin --replace-supervisor` from the new checkout. A refusal is reported under `supervisor.refused` with the command that resolves it, and at the top of `attention` and `next`.
-
-Confirm it, on this host, rather than assuming it:
-
-```sh
-node "$GRAPHYARD_CLI" master status   # setup.supervisor: installed, enabled, active, linger
-systemctl --user status graphyard-master.service
-journalctl --user -u graphyard-master.service -f
-```
-
-`master status` reads the answer from systemd every time it runs, lingering included (`loginctl show-user` for this user). A supervisor that is missing, disabled, stopped, or unreadable becomes an attention item naming the exact command that fixes it (`systemctl --user enable --now graphyard-master.service` for a disabled unit, `systemctl --user start graphyard-master.service` for a stopped one, `loginctl enable-linger` when this user's manager would not start at boot, and `master init` on this host when no unit is installed), and the same facts appear under `setup.supervisor`.
-
-On a host where Graphyard cannot install one — any non-Linux host, or a container or session with no reachable systemd user manager — setup says so instead of leaving the promise unkept, and prints what you must run: keep `master run` alive under that platform's own always-restart supervisor (launchd, an init service, a container restart policy), configured to start at boot. The self-healing described above does not happen on such a host until you provide it.
-
-## 5. Register the reviewer identity
-
-Independent review needs a GitHub identity that is neither the pull-request author nor the Graphyard control-plane App. Register it once:
-
-```sh
-node "$GRAPHYARD_CLI" master reviewer setup
-```
-
-Open the printed local URL, click through GitHub's App confirmation, and install the App on the managed repository only. That click and your provider logins are the only hand-run steps in this section. The reviewer App requests Metadata read, Contents read, and Pull requests write; it cannot write code, publish the `Graphyard / merge` check, or read branch protection. Its private key and IDs are stored outside every worktree with mode 0600, and only the App ID, installation ID, and slug are recorded in `.graphyard/master.json`.
-
-To bind an App you already created, put its IDs in a file that contains no secret and send the PEM on standard input:
-
-```sh
-printf '{"appId":123456,"installationId":654321,"slug":"graphyard-reviewer-your-repo"}' > /tmp/reviewer.json
-node "$GRAPHYARD_CLI" master reviewer bind /tmp/reviewer.json --key-stdin < /path/to/reviewer.private-key.pem
-```
-
-Then add one reviewer launch profile:
-
-- [Claude](../examples/master/claude-reviewer.json)
-- [Cursor](../examples/master/cursor-reviewer.json)
-- [opencode](../examples/master/opencode-reviewer.json)
-
-```sh
-node "$GRAPHYARD_CLI" master reviewer add /path/to/reviewer-profile.json
-```
-
-A reviewer profile holds no Graphyard credential: a reviewer reads a candidate and posts one GitHub verdict. Finally, make branch protection match the review policy of every open item:
-
-```sh
-node "$GRAPHYARD_CLI" master protection
-node "$GRAPHYARD_CLI" master protection --apply
-```
-
-From here on the master reconciles protection itself after every review-policy change, through the API or, when only the settings page can make the change, with `master browser protection`.
-
-## 6. Add workers
 
 ### Agent environments
 
@@ -382,13 +308,11 @@ twenty candidates with no confident wrong answer and agreement at least as high 
 
 ### Profiles by hand
 
-For a trusted worker on the coordinator host, start from a template:
+Worker profile templates, for a profile added by hand:
 
 - [Codex](../examples/master/codex-worker.json)
 - [Claude](../examples/master/claude-worker.json)
 - [existing Herdr session](../examples/master/existing-worker.json)
-
-Store each worker token in a mode-0600 file outside the repository, edit the template, then:
 
 ```sh
 node "$GRAPHYARD_CLI" master worker add /path/to/profile.json
@@ -397,11 +321,114 @@ node "$GRAPHYARD_CLI" master status
 
 Every launch profile starts non-interactively by default (`"approvals": "auto"`): Graphyard adds that runtime's own startup flags so a fresh session never blocks on an approval or workspace-trust prompt. `master worker add` prints exactly what it will start with and what that costs. Set `"approvals": "prompt"` to opt out per profile; the session then waits for a human in its tab. See [approval modes](master-agent.md#approval-modes).
 
-Local launch profiles share the coordinator host. They require Linux with a working systemd user manager for durable containment. Use them only for trusted dogfooding or inside a real OS/container boundary that hides coordinator GitHub credentials. On macOS or a Linux host without user systemd, use the remote-worker flow below.
+Local launch profiles share the coordinator host. They require Linux with a working systemd
+user manager for durable containment. Use them only for trusted dogfooding or inside a real
+OS or container boundary that hides coordinator GitHub credentials. On macOS, or a Linux host
+without user systemd, run workers on other machines with GitHub identities that can push
+branches and open pull requests but cannot merge the protected base branch. Version 0.1 does
+not remotely launch supervised Herdr tabs across hosts; the master selects work and the
+remote worker claims it.
 
-For the recommended separated setup, workers run on other machines with GitHub identities that can push branches and open PRs but cannot merge the protected base branch. Version 0.1 does not remotely launch supervised Herdr tabs across hosts; the master selects work and the remote worker claims it.
+## 4. Start the master
 
-## 7. Prove the first PR
+```sh
+node "$GRAPHYARD_CLI" master start codex
+```
+
+Use the agent kind reported as `profiles.master.kind` in the summary; `master start claude`
+if you prefer. The master reads Graphyard truth, watches runtime health, routes work,
+requests guarded merges, and administers GitHub for the managed repository. It does not
+implement work or submit evidence. Run it from a checkout under a dedicated coordinator OS
+identity that does not expose its merge-capable GitHub CLI credentials to worker sessions.
+
+To let the master administer the control-plane App, its installation, and branch protection
+itself, give it the Chrome profile on this machine that is signed in to GitHub as the
+repository administrator (`agent-browser profiles` lists them). The installer wrote
+`.graphyard/master.json` without one; add it by re-running master setup with the coordinator
+credential the installer stored, redirected from its file so it is never printed:
+
+```sh
+node "$GRAPHYARD_CLI" master init \
+  --url https://YOUR-GRAPHYARD-HOST \
+  --browser-profile Default \
+  --token-stdin < ~/.config/graphyard/INSTALL/tokens/INSTALL-master.token
+```
+
+`INSTALL` is the `installDirectory` name from the summary. Master setup is idempotent: the
+existing worker and reviewer profiles are kept. With a browser profile the master performs
+GitHub administration through the API where one exists and otherwise through that profile,
+headless, with every step recorded, verified, and audited (see [GitHub administration through
+the browser](master-agent.md#github-administration-through-the-browser)). The profile is your
+identity: the master never stores or exports its cookies and uses it only for those flows. The
+one thing it still needs from you is approving GitHub's *Confirm access* prompt on your device
+when a page asks for it; `master status` shows the two-digit GitHub Mobile code to choose.
+
+### Executors, supervised
+
+After the cutover to typed actions the executors are the only thing that moves work: they claim each item's next action from the control plane and run it. They must outlive a reboot, a crash and a closed terminal, so they run under systemd, and connecting the coordinator host installs that supervision. From the same coordinator checkout, after `master init`:
+
+```sh
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST
+```
+
+`init` takes a worker credential or none — never the coordinator token, which it refuses — and a checkout already connected as a worker keeps that connection. On a host that `master init` configured it writes `.graphyard/executors.json`, installs the shipped template [`examples/master/graphyard-executor@.service`](../examples/master/graphyard-executor@.service) as a systemd user unit bound to this checkout, and enables and starts one instance per declared slot. A new installation therefore has running executors without a hand-typed command; `master status` lists them under `executors`, and `journalctl --user -u 'graphyard-executor@*' -f` follows them.
+
+**How a host declares how many executors it runs and of which kinds** is that one file:
+
+```json
+{ "version": 1, "count": 2, "kinds": null, "intervalSeconds": 5 }
+```
+
+`count` is the number of slots (`graphyard-executor@1` … `graphyard-executor@N`); `kinds` is the action kinds every slot on this host claims — `null` for every kind an executor can run, or a list such as `["dispatch", "request-review", "merge"]` to split kinds across hosts; `intervalSeconds` is the poll interval (at most 60). Change it with the installer, which rewrites the declaration and reconciles the units — enabling new slots, disabling the ones above the count:
+
+```sh
+node scripts/graphyard-executor.mjs --install --count 2
+node scripts/graphyard-executor.mjs --install --kinds dispatch,request-review,merge
+```
+
+Each slot authenticates with the coordinator credential `master init` stored and claims under `master@HOST/N`; it never holds a worker, producer or operator credential. Every unit restarts its executor after any exit and answers systemd's watchdog on every poll, so a killed executor loses only the one claim it held, which another executor takes within two minutes. A host without a systemd user manager (macOS, a container without one) keeps its declaration, and the installer prints the unit to install by hand. The full account — the unit's policy, the presence the control plane keeps, and how an action nobody can claim is reported — is in [running executors under supervision](master-agent.md#running-executors-under-supervision).
+
+`master start claude` also writes the master's own harness permissions to
+`.claude/settings.local.json` before the session starts, so routine master commands do not
+stop for an approval keypress and the auto-mode classifier does not refuse the GitHub
+administration flows as permission grants or CI bypasses. Review them with `master harness
+claude`; every rule is printed with the reason it exists. The generated rules grant no merge
+path and no credential read. For Codex, `master harness codex` prints the
+`trust_level = "trusted"` block to add to `$CODEX_HOME/config.toml`; Graphyard does not edit
+that shared user file for you.
+
+The installer registers the reviewer App and its launch profile when you pass `--reviewer
+NAME`. To add or replace one later, use `master reviewer setup`, `master reviewer bind FILE
+--key-stdin` for an App you already created, and `master reviewer add PROFILE` with one of
+the shipped reviewer profiles — [Claude](../examples/master/claude-reviewer.json),
+[Cursor](../examples/master/cursor-reviewer.json), or
+[opencode](../examples/master/opencode-reviewer.json); see
+[master-agent mode](master-agent.md). A reviewer profile holds no Graphyard credential: a
+reviewer reads a candidate and posts one GitHub verdict. From here on the master reconciles
+branch protection itself after every review-policy change with `master protection --apply`,
+or, when only the settings page can make the change, with `master browser protection`.
+
+### The loop must be supervised
+
+The coordination loop (`master run`) is a process, and a process that is not supervised stays down. Graphyard reports a loop that is absent or stalled as its top attention item with the command that restarts it, but nothing acts on that item unless a supervisor does: on 2026-09-21 an unsupervised loop was down for four hours, twenty-one requests queued behind it, and the pipeline still read as busy. Treat an unsupervised loop as an incomplete installation.
+
+`graphyard install` writes the master profile but never installs the supervisor, because installing it is an explicit operator action (below): run the `master init` command above from the coordinator checkout once the install succeeds. `master init`, run by you from the coordinator checkout, installs the supervisor. On a Linux host with a systemd user manager it writes `~/.config/systemd/user/graphyard-master.service` from this installation's own checkout, launcher, and cycle interval, reloads systemd if the file changed, runs `systemctl --user enable --now graphyard-master.service`, and runs `loginctl enable-linger` so this user's manager starts at boot. The unit restarts the loop after a crash (`Restart=always` with no start limit), after a reboot (`WantedBy=default.target` plus lingering), and after a *hang*: the loop sends systemd a keep-alive at the end of every cycle, so `WatchdogSec` restarts it when the cycles stop rather than only when the process does. Re-running `master init` is idempotent — an unchanged unit is left alone and nothing is reloaded; a unit rewritten for a changed interval is reloaded and restarted — and setup prints exactly what it did under `supervisor.performed`.
+
+Installing the unit is that explicit operator action and never a side effect. Nothing else writes it: not a library call, not the test suite (which is refused, by one shared guard, any home outside the system temporary directory; the guard reads the test runner's mark from its own process, so nothing a test passes or omits can switch it off), and not a worker, reviewer, or producer checkout. `master init` itself refuses, by name and without failing the rest of setup, a checkout under the system temporary directory (`/tmp`, `/var/tmp`, `$TMPDIR`), a checkout inside a managed `.graphyard` directory (an assignment worktree or session checkout), and a directory that holds no `.graphyard/master.json`. It also refuses to replace a unit that already runs a different checkout or launcher: if that unit is the coordinator you mean to replace, re-run `master init --token-stdin --replace-supervisor` from the new checkout. A refusal is reported under `supervisor.refused` with the command that resolves it, and at the top of `attention` and `next`.
+
+Confirm it, on this host, rather than assuming it:
+
+```sh
+node "$GRAPHYARD_CLI" master status   # setup.supervisor: installed, enabled, active, linger
+systemctl --user status graphyard-master.service
+journalctl --user -u graphyard-master.service -f
+```
+
+`master status` reads the answer from systemd every time it runs, lingering included (`loginctl show-user` for this user). A supervisor that is missing, disabled, stopped, or unreadable becomes an attention item naming the exact command that fixes it (`systemctl --user enable --now graphyard-master.service` for a disabled unit, `systemctl --user start graphyard-master.service` for a stopped one, `loginctl enable-linger` when this user's manager would not start at boot, and `master init` on this host when no unit is installed), and the same facts appear under `setup.supervisor`.
+
+On a host where Graphyard cannot install one — any non-Linux host, or a container or session with no reachable systemd user manager — setup says so instead of leaving the promise unkept, and prints what you must run: keep `master run` alive under that platform's own always-restart supervisor (launchd, an init service, a container restart policy), configured to start at boot. The self-healing described above does not happen on such a host until you provide it.
+
+## 5. Prove the first PR
 
 Before the first PR, read the readiness checklist for the completion profile you intend to enforce:
 
@@ -458,8 +485,23 @@ Before adding more workers, stop one worker, let its lease expire, reclaim with 
 
 Everything in this guide that still needs your hand is feedback about the product, and from the first PR on Graphyard counts it. Every intervention — a rework decision, a scope widening, a merge outside the guarded path, a containment fence settled by hand, a session nudged after it ignored its prompt, an escalation resolved, a decision only you may make — is read from the ledger as a typed signal: its kind, what was blocked, how long it waited, the item and stage, and what resolved it. The dashboard's **Shipped → Interventions** page, `GET /api/interventions`, and `master status` report the rate per delivery, where people stepped in, the trend, and the items that cost the most attention; when one kind at one stage recurs past the threshold in a week (`GRAPHYARD_INTERVENTION_PATTERN_THRESHOLD`, default 3, in `GRAPHYARD_INTERVENTION_PATTERN_WINDOW_DAYS`, default 7), the server opens a work item for the pattern itself, once, with the instances linked as evidence. When something delivered is confusing, wrong for its user, or not good enough, record that judgement against the item or the page on the same dashboard page (or `POST /api/judgements`) rather than telling the master in a chat: it enters the backlog as first-class input and becomes an item with one click. The model — what counts, what the rate means, how a pattern becomes work — is in [interventions as product feedback](interventions.md).
 
-## Current manual steps
+## What is still manual
 
-Version 0.1 still requires the human operator to deploy the server, provision principals, log each agent environment in to its provider once, sign the browser profile in to GitHub once, approve GitHub's *Confirm access* prompt on their device when a page asks for it, and connect project-specific trusted evidence. Starting executors is not among them: connecting the coordinator host installs them under systemd, and they come back on their own after a reboot or a crash. Registering each App is still a first-time click in the manifest flow; App permission updates, installation acceptance, and branch-protection reconciliation are the master's (`master browser …` and `master protection --apply`), and Graphyard still refuses to create protection that is missing the `Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark human-only — releasing work, revising requirements, choosing review providers, clearing blockers, manual proofs, rework, and merge approval without automatic merging — stay with you. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E execution covers the [packaged Playwright runner](runner-setup.md) and the [report adapters](report-adapters.md) it accepts.
+The installer covers deployment, identities, GitHub integration, protection, profiles, and
+verification, and connecting the coordinator host installs the executors under systemd, so they
+come back on their own after a reboot or a crash. The human operator still authenticates the provider CLI, the GitHub CLI, and each agent
+environment in to its provider, confirms each GitHub App in the browser once in the manifest flow, approves the plan,
+signs the master's browser profile in to GitHub once and approves GitHub's *Confirm access*
+prompt on their device when a page asks for it, and connects project-specific trusted evidence
+by granting a producer its proof names. App permission updates, installation acceptance, and
+branch-protection reconciliation are the master's (`master browser …` and `master protection
+--apply`), and Graphyard still refuses to create protection that is missing the
+`Graphyard / merge` binding or a classic rule for the base branch. Decisions the guides mark
+human-only — releasing work, revising requirements, choosing review providers, clearing
+blockers, manual proofs, rework, and merge approval without automatic merging — stay with
+you. Self-hosting is the complete product: versioned images, Compose, the Helm chart, backups
+and restores need no hosted account. A hosted signup flow is not shipped, and turnkey E2E
+execution covers the [packaged Playwright runner](runner-setup.md) and the
+[report adapters](report-adapters.md) it accepts.
 
 Use the [documentation index](README.md) for deeper setup, operations, and protocol details.
