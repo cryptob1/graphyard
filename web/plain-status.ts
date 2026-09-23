@@ -1,5 +1,6 @@
 import { deliveryState, type Gate, type Work } from '../src/model';
 import { assignment } from './assignment';
+import { formatAge } from './duration';
 
 /**
  * Plain-English status for people who have never read the Graphyard docs. Every sentence is
@@ -66,6 +67,35 @@ export function plainReason(reason: string, gate: string): { text: string; stuck
   return { text: fallback[gate] ?? 'Waiting', stuck: false, known: false };
 }
 
+/**
+ * The step a stalled action is, in the words of somebody who has never read the docs. Every action
+ * kind has one, so a kind nobody thought about still reads as a step rather than as its own name.
+ */
+const stepWords: Record<string, string> = {
+  dispatch: 'handing it to a builder', 'request-review': 'asking for a review',
+  'request-rework': 'sending it back for changes', 'approve-scope': 'deciding which files it may touch',
+  resync: 're-reading it from GitHub', reclaim: 'freeing it from its last builder', merge: 'merging it',
+  'verify-deployment': 'checking the deployment that carries it', escalate: 'getting somebody to decide it',
+};
+
+/**
+ * The item's stalled step, when one of its actions keeps failing for the same reason.
+ *
+ * An action that fails is retried, and a retried action is invisible: the item sits at its gate
+ * looking like it is waiting for somebody, while something tries the same impossible step over and
+ * over. The control plane classifies that on the row itself (`actionStall`), and this is the card's
+ * reading of it — the step, how many times it has failed for one unchanged reason, and how long it
+ * has been trying. The reason itself stays out: it is written for an operator reading
+ * `master status`, in vocabulary this page keeps out of its copy.
+ */
+export function stalledStep(work: Work, now: number): string | null {
+  const stalled = (work.actionQueue?.actions ?? []).flatMap(row => row.stall ? [{ row, stall: row.stall }] : []);
+  if (!stalled.length) return null;
+  const worst = stalled.sort((a, b) => Date.parse(a.stall.since) - Date.parse(b.stall.since))[0];
+  const step = stepWords[worst.row.kind] ?? 'the next step';
+  return `${step} has failed ${worst.stall.failures} times for the same reason, since ${formatAge(worst.stall.since, now)} ago`;
+}
+
 /** The builder's name, never a machine identifier when a display name exists. */
 function builder(work: Work, now: number) {
   const a = assignment(work, now);
@@ -108,6 +138,12 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   const ready = work.gates.find(g => g.name === 'ready');
   const blocker = work.blocker ?? null;
   if (blocker) return make(`Stuck: ${blocker}`, 'stuck', blocker, who.active ? who.name : null);
+  // A step that keeps failing for the same reason is a stall, not a retry, and it outranks the
+  // gate it was going to clear: the gate's own sentence would say the item is waiting for a
+  // review or a builder, when in truth something is asking for one every minute and being
+  // refused. Nothing here moves until somebody clears what the reason names.
+  const stalled = stalledStep(work, now);
+  if (stalled) return make(`Stuck: ${stalled}`, 'stuck', stalled, who.active ? who.name : null);
   if (phase === 'not-started') {
     const dependency = reasons(ready).find(r => r.raw.startsWith('Dependency '));
     return dependency && work.ready ? make(dependency.text, 'waiting', dependency.text) : make('Not started — waiting to be released for work', 'waiting', 'Not released for work yet');
