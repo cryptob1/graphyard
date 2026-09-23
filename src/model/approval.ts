@@ -51,13 +51,22 @@ export const decisionPrecedentSchema = z.array(z.string().uuid()).max(20);
 export const decisionContextSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const decisionRequestSchema = z.object({ action: z.enum(decisionActions), input: z.unknown(), reason, precedent: decisionPrecedentSchema.optional(), context: decisionContextSchema.optional() }).strict();
 export const decisionApprovalSchema = z.object({ decision: z.string().uuid(), reason }).strict();
+/** The approver's other answer: `{ action: 'refuse', decision, reason }` on the approve route. */
+export const decisionRefusalSchema = z.object({ action: z.literal('refuse'), decision: z.string().uuid(), reason }).strict();
 
-export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed';
+/**
+ * `refused` is the approver's considered decline (`decision.declined`): terminal, carrying who
+ * refused, why and when. It is distinct from `refusals`, the conflicted approvals the server
+ * turned away, and from a decision still `requested` because no session ever judged it.
+ */
+export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused';
 export interface Decision {
   id: string; workId: string; action: DecisionAction; input: any; reason: string;
   requestedBy: string; requestedAt: string; state: DecisionState;
   approvedBy: string | null; approvedAt: string | null; approvalReason: string | null;
   outcome: string | null; refusals: { approver: string; conflict: string; at: string }[];
+  /** The approver's recorded decline, when the decision ended `refused`. */
+  refusal: { approver: string; reason: string; at: string } | null;
   /** The decisions the requester cited and the context fingerprint it judged from; empty and null for a request that named none. */
   precedent: string[]; context: string | null;
   /** Later requesters that followed the same precedent while this decision stood. */
@@ -72,7 +81,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     const details = event.payload ?? {};
     if (event.kind === 'decision.requested') {
       decisions.set(details.id, { id: details.id, workId, action: details.action, input: details.input, reason: details.reason, requestedBy: event.actor, requestedAt: event.at, state: 'requested',
-        approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [],
+        approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [], refusal: null,
         precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, concurrences: [] });
       continue;
     }
@@ -80,6 +89,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     if (!decision) continue;
     if (event.kind === 'decision.concurred') decision.concurrences.push({ requester: event.actor, reason: details.reason, precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, at: event.at });
     if (event.kind === 'decision.refused') decision.refusals.push({ approver: event.actor, conflict: details.conflict, at: event.at });
+    if (event.kind === 'decision.declined') Object.assign(decision, { state: 'refused', outcome: details.reason ?? null, refusal: { approver: event.actor, reason: details.reason, at: event.at } });
     if (event.kind === 'decision.approved') Object.assign(decision, { state: 'approved', approvedBy: event.actor, approvedAt: event.at, approvalReason: details.reason });
     if (event.kind === 'decision.applied') Object.assign(decision, { state: 'applied', outcome: details.outcome ?? null });
     if (event.kind === 'decision.failed') Object.assign(decision, { state: 'failed', outcome: details.error ?? null });
@@ -115,6 +125,19 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
   if (decision.action === 'grant' && decision.input.principal === approver.id)
     return `Conflicted approval refused: ${approver.id} is the principal this grant would authorize`;
   return null;
+}
+
+/**
+ * The refusal a new request would repeat, or null. A request of the same action and input as a
+ * decision an approver refused is accepted only when it answers that refusal: its reason names
+ * the refused decision's id and is not the reason the refused request already gave. Anything
+ * else is the same unjustified request retried, and it is refused naming the prior refusal.
+ */
+export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | 'input' | 'reason' | 'refusal'> & { state: string })[], action: DecisionAction, input: unknown, reason: string, same: (a: unknown, b: unknown) => boolean): string | null {
+  const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input));
+  const bare = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const standing = refused.find(decision => !reason.includes(decision.id) || bare(reason.split(decision.id).join(' ')) === bare(decision.reason));
+  return standing ? `Decision ${standing.id} (${action}) with this input was refused by ${standing.refusal?.approver ?? 'its approver'}: ${standing.refusal?.reason ?? standing.reason}. An identical request is refused; answer the refusal with a new request whose reason cites ${standing.id} and gives what the refused request lacked` : null;
 }
 
 /**
