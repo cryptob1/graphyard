@@ -9,6 +9,7 @@ import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerP
 import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
+import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
@@ -2165,8 +2166,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed),
     endSession: async (session, resolution) => {
-      if (session.pane) closeHerdrPane(session.pane, run);
-      const closedAt = new Date().toISOString(), ended = { state: 'failed' as const, resolution: resolution.slice(0, 500), closedAt };
+      // A pane that is already gone is closed (GY-137): the record still settles, and says so.
+      let paneGone = false;
+      try { if (session.pane) closeHerdrPane(session.pane, run); } catch (error) { if (!paneAlreadyGone(error)) throw error; paneGone = true; }
+      const closedAt = new Date().toISOString(), ended = { state: 'failed' as const, resolution: paneGone ? withPaneGone(resolution, session.pane!, 500) : resolution.slice(0, 500), closedAt };
       if (session.role === 'reviewer') { const ledger = await readReviewLedger(root); await saveReviewLedger(root, { ...ledger, reviews: ledger.reviews.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
       else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
     },
