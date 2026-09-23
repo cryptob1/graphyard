@@ -83,7 +83,9 @@ export async function main() {
       await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
       await step('engine.reconcile', () => engine.reconcile()); await step('delivery.sweep', () => delivery.sweep());
       await step('projectFlow', () => projectFlow(engine.store, { batches: 4 }));
-      if (Date.now() - patternsAt >= 60_000) {
+      // The pattern scan's ledger query is quadratic in the events table and held the whole tick for
+      // good once the table grew (2026-09-23): it runs only where an operator opts in until it is bounded.
+      if (process.env.GRAPHYARD_INTERVENTION_PATTERNS === '1' && Date.now() - patternsAt >= 60_000) {
         patternsAt = Date.now();
         for (const work of (await step('openPatternItems', () => openPatternItems(engine, http.services.interventionPolicy))).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
       }
