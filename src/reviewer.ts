@@ -36,6 +36,10 @@ export const reviewRecordSchema = z.object({
   requestId: z.string().min(1).max(64).optional(),
   /** Which launch for the request this is: a failed or expired session is relaunched as the next attempt. */
   attempt: z.number().int().min(1).max(50).optional(),
+  /** When the loop saw the control plane no longer request `requestId`; until then the record is pinned (boundSessionLedger). */
+  requestClosedAt: z.string().min(1).max(40).optional(),
+  /** When the loop saw `sha` stop being the undelivered candidate of `key`; until then a record with a verdict is pinned (boundSessionLedger). */
+  headReleasedAt: z.string().min(1).max(40).optional(),
   state: z.enum(['pending', 'completed', 'expired', 'cancelled', 'failed']),
   /** When Herdr first reported the session finished or blocked without a verdict. */
   idleSince: z.string().min(1).max(40).optional(),
@@ -59,16 +63,124 @@ export const reviewRecordSchema = z.object({
   checkoutFailure: z.string().min(1).max(500).optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
-export const reviewLedgerSchema = z.object({ version: z.literal(1), reviews: z.array(reviewRecordSchema).max(200).default([]) }).strict();
+// The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
+// bound existed, or by hand, is still read, and the next write brings it inside the bound.
+export const reviewLedgerSchema = z.object({ version: z.literal(1), reviews: z.array(reviewRecordSchema).default([]) }).strict();
 export type ReviewLedger = z.infer<typeof reviewLedgerSchema>;
 
-const ledgerFile = (root: string) => resolve(root, '.graphyard/reviews.json');
+/**
+ * The session ledgers (GY-131): `.graphyard/reviews.json` and `.graphyard/producers.json`, one
+ * record per reviewer or producer session this host launched. Both are the working set the loop
+ * reconciles, not an archive, and both share this one bounded, reaped implementation.
+ *
+ * A record is live while its session is pending; completed, failed, cancelled and expired are
+ * terminal. A terminal record is pinned while something still reads it:
+ * - its request is open (`requestId` without `requestClosedAt`): the request's attempt count, retry
+ *   bound, settled state and agent names are read from its records (producer.ts sessionRetry), so
+ *   they are kept until the loop sees the control plane stop requesting it (releaseClosedRequests);
+ * - it carries a verdict and its sha is still the item's undelivered candidate (no `headReleasedAt`),
+ *   or a pending session reviews the same key and sha: a session of that head — pending now, or
+ *   launched later when GitHub dismisses the approval with the head unchanged — reads its
+ *   `answered` set (reconcileReviews) from these records, so an old verdict is never adopted.
+ * Every write keeps every live and every pinned record, and only the newest
+ * `sessionLedgerRetention` of the other terminal records (by when they settled) for diagnostics,
+ * so a session whose record nothing reads is reaped in the write that resolves or releases it.
+ * A write that would pass `sessionLedgerBound` gives up retained records first, and is refused
+ * only when live and pinned records alone pass it: that refusal names the ledger, its bound and
+ * the live count, and is local state, never session capacity.
+ *
+ * The review ledger used to be an append-only array capped at 200 by its schema; nothing reaped
+ * it, so on 2026-09-23 it filled with 200 finished records and refused every review launch.
+ */
+export const sessionLedgerBound = 200;
+export const sessionLedgerRetention = 50;
+export const terminalSessionStates = ['completed', 'failed', 'cancelled', 'expired'] as const;
+/** `idleGraceMs`: how long a session Herdr reports finished, blocked or gone is given before its record is failed. */
+export interface SessionLedgerSpec { name: string; path: string; role: 'reviewer' | 'producer'; idleGraceMs: number }
+export const reviewLedgerSpec: SessionLedgerSpec = { name: 'review ledger', path: '.graphyard/reviews.json', role: 'reviewer', idleGraceMs: 5 * 60_000 };
+type LedgerRecord = { state: string; requestedAt: string; closedAt?: string; requestId?: string; requestClosedAt?: string; headReleasedAt?: string; key?: string; sha?: string; verdict?: unknown };
+const live = (record: LedgerRecord) => !(terminalSessionStates as readonly string[]).includes(record.state);
+/** The terminal records something still reads: those of an open request, and verdicts a session of the same head, pending or relaunched, checks against. */
+export function pinnedSessionRecords<T extends LedgerRecord>(records: T[]): Set<T> {
+  const pendingHeads = new Set(records.filter(live).map(record => `${record.key}@${record.sha}`));
+  return new Set(records.filter(record => !live(record) && (!!record.requestId && !record.requestClosedAt || !!record.verdict && (!record.headReleasedAt || pendingHeads.has(`${record.key}@${record.sha}`)))));
+}
+
+/** The refusal of a write that would hold more live and pinned records than the bound. */
+export class SessionLedgerFullError extends Error {
+  constructor(readonly spec: SessionLedgerSpec, readonly bound: number, readonly live: number, subject?: string, readonly pinned = 0) {
+    super(`The ${spec.name} (${spec.path}) refused the write: its bound is ${bound} records and ${live} are live sessions, ${pinned ? `${pinned} more are terminal records an open request or a pending review still reads, and none is left to reap` : 'none of them terminal to reap'}${subject ? `, so no session can be recorded for ${subject}` : ''}. This is local state, not ${spec.role} capacity: ${sessionLedgerRemedy(spec)}`);
+    this.name = 'SessionLedgerFullError';
+  }
+}
+export const sessionLedgerRemedy = (spec: SessionLedgerSpec) => `settle the live sessions — graphyard master status reconciles every pending record against its session and GitHub, and a session gone from Herdr is marked idle by the first pass that finds it gone and failed by the first pass after its ${spec.idleGraceMs / 60_000}-minute idle grace, not on the same one — and the next write reaps them, as it reaps a request's records once the control plane stops requesting it; ${spec.path} is read-only diagnostics otherwise`;
+/** Matches a ledger refusal wherever its text was recorded: an action row, a dispatch failure, a launch error. */
+export const sessionLedgerRefusal = /The (review|producer) ledger \((\S+)\) refused the write: its bound is (\d+) records and (\d+) are live/;
+
+/**
+ * After a launch whose record could not be written, stop the pane it created. When Herdr cannot
+ * confirm the pane closed, the refusal says so — naming the pane and the agent name it still holds —
+ * so a session with no ledger record is never reported as removed; the caller keeps its checkout.
+ * Returns whether the pane is gone (or never existed).
+ */
+export async function unrecordedPaneStopped(error: unknown, pane: string | undefined, tab: string | undefined, agentName: string, stop: () => void | Promise<void>): Promise<boolean> {
+  if (!pane && !tab) return true;
+  try { await stop(); return true; }
+  catch (cleanup) {
+    if (error instanceof Error) error.message += `; Herdr could not confirm the created pane ${pane ?? tab} closed (${cleanup instanceof Error ? cleanup.message.split('\n')[0] : String(cleanup)}), so agent ${agentName} may still be running with no ledger record: close that pane in Herdr before relaunching`;
+    return false;
+  }
+}
+
+/** The records one write keeps: every live and pinned one, then the newest other terminal ones the bound and the retention allow. */
+export function boundSessionLedger<T extends LedgerRecord>(records: T[], spec: SessionLedgerSpec, limits: { bound?: number; retention?: number } = {}): T[] {
+  const bound = limits.bound ?? sessionLedgerBound, retention = limits.retention ?? sessionLedgerRetention;
+  const running = records.filter(live).length, pinned = pinnedSessionRecords(records);
+  if (running + pinned.size > bound) throw new SessionLedgerFullError(spec, bound, running, undefined, pinned.size);
+  const settledAt = (record: T) => Date.parse(record.closedAt ?? record.requestedAt) || 0;
+  const terminal = records.map((record, index) => ({ record, index })).filter(entry => !live(entry.record) && !pinned.has(entry.record))
+    .sort((a, b) => settledAt(b.record) - settledAt(a.record) || b.index - a.index);
+  const kept = new Set(terminal.slice(0, Math.max(0, Math.min(retention, bound - running - pinned.size))).map(entry => entry.record));
+  return records.filter(record => live(record) || pinned.has(record) || kept.has(record));
+}
+/** Refuses, before a session exists, a launch whose record (`next`) the ledger could not hold. */
+export function assertSessionLedgerRoom(records: LedgerRecord[], spec: SessionLedgerSpec, subject: string, next: LedgerRecord = { state: 'pending', requestedAt: '' }, bound = sessionLedgerBound) {
+  const after = [...records, next], running = after.filter(live).length, pinned = pinnedSessionRecords(after).size;
+  if (running + pinned > bound) throw new SessionLedgerFullError(spec, bound, running - 1, subject, pinned);
+}
+/**
+ * Marks the terminal records whose request the control plane no longer holds open — answered,
+ * withdrawn, superseded, or its item done or gone — and the verdicts whose head is no longer the
+ * item's undelivered candidate, so a later write may reap them. Only a work snapshot can say so;
+ * without one nothing is released and the records stay pinned.
+ */
+export function releaseClosedRequests(records: LedgerRecord[], work: Work[], now: Date) {
+  let released = 0;
+  for (const record of records) {
+    if (live(record)) continue;
+    const item = work.find(candidate => candidate.key === record.key);
+    if (record.requestId && !record.requestClosedAt) {
+      const open = !!item && item.stage !== 'done' && [item.autoDispatch?.review ?? null, ...(item.autoDispatch?.producers ?? [])].some(request => !!request && request.id === record.requestId && request.state === 'requested');
+      if (!open) { record.requestClosedAt = now.toISOString(); released++; }
+    }
+    const current = !!item && item.stage !== 'done' && !item.observation?.merged && item.candidate?.sha === record.sha;
+    if (record.verdict && !record.headReleasedAt && !current) { record.headReleasedAt = now.toISOString(); released++; }
+  }
+  return released;
+}
+/** What `master status` reports per ledger: where it lives, its bound and retention, and the room left for live sessions. */
+export function sessionLedgerHeadroom(records: LedgerRecord[], spec: SessionLedgerSpec) {
+  const running = records.filter(live).length, pinned = pinnedSessionRecords(records).size;
+  return { ledger: spec.name, path: spec.path, bound: sessionLedgerBound, retention: sessionLedgerRetention, records: records.length, live: running, pinned, terminal: records.length - running, headroom: Math.max(0, sessionLedgerBound - running - pinned) };
+}
+
+const ledgerFile = (root: string) => resolve(root, reviewLedgerSpec.path);
 export async function readReviewLedger(root: string): Promise<ReviewLedger> {
   const file = ledgerFile(root);
   try { await privateFile(file); return reviewLedgerSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; return { version: 1, reviews: [] }; }
 }
-export const saveReviewLedger = (root: string, ledger: ReviewLedger) => atomicPrivateWrite(ledgerFile(root), reviewLedgerSchema.parse(ledger));
+export const saveReviewLedger = async (root: string, ledger: ReviewLedger) => atomicPrivateWrite(ledgerFile(root), reviewLedgerSchema.parse({ ...ledger, reviews: boundSessionLedger(ledger.reviews, reviewLedgerSpec) }));
 
 // Reviewer credentials live beside the coordinator credential, outside every worktree.
 export function reviewerCredentialDirectory(config?: Pick<MasterConfig, 'credentialFile'>, input?: string) {
@@ -285,6 +397,9 @@ export async function launchReview(root: string, work: Work, profileName: string
   const attempt = dependencies.requestId ? ledger.reviews.filter(entry => entry.requestId === dependencies.requestId).length + 1 : undefined;
   const agentName = sessionAgentName(profile, { id, requestId: dependencies.requestId, attempt });
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Reviewer agent ${agentName} is already visible in Herdr`);
+  // The ledger's room is local state, judged before any session exists: a launch whose record
+  // could not be written must never leave a running pane behind that holds the agent's name.
+  assertSessionLedgerRoom(ledger.reviews, reviewLedgerSpec, `${binding.key} review of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: now().toISOString(), key: binding.key, sha: binding.sha, requestId: dependencies.requestId });
   const sessions = profileSessions(profile, agents, ledger.reviews);
   if (!sessions.free) throw new Error(profileAtLimit('Reviewer', profile, sessions));
   // Before a token is minted: an exhausted or logged-out account is skipped for the profile's next.
@@ -329,7 +444,12 @@ export async function launchReview(root: string, work: Work, profileName: string
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
       profile: profile.name, agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory,
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
-    await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
+    // A record that cannot be written leaves no session behind: the pane is stopped and the credential withdrawn.
+    try { await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] }); }
+    catch (error) {
+      if (!await unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
+      await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
+    }
     return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
       pane: record.pane, checkout: checkout.directory, reviewer: `${reviewerApp.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery,
       account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
@@ -421,7 +541,7 @@ export function dismissalResolution(record: Pick<ReviewRecord, 'key' | 'sha' | '
  * a verdict it managed to post for the old head settles nothing the record does not already say.
  */
 /** A session Herdr reports finished or blocked is given this long to post its verdict before it is recorded as failed. */
-export const reviewIdleGraceMs = 5 * 60_000;
+export const reviewIdleGraceMs = reviewLedgerSpec.idleGraceMs;
 
 export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, work: Work[] | undefined): string | null {
   const item = work?.find(candidate => candidate.key === record.key);
@@ -556,6 +676,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     record.state = 'failed'; record.resolution = dismissalResolution(record, dependencies.work); record.closedAt = now.toISOString();
     changed++;
   }
+  // A request the control plane no longer holds open releases its records to the retention window.
+  if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
   if (changed) await saveReviewLedger(root, ledger);
   return { reviews: ledger.reviews, changed };
 }
