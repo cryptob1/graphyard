@@ -9,6 +9,7 @@ import type { FleetProbe } from './fleet.js';
 import type { Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { liveReviewRequest } from './model/dispatch.js';
+import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
 export const reviewerCredentialSchema = z.object({
@@ -411,9 +412,11 @@ export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'ba
  * behind there would never be removed at all, while a record that stays pending is retried.
  */
 async function closeReviewSession(root: string, record: ReviewRecord, dependencies: { run?: (command: string, args: string[]) => string; now: () => Date }, options: { state: ReviewRecord['state']; resolution?: string; force?: boolean }) {
-  let closeFailure: string | undefined;
+  let closeFailure: string | undefined, paneGone = false;
+  // A pane that is already gone is the state the close wanted (GY-137): it settles the record,
+  // named on its resolution, rather than holding the request pending as a failure for good.
   try { if (record.pane) closeHerdrPane(record.pane, dependencies.run); }
-  catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
+  catch (error) { if (paneAlreadyGone(error)) paneGone = true; else closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
   if (!closeFailure || options.force) {
     try { await rm(record.sessionDirectory, { recursive: true, force: true }); }
     catch (error) { closeFailure = `${closeFailure ? `${closeFailure}; ` : ''}the reviewer credential directory ${record.sessionDirectory} could not be removed: ${error instanceof Error ? error.message : 'unknown reason'}`; }
@@ -427,6 +430,7 @@ async function closeReviewSession(root: string, record: ReviewRecord, dependenci
     if (failure) record.checkoutFailure = failure; else delete record.checkoutFailure;
     record.state = options.state; record.closedAt = dependencies.now().toISOString();
     if (options.resolution) record.resolution = options.resolution;
+    if (paneGone) record.resolution = withPaneGone(options.resolution, record.pane!);
   }
   return closeFailure;
 }
@@ -499,7 +503,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     if (dismissed) await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: 'failed', resolution: dismissed, force: true });
     else if (verdict) await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: 'completed', force: true });
     else if (stale) await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: 'cancelled', resolution: stale, force: true });
-    else await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: failed ? 'failed' : 'expired', resolution: failed ?? `the reviewer token expired at ${record.tokenExpiresAt} without a verdict on ${record.sha.slice(0, 12)}` });
+    // No request outlives its own token (GY-137): an expired one whose session Herdr no longer
+    // reports settles as expired whatever its pane's state, with any close failure kept as attention.
+    else await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: failed ? 'failed' : 'expired', resolution: failed ?? `the reviewer token expired at ${record.tokenExpiresAt} without a verdict on ${record.sha.slice(0, 12)}`, force: !failed && !sessionReported(dependencies.agents, record.agentName) });
     changed++;
   }
   // An approval recorded as a session's verdict can be withdrawn after that session closed: a push
