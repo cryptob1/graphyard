@@ -648,6 +648,8 @@ test('unit:queue-real-base-tip — the observed base tip and tree come from refs
   assert.ok(f.calls.some(call => call.path === '/git/ref/heads/main'), 'the branch ref is read');
   assert.equal(observation.baseTipContained, true, 'GitHub compares the head with the branch head');
   f.compare('diverged');
+  // Real commits never change ancestry, so the client memoizes it; this fixture rewrites the answer for the same pair.
+  (f.github as any).ancestry.clear();
   assert.equal((await f.github.observe(f.work)).baseTipContained, false, 'a head behind the branch does not contain its tip');
   // A published tip keeps its validated base while the branch is tree-identical to it, and a
   // follower's tip contains the branch by publication of the chain it sits on.
