@@ -238,15 +238,60 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(page.locator('.node small span[title]')).toHaveCount(1);
     await expect(node('In review').locator('span[title]')).toHaveAttribute('title', /50th and 95th percentile/);
     await expect(node('In review').locator('span[title]')).toHaveCSS('text-transform', 'none');
-    const age = (key: string) => page.locator('.card', { hasText: key }).locator('.status-line');
-    await expect(age('GY-2')).toHaveAttribute('title', 'In this step for 45m');
-    await expect(age('GY-3')).toHaveAttribute('title', 'In this step for 14h 54m');
-    await expect(age('GY-5')).toHaveAttribute('title', 'In this step for 2d 3h');
-    await expect(age('GY-6')).toHaveAttribute('title', 'In this step for 2d 2h');
+    // The same adaptive units on the cards themselves, where the duration is read rather than
+    // hovered: every one of these fixtures has held its status for hours, so each says so.
+    const age = (key: string) => page.locator('.card', { hasText: key }).locator('.status-age');
+    await expect(age('GY-2')).toContainText('45m overdue');
+    await expect(age('GY-3')).toContainText('14h 54m overdue');
+    await expect(age('GY-5')).toContainText('2d 3h overdue');
+    await expect(age('GY-6')).toContainText('2d 2h overdue');
+    await expect(age('GY-2')).toHaveAttribute('title', 'In this status for 45m — longer than the 30m an item may hold one status before it counts as stopped');
     const clipped = await page.locator('.node').evaluateAll(nodes => nodes.flatMap(node => [node, ...node.querySelectorAll('small')].map(element => element.scrollWidth > element.clientWidth)));
     expect(clipped).not.toContain(true);
   });
 }
+
+// GY-108: the board never said for how long, so an item waiting forty seconds looked exactly
+// like one waiting fifty minutes. Every card now carries the time it has held its current status
+// and says, in red and in words, when that is past the operator's thirty-minute threshold.
+test('every work card carries how long it has held its status, in red past thirty minutes, in the list, the board and the item view', async ({ page }) => {
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  const item = (key: string, title: string, minutesAgo: number) => ({ ...work, id: `fixture-${key.toLowerCase()}`, key, title,
+    createdAt: at(30 * 24 * 60), stageEnteredAt: at(minutesAgo) });
+  const items = [item('GY-20', 'Just moved', 29), item('GY-21', 'Stopped moving', 31)];
+  await page.route('**/api/**', async route => {
+    if (route.request().headers().authorization !== 'Bearer browser-fixture') return route.fulfill({ status: 401, json: { error: 'Rejected' } });
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'fixture', role: 'admin' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] } });
+    if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: items, now: new Date().toISOString() } });
+    return route.fulfill({ json: [] });
+  });
+  await page.goto('/'); await login(page);
+  const age = (key: string) => page.locator('.card', { hasText: key }).locator('.status-age');
+  const colour = (key: string) => age(key).evaluate(element => getComputedStyle(element).color);
+  const red = (value: string) => { const [r, g, b] = value.match(/\d+/g)!.map(Number); return r > g + 40 && r > b + 40; };
+  // No control is pressed: the durations are on the untouched page, measured from when each item
+  // entered its status rather than from the month-old creation date they share.
+  await expect(age('GY-20')).toHaveText('29m');
+  await expect(age('GY-21')).toContainText('31m overdue');
+  expect(red(await colour('GY-21'))).toBe(true);
+  expect(red(await colour('GY-20'))).toBe(false);
+  // Red is never the only cue: the word survives greyscale and a screen reader, the triangle
+  // beside it is decoration and is hidden from assistive technology, and the card is outlined.
+  await expect(age('GY-21').locator('.overdue-mark')).toHaveAttribute('aria-hidden', 'true');
+  await expect(page.locator('.card.overdue')).toHaveCount(1);
+  await expect(page.locator('.card.overdue')).toContainText('Stopped moving');
+  // Board view draws the same cards, with the same verdict.
+  await page.getByRole('button', { name: 'Board view' }).click();
+  await expect(page.locator('.board .card')).toHaveCount(2);
+  await expect(age('GY-20')).toHaveText('29m');
+  await expect(age('GY-21')).toContainText('31m overdue');
+  // And so does the item view, from the same threshold.
+  await page.locator('.card', { hasText: 'GY-21' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Stopped moving' });
+  await expect(drawer.locator('.status-age')).toContainText('31m overdue');
+  expect(red(await drawer.locator('.status-age').evaluate(element => getComputedStyle(element).color))).toBe(true);
+});
 
 test('the work page shows one count row, the stages, with the open total in the heading and nothing counted twice', async ({ page }) => {
   await fixture(page); await login(page);
@@ -768,7 +813,9 @@ test('merge queue shows each entry with its position, predicted tip, and wait', 
   await expect(entries).toHaveCount(2);
   await expect(entries.nth(0)).toContainText('1. GY-10');
   await expect(entries.nth(0)).toContainText('Next to merge');
-  await expect(entries.nth(0)).toContainText('Waiting 45m');
+  await expect(entries.nth(0)).toContainText('queued 45m ago');
+  // A queued card is a work card too: it carries the item's time in its status beside its position.
+  await expect(entries.nth(0).locator('.status-age')).toHaveCount(1);
   await expect(entries.nth(1)).toContainText('2. GY-11');
   await expect(entries.nth(1)).toContainText('Behind GY-10');
   await entries.nth(1).click();

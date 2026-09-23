@@ -10,6 +10,8 @@ export function queueRef(key: string) { return `refs/graphyard/queue/${key.toLow
 
 export interface QueueSpeculation {
   ref: string; tip: string; base: string; baseTree: string;
+  /** The published tip's own tree: what the entry behind this one is predicted to land on (GY-100). */
+  tipTree?: string;
   predecessors: string[]; policyRevision: number; publishedAt: string;
   /** How Graphyard produced the tip, when it replaced the head; absent when the head already contained its base. */
   merge?: TipMerge | null;
@@ -261,6 +263,8 @@ export interface QueuePlacement {
   base: { sha: string; tree: string | null } | null;
   /** How a current entry binds its predicted base: the exact commit, or a tree-identical advance of it. */
   binding: 'exact' | 'tree-equivalent' | null;
+  /** The tree a current entry's tip lands, for the entry behind it to bind its prediction by (GY-100); null when unpublished or recorded before tips carried their tree. */
+  tipTree?: string | null;
   current: boolean; publishable: boolean; reasons: string[];
 }
 
@@ -471,6 +475,37 @@ export function observedBaseTip(work: Work) {
   return work.observation?.baseTip ?? work.candidate?.baseSha ?? null;
 }
 
+/**
+ * The published speculation a queued candidate keeps when its predicted base moved only to a
+ * commit with the validated base's own tree — an entry ahead republishing a tree-identical tip,
+ * or a queue merge advancing the base branch. Merging such a prediction would replace the head
+ * with a tree-identical commit, and a tip push dismisses the approval and every verdict bound to
+ * the head it replaces: a review round for content nobody changed. So nothing is republished
+ * (GY-100); the advance is recorded on the speculation as `carriedBase` and `predictQueue` binds
+ * the tip to the prediction through it. Null whenever a merge really has to happen: no published
+ * tip for this exact candidate and policy, or a prediction whose tree differs from the validated
+ * base's, which is content the tip does not hold.
+ */
+export function treeIdenticalPrediction(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>, predictedBase: string, predictedBaseTree: string): QueueSpeculation | null {
+  const speculation = work.queue?.speculation, candidate = work.candidate;
+  if (!speculation || !candidate || speculation.tip !== candidate.sha || speculation.base !== candidate.baseSha || speculation.policyRevision !== work.policyRevision) return null;
+  return speculation.base !== predictedBase && !!speculation.baseTree && speculation.baseTree === predictedBaseTree ? speculation : null;
+}
+/**
+ * The carry decision a speculation being bound keeps without deciding again, or undefined when
+ * the tip replaces the candidate's head and the carry must be decided for it. A tip that already
+ * is the candidate — the same published tip re-bound to a tree-identical prediction (see
+ * treeIdenticalPrediction) — keeps the decision recorded when it first replaced the reviewed
+ * head: that decision is what binds the carried approval and every carried proof to the tip, and
+ * nothing about the tip changed. A tip the record does not already hold carries nothing.
+ */
+export function keptTipCarry(work: Pick<Work, 'candidate' | 'queue'>, speculation: QueueSpeculation): QueueCarry | null | undefined {
+  const candidate = work.candidate, recorded = work.queue?.speculation;
+  if (!candidate) return null;
+  if (speculation.tip !== candidate.sha) return undefined;
+  return recorded && recorded.tip === speculation.tip && recorded.base === speculation.base && recorded.policyRevision === speculation.policyRevision ? recorded.carry ?? null : null;
+}
+
 export function predictQueue(all: Work[], now: number): QueuePlacement[] {
   const entries = queueOrder(all);
   const placements: QueuePlacement[] = [];
@@ -483,14 +518,23 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     const published = !!speculation && !!candidate && speculation.tip === candidate.sha
       && speculation.base === candidate.baseSha && speculation.policyRevision === work.policyRevision;
     const onPrediction = !!candidate && !!predictedBase && candidate.baseSha === predictedBase;
-    // An earlier queue merge advances the base branch to a new commit whose tree is exactly the
-    // validated base's tree. Re-binding to that advance needs no new commit, so the published tip,
-    // the candidate, the review and every proof stay bound; the advance is recorded, not republished.
-    const treeEquivalent = !onPrediction && position === 0 && published && !!work.observation?.baseTree && work.observation.baseTree === speculation!.baseTree;
+    // An earlier queue merge advances the base branch, or an entry ahead republishes its own tip,
+    // to a commit whose tree is exactly the validated base's tree. Re-binding to that advance
+    // needs no new commit, so the published tip, the candidate, the review and every proof stay
+    // bound; the advance is recorded, not republished. This is the same judgement at every
+    // position (GY-100): a tip push replaces the head, and GitHub dismisses its approval with it,
+    // so an entry whose prediction moved only in sha must not be republished either.
+    const predictedBaseTree = position === 0 ? work.observation?.baseTree ?? null : placements[position - 1].tipTree ?? null;
+    const treeEquivalent = !onPrediction && published && !!predictedBaseTree && predictedBaseTree === speculation!.baseTree;
+    // The same tree identity as the publisher itself found it, when it declined to republish and
+    // recorded the advance on the speculation instead (see treeIdenticalPrediction). Read for a
+    // tip published before tips carried their own tree, where the prediction's tree is unknown here.
+    const carriedToPrediction = !onPrediction && published && !!predictedBase
+      && speculation!.carriedBase?.sha === predictedBase && speculation!.carriedBase!.tree === speculation!.baseTree;
     // Only a Graphyard-published tip may land. Publication is what proves the validated commit
     // already contains its predicted base, so the merge result is that commit's tested tree even
     // though the candidate branch is deliberately behind the base branch while it waits its turn.
-    const current = published && (onPrediction || treeEquivalent);
+    const current = published && (onPrediction || treeEquivalent || carriedToPrediction);
     const reasons: string[] = [];
     if (position > 0) reasons.push(`Merge queue position ${position + 1} of ${entries.length}: ${entries[position - 1].key} is ahead`);
     if (!current) reasons.push(predictedBase
@@ -499,7 +543,8 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     placements.push({
       id: work.id, key: work.key, position, size: entries.length, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
       waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: entries.slice(0, position).map(ahead => ahead.key),
-      predictedBase, tip: current && candidate ? candidate.sha : null, base, binding: current ? treeEquivalent ? 'tree-equivalent' : 'exact' : null, current,
+      predictedBase, tip: current && candidate ? candidate.sha : null, base, binding: current ? treeEquivalent || carriedToPrediction ? 'tree-equivalent' : 'exact' : null,
+      tipTree: current && candidate ? speculation!.tipTree ?? null : null, current,
       publishable: !current && !!predictedBase && !!candidate, reasons,
     });
   }

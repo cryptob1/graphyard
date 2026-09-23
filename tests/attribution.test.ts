@@ -116,7 +116,7 @@ async function start(f: Fixture, r = f.r) {
   await validation.runnerCommand(runner, 'ack', command, id()); await validation.collectionAuthority(collector, command); return command;
 }
 function report(f: Fixture, command: { requestId: string; attemptId: string; epoch: number }, artifacts: Record<string, string> = A, target: Record<string, unknown> = {}) {
-  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: artifactsOf(artifacts), measurement: 'provider', coversEntireRun: true, attribution: 'matched', ...target }, bundleDigest, runnerImageDigest: runnerImage, artifacts: [{ name: 'report', digest: bundleDigest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true };
+  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: artifactsOf(artifacts), measurement: 'provider', coversEntireRun: true, attribution: 'matched', ...target }, bundleDigest, runnerImageDigest: runnerImage, artifacts: [{ name: 'report', digest: bundleDigest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } };
 }
 async function cleanup(f: Fixture) {
   for (const r of (await store.pool.query("SELECT document FROM validation_requests WHERE document->>'workId'=$1", [f.w.id])).rows.map(row => row.document as ValidationRequest)) {
@@ -135,7 +135,7 @@ async function delivered(mergeSha: string) {
   const observation = (): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { sha, baseSha: base, pr: serial, branch: `graphyard/attribution-delivered-${serial}`, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString() });
   w = await engine.observe(w.id, w.revision, observation());
-  w = await engine.execute(collector, 'evidence', w.id, { proof: 'integration:claim-safety', sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0 }, id());
+  w = await engine.execute(collector, 'evidence', w.id, { proof: 'integration:claim-safety', sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: sha, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
   w = await engine.observe(w.id, (await current(w.id)).revision, observation());
@@ -590,7 +590,7 @@ test('integration:attribution-security-regressions', async () => {
   w = await current(f.w.id); assert.equal(currentEvidence(w, f.proof), undefined); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
   const replacement = await request(w.validation![f.proof].requestId!); assert.equal(replacement.attempts.length, 0);
   const late: any = await validation.result(collector, report(f, command), id()); assert.equal(late.accepted, false, 'a late report on the superseded attempt is recorded, never accepted');
-  const generic = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());
+  const generic = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());
   assert.equal(currentEvidence(generic, f.proof), undefined, 'generic evidence cannot stand in for the pinned attempt');
   // Idempotent reschedule under a race is covered by integration:reanchor-races; here the fence itself is checked to be one row per superseded request.
   const fences = (await store.pool.query("SELECT superseded_request_id, count(*)::int AS n FROM attribution_reanchors GROUP BY superseded_request_id")).rows; assert.ok(fences.every(row => row.n === 1), "fences.every(row => row.n === 1)");
