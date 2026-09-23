@@ -166,13 +166,15 @@ test('unit:steady-state-spend-bounded — twenty unchanged candidates polled for
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client();
-  const candidates = Array.from({ length: 20 }, (_, index) => { const pr = api.open(100 + index, `graphyard/gy-${index}-1`, { approved: false }); return item(`GY-${index}`, 100 + index, pr.head, api.main); });
+  const candidates = Array.from({ length: 20 }, (_, index) => { const pr = api.open(100 + index, `graphyard/gy-${index}-1`, { approved: index >= 10 }); return item(`GY-${index}`, 100 + index, pr.head, api.main); });
   // The premise: every candidate has been observed once already and nothing has changed since.
   let all: Work[] = [];
   for (const candidate of candidates) all.push(evaluated(candidate, candidates, await github.observe(candidate, candidates)));
   // Observed once more with every peer observed, since the landing check reads each open peer.
   for (const candidate of [...all]) { const observation = await github.observe(candidate, all); all = all.map(entry => entry.id === candidate.id ? evaluated(candidate, all, observation) : entry); }
-  for (const candidate of all) assert.equal(observationBand(candidate, all, new Date()).band, 'active', `${candidate.key} waits on a review GitHub can still deliver`);
+  assert.deepEqual(all.map(candidate => observationBand(candidate, all, new Date()).band),
+    [...Array(10).fill('active'), ...Array(10).fill('idle')],
+    'the fleet includes candidates waiting on GitHub and unchanged candidates whose next action is a dispatch');
   github.noteFleet(all.length);
   const limit = api.limit;
   api.requests = [];
@@ -191,13 +193,15 @@ test('unit:steady-state-spend-bounded — twenty unchanged candidates polled for
       all = all.map(entry => entry.id === candidate.id ? observed : entry);
       const cadence = observationCadence(observed, all, new Date(), candidate.observation, github.steadyStateMs());
       github.recordObservation(candidate.id, { requests: measured.requests, uncached: measured.uncached, band: cadence.band, cadenceMs: cadence.ms });
-      assert.equal(cadence.band, 'steady', `${candidate.key} came back unchanged`);
+      assert.equal(cadence.band, Number(candidate.key.slice(3)) < 10 ? 'steady' : 'idle', `${candidate.key} came back unchanged in its state-derived band`);
       intervals.push(cadence.ms); due.set(candidate.id, clock + cadence.ms);
     }
   }
   const total = api.requests.length, charged = api.charged();
   if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log('steady-state hour', { total, charged, observations: intervals.length, intervals: [...new Set(intervals)], meanRequests: github.budget().observations.meanRequests });
   assert.ok(intervals.every(ms => ms >= 120_000), `every steady-state interval is at least two minutes (${Math.min(...intervals)})`);
+  assert.ok(github.budget().observations.jobs.filter(job => job.band === 'idle').every(job => job.cadenceMs >= Math.max(300_000, github.steadyStateMs())),
+    'unchanged idle candidates keep their five-minute floor and are stretched by the fleet bound');
   assert.ok(total < limit * steadyStateShare, `${total} requests in the simulated hour exceed the ${steadyStateShare * 100}% share (${limit * steadyStateShare}) of the hourly limit`);
   assert.equal(charged, 0, 'and none of them was charged: every read was a conditional read GitHub answered from its ETag');
   const budget = github.budget();

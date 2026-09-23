@@ -107,7 +107,9 @@ export function steadyStateInterval(openCandidates: number, meanRequests: number
  *   steady-state share.
  * - `active` — waiting on something GitHub can still deliver: a check, a review, a base refresh.
  * - `steady` — `active`, and the last observation came back with its head, base tip, check state
- *   and review state unchanged. The webhook wakes it the moment any of that moves.
+ *   and review state unchanged. The webhook wakes it the moment any of that moves. An unchanged
+ *   `idle` candidate keeps the `idle` band and its five-minute floor, but is stretched by the same
+ *   fleet bound when that is longer.
  * - `idle` — the next action is a dispatch, a rework or an escalation. Nothing on GitHub can move
  *   it, so polling is pure safety net.
  */
@@ -200,14 +202,18 @@ export function observationBand(work: Work, all: Work[], now: Date): { band: Exc
 
 /**
  * When to observe this item again. `previous` is the observation the one just recorded replaced:
- * an active candidate that came back saying exactly what it said last time settles to the
- * steady-state interval, because the webhook is what will tell Graphyard that it stopped.
+ * every non-merge candidate that came back saying exactly what it said last time is subject to
+ * the fleet's steady-state bound, because the webhook is what will tell Graphyard that it moved.
+ * Active candidates use the `steady` band; idle candidates retain their idle band and five-minute
+ * floor so something GitHub cannot move is never polled more often than an active candidate.
  */
 export function observationCadence(work: Work, all: Work[], now: Date, previous?: Observation | null, steadyMs: number = observationCadenceMs.steady): { band: CadenceBand; ms: number; reason: string } {
   const state = observationBand(work, all, now);
-  if (state.band === 'active' && previous && observationFingerprint(previous) === observationFingerprint(work.observation))
-    return { band: 'steady', ms: Math.max(observationCadenceMs.steady, steadyMs),
+  if (state.band !== 'merge' && previous && observationFingerprint(previous) === observationFingerprint(work.observation)) {
+    const band = state.band === 'active' ? 'steady' : state.band;
+    return { band, ms: Math.max(observationCadenceMs[band], steadyMs),
       reason: `${work.key} came back with its head, base tip, check state and review state unchanged; polling settles to the steady-state interval and the webhook wakes it the moment any of that moves` };
+  }
   return { band: state.band, ms: observationCadenceMs[state.band], reason: state.reason };
 }
 /** The open candidates the steady-state bound is sized for: submitted, observed open, not delivered. */

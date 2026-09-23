@@ -34,7 +34,7 @@ Three minutes for the operator. Deeper: [reference](operations-reference.md), [g
 
 ### Lost worker before submission
 
-Leases expire 120 seconds after the last heartbeat; a new worker claims at a higher epoch; old-epoch commands refuse. Keep the worktree: expiry proves no stop. [Detail](operations-reference.md#lost-worker-before-submission)
+Leases expire 120 seconds after the last heartbeat; a new worker claims at a higher epoch; old-epoch commands refuse. Keep the worktree: expiry does not prove it stopped. [Detail](operations-reference.md#lost-worker-before-submission)
 
 ### Rework a submitted implementation
 
