@@ -3,7 +3,7 @@
 // list, so any number of these run on any number of hosts against the same queue; none of them is
 // a master, and killing one costs the claim it held and nothing else.
 //
-//   node scripts/graphyard-executor.mjs [--once] [--interval SECONDS] [--kinds a,b] [--name NAME]
+//   node scripts/graphyard-executor.mjs [--once] [--interval SECONDS] [--kinds a,b] [--name NAME] [--unit UNIT]
 //   node scripts/graphyard-executor.mjs --slot N                 # one supervised slot (GY-105)
 //   node scripts/graphyard-executor.mjs --install [--count N] [--kinds a,b] [--interval SECONDS]
 //
@@ -20,12 +20,20 @@
 // declaration, claims under a stable name, and answers systemd's watchdog on every poll and every
 // claim renewal. `--install` writes that declaration and enables the units (src/repository-setup.ts
 // installExecutorSupervision); `graphyard init` does the same on a coordinator host.
+//
+// The modules are loaded once, here, and the checkout they came from keeps moving (GY-126). The
+// process records the release it loaded beside the coordinator credential, re-reads the checkout's
+// commit before every claim, and stands down — finishing what it runs, claiming nothing more,
+// saying why and how to restart it — the moment the two differ. `--unit` names the systemd user
+// unit it runs under when that cannot be read from the process itself (only a graphyard-executor
+// service is accepted); `graphyard master executors restart` restarts every registered executor
+// through that unit, and no claim starts while its fence stands.
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export function parseArguments(argv) {
-  const options = { once: false, intervalSeconds: null, kinds: null, name: null, slot: null, install: false, count: null };
+  const options = { once: false, intervalSeconds: null, kinds: null, name: null, slot: null, install: false, count: null, unit: null };
   for (let i = 0; i < argv.length; i++) {
     const argument = argv[i];
     const value = () => { const next = argv[++i]; if (next === undefined) throw new Error(`${argument} needs a value`); return next; };
@@ -36,6 +44,7 @@ export function parseArguments(argv) {
     else if (argument === '--slot') options.slot = Number(value());
     else if (argument === '--install') options.install = true;
     else if (argument === '--count') options.count = Number(value());
+    else if (argument === '--unit') options.unit = value();
     else throw new Error(`Unknown argument ${argument}`);
   }
   if (options.intervalSeconds !== null && (!Number.isInteger(options.intervalSeconds) || options.intervalSeconds < 1 || options.intervalSeconds > 900)) throw new Error('--interval takes whole seconds between 1 and 900');
@@ -62,12 +71,12 @@ export function supervisorNotifier(env = process.env, run, log = line => console
 export async function load() {
   const { tsImport } = await import('tsx/esm/api');
   const here = import.meta.url;
-  const [master, daemon, dispatch, executor, reviewer, producer, actions, view, setup] = await Promise.all([
+  const [master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet] = await Promise.all([
     tsImport('../src/master.ts', here), tsImport('../src/master-daemon.ts', here), tsImport('../src/auto-dispatch.ts', here),
     tsImport('../src/executor.ts', here), tsImport('../src/reviewer.ts', here), tsImport('../src/producer.ts', here),
-    tsImport('../src/model/next-action.ts', here), tsImport('../src/server/work-view.ts', here), tsImport('../src/repository-setup.ts', here),
+    tsImport('../src/model/next-action.ts', here), tsImport('../src/server/work-view.ts', here), tsImport('../src/repository-setup.ts', here), tsImport('../src/executor-fleet.ts', here),
   ]);
-  return { master, daemon, dispatch, executor, reviewer, producer, actions, view, setup };
+  return { master, daemon, dispatch, executor, reviewer, producer, actions, view, setup, fleet };
 }
 
 /** An exit status the supervisor reads: a slot the declaration does not have stays down instead of flapping. */
@@ -107,7 +116,7 @@ export function controlPlaneEffects(modules, context) {
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const options = parseArguments(argv);
   const modules = await load();
-  const { master: m, daemon: d, dispatch: a, executor: x, reviewer: r, producer: pr, actions: k, view: v, setup: s } = modules;
+  const { master: m, daemon: d, dispatch: a, executor: x, reviewer: r, producer: pr, actions: k, view: v, setup: s, fleet: f } = modules;
   // Bounded, captured and awaited, exactly as the daemon runs its own children: a launch that
   // holds for its whole thirty-second timeout must not stop this process renewing the claim it
   // is holding while the launch runs.
@@ -183,18 +192,45 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   // A supervised slot claims under a stable name, so a restart is the same executor coming back
   // rather than a new one appearing beside a ghost; the pid says which incarnation is speaking.
   const identity = { id: options.name ?? (options.slot !== null ? `${status.actor.id}@${config.hostId}/${options.slot}` : `${status.actor.id}@${config.hostId}:${process.pid}`), host: config.hostId };
+  // The release these modules were loaded from, recorded on this host before the first claim and
+  // refreshed on every claim; the commit is re-read from the checkout in front of each claim.
+  const release = f.readRelease(root);
+  const registrar = f.executorRegistrar(config, { name: identity.id, host: identity.host, pid: process.pid, principal: status.actor.id, kinds: a.executorKinds(effects.handlers),
+    intervalSeconds: options.intervalSeconds, root, release, supervisor: f.detectSupervisorUnit({ named: options.unit }) });
+  await registrar.started();
+  let fenceSeen = null;
+  const guarded = x.releaseGuardedEffects(effects, {
+    loaded: release, current: () => f.readCommit(root),
+    claimed: action => registrar.claimed(action), settled: () => registrar.settled(),
+    // A fleet restart raises a fence beside the records; no claim starts while it stands.
+    claiming: () => registrar.claiming(), abandoned: () => registrar.abandoned(),
+    fenced: async () => {
+      const fence = await f.readRestartFence(config);
+      if (fence && fence.id !== fenceSeen) console.error(`[graphyard-executor] ${identity.id} claims nothing while the restart by pid ${fence.pid} since ${fence.at} stands`);
+      fenceSeen = fence?.id ?? null;
+      return fence;
+    },
+    standDown: detail => { console.error(`[graphyard-executor] ${identity.id} stands down: ${detail.reason}; restart it with ${registrar.registration.supervisor?.restart ?? f.executorRestartCommand}`); return registrar.standDown(detail); },
+    resumed: () => { console.error(`[graphyard-executor] ${identity.id} claims again: its checkout is back on ${release.commit.slice(0, 12)}`); return registrar.resumed(); },
+  });
+  console.error(`[graphyard-executor] ${identity.id} runs ${release.commit ? release.commit.slice(0, 12) : 'an unknown commit'}${release.dirty ? ' (dirty)' : ''} from ${root}${registrar.registration.supervisor ? ` under ${registrar.registration.supervisor.unit}` : ' with no supervisor unit'}; registered at ${registrar.file}`);
   const stopping = new AbortController();
   const stop = () => stopping.abort();
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, stop);
   notify?.('ready');
   console.error(`[graphyard-executor] ${identity.id} (pid ${process.pid}) serving ${a.executorKinds(effects.handlers).join(', ')} every ${options.intervalSeconds}s${options.slot !== null ? ` as slot ${options.slot}` : ''}${notify ? ' under systemd supervision' : ''}`);
   try {
-    const result = await a.runExecutor(identity, effects, { intervalMs: options.intervalSeconds * 1000, once: options.once, signal: stopping.signal, log: line => console.error(line) });
+    const result = await a.runExecutor(identity, guarded, { intervalMs: options.intervalSeconds * 1000, once: options.once, signal: stopping.signal, log: line => console.error(line) });
     const report = { executor: identity.id, host: identity.host, pid: process.pid, slot: options.slot, repository: config.repository, kinds: a.executorKinds(effects.handlers), intervalSeconds: options.intervalSeconds,
+      release, supervisor: registrar.registration.supervisor, standingDown: guarded.standingDown(), registration: registrar.file,
       steps: result.steps.length, ran: result.steps.filter(step => step.action).length, failed: result.steps.filter(step => step.result === 'failed').length, last: result.steps.at(-1) ?? null };
     console.log(JSON.stringify(report, null, 2));
     return report;
-  } finally { for (const signal of ['SIGINT', 'SIGTERM']) process.off(signal, stop); }
+  } finally {
+    for (const signal of ['SIGINT', 'SIGTERM']) process.off(signal, stop);
+    // The last write: a restart's wait tells the process that came back from the one that left by it.
+    await registrar.stopped().catch(() => {});
+  }
 }
 
 // The entry check follows symlinks: a checkout may reach the shipped scripts through a link, and

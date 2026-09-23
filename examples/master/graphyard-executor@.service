@@ -15,6 +15,12 @@
 # the host runs come from .graphyard/executors.json in the same directory. Do not add a worker,
 # producer or operator credential: an executor launches sessions, re-reads pull requests and
 # brokers the guarded merge, and must never be able to satisfy a gate itself.
+#
+# The executor loads its modules once, at startup, and records the release it loaded beside the
+# coordinator credential (GY-126). When the checkout moves on it stands down and claims nothing more;
+# `graphyard master executors restart` restarts every executor on the host through these units
+# and waits for each to register again on the current release. The unit name is passed in so the
+# record names the exact unit that restarts it.
 [Unit]
 Description=Graphyard executor slot %i
 After=network-online.target
@@ -28,6 +34,7 @@ StartLimitIntervalSec=0
 Type=simple
 WorkingDirectory=%h/code/graphyard
 ExecStart=/usr/bin/node %h/code/graphyard/scripts/graphyard-executor.mjs --slot %i
+Environment=GRAPHYARD_EXECUTOR_UNIT=%n
 # An executor keeps nothing between claims, so restarting it costs the one claim it held, which
 # expires within two minutes and is taken by the next executor as a further attempt.
 Restart=always
@@ -40,7 +47,9 @@ RestartPreventExitStatus=78
 # window must stay above the executor's own synchronous command timeout (90s).
 WatchdogSec=180
 NotifyAccess=all
-TimeoutStopSec=120
+# A stop lets the action in flight finish: a dispatch waits on a runtime and a guarded merge
+# chains provider calls, so the executor is given the same room a worker launch may take.
+TimeoutStopSec=900
 KillSignal=SIGTERM
 StandardOutput=journal
 StandardError=journal

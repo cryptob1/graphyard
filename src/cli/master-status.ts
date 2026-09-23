@@ -18,6 +18,7 @@ import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
 import { ledgerRefusalAttention } from '../master-status.js';
+import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
@@ -172,13 +173,18 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // An escalation context over its budget (GY-138), named before a handler declines on it.
   const overflow = await contextOverflows(masterApi, snapshot.work);
   attentionItems.push(...generatedFiles, ...overflow);
+  // The fleet against the release this CLI runs (GY-126): every executor registered on this host
+  // with the commit it loaded beside the coordinator's, and one item naming each that has stood
+  // down, or will at its next claim, because the checkout moved on under it.
+  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: cli.commit ?? readCommit(root) }, { hostId: master.hostId });
+  attentionItems.push(...releases.attention);
   const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
   return { ...status, ...ledgerRefusalAttention({ work: status.work, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length, needsHuman: owed.rows.length,
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + overflow.length + owed.counted } }, snapshot.work),
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + owed.counted } }, snapshot.work),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
     actionless: { bound: stallBoundMs, items: actionless },
@@ -195,7 +201,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     ledgers: { reviews: sessionLedgerHeadroom(reviewRecords, reviewLedgerSpec), producers: sessionLedgerHeadroom(producerRecords, producerLedgerSpec) },
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
-    actions: needsHumanActions(actionReport(snapshot), owed.rows), executors, sessions: sessionReport(snapshot),
+    actions: needsHumanActions(actionReport(snapshot), owed.rows),
+    // Presence and supervision (GY-105) and the release each registered executor runs (GY-126).
+    executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] }, sessions: sessionReport(snapshot),
     // Branches the queue's own pushes contaminated and the approvals its pushes cost (GY-127).
     branches: branchReport(status.work),
     requests: agentRequestReport(snapshot),
