@@ -1625,7 +1625,8 @@ exception in the audited reason instead (`Broad scope exception (tests/) recorde
 never introduced unnoticed. Each row's `scope` still carries the breadth and marks a root-level
 directory `highConflict` (also under `schedule.highConflict`). A worker that needs a root
 directory asks with `graphyard scope-request`; the loop refuses it like any path the item does not
-imply, and the master decides it with the flag.
+imply — unless a criterion's own text names that directory, which the loop reads as implied — and
+the master decides it with the flag.
 
 **Effective concurrency.** `master status` reports, under `effectiveConcurrency`, how many items the
 overlap graph lets run at once — the largest set of open items (in flight or dispatchable) no two
@@ -1638,7 +1639,9 @@ single hold reason. `counts.effectiveConcurrency`, `counts.idleWorkers`, `counts
 `counts.holdsOverdue` carry the same numbers.
 
 **The hold is bounded.** A hold is honoured for two hours (`dispatchHoldBoundMs`), counted from
-the later of the item becoming dispatchable and the first item now ahead of it going into flight.
+the later of the item becoming dispatchable and the first item now ahead of it going into flight —
+its claim, not the stage it last entered, so an item ahead moving from review to acceptance to the
+merge queue does not restart the hold behind it.
 Past the bound the item is no longer held: the loop and `master dispatch` offer it over the overlap,
 the dispatch result records the overlap, the age of the hold and the chain it waited behind
 (`Dispatched over a planned-file overlap with GY-b (submitted, merge) on src/cli/b.ts after a hold
