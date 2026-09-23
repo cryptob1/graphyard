@@ -13,7 +13,7 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   const reviewer = await reviewerBindingHealth(master);
   const supervisor = await loopSupervision({ root, cliPath: master.cliPath }, supervisorHost);
   const supervisorAttention = loopSupervisionAttention(supervisor);
-  const herdrWorkspace = herdrWorkspaceHealth(master);
+  const herdrWorkspace = await herdrWorkspaceHealth(master);
   const setup = { reviewer, supervisor, herdrWorkspace,
     attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : [])] };
   // An unsupervised loop stays stopped; each supervisor state names its own repair.
