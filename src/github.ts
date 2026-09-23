@@ -60,6 +60,19 @@ export class GitHub {
   private authentication?: Promise<void>;
   private cache = new Map<string, { etag: string; value: any }>();
   private ancestry = new Map<string, boolean>();
+  private usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map<string, number>(), remaining: null as string | null, reset: null as string | null };
+  /** Once a minute, logs what the App spent: requests, free 304s, the costliest endpoints, and GitHub's own remaining budget. */
+  private meter(method: string, path: string, response: Response) {
+    const u = this.usage;
+    u.total++; if (response.status === 304) u.notModified++;
+    const kind = `${method} ${path.replace(/^\/repos\/[^/]+\/[^/]+/, '').replace(/\?.*$/, '').replace(/[a-f0-9]{40}/g, ':sha').replace(/\/\d+/g, '/:n').replace(/^\/contents\/.*/, '/contents/:path').replace(/^\/compare\/.*/, '/compare/:range')}`;
+    u.byKind.set(kind, (u.byKind.get(kind) ?? 0) + 1);
+    u.remaining = response.headers.get('x-ratelimit-remaining') ?? u.remaining; u.reset = response.headers.get('x-ratelimit-reset') ?? u.reset;
+    if (Date.now() - u.since < 60_000) return;
+    const top = [...u.byKind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => `${k}=${n}`).join(', ');
+    console.log(`GitHub usage ${Math.round((Date.now() - u.since) / 1000)}s: ${u.total} requests, ${u.notModified} not-modified (free); remaining ${u.remaining} until ${u.reset ? new Date(Number(u.reset) * 1000).toISOString() : '?'}; top ${top}`);
+    this.usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map(), remaining: u.remaining, reset: u.reset };
+  }
   private blobs = new Map<string, string | null>();
   private preflightState: AppPermissionReport | null = null;
   private preflightDueAt = 0;
@@ -201,6 +214,7 @@ export class GitHub {
     }
     // A slow request is named so a stalled observation can be traced to the call that held it.
     if (Date.now() - started > 5_000) console.error(`GitHub ${method} ${path} took ${Date.now() - started} ms (${response.status})`);
+    this.meter(method, path, response);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
     if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); return structuredClone(cached.value); }
     const refused = await this.refusal(response, `${method} ${path}`);
