@@ -111,10 +111,35 @@ export const cycleMetricsSchema = z.object({
 }).strict();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 
+/**
+ * What one observation has established about containment, carried to the next cycle. `release` is
+ * the release every retained entry has been verified against: a later release that descends from it
+ * contains everything it contains, so one ancestry check revalidates the whole set. `settled` keeps,
+ * per delivered item, the release its containment was first established against — the record of when
+ * the delivery started serving, which is never rewritten by a later release that merely still holds it.
+ */
+export const containmentRetentionSchema = z.object({
+  release: z.string().min(7).max(40),
+  settled: z.record(z.string().max(40), z.string().min(7).max(40)).default({}),
+}).strict();
+export type ContainmentRetention = z.infer<typeof containmentRetentionSchema>;
+/** Containment is retained for this many deliveries; older ones are derived again if ever asked about. */
+export const retainedContainments = 1000;
+
 export const deploymentObservationSchema = z.object({
   source: z.enum(['endpoint', 'github-deployment', 'unavailable']),
   sha: z.string().nullable(), at: z.string(), reason: z.string().max(500).nullable(),
   deployed: z.array(z.string()).max(200).default([]), pending: z.array(z.string()).max(200).default([]),
+  /**
+   * What the observation cost, so the bound is a reading rather than a claim: GitHub requests made
+   * (never more than `maxDeploymentRequests`, whatever has been delivered), deliveries whose
+   * containment was derived locally this pass, and deliveries answered from `containment`.
+   * Absent — never zero — on an observation recorded before the loop measured it.
+   */
+  requests: z.number().int().min(0).optional(),
+  derived: z.number().int().min(0).optional(),
+  retained: z.number().int().min(0).optional(),
+  containment: containmentRetentionSchema.nullable().optional(),
 }).strict();
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
@@ -1116,7 +1141,7 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
     ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
-    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.restart}`) });
+    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`) });
   if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
     ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step') });
   return items;
@@ -1166,7 +1191,12 @@ export interface DaemonEffects {
    */
   decideScope?: (work: Work) => Promise<Work>;
   merge: (work: Work) => Promise<unknown>;
-  observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
+  /**
+   * The deployed release and which deliveries it serves. The containment the previous observation
+   * retained is handed back so the cycle re-derives only what the release has not already been
+   * shown to contain (see `observeDeployment`).
+   */
+  observeDeployment: (delivered: Work[], retained?: ContainmentRetention | null) => Promise<DeploymentObservation>;
   /** Records the coordinator's own deployment observation on the delivered item. */
   recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
@@ -2003,13 +2033,15 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
   const deploymentKey = `deployment:${delivered.at(-1)?.delivery?.mergeSha ?? 'none'}`;
   try {
-    const observation = await effects.observeDeployment(delivered);
+    const observation = await effects.observeDeployment(delivered, state.deployment?.containment ?? null);
     state.deployment = deploymentObservationSchema.parse(observation);
     if (state.actions[deploymentKey]?.detail !== deploymentDetail(state.deployment)) {
       performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: observation.source === 'unavailable' ? 'failed' : 'done', detail: deploymentDetail(state.deployment), attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }
   } catch (error) {
-    state.deployment = { source: 'unavailable', sha: null, at: new Date(now()).toISOString(), reason: message(error), deployed: [], pending: delivered.map(item => item.key) };
+    // A failed observation keeps the containment already established: it is a record of releases
+    // that did serve these deliveries, and nothing about this failure makes that untrue.
+    state.deployment = { source: 'unavailable', sha: null, at: new Date(now()).toISOString(), reason: message(error), deployed: [], pending: delivered.map(item => item.key), containment: state.deployment?.containment ?? null };
     performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: 'failed', detail: `Deployment SHA could not be verified: ${message(error)}`, attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
@@ -2100,18 +2132,70 @@ const message = (error: unknown) => {
 };
 function deploymentDetail(observation: DeploymentObservation) {
   if (observation.source === 'unavailable') return `Deployment SHA is unverified: ${observation.reason ?? 'no deployment observation is configured or available'}`;
-  return `Deployed SHA ${observation.sha?.slice(0, 12) ?? 'unknown'} from ${observation.source}; verified ${observation.deployed.length} delivered item(s), ${observation.pending.length} not yet serving`;
+  return `Deployed SHA ${observation.sha?.slice(0, 12) ?? 'unknown'} from ${observation.source}; verified ${observation.deployed.length} delivered item(s), ${observation.pending.length} not yet serving, from ${observation.requests ?? 0} GitHub request(s)${observation.reason ? `; ${observation.reason}` : ''}`;
+}
+
+/**
+ * How many deployments of the base branch the observation reads, and therefore how many GitHub
+ * requests one observation may make: the listing itself, plus at most one status listing for each
+ * deployment in it. Nothing below this bound scales with how much has been delivered — containment
+ * is derived locally — so the cycle's deployment step costs the same on the first delivery as on
+ * the five hundredth. A configured `--deployment-url` costs zero GitHub requests.
+ */
+export const deploymentListingSize = 20;
+export const maxDeploymentRequests = 1 + deploymentListingSize;
+
+/**
+ * Local ancestry over this checkout's own object store, which is what "does the release contain
+ * this merge" actually asks. The base branch is fetched once, lazily: an observation that answers
+ * every delivery from the retained containment fetches nothing at all.
+ */
+function localAncestry(root: string, baseBranch: string, run: ChildRun) {
+  let fetched: string | null | undefined;
+  const git = (...args: string[]) => run('git', ['-C', root, ...args]);
+  const fetchBase = async () => {
+    if (fetched !== undefined) return fetched;
+    try { await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`); fetched = null; }
+    catch (error) { fetched = message(error).split('\n')[0]; }
+    return fetched;
+  };
+  return {
+    get fetchFailure() { return fetched || null; },
+    /** `true`/`false` when git could answer, `null` when this checkout does not hold both commits. */
+    async contains(ancestor: string, descendant: string): Promise<boolean | null> {
+      if (ancestor === descendant) return true;
+      await fetchBase();
+      try { await git('merge-base', '--is-ancestor', ancestor, descendant); return true; }
+      // Exit 1 is git's "not an ancestor". Anything else — a commit this checkout does not hold,
+      // a broken repository — is unknown, and unknown containment is never read as deployed.
+      catch (error: any) { return error?.status === 1 ? false : null; }
+    },
+  };
 }
 
 /**
  * The deployed commit, taken from a configured endpoint that reports it or from the provider's own
  * deployment record. A delivered item counts as deployed when the serving commit is its merge commit
  * or a descendant of it, so later merges do not make earlier ones look undeployed.
+ *
+ * Containment is derived from git, not from the forge: one fetch of the base branch and
+ * `git merge-base --is-ancestor` per delivery whose containment this loop has not already
+ * established. What it has established is retained with the release it was verified against, and
+ * one ancestry check carries the whole retained set onto a release that descends from it — so a
+ * steady cycle derives containment only for deliveries newer than the last observed release, and
+ * the GitHub requests stay under `maxDeploymentRequests` however long the delivery history grows.
+ * `root` is the managed repository's checkout, which every caller must name: the Graphyard
+ * launcher's directory may be a checkout of another repository, or no checkout at all, and
+ * ancestry asked there would leave every delivery pending without saying why.
+ * A release that does not descend from the retained one (a rollback, an unrelated commit) drops
+ * the retention and every delivery is derived again.
  */
-export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now()): Promise<DeploymentObservation> {
+export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now(),
+  options: { root: string; retained?: ContainmentRetention | null }): Promise<DeploymentObservation> {
   const at = new Date(now()).toISOString();
-  const unavailable = (reason: string): DeploymentObservation => ({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key) });
-  if (!delivered.length) return { source: 'unavailable', sha: null, at, reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [] };
+  let requests = 0;
+  const unavailable = (reason: string): DeploymentObservation => ({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key), requests, derived: 0, retained: 0, containment: options.retained ?? null });
+  if (!delivered.length) return { source: 'unavailable', sha: null, at, reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [], requests, derived: 0, retained: 0, containment: options.retained ?? null };
   let sha: string | null = null, source: DeploymentObservation['source'] = 'unavailable';
   if (config.run.deploymentUrl) {
     let payload: any;
@@ -2125,27 +2209,43 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     sha = value.toLowerCase(); source = 'endpoint';
   } else {
     let deployments: any[];
-    try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=20&ref=${encodeURIComponent(config.baseBranch)}`])); }
+    requests++;
+    try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentListingSize}&ref=${encodeURIComponent(config.baseBranch)}`])); }
     catch (error) { return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`); }
     if (!Array.isArray(deployments) || !deployments.length) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
-    for (const deployment of deployments) {
+    for (const deployment of deployments.slice(0, deploymentListingSize)) {
       let statuses: any[];
+      requests++;
       try { statuses = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
       catch { continue; }
       if (Array.isArray(statuses) && statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
     }
     if (!sha) return unavailable('No GitHub deployment for the managed base branch reports a successful status');
   }
+  const ancestry = localAncestry(options.root, config.baseBranch, run);
+  // The retained set is carried forward whole, on one ancestry check, or dropped whole.
+  const retention = options.retained ?? null;
+  const carried = retention && (retention.release === sha || await ancestry.contains(retention.release, sha) === true) ? retention : null;
   const deployed: string[] = [], pending: string[] = [];
+  const settled: Record<string, string> = {};
+  let derived = 0, retainedCount = 0;
   for (const item of delivered) {
     const mergeSha = item.delivery!.mergeSha.toLowerCase();
-    if (mergeSha === sha) { deployed.push(item.key); continue; }
-    try {
-      const comparison = JSON.parse(await run('gh', ['api', `repos/${config.repository}/compare/${mergeSha}...${sha}`]));
-      (comparison?.status === 'ahead' || comparison?.status === 'identical' ? deployed : pending).push(item.key);
-    } catch { pending.push(item.key); }
+    const established = carried?.settled[item.key];
+    // Already shown to be served by a release this one descends from: nothing to ask git again.
+    if (established) { deployed.push(item.key); settled[item.key] = established; retainedCount++; continue; }
+    // Everything else is derived this pass, so `derived + retained` is always the delivery count.
+    // The release's own merge needs no ancestry; every other delivery asks git once.
+    derived++;
+    if (mergeSha === sha || await ancestry.contains(mergeSha, sha) === true) { deployed.push(item.key); settled[item.key] = sha; }
+    else pending.push(item.key);
   }
-  return deploymentObservationSchema.parse({ source, sha, at, reason: null, deployed: deployed.slice(-200), pending: pending.slice(-200) });
+  const keep = Object.entries(settled).slice(-retainedContainments);
+  // A base branch this checkout could not fetch is said out loud: containment was then derived
+  // from whatever objects are here, and a delivery git could not place stays pending, never deployed.
+  const stale = ancestry.fetchFailure;
+  return deploymentObservationSchema.parse({ source, sha, at, reason: stale ? `Containment was derived without a fresh base branch: ${stale}` : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
+    requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
 }
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
@@ -2156,7 +2256,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
   const liveness = loopLiveness(state, now, intervalMs, hostId);
   return {
     // A loop inside a failed-cycle backoff is running: it announced when its next cycle is due.
-    running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running'),
+    running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running' || liveness.state === 'slow'),
     // Whether the loop is cycling at all, on the two-interval bound, with the restart command.
     liveness,
     // Failed cycles and the process-level events the loop survived (GY-119).
@@ -2410,7 +2510,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
     merge: work => mergeExecutor(current(), deps.snapshot, deps.mutate, deps.executor, randomUUID(), run)(work),
-    observeDeployment: delivered => observeDeployment(current(), delivered, run),
+    // `root` is this checkout: containment is derived from its object store, never from the forge.
+    observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {
       const config = current();
