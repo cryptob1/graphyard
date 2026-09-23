@@ -169,6 +169,36 @@ export const approvalWatchSchema = z.object({
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 
+/**
+ * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a
+ * runtime call that failed, a configuration reload that could not be read — is a failed cycle, not
+ * the end of the process: it is recorded here, the cycle counter advances, and the next cycle runs
+ * after a delay that grows with the consecutive count. An unhandled rejection or uncaught exception
+ * anywhere in the process — a detached promise in the dispatcher, an approver watch, a Herdr read —
+ * is caught at the process level and counted here too. The supervisor's restart is reserved for a
+ * process that hangs, which the watchdog detects; nothing here ends the process.
+ */
+export const cycleFailureSchema = z.object({
+  /** Failed cycles since the last one that completed; the backoff and the attention item read it. */
+  consecutive: z.number().int().min(0).default(0),
+  /** Every failed cycle this cursor has seen, so a loop that fails and recovers still says so. */
+  total: z.number().int().min(0).default(0),
+  last: z.object({
+    cycle: z.number().int().min(0), at: z.string(),
+    /** Where the rejection escaped from: the cycle itself, or the configuration reload before it. */
+    phase: z.enum(['cycle', 'reload']),
+    /** The effect that threw (`snapshot`, `credentials`, `merge`, ...), when one can be named; the reload is `reload`. */
+    call: z.string().max(100).nullable().default(null),
+    reason: z.string().max(1000),
+    /** The delay chosen before the next cycle, and when that cycle is due. */
+    delayMs: z.number().int().min(0), nextAt: z.string(),
+  }).strict().nullable().default(null),
+  /** Unhandled rejections and uncaught exceptions the process caught and survived. */
+  unhandled: z.number().int().min(0).default(0),
+  lastUnhandled: z.object({ at: z.string(), origin: z.enum(['unhandledRejection', 'uncaughtException']), reason: z.string().max(1000), cycle: z.number().int().min(0) }).strict().nullable().default(null),
+}).strict();
+export type CycleFailures = z.infer<typeof cycleFailureSchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -193,6 +223,8 @@ export const daemonStateSchema = z.object({
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
   /** Per decision action key, the request this loop put to an approver and what became of it. */
   approvals: z.record(z.string(), approvalWatchSchema).default({}),
+  /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
+  failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -825,10 +857,13 @@ export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledA
  * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
  * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence.
  */
-export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures'>>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
-  const stalledAfterMs = 2 * intervalMs;
+  // A loop backing off from failed cycles is waiting on purpose, not hung: its bound is two
+  // intervals past the retry it announced, so the backoff never reads as a stall to restart.
+  const backoff = backingOff(state.failures, now);
+  const stalledAfterMs = 2 * intervalMs + (backoff ? Math.max(0, backoff.dueAt - lastCycleAt) : 0);
   const restart = 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)';
   const lock = state.lock;
   const gone = !!lock && !!hostId && lock.host === hostId && !liveProcess(lock.pid);
@@ -841,16 +876,103 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
     return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
       detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled.` };
   }
+  if (backoff) {
+    return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+      detail: `Cycle ${backoff.last.cycle} failed ${Math.round(lagMs / 1000)}s ago in ${describeFailingCall(backoff.last)} (${backoff.last.reason}); ${backoff.consecutive} consecutive failure(s), the next cycle is due at ${backoff.last.nextAt}` };
+  }
   return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago` };
+}
+
+// ---- A cycle that fails (GY-119) -----------------------------------------------------------
+/** Consecutive failed cycles after which `master status` raises an attention item naming the failing call. */
+export const cycleFailureAttentionAfter = 3;
+/** The backoff ceiling: the delay before the next cycle doubles from the interval up to five minutes. */
+export const cycleFailureCeilingMs = 300_000;
+/**
+ * How long to wait after a failed cycle. The first failure waits the normal interval — one timed-out
+ * read is not a fault — and each consecutive failure doubles it, to the ceiling or the interval
+ * itself when that is longer. Under a supervisor with a watchdog the ceiling is halved against the
+ * window (`cycleFailureCeiling`), so a loop backing off is never mistaken for one that hung.
+ */
+export const cycleFailureDelay = (consecutive: number, intervalMs: number, ceilingMs = cycleFailureCeilingMs) =>
+  Math.min(intervalMs * 2 ** Math.max(0, consecutive - 1), Math.max(intervalMs, ceilingMs));
+export const cycleFailureCeiling = (watchdogWindowMs: number | null) => watchdogWindowMs ? Math.min(cycleFailureCeilingMs, Math.floor(watchdogWindowMs / 2)) : cycleFailureCeilingMs;
+export const describeFailingCall = (failure: Pick<NonNullable<CycleFailures['last']>, 'phase' | 'call'>) =>
+  failure.phase === 'reload' ? 'the configuration reload' : failure.call ? `the ${failure.call} call` : 'the cycle itself';
+/** The failed-cycle wait the loop is in, if any: the last failure with its retry still ahead (allowing one interval of slack). */
+function backingOff(failures: CycleFailures | undefined, now: number) {
+  const last = failures?.last;
+  if (!failures || !last || failures.consecutive === 0) return null;
+  const dueAt = Date.parse(last.nextAt);
+  return Number.isFinite(dueAt) ? { last, consecutive: failures.consecutive, dueAt } : null;
+}
+
+/**
+ * Records a rejection that escaped the cycle (or the configuration reload before it) as a failed
+ * cycle: the counter advances, the failure and its cause are kept on the cursor, and the delay
+ * before the next cycle is chosen from the consecutive count. The loop itself keeps cycling.
+ */
+export async function noteCycleFailure(state: DaemonState, error: unknown, phase: 'cycle' | 'reload', options: { now: number; intervalMs: number; ceilingMs?: number; persist: DaemonEffects['persist'] }) {
+  const call = phase === 'reload' ? 'reload' : failingCall(error);
+  const consecutive = state.failures.consecutive + 1;
+  const delayMs = cycleFailureDelay(consecutive, options.intervalMs, options.ceilingMs);
+  const at = new Date(options.now).toISOString();
+  const last = { cycle: state.cycle, at, phase, call, reason: message(error).slice(0, 1000), delayMs, nextAt: new Date(options.now + delayMs).toISOString() };
+  state.failures = { ...state.failures, consecutive, total: state.failures.total + 1, last };
+  // The cycle ended, failed, and the loop is alive: the counter and the heartbeat both say so.
+  state.cycle += 1;
+  state.lastCycleAt = at;
+  if (state.lock) state.lock = { ...state.lock, heartbeatAt: at };
+  try { await options.persist(state); } catch { /* a cursor that cannot be written is the next cycle's failure, not this one's */ }
+  return last;
+}
+/** A completed cycle ends the run of failures; the total stays. */
+export function noteCycleSuccess(state: DaemonState) {
+  const recovered = state.failures.consecutive;
+  if (recovered) state.failures = { ...state.failures, consecutive: 0 };
+  return recovered;
+}
+/** Records an unhandled rejection or uncaught exception the process caught and survived. */
+export function noteUnhandled(state: DaemonState, error: unknown, origin: 'unhandledRejection' | 'uncaughtException', now: number) {
+  const entry = { at: new Date(now).toISOString(), origin, reason: message(error).slice(0, 1000), cycle: state.cycle };
+  state.failures = { ...state.failures, unhandled: state.failures.unhandled + 1, lastUnhandled: entry };
+  return entry;
+}
+const callTag = Symbol.for('graphyard.daemonCall');
+const failingCall = (error: unknown) => { const call = (error as { [callTag]?: unknown } | null)?.[callTag]; return typeof call === 'string' ? call : null; };
+/**
+ * The same effects, with every rejection or throw tagged with the name of the effect it escaped
+ * from, so a failed cycle can say which call failed — `snapshot`, `credentials`, `merge` — rather
+ * than only what the runtime said about it. The tag is a symbol on the error; nothing else changes.
+ */
+export function namedEffects(effects: DaemonEffects): DaemonEffects {
+  const tag = (error: unknown, name: string) => { if (error && typeof error === 'object' && !(callTag in error)) Object.defineProperty(error, callTag, { value: name, enumerable: false }); return error; };
+  return new Proxy(effects, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== 'function' || typeof property !== 'string') return value;
+      return (...args: unknown[]) => {
+        let result: unknown;
+        try { result = value.apply(target, args); } catch (error) { throw tag(error, property); }
+        return result instanceof Promise ? result.catch(error => { throw tag(error, property); }) : result;
+      };
+    },
+  });
 }
 
 /**
  * The loop's own attention, ahead of every work item: a coordinator that is not cycling is why
  * nothing else on the list is moving. A breached silence bound or latency budget follows it.
  */
-export function loopAttention(report: { liveness: LoopLiveness; silence?: SilenceReport | null; budget?: LatencyBudget | null }): AttentionItem[] {
+export function loopAttention(report: { liveness: LoopLiveness; silence?: SilenceReport | null; budget?: LatencyBudget | null; failures?: CycleFailures | null }): AttentionItem[] {
   const items: AttentionItem[] = [];
   if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.restart) });
+  // A cycle that keeps failing is retried in-process with backoff; past the bound it names the
+  // failing call, because a restart would not clear a read that times out every time.
+  const failures = report.failures;
+  if (failures?.last && failures.consecutive >= cycleFailureAttentionAfter) items.push({ subject: 'loop',
+    text: `The master loop has failed ${failures.consecutive} consecutive cycles, the last (cycle ${failures.last.cycle} at ${failures.last.at}) in ${describeFailingCall(failures.last)}: ${failures.last.reason}. It keeps cycling in-process, waiting ${Math.round(failures.last.delayMs / 1000)}s before the next attempt (due ${failures.last.nextAt}); a restart does not clear this`,
+    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
     ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.restart}`) });
@@ -1832,10 +1954,14 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? now - lastCycleAt : null;
   const recent = Object.entries(state.actions).map(([key, action]) => ({ key, ...action })).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  const liveness = loopLiveness(state, now, intervalMs, hostId);
   return {
-    running: !!state.lock && lagMs !== null && lagMs < Math.max(3 * intervalMs, 120_000),
+    // A loop inside a failed-cycle backoff is running: it announced when its next cycle is due.
+    running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running'),
     // Whether the loop is cycling at all, on the two-interval bound, with the restart command.
-    liveness: loopLiveness(state, now, intervalMs, hostId),
+    liveness,
+    // Failed cycles and the process-level events the loop survived (GY-119).
+    failures: state.failures,
     // What it could act on and the longest any of those has waited, and the latency budgets.
     silence: silenceReport(state.silence, now),
     budget: latencyBudget(state.latency),
@@ -1887,15 +2013,26 @@ export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof w
 /**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe: it reconciles the cursor against Graphyard and keeps cycling.
+ *
+ * A cycle that throws does not end the process (GY-119). The rejection — a control-plane read that
+ * timed out, a runtime call that failed, a reload that could not be parsed — fails that cycle: it is
+ * recorded on the cursor with the cycle number and the call it escaped from, logged, and the next
+ * cycle runs after a delay that grows with the consecutive count. An unhandled rejection or uncaught
+ * exception anywhere in the process is caught here, logged with its origin, counted on the cursor,
+ * and survived. Only a stop signal ends the loop; the supervisor's restart is reserved for a process
+ * that hangs, which its watchdog detects.
  */
-export async function runDaemon(config: MasterConfig, state: DaemonState, effects: DaemonEffects, options: { once?: boolean; intervalMs: number | (() => number); identity: { pid: number; host: string }; signals?: NodeJS.Signals[]; now?: () => number; log?: (line: string) => void;
+export async function runDaemon(config: MasterConfig, state: DaemonState, raw: DaemonEffects, options: { once?: boolean; intervalMs: number | (() => number); identity: { pid: number; host: string }; signals?: NodeJS.Signals[]; now?: () => number; log?: (line: string) => void;
   /** The process supervisor's environment, for the watchdog keep-alive; defaults to this process's. */
   environment?: Record<string, string | undefined>;
   /** Re-reads .graphyard/master.json before each cycle, so profiles, workspace, run settings and autoMerge apply without a restart. */
-  reload?: () => Promise<ConfigReload> } ) {
+  reload?: () => Promise<ConfigReload>;
+  /** The process whose unhandled rejections and uncaught exceptions the loop catches; defaults to this one. */
+  process?: Pick<NodeJS.Process, 'on' | 'off'> } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
+  const effects = namedEffects(raw), host = options.process ?? process;
   acquireDaemonLock(state, options.identity, now(), interval());
   await effects.persist(state);
   // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
@@ -1909,30 +2046,58 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, effect
   const waking = new AbortController();
   const stop = () => { stopping = true; waking.abort(); };
   const signals = options.signals ?? ['SIGTERM', 'SIGINT'];
-  for (const signal of signals) process.on(signal, stop);
-  const cycles: { cycle: number; actions: number; durationMs: number }[] = [];
+  for (const signal of signals) host.on(signal, stop);
+  // A detached promise that rejects — in the dispatcher beside this loop, an approver watch, a
+  // Herdr read nobody awaited — would otherwise end the process. It is counted and survived; the
+  // cursor write is best-effort, since the handler runs outside any cycle's own persistence.
+  const unhandled = (origin: 'unhandledRejection' | 'uncaughtException') => (error: unknown) => {
+    const entry = noteUnhandled(state, error, origin, now());
+    log(`[graphyard-master] ${origin} caught at the process level during cycle ${entry.cycle} (${state.failures.unhandled} so far); the loop keeps running: ${entry.reason}`);
+    effects.persist(state).catch(() => {});
+  };
+  const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
+  host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
+  const cycles: { cycle: number; actions: number; durationMs: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
   try {
     do {
-      if (options.reload) {
-        for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+      let phase: 'reload' | 'cycle' = 'reload', wait: number;
+      try {
+        if (options.reload) {
+          for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+        }
+        phase = 'cycle';
+        const result = await runCycle(config, state, effects, now);
+        // The end of a run of failures is written at once, so `master status` stops naming it.
+        const recovered = noteCycleSuccess(state);
+        if (recovered) await effects.persist(state);
+        cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs });
+        for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
+        // Both halves of every cycle: what it could act on, and what it did about it.
+        log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms; ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
+        // The configured interval is the idle cadence; while anything is actionable the loop comes
+        // back inside the responsive window so ready work cannot sit out a long interval.
+        wait = cycleDelay(interval(), result.silence);
+      } catch (error) {
+        // The cycle failed; the loop did not. The counter advances, the cause is on the cursor, and
+        // the next cycle waits longer for each consecutive failure so a fault is not hammered.
+        const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });
+        failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
+        log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
+        wait = failure.delayMs;
       }
-      const result = await runCycle(config, state, effects, now);
-      cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs });
-      for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
-      // Both halves of every cycle: what it could act on, and what it did about it.
-      log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms; ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}`);
+      // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
+      // is for a cycle that hangs, and a thrown one has just proved it did not.
       if (watchdog.supervised) { try { effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
       if (options.once || stopping) break;
-      // The configured interval is the idle cadence; while anything is actionable the loop comes
-      // back inside the responsive window so ready work cannot sit out a long interval.
-      try { await delay(cycleDelay(interval(), result.silence), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
+      try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
     } while (!stopping);
   } finally {
-    for (const signal of signals) process.off(signal, stop);
+    for (const signal of signals) host.off(signal, stop);
+    host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
     state.lock = null;
     await effects.persist(state).catch(() => {});
   }
-  return { cycles, stopped: stopping };
+  return { cycles, failed, stopped: stopping };
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
@@ -1966,7 +2131,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const decide: DaemonEffects['decide'] = async (work, action, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, {}), reason });
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, current().reviewers[0]?.kind ?? 'claude', listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
+  // The approver's runtime and account come from the registry's approver role; naming a kind here
+  // would be a runtime read out of code, and the role would decide nothing.
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);

@@ -2,6 +2,7 @@ import { agentOwner, buildMasterStatus, humanOwner, type AttentionItem, type Her
 import { orphanedSupervisors, type OrphanSupervisor } from '../master-daemon.js';
 import type { Work } from '../model.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
+import { elapsed } from '../model/sessions.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 
 /**
@@ -28,9 +29,6 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
 }
 
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
-
-/** Long waits read in the unit the reader thinks in; a request measured in seconds is still young. */
-const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
 
 /** Who answers a request whose session settled unanswered, and with which command. */
 export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
