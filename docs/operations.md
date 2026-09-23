@@ -1,14 +1,14 @@
 <!-- page: Operate Graphyard | 7 | daily checklist, incident decision tree, and recovery recipes in three minutes. -->
 # Operations and recovery
 
-Three minutes for the operator. Deeper: [reference](operations-reference.md), [glossary](glossary.md).
+Three minutes for operators. Deeper: [reference](operations-reference.md), [glossary](glossary.md).
 
 ## Daily checklist
 
 - `/healthz`: 200, database connectivity, expected `version`, deployed `commit`.
 - `/api/status`: no persistent integration errors, `delegationLimits.attention`, open `production.incidents`.
 - `graphyard master status`: `daemon.running` true, `unresolved` empty, every `escalations` entry owned.
-- Delivery graph: no stale observations, no unexplained blockers.
+- Delivery graph: no stale observations or unexplained blockers.
 - `graphyard db backup` restore verified recently, in isolation.
 - Postgres size watched, nothing pruned.
 
