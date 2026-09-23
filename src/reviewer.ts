@@ -353,15 +353,45 @@ export async function reviewCommand(root: string, args: string[], snapshot: { wo
 
 const reviewStates = ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'];
 /**
- * The reviewer identity's latest verdict on this session's exact head, ignoring the verdicts an
- * earlier session of the same head already recorded. Without that, a relaunch after a dismissal
- * would read the dismissed review back as its own answer the moment it started and burn every
- * remaining attempt on a verdict GitHub had already withdrawn.
+ * Whether one GitHub review can be the verdict of a session launched at `launchedAt`.
+ *
+ * A session is answered by a review *it* collected, so only a review submitted after it was
+ * launched can settle it (GY-100). The rule is decided on the dismissal, because a dismissal is
+ * the only verdict that can predate the session it settles and the only one whose match costs
+ * anything. GitHub keeps a dismissed review listed with the timestamp it was originally submitted
+ * at, so a verdict it withdrew before the session existed — an earlier session's approval, a
+ * carried approval `master merge` re-posted through the same reviewer App, a dismissal by hand —
+ * stands on the candidate sha under the reviewer's own identity, and matching it recorded every
+ * new session unanswered the moment it started: the request burned its attempts on a verdict
+ * GitHub had already taken back, and the commit could never be reviewed again. Nothing is
+ * weakened by refusing it: a dismissal satisfies no gate, so a session that finds none stays
+ * pending until its reviewer posts or it fails on its own terms. An `APPROVED` or
+ * `CHANGES_REQUESTED` review of this exact head answers the request whichever session collected
+ * it, and is matched as it always was.
+ *
+ * A dismissal whose `submitted_at` cannot be read is not matched either: it cannot be shown to be
+ * this session's. GitHub reports whole seconds, so one submitted within the launch second counts
+ * as after it — a session takes minutes to reach a verdict, so nothing genuine turns on that.
+ */
+export function withdrawnBeforeLaunch(review: { state?: unknown; submitted_at?: unknown }, launchedAt: number) {
+  if (String(review?.state) !== 'DISMISSED' || !Number.isFinite(launchedAt)) return false;
+  const submitted = Date.parse(String(review?.submitted_at ?? ''));
+  return !Number.isFinite(submitted) || submitted < launchedAt;
+}
+/**
+ * The reviewer identity's latest verdict on this session's exact head: the verdicts an earlier
+ * session of the same head already recorded are skipped, and so is a review GitHub dismissed
+ * before this session was launched (see `withdrawnBeforeLaunch`), which no session of that head
+ * could have collected. The review this record already names as its own verdict is the one
+ * exception — the record is the evidence that this session collected it, so it is re-read whatever
+ * its timestamp, which is how an approval GitHub withdraws after the session closed is found.
  */
 export async function observeReviewVerdict(repository: string, record: ReviewRecord, reviewer: string, run: ChildRun, answered: Set<number> = new Set()) {
   const reviews = JSON.parse(await run('gh', ['api', '--paginate', `repos/${repository}/pulls/${record.pr}/reviews`]));
   if (!Array.isArray(reviews)) throw new Error('GitHub did not return a review list for the pending reviewer session');
-  const match = reviews.filter((review: any) => review?.commit_id === record.sha && typeof review?.user?.login === 'string' && review.user.login.toLowerCase() === reviewer.toLowerCase() && reviewStates.includes(review?.state) && !answered.has(Number(review?.id))).at(-1);
+  const launchedAt = Date.parse(record.requestedAt), collected = record.verdict?.reviewId;
+  const match = reviews.filter((review: any) => review?.commit_id === record.sha && typeof review?.user?.login === 'string' && review.user.login.toLowerCase() === reviewer.toLowerCase() && reviewStates.includes(review?.state)
+    && !answered.has(Number(review?.id)) && (Number(review?.id) === collected || !withdrawnBeforeLaunch(review, launchedAt))).at(-1);
   return match ? { state: String(match.state), reviewer, reviewId: Number(match.id), submittedAt: String(match.submitted_at ?? new Date().toISOString()) } : null;
 }
 
@@ -530,6 +560,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
 export function summarizeReviews(records: ReviewRecord[]) {
   const describe = (record: ReviewRecord) => ({ review: record.id, requestId: record.requestId ?? null, attempt: record.attempt ?? 1, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, profile: record.profile, agentName: record.agentName,
     state: record.state, verdict: record.verdict?.state ?? null, requestedAt: record.requestedAt, tokenExpiresAt: record.tokenExpiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null,
+    // GY-100: which GitHub review the session settled on, so a reader can name the dismissed
+    // verdict every session of a request has settled on rather than reporting an ordinary wait.
+    reviewId: record.verdict?.reviewId ?? null,
     // GY-93: how the request reached the session, and whether the session has taken it up.
     delivery: record.delivery ?? null, activity: record.state === 'pending' ? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null, neverStarted: neverStarted(record) });
   return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
