@@ -10,7 +10,8 @@ import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
-import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileSessions, readCredentialFile, readEnvironmentLog, sessionAgentName, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { launchReview, reconcileReviews, type ReviewRecord } from './reviewer.js';
 import { independentProducerProfiles, launchProducer, reconcileProducers, sessionRetry, type ProducerRecord } from './producer.js';
 
@@ -44,12 +45,38 @@ import { independentProducerProfiles, launchProducer, reconcileProducers, sessio
  * anybody performs by hand.
  */
 
+/**
+ * Every string the cursor holds is bounded where it is composed, never only checked at persist
+ * time (GY-120): a reason the dispatcher composed and then could not persist failed the whole
+ * tick, and with it every launch for every item, until the string happened to change. The caps
+ * nest — a stored failure reason leaves room for the wait sentence that wraps it, and that
+ * sentence is bounded again before it becomes a tick reason — so a reason at its cap still
+ * yields a valid tick. `bounded` marks every cut with an ellipsis rather than hiding it.
+ */
+export const cursorTextLimit = 500, capacityReasonLimit = 1000, dispatchFailureReasonLimit = 300, closureFailureReasonLimit = 300;
+export const ellipsis = '…';
+export const bounded = (text: string, limit: number) => text.length > limit ? `${text.slice(0, Math.max(0, limit - ellipsis.length))}${ellipsis}` : text;
+/**
+ * The closure failures a tick stores, as the sentences the cursor holds. The sentence wraps a
+ * reason already bounded below the cap, and is bounded again so a reason at its own cap cannot
+ * push the stored string past `cursorTextLimit` and refuse the whole tick's persist.
+ */
+export const closeFailureReasons = (failures: { work: string; id: string; reason: string }[]) =>
+  failures.slice(0, 20).map(failure => bounded(`${failure.work} session ${failure.id}: ${failure.reason}`, cursorTextLimit));
 export const dispatchFailureSchema = z.object({
   kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40),
-  attempts: z.number().int().min(1).max(1000), reason: z.string().max(500), at: z.string(), nextAt: z.string(),
+  attempts: z.number().int().min(1).max(1000), reason: z.string().max(cursorTextLimit), at: z.string(), nextAt: z.string(),
 }).strict();
 export type DispatchFailure = z.infer<typeof dispatchFailureSchema>;
-const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(1000) }).strict();
+const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(capacityReasonLimit) }).strict();
+/**
+ * A tick that failed, and — when it composed state it could not persist — the field that failed
+ * and the request and item it was composed for, so `master status` attributes the failure to a
+ * request rather than to the dispatcher as a whole.
+ */
+export const tickFailureSchema = z.object({ at: z.string(), reason: z.string().max(cursorTextLimit),
+  field: z.string().max(200).optional(), kind: z.enum(['review', 'producer']).optional(), request: z.string().max(64).optional(), work: z.string().max(40).optional() }).strict();
+export type TickFailure = z.infer<typeof tickFailureSchema>;
 export const dispatchCursorSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   ticks: z.number().int().min(0).default(0),
@@ -57,7 +84,7 @@ export const dispatchCursorSchema = z.object({
   /** The last tick that read the snapshot and ran to the end, and how many ticks have failed since. */
   lastSuccessAt: z.string().nullable().default(null),
   consecutiveFailures: z.number().int().min(0).default(0),
-  lastFailure: z.object({ at: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
+  lastFailure: tickFailureSchema.nullable().default(null),
   /** Launches that refused, by request id, with the widening retry time; cleared by the launch that succeeds. */
   failures: z.record(z.string(), dispatchFailureSchema).default({}),
   /**
@@ -67,8 +94,8 @@ export const dispatchCursorSchema = z.object({
    */
   lastTick: z.object({ at: z.string(), launched: z.number().int().min(0), refused: z.number().int().min(0), waiting: z.number().int().min(0), settled: z.number().int().min(0),
     /** Session records this tick closed against the runtime, and the closures it could not write back. */
-    closed: z.number().int().min(0).default(0), closeFailures: z.array(z.string().max(500)).max(20).default([]),
-    reasons: z.array(z.string().max(500)).max(20).default([]) }).strict().nullable().default(null),
+    closed: z.number().int().min(0).default(0), closeFailures: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
+    reasons: z.array(z.string().max(cursorTextLimit)).max(20).default([]) }).strict().nullable().default(null),
   /**
    * A role none of whose accounts can launch (GY-89): why, and when its accounts are read again.
    * That is capacity, not a refusal, so it never counts toward a request's failure limit — a
@@ -119,7 +146,36 @@ export function dispatchCursorPath(config: MasterConfig) {
   const file = config.credentialFile;
   return resolve(dirname(file), `${basename(file).replace(/\.token$/, '')}.dispatch.json`);
 }
-export async function readDispatchCursor(root: string, config: MasterConfig): Promise<DispatchCursor> {
+/**
+ * A cursor that fails its own schema is repaired, not fatal (GY-120): a string past its cap is
+ * truncated in place, ellipsis-marked like every other bound, and the repair is reported with
+ * the path that failed, so a defect of this class degrades one reason string rather than every
+ * launch. Anything else the schema refuses is still refused, naming its path.
+ */
+export interface CursorRepair { path: string; detail: string }
+export type RepairListener = (repair: CursorRepair) => void;
+/** A schema path as `master status` and the loop log name it: `lastTick.reasons[1]`, `failures.<request>.reason`. */
+export const cursorPath = (path: readonly PropertyKey[]) => path.reduce<string>((text, segment) => typeof segment === 'number' ? `${text}[${segment}]` : text ? `${text}.${String(segment)}` : String(segment), '');
+export function repairDispatchCursor(value: unknown, onRepair?: RepairListener): DispatchCursor {
+  for (let pass = 0; ; pass++) {
+    const parsed = dispatchCursorSchema.safeParse(value);
+    if (parsed.success) return parsed.data;
+    const first = parsed.error.issues[0];
+    const oversized = parsed.error.issues.filter(issue => issue.code === 'too_big' && (issue as { origin?: string }).origin === 'string' && typeof (issue as { maximum?: unknown }).maximum === 'number');
+    if (!oversized.length || pass >= 3) throw new Error(`Master dispatch cursor is invalid at ${cursorPath(first.path)}: ${first.message}`);
+    for (const issue of oversized) {
+      const holder = issue.path.slice(0, -1).reduce<any>((node, segment) => node?.[segment as string | number], value), key = issue.path.at(-1) as string | number;
+      const limit = (issue as { maximum: number }).maximum;
+      if (typeof holder?.[key] !== 'string') throw new Error(`Master dispatch cursor is invalid at ${cursorPath(issue.path)}: ${issue.message}`);
+      const length = holder[key].length;
+      holder[key] = bounded(holder[key], limit);
+      onRepair?.({ path: cursorPath(issue.path), detail: `${length} characters exceeded its cap of ${limit} and it was truncated` });
+    }
+  }
+}
+/** The loop's own line for a repair, written once per path (see `dispatchEffects`). */
+export const repairLine = (stage: 'loading' | 'persisting', repair: CursorRepair) => `[graphyard-dispatch] repaired the dispatch cursor while ${stage} it: ${repair.path} — ${repair.detail}`;
+export async function readDispatchCursor(root: string, config: MasterConfig, onRepair: RepairListener = repair => console.error(repairLine('loading', repair))): Promise<DispatchCursor> {
   const file = dispatchCursorPath(config);
   await assertOutsideWorktrees(root, dirname(file), 'Master dispatch cursor directory');
   let raw: string;
@@ -129,14 +185,16 @@ export async function readDispatchCursor(root: string, config: MasterConfig): Pr
   };
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return withAccounts(emptyDispatchCursor(config)); throw error; }
-  const cursor = dispatchCursorSchema.parse(JSON.parse(raw));
+  const cursor = repairDispatchCursor(JSON.parse(raw), onRepair);
   if (cursor.url !== config.url || cursor.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master dispatch cursor belongs to another Graphyard server or repository; remove it before running the loop');
   return withAccounts(cursor);
 }
-export async function writeDispatchCursor(config: MasterConfig, cursor: DispatchCursor) {
+export async function writeDispatchCursor(config: MasterConfig, cursor: DispatchCursor, onRepair?: RepairListener) {
   const file = dispatchCursorPath(config), temporary = `${file}.${randomUUID()}.tmp`;
   const { accounts: _accounts, ...persisted } = cursor;
-  await writeFile(temporary, JSON.stringify(dispatchCursorSchema.parse(persisted), null, 2), { mode: 0o600, flag: 'wx' });
+  // The repair truncates the live cursor's own strings (the nested objects are shared), so a
+  // string repaired once is not composed past its cap again by the tick that reads it back.
+  await writeFile(temporary, JSON.stringify(repairDispatchCursor(persisted, onRepair), null, 2), { mode: 0o600, flag: 'wx' });
   await rename(temporary, file); await chmod(file, 0o600);
 }
 
@@ -167,12 +225,79 @@ export interface DispatchEffects {
    */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
   /**
+   * A session that exited within seconds of its launch on its provider's limit notice (GY-120) is
+   * failed over exactly as one exhausted mid-session is (master-daemon.ts): the account its
+   * launcher selected is held until the notice's reset, the exhaustion is recorded on the item,
+   * and the request launches again on the profile's next account. A dispatcher wired without
+   * `holdAccount` records the exit as the refusal it was.
+   */
+  selectedAccount?: (role: 'reviewer' | 'producer', profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
+  holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<{ until?: string } | void>;
+  reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<unknown>;
+  /**
    * Ends one session record the liveness sweep found settled. A dispatcher wired without it still
    * launches and still judges liveness — it simply leaves the record standing, which is the state
    * GY-113 exists to end, so the shipped `dispatchEffects` always wires it.
    */
   endSession?: (closure: SessionClosure) => Promise<unknown>;
   persist: (cursor: DispatchCursor) => Promise<void>;
+}
+
+/**
+ * A launched session Herdr cannot find within seconds of its launch. The launcher types the
+ * launch into the pane and reads it until the runtime is ready (master.ts, `awaitRuntimeStart`):
+ * `herdr agent get` answers `agent_not_found` while the runtime is not there, which says nothing
+ * about why, and `herdr pane read` shows what the runtime printed. A runtime that printed its
+ * provider's limit notice and exited leaves the notice under its banner, and the banner alone
+ * would hold the launcher's start bound to its ceiling before the refusal. The dispatcher watches
+ * each launch's reads of its own pane (GY-120): a provider limit notice on the pane is account
+ * exhaustion — the launch is refused at the next pause between the launcher's polls, the account
+ * is held and the request launches on the profile's next account exactly as a mid-session
+ * exhaustion does — and any other refusal is the launcher's own, which names the case it saw and
+ * the pane's last words rather than the CLI's JSON error.
+ */
+export interface InstantExit { pane: string; words: string; notice: ExhaustionSignal }
+export class InstantExitError extends Error {
+  constructor(readonly instantExit: InstantExit, override readonly cause: unknown) {
+    super(`the session exited within seconds of its launch on its provider's limit notice: ${instantExit.notice.reason}`);
+  }
+}
+/** How many times one profile launches again on its next account within a single tick after such exits. */
+export const instantExitRelaunchLimit = 4;
+export interface InstantExitWatch {
+  /** The launcher's Herdr calls, with each read of the pane it typed the launch into remembered. */
+  run: ChildRun;
+  /** The launcher's pause between polls of that pane: a pane already showing the notice is refused here, never waited out. */
+  start: StartBounds;
+  /** A refusal the launcher raised at its bound, classified from the pane's last read; any other error as it came. */
+  classify: (error: unknown) => unknown;
+}
+/**
+ * One watch per launch: it remembers the pane `pane run` typed the launch into and that pane's
+ * last screen, and touches nothing else the launcher runs. The screen is read from the launcher's
+ * own `pane read`, so the pane is read no more often than the launcher reads it and never after
+ * the launcher closed it.
+ */
+export function watchInstantExit(run: ChildRun, now: () => number = Date.now): InstantExitWatch {
+  let pane: string | null = null, screen: string | null = null, missing: unknown = null;
+  const exit = () => { const notice = pane && screen !== null ? detectExhaustion(screen, now()) : null; return notice ? new InstantExitError({ pane: pane!, words: sessionWords(screen), notice }, missing) : null; };
+  return {
+    run: (command, args, options) => {
+      const herdr = command === 'herdr';
+      if (herdr && args[0] === 'pane' && args[1] === 'run') { pane = args[2] ?? null; screen = null; missing = null; }
+      const read = (result: string) => { if (herdr && pane && args[0] === 'pane' && args[1] === 'read' && args[2] === pane) screen = String(result); return result; };
+      const refused = (error: unknown): never => { if (herdr && pane && args[0] === 'agent' && args[1] === 'get' && args[2] === pane && herdrErrorCode(error) === 'agent_not_found') missing = error; throw error; };
+      // The runner's answer is passed on as it came: a test's table answers at once, the process's
+      // bounded runner (GY-125) answers on the event loop, and the watch notes the read either way.
+      let result: Promise<string> | string;
+      try { result = run(command, args, options); } catch (error) { return refused(error); }
+      return typeof result === 'string' ? read(result) : result.then(read, refused);
+    },
+    // A pane already showing the notice is refused before the pause; otherwise the pause is a timer
+    // the launcher awaits, never a blocking sleep, so the cycle's reads beside it are served.
+    start: { wait: ms => { const exited = exit(); if (exited) throw exited; return new Promise<void>(resolve => setTimeout(resolve, ms)); } },
+    classify: error => error instanceof SessionStartError && error.pane === pane && error.startCase !== 'blocked' ? exit() ?? error : error,
+  };
 }
 
 /**
@@ -314,19 +439,24 @@ const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math
  * Launch on the first profile that can: a profile none of whose agent accounts is logged in with
  * quota left is skipped for the next, with its reason kept for the tick, and a session whose runtime
  * never accepted its prompt (the launcher closed it) is launched once more before the request is
- * refused. Any other refusal stops at the profile that raised it.
+ * refused. A session that exited at launch on its provider's limit notice is handed to
+ * `exhaustedAtLaunch`, which holds the account, and the same profile launches again on its next
+ * account; a profile with no account left then fails over through `selectAccount`'s refusal like
+ * any other. Any other refusal stops at the profile that raised it.
  */
-async function launchWithFailover<P extends { name: string }>(profiles: P[], launch: (profile: P) => Promise<unknown>) {
+async function launchWithFailover<P extends { name: string }>(profiles: P[], launch: (profile: P) => Promise<unknown>, exhaustedAtLaunch?: (profile: P, exit: InstantExit) => Promise<string>) {
   const failover: string[] = [];
   // Whether every profile so far was passed over for spent quota alone. A logged-out account or an
   // unconfigured environment also fails over, but it is a fault a master can fix now, so it must
   // not turn the role's launches into a wait for a provider reset (GY-89).
   let capacity = true;
   for (const profile of profiles) {
-    for (let attempt = 1; ; attempt++) {
-      try { return { profile, failover, relaunched: attempt > 1, result: await launch(profile) }; }
+    let dropped = false, exits = 0;
+    for (;;) {
+      try { return { profile, failover, relaunched: dropped, result: await launch(profile) }; }
       catch (error: any) {
-        if (error?.promptDropped && attempt < 2) continue;
+        if (error?.promptDropped && !dropped) { dropped = true; continue; }
+        if (error?.instantExit?.notice && exhaustedAtLaunch && exits < instantExitRelaunchLimit) { exits++; failover.push(await exhaustedAtLaunch(profile, error.instantExit)); continue; }
         if (error?.accountsExhausted) { failover.push(`${profile.name}: ${message(error)}`); capacity &&= !!error.capacityExhausted; break; }
         throw error;
       }
@@ -363,7 +493,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     // A closure that cannot be written back still stands as a judgment — the session is over
     // whichever way the record went — so the slot is freed either way and the tick says what failed.
     try { await effects.endSession?.(closure); tick.closed.push(closure); }
-    catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: message(error).slice(0, 500) }); }
+    catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
   }
   const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
@@ -395,7 +525,8 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const refuse = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
     const previous = cursor.failures[request.id];
     const attempts = (previous?.attempts ?? 0) + 1;
-    const failure: DispatchFailure = { kind, work: item.key, sha: request.sha, attempts, reason: message(error).slice(0, 500), at: new Date(now()).toISOString(), nextAt: new Date(now() + retryDelay(attempts)).toISOString() };
+    // Bounded below the cursor's cap: the wait sentence that wraps it on later ticks must fit too.
+    const failure: DispatchFailure = { kind, work: item.key, sha: request.sha, attempts, reason: bounded(message(error), dispatchFailureReasonLimit), at: new Date(now()).toISOString(), nextAt: new Date(now() + retryDelay(attempts)).toISOString() };
     cursor.failures[request.id] = failure;
     // A refusal is the role answering with something other than spent quota, so any hold the
     // previous tick armed is stale: withdraw it rather than let the summary keep reporting a
@@ -409,10 +540,30 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const capacityWait = (kind: 'review' | 'producer') => `${kind === 'review' ? 'reviewer' : 'producer'} capacity is exhausted (${cursor.capacity[kind]!.reason}); launches are paused and its accounts are read again at ${cursor.capacity[kind]!.recheckAt}`;
   const outOfCapacity = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
     if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) return false;
-    cursor.capacity[kind] = { at: cursor.capacity[kind]?.at ?? new Date(now()).toISOString(), recheckAt: new Date(now() + capacityRecheckMs).toISOString(), reason: message(error).slice(0, 1000) };
+    cursor.capacity[kind] = { at: cursor.capacity[kind]?.at ?? new Date(now()).toISOString(), recheckAt: new Date(now() + capacityRecheckMs).toISOString(), reason: bounded(message(error), capacityReasonLimit) };
     delete cursor.failures[request.id];
     wait(kind, item, request, capacityWait(kind));
     return true;
+  };
+  // The tick's reasons, in the order they are stored, each with the request it was composed for:
+  // a persist that fails on one of them is attributed to that request rather than to the tick.
+  const composed = () => {
+    const reasons = new Map<string, DispatchWait>();
+    for (const entry of tick.waiting) { const reason = bounded(`${entry.kind} for ${entry.work} ${entry.sha.slice(0, 12)}: ${entry.reason}`, cursorTextLimit); if (!reasons.has(reason)) reasons.set(reason, entry); }
+    return [...reasons.entries()].slice(0, 20);
+  };
+  const persist = async () => { try { await effects.persist(cursor); } catch (error) { throw attributePersistFailure(error, cursor, composed().map(([, entry]) => entry)); } };
+  // The failover for a session that exited at launch on its provider's limit notice: the account
+  // the launcher selected is held until the reset the notice named, the exhaustion goes on the
+  // item's record as a mid-session one would, and the caller launches the profile's next account.
+  const exhaustedAtLaunch = (kind: 'review' | 'producer', item: Work, request: DispatchRequest) => async (profile: { name: string; kind?: string }, exit: InstantExit): Promise<string> => {
+    const role = kind === 'review' ? 'reviewer' : 'producer', notice = exit.notice!;
+    const selected = await effects.selectedAccount?.(role, profile.name).catch(() => null) ?? null;
+    const account = selected?.environment ?? null;
+    const held = await effects.holdAccount!(account ?? profileAccount(profile.name), { at: new Date(now()).toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role, profile: profile.name, work: item.key });
+    await effects.reportCapacity?.(item, { event: 'exhausted', role, requestId: request.id, profile: profile.name, account, runtime: selected?.kind ?? profile.kind ?? null, reason: notice.reason, resetsAt: notice.resetsAt,
+      partialWork: { state: 'not-applicable', detail: 'the session exited at launch on the provider limit notice: it read nothing and edited nothing' } }).catch(() => { /* the hold stands; a record the control plane refused is not a failed failover */ });
+    return `${profile.name}: ${account ?? `${profile.name}'s own account`} exited at launch on its provider's limit notice (${notice.reason}); held ${notice.resetsAt ? `until it resets ${notice.resetsAt}` : held && 'until' in held && held.until ? `until ${held.until}` : 'for its reset'}`;
   };
   const retryable = (request: DispatchRequest) => { const failure = cursor.failures[request.id]; return !failure || failure.attempts < dispatchFailureLimit && Date.parse(failure.nextAt) <= now(); };
   // Whether the request already has its session, waits to relaunch one that failed or expired, or may launch now.
@@ -449,7 +600,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
         else if (!order.length) wait('review', item, review, `every reviewer profile is busy: ${[profile, ...config.reviewers.filter(other => other.name !== profile.name)].map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
         else {
           try {
-            const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt));
+            const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
             started.push({ name: launchedName(launched.profile, review, launched.result) }); delete cursor.failures[review.id]; delete cursor.capacity.review;
             // The session is running somewhere; put its coordinates where every Graphyard reader
             // looks, so watching this reviewer never means reading this host's local ledger.
@@ -457,7 +608,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
               .catch(() => { /* the launch landed; a handle that could not be written is not a failed launch */ });
             tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
           } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
-          await effects.persist(cursor);
+          await persist();
         }
       }
     }
@@ -478,13 +629,13 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
         continue;
       }
       try {
-        const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt));
+        const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
         started.push({ name: launchedName(launched.profile, request, launched.result) }); delete cursor.failures[request.id]; delete cursor.capacity.producer;
         await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
           .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
         tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
       } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
-      await effects.persist(cursor);
+      await persist();
     }
   }
   // A failure for a request the control plane resolved is history the cursor need not keep.
@@ -492,10 +643,27 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
   cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
-    closed: tick.closed.length, closeFailures: tick.closeFailures.map(failure => `${failure.work} session ${failure.id}: ${failure.reason}`).slice(0, 20),
-    reasons: [...new Set(tick.waiting.map(entry => `${entry.kind} for ${entry.work} ${entry.sha.slice(0, 12)}: ${entry.reason}`))].slice(0, 20) };
-  await effects.persist(cursor);
+    closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
+    reasons: composed().map(([reason]) => reason) };
+  await persist();
   return tick;
+}
+
+/** What a tick failure records about state it could not persist, for `master status` and the attention it raises. */
+export interface PersistFailure { field: string | null; kind?: 'review' | 'producer'; request?: string; work?: string }
+/**
+ * A persist that failed, attributed. A schema refusal names the path it refused; the request and
+ * item that path was composed for come from the cursor (a recorded refusal) or from the tick's
+ * own wait list (a tick reason). Anything else — the file, the disk — is the write's own message.
+ */
+export function attributePersistFailure(error: unknown, cursor: DispatchCursor, reasons: Pick<DispatchWait, 'kind' | 'requestId' | 'work'>[]): Error & { persistFailure: PersistFailure } {
+  const issue = (error as { issues?: { path: PropertyKey[]; message: string }[] })?.issues?.[0];
+  const failure: PersistFailure = { field: issue ? cursorPath(issue.path) : null };
+  const path = issue?.path ?? [];
+  if (path[0] === 'failures' && typeof path[1] === 'string' && cursor.failures[path[1]]) Object.assign(failure, { kind: cursor.failures[path[1]].kind, request: path[1], work: cursor.failures[path[1]].work });
+  else if (path[0] === 'lastTick' && path[1] === 'reasons' && typeof path[2] === 'number' && reasons[path[2]]) Object.assign(failure, { kind: reasons[path[2]].kind, request: reasons[path[2]].requestId, work: reasons[path[2]].work });
+  const composed = failure.request ? `, composed for the ${failure.kind} request ${failure.request} on ${failure.work}` : '';
+  return Object.assign(new Error(`the dispatch cursor could not be persisted: ${issue ? `${failure.field} ${issue.message}${composed}` : message(error)}`), { persistFailure: failure, cause: error });
 }
 
 async function boundedRead<T>(read: () => Promise<T>, timeoutMs: number): Promise<T> {
@@ -516,6 +684,10 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
     if (options.signal?.aborted) break;
     const interval = typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
     let wait = interval;
+    // A tick that ran to its end and failed only to persist has already reset the streak and
+    // stamped its success; both are restored from here, so a persist that keeps failing counts
+    // as the consecutive failures it is rather than as one failure forever.
+    const streak = cursor.consecutiveFailures, lastSuccessAt = cursor.lastSuccessAt;
     try {
       if (options.reload) {
         const reload = await options.reload();
@@ -542,8 +714,12 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       waiting = reasons;
     } catch (error) {
       // A failed tick launched nothing it has not already recorded, so it is retried promptly;
-      // the cursor keeps the streak so master status can say how long dispatch has been blind.
-      cursor.consecutiveFailures += 1; cursor.lastFailure = { at: new Date(now()).toISOString(), reason: message(error).slice(0, 500) };
+      // the cursor keeps the streak so master status can say how long dispatch has been blind,
+      // and the request, item and field a persist failure was composed for, so it can say why.
+      const failure = (error as { persistFailure?: PersistFailure })?.persistFailure;
+      cursor.consecutiveFailures = streak + 1; cursor.lastSuccessAt = lastSuccessAt;
+      cursor.lastFailure = { at: new Date(now()).toISOString(), reason: bounded(message(error), cursorTextLimit),
+        ...(failure?.field ? { field: bounded(failure.field, 200) } : {}), ...(failure?.request ? { kind: failure.kind, request: failure.request, work: failure.work } : {}) };
       wait = tickRetryDelay(cursor.consecutiveFailures, interval, options.retryMinMs);
       await effects.persist(cursor).catch(() => {});
       log(`[graphyard-dispatch] tick failed (${cursor.consecutiveFailures} in a row, retrying in ${wait}ms): ${message(error)}`);
@@ -555,11 +731,16 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
-export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun }): DispatchEffects {
+export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
   // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
   const current = typeof config === 'function' ? config : () => config;
+  const log = deps.log ?? (line => console.error(line));
+  // A repair is logged once per path: the same over-long string would otherwise be reported on
+  // every tick that persists it, when one line naming the path is what a reader needs.
+  const repaired = new Set<string>();
+  const onRepair: RepairListener = repair => { if (repaired.has(repair.path)) return; repaired.add(repair.path); log(repairLine('persisting', repair)); };
   // The coordinator mutation this loop records handles with. It is built from the same
   // configuration the loop already runs on — the credential the dispatcher authenticates every
   // launch decision with — so a dispatcher records what it launched wherever it runs, rather than
@@ -577,15 +758,21 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
-    launchReview: (work, request, profile, agents, observedAt) => launchReview(root, work, profile.name, agents, observedAt, { run, requestId: request.id }),
-    launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run }),
+    // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
+    // limit notice is failed over below rather than counted as a refusal.
+    launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id }).catch(error => { throw watch.classify(error); }); },
+    launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start }).catch(error => { throw watch.classify(error); }); },
     // The handle goes where every Graphyard reader already looks, so watching a reviewer or
     // producer session the loop launched never means reading this host's own ledger.
     recordSession: (work: Work, handle: SessionHandleInput) => mutate(`work/${work.id}/session`, handle, randomUUID()),
     // And ends one when the sweep finds it over. The same coordinator mutation: a record that says
     // running is what holds the role slot, so closing it is as much this loop's job as opening it.
     endSession: (closure: SessionClosure) => mutate(`work/${closure.workId}/session`, closureHandle(closure), randomUUID()),
-    persist: cursor => writeDispatchCursor(current(), cursor),
+    // The same three moves the coordination loop makes for a session exhausted mid-work.
+    selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
+    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.()),
+    reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
+    persist: cursor => writeDispatchCursor(current(), cursor, onRepair),
   };
 }
 
@@ -607,6 +794,28 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
       environments: Object.values(cursor.accounts.environments).map((health: any) => ({ environment: health.name, kind: health.kind, loggedIn: health.loggedIn, quota: health.quota, healthy: health.healthy, reason: health.reason, usage: health.usage, login: health.login, checkedAt: health.checkedAt })),
       skipped: cursor.accounts.skipped.slice(-20),
     } : { environments: [], skipped: [] } };
+}
+
+/**
+ * The dispatcher's own health, as `master status` raises it before every request it launches
+ * (GY-120). A tick that fails launches nothing for any item, and a dispatcher that kept failing
+ * the same tick looked like one that was running: the tick count moved, the cursor was fresh, and
+ * every request simply stayed `waiting`. Three failures in a row raise one attention item that
+ * says no reviewer or producer is being launched and why — the request, item and field a persist
+ * failure was composed for, when that is the cause — and a cursor that cannot be read at all
+ * raises the same. Addressed to the master, with what fixes each.
+ */
+export const dispatchFailureAttentionThreshold = 3;
+export function dispatchFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
+  if (dispatch.error) return [{ subject: 'dispatch', text: `The dispatch cursor cannot be read, so whether any reviewer or producer is being launched is unknown: ${dispatch.error}`,
+    ...agentOwner('master', 'graphyard master restart re-reads the dispatch cursor beside the coordinator credential and repairs an over-long string in it; a cursor for another server or repository is removed by hand first') }];
+  const failures = dispatch.consecutiveFailures ?? 0, failure = dispatch.lastFailure;
+  if (failures < dispatchFailureAttentionThreshold || !failure) return [];
+  const persisted = failure.field ? ` The tick could not persist ${failure.field}${failure.request ? `, composed for the ${failure.kind} request ${failure.request} on ${failure.work}` : ''}.` : '';
+  return [{ subject: 'dispatch', text: `The dispatcher has failed ${failures} ticks in a row (last at ${failure.at}; last successful tick ${dispatch.lastSuccessAt ?? 'none since it started'}), so no reviewer or producer session is being launched for any item: ${failure.reason}${persisted}`,
+    ...agentOwner('master', failure.field
+      ? 'graphyard master restart re-reads and repairs the dispatch cursor; a tick that still cannot persist names the field above, and the request it was composed for is the one to look at'
+      : 'Fix what the reason names — the control plane URL and coordinator credential in .graphyard/master.json, or Herdr — then graphyard master restart if the loop does not recover on its own') }];
 }
 
 /**
