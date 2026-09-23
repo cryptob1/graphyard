@@ -503,5 +503,5 @@ test('unit:context-overflow-surfaced — master status names the item, its trigg
   const report = await readFile(join(root, 'src/cli/master-status.ts'), 'utf8');
   assert.match(report, /const overflow = await contextOverflows\(masterApi, snapshot\.work\);/);
   assert.match(report, /attentionItems\.push\(\.\.\.generatedFiles, \.\.\.overflow\)/);
-  assert.match(report, /\+ overflow\.length \+/);
+  assert.match(report, /dispatchItems\.length \+ overflow\.length \+ scopeRequests/);
 });
