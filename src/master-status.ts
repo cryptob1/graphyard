@@ -39,16 +39,13 @@ export function resourceReport(readings: ResourceReading[], lastReclaim: unknown
  * Names the resource in place of the symptom. An attention item whose text is the downstream
  * effect of a resource at its bound — a reviewer "busy in Herdr" on a name a finished pane holds,
  * a launch refused by a full ledger, a stalled action repeating either — is rewritten to name the
- * resource, its bound and its usage, and keeps its subject and its remedy owner. A resource that
- * already raised its own item absorbs the symptom rather than reporting it twice.
+ * resource, its bound and its usage, and keeps its subject; its next step becomes the resource's remedy.
  */
 export function attributeAttention(items: AttentionItem[], readings: ResourceReading[]): AttentionItem[] {
-  const raised = new Set(items.filter(item => item.subject.startsWith('resource:')).map(item => item.subject.slice('resource:'.length)));
-  return items.flatMap(item => {
-    if (item.subject.startsWith('resource:')) return [item];
+  return items.map(item => {
+    if (item.subject.startsWith('resource:')) return item;
     const reading = attributionFor(item.text, readings);
-    if (!reading) return [item];
-    if (raised.has(reading.id) && item.subject === 'loop') return [];
-    return [{ ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy }];
+    if (!reading) return item;
+    return { ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy };
   });
 }
