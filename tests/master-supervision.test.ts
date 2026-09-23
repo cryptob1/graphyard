@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { agentRuntimeRun, agentRuntimeTimeoutMs, daemonExecutor, listHerdrAgents, masterConfigSchema, masterHarness, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
 import { daemonEffects, emptyDaemonState, runDaemon, writeDaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
+import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js';
 import { installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
 
 /**
@@ -266,11 +267,11 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
     const bounded = agentRuntimeRun(400);
 
     const started = Date.now();
-    assert.throws(() => listHerdrAgents(bounded), (error: NodeJS.ErrnoException & { killed?: boolean }) =>
-      error.killed === true || error.code === 'ETIMEDOUT', 'the call is killed at its bound rather than waited on');
+    await assert.rejects(listHerdrAgents(bounded), (error: ChildProcessError) =>
+      error.timedOut === true, 'the call is killed at its bound rather than waited on');
     assert.ok(Date.now() - started < 30_000, 'and it returns in the order of its bound, not of the runtime');
     // The step fails; Herdr is reported unavailable and Graphyard work state stays authoritative.
-    assert.deepEqual(observeHerdrAgents(bounded), { agents: [], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' });
+    assert.deepEqual(await observeHerdrAgents(bounded), { agents: [], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' });
 
     const credential = join(directory, 'coordinator.token');
     await writeFile(credential, coordinatorToken, { mode: 0o600 });
@@ -281,7 +282,7 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
       mutate: async () => ({}), executor: daemonExecutor('coordinator-1'), run: bounded,
     });
     // The loop's own reading of the runtime, through the hung stub: an empty answer, not a throw.
-    assert.deepEqual(effects.agents(), []);
+    assert.deepEqual(await effects.agents(), []);
 
     const runStarted = Date.now();
     const result = await runDaemon(master, emptyDaemonState(master), effects,
@@ -291,21 +292,23 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
     assert.equal(result.stopped, true, 'and the loop answers its stop signal rather than staying wedged in the call');
     assert.ok(elapsed < loopStopTimeoutSeconds * 1000, `it stopped in ${elapsed}ms, inside the unit's ${loopStopTimeoutSeconds}s stop timeout`);
 
-    // Every call into the runtime carries the bound, not just the ones a test reaches: these are
-    // synchronous, so one unbounded call blocks the event loop and the SIGTERM handler with it.
+    // Every call into the runtime carries the bound, not just the ones a test reaches: each is a
+    // spawned child through the asynchronous runner (GY-125), bounded by its timeout, so a hung
+    // runtime neither holds the step nor blocks the event loop and the SIGTERM handler with it.
     const master_ts = source('master.ts');
     for (const signature of [
-      "export function herdrJson(args: string[], run: (command: string, args: string[]) => string = agentRuntimeRun())",
-      "function herdrRun(args: string[], run: (command: string, args: string[]) => string = agentRuntimeRun())",
-      "export function readSessionScreen(target: string, run: (command: string, args: string[]) => string = agentRuntimeRun(), lines = 80)",
+      "export async function herdrJson(args: string[], run: ChildRun = defaultChildRun)",
+      "async function herdrRun(args: string[], run: ChildRun = defaultChildRun)",
+      "export async function readSessionScreen(target: string, run: ChildRun = defaultChildRun, lines = 80)",
     ]) assert.ok(master_ts.includes(signature), `the agent runtime is reached only through the bounded runner: ${signature}`);
-    assert.doesNotMatch(master_ts, /execFileSync\([^)]*'herdr'/, 'no call reaches Herdr around the bounded runner');
-    assert.match(master_ts, /agentRuntimeRun = \(timeoutMs: number = agentRuntimeTimeoutMs\)[\s\S]{0,300}?timeout: timeoutMs/);
+    assert.doesNotMatch(master_ts, /execFileSync\(|spawnSync\(/, 'no call reaches Herdr around the bounded runner');
+    assert.match(master_ts, /agentRuntimeRun = \(timeoutMs: number = agentRuntimeTimeoutMs\)[\s\S]{0,300}?childRunner\(\{ timeoutMs \}\)/);
+    assert.equal(defaultChildTimeoutMs, agentRuntimeTimeoutMs, 'the default runner carries the runtime bound');
     // The loop's other subprocess commands are bounded where it builds them.
     for (const file of ['master-daemon.ts', 'auto-dispatch.ts']) {
-      const defaults = [...source(file).matchAll(/execFileSync\(command, args, \{[^}]*\}/g)];
+      const defaults = [...source(file).matchAll(/childRunner\(\{[^}]*\}\)/g)];
       assert.ok(defaults.length, `${file} builds the loop's command runner`);
-      for (const [call] of defaults) assert.match(call, /timeout:/, `${file} bounds every command the loop runs: ${call}`);
+      for (const [call] of defaults) assert.match(call, /timeoutMs:/, `${file} bounds every command the loop runs: ${call}`);
     }
   } finally {
     process.env.PATH = previousPath;

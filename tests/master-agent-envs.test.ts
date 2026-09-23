@@ -293,7 +293,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const produceStart = expandTypedCommand(produceCrossCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
     assert.equal(produceStart.kind, 'codex', 'the session runs the account\'s runtime, not the profile\'s');
     const produceTail = produceStart.args;
-    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', sharedGitDirectory(root)]);
+    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', await sharedGitDirectory(root)]);
     assert.match(produceTail.at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
@@ -329,17 +329,17 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
   // Herdr's own confirmation: the prompt must move the agent out of idle.
   const stalled = { error: { code: 'agent_prompt_stalled', message: 'agent did not start working within 5000ms' } };
   let prompts = 0; const calls: string[][] = [];
-  const delivered = deliverPrompt('opencode-worker', 'Implement GY-68', herdr(calls, args => args[1] === 'prompt' && ++prompts < 3 ? stalled : undefined), fast);
+  const delivered = await deliverPrompt('opencode-worker', 'Implement GY-68', herdr(calls, args => args[1] === 'prompt' && ++prompts < 3 ? stalled : undefined), fast);
   assert.equal(delivered.attempts, 3);
   assert.deepEqual(calls[0], ['agent', 'prompt', 'opencode-worker', 'Implement GY-68', '--wait', '--until', 'working', '--until', 'blocked', '--timeout', '1000']);
-  assert.throws(() => deliverPrompt('dropped', 'x', herdr([], () => stalled), fast), (error: any) => error instanceof PromptNotAcceptedError && error.promptDropped && /after 3 deliveries/.test(error.message));
+  await assert.rejects(deliverPrompt('dropped', 'x', herdr([], () => stalled), fast), (error: any) => error instanceof PromptNotAcceptedError && error.promptDropped && /after 3 deliveries/.test(error.message));
   const blocked: string[][] = [];
-  assert.throws(() => deliverPrompt('blocked', 'x', herdr(blocked, () => ({ error: { code: 'agent_blocked', message: 'agent is blocked' } })), fast), /agent is blocked/);
+  await assert.rejects(deliverPrompt('blocked', 'x', herdr(blocked, () => ({ error: { code: 'agent_blocked', message: 'agent is blocked' } })), fast), /agent is blocked/);
   assert.equal(blocked.length, 1, 'a refusal other than a stall is not retried');
   // The real CLI exits non-zero with the error JSON on its output.
   assert.equal(herdrErrorCode(Object.assign(new Error('Command failed: herdr agent prompt'), { stdout: '{"error":{"code":"agent_prompt_stalled","message":"m"}}' })), 'agent_prompt_stalled');
   const follow: string[][] = []; let waits = 0;
-  assert.equal(deliverPrompt('master', 'You are the master', herdr(follow, args => args[1] === 'wait' && ++waits === 1 ? { error: { code: 'timeout', message: 'timed out' } } : undefined), { ...fast, confirm: 'follow' }).attempts, 2);
+  assert.equal((await deliverPrompt('master', 'You are the master', herdr(follow, args => args[1] === 'wait' && ++waits === 1 ? { error: { code: 'timeout', message: 'timed out' } } : undefined), { ...fast, confirm: 'follow' })).attempts, 2);
   assert.deepEqual(follow.map(args => args[1]), ['prompt', 'wait', 'prompt', 'wait']);
   assert.equal(follow[0].at(-1), 'You are the master');
 

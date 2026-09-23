@@ -125,7 +125,7 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     // which alone would count as started. The launch is reported awaiting consent instead, with the
     // prompt's text, and nothing is typed into the dialog.
     const pane = new ConsentPane('claude', folderDialog);
-    const held = startAgentSession('eng-consent', 'claude', 'w1V:pC1', ['--permission-mode', 'bypassPermissions'], 'Implement GY-130', pane.run, { directory, ...pane.bounds(), holdConsent: true });
+    const held = await startAgentSession('eng-consent', 'claude', 'w1V:pC1', ['--permission-mode', 'bypassPermissions'], 'Implement GY-130', pane.run, { directory, ...pane.bounds(), holdConsent: true });
     assert.equal(held.started.state, 'awaiting consent');
     assert.equal(held.awaiting!.kind, 'folder');
     assert.equal(held.awaiting!.prompt, 'Do you trust the files in this folder? / /home/vish/code/project/.graphyard/worktrees/GY-130-1 / Claude Code may read, write, or execute files contained in this directory. This can pose security risks, so only use files from trusted sources. / ❯ 1. Yes, proceed / 2. No, exit');
@@ -136,7 +136,7 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     // A runtime prompted after it starts (no request contract) is never pasted into the dialog: its
     // request waits in its launch file, which the hold names for the supervisor to deliver.
     const pastePane = new ConsentPane('gemini', loginDialog);
-    const pasteHeld = startAgentSession('eng-paste', 'gemini', 'w1V:pC1', [], 'Implement GY-130', pastePane.run, { directory, ...pastePane.bounds(), holdConsent: true });
+    const pasteHeld = await startAgentSession('eng-paste', 'gemini', 'w1V:pC1', [], 'Implement GY-130', pastePane.run, { directory, ...pastePane.bounds(), holdConsent: true });
     assert.equal(pasteHeld.delivery, 'paste'); assert.equal(pasteHeld.started.state, 'awaiting consent');
     assert.equal(pastePane.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
     assert.equal(pasteHeld.awaiting!.request, join(directory, '.graphyard/launch/eng-paste.request'));
@@ -148,7 +148,7 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     // A rename Herdr fails while the dialog is up keeps the hold, recorded unnamed for the supervisor to retry.
     const unnamedPane = new ConsentPane('claude', folderDialog);
     const unnamedRun = (command: string, args: string[]) => { if (args[0] === 'agent' && args[1] === 'rename') throw new Error('herdr: agent busy'); return unnamedPane.run(command, args); };
-    const unnamed = startAgentSession('eng-consent', 'claude', 'w1V:pC1', [], 'Implement GY-130', unnamedRun, { directory, ...unnamedPane.bounds(), holdConsent: true });
+    const unnamed = await startAgentSession('eng-consent', 'claude', 'w1V:pC1', [], 'Implement GY-130', unnamedRun, { directory, ...unnamedPane.bounds(), holdConsent: true });
     assert.equal(unnamed.started.state, 'awaiting consent'); assert.equal(unnamed.awaiting!.named, false);
     assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', unnamed.awaiting!, clock).named, false);
     assert.equal('named' in consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', held.awaiting!, clock), false, 'a named session\'s hold says nothing about it');
@@ -158,16 +158,16 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     const flaky = new ConsentPane('claude', folderDialog);
     let unread = 3;
     const flakyRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read' && unread-- > 0) throw new Error('herdr: pane read failed'); return flaky.run(command, args); };
-    const found = awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', flakyRun, { ...flaky.bounds(), holdConsent: true });
+    const found = await awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', flakyRun, { ...flaky.bounds(), holdConsent: true });
     assert.equal(found.state, 'consent'); assert.equal(found.awaiting!.kind, 'folder');
     const blind = new ConsentPane('claude', folderDialog);
     const blindRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read') throw new Error('herdr: pane read failed'); return blind.run(command, args); };
-    assert.throws(() => awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', blindRun, { ...blind.bounds(), holdConsent: true }),
+    await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', blindRun, { ...blind.bounds(), holdConsent: true }),
       (error: unknown) => error instanceof SessionStartError && error.startCase === 'still starting' && /Herdr reports the claude runtime idle but its pane could not be read, so a consent prompt is not ruled out/.test(error.message));
 
     // Without a hold the same launch is refused as awaiting consent, carrying the prompt's text.
     const refusedPane = new ConsentPane('claude', folderDialog);
-    assert.throws(() => awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', refusedPane.run, refusedPane.bounds()),
+    await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', refusedPane.run, refusedPane.bounds()),
       (error: unknown) => error instanceof SessionStartError && error.startCase === 'awaiting consent' && error.screen.startsWith('Do you trust the files in this folder?') && /outside the launcher's consent allow-list: "Do you trust the files in this folder\?/.test(error.message));
 
     // The worker launch itself: dispatchWork reports the session awaiting consent, not started.
@@ -219,7 +219,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
     // A dialog still drawn after its answer is given time to close before it is answered again,
     // and one that never closes is answered twice at most and then held like any other prompt.
     const stubborn = new ConsentPane('codex', hooksDialog);
-    const stuck = awaitRuntimeStart('w1V:pC1', 'codex', 'GY=/s; codex', stubborn.run, { ...stubborn.bounds(), holdConsent: true });
+    const stuck = await awaitRuntimeStart('w1V:pC1', 'codex', 'GY=/s; codex', stubborn.run, { ...stubborn.bounds(), holdConsent: true });
     assert.deepEqual(stubborn.keys, [['3'], ['3']]);
     assert.ok(Date.parse(stuck.consent[1].at) - Date.parse(stuck.consent[0].at) >= 5_000, 'no second keystroke inside the settle period');
     assert.match(stuck.awaiting!.why, /answered it 2 times and it is still showing/);
@@ -233,7 +233,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
       if (args[0] === 'pane' && args[1] === 'send-keys' && second.keys.length === 2) Object.assign(second as unknown as { screen: string; accepts: string[] }, { screen: crashDialog, accepts: ['2'] });
       return result;
     };
-    const both = awaitRuntimeStart('w1V:pC1', 'gemini', 'GY=/s; gemini', secondRun, { ...second.bounds(), holdConsent: true });
+    const both = await awaitRuntimeStart('w1V:pC1', 'gemini', 'GY=/s; gemini', secondRun, { ...second.bounds(), holdConsent: true });
     assert.equal(both.state, 'ready'); assert.equal(both.awaiting, null);
     assert.deepEqual(both.consent.map(answer => answer.rule), ['telemetry-decline', 'telemetry-decline', 'telemetry-decline']);
     assert.equal(both.consent[0].prompt, both.consent[1].prompt); assert.match(both.consent[2].prompt, /crash reports when it fails/);
