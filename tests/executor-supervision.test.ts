@@ -319,9 +319,11 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
   // executor refuses the kind outright, so however long such a row waits it is never reported as
   // unserved and the start command it would have carried is never offered.
   assert.deepEqual(['escalate', 'request-rework'].filter(kind => (executorRunnableKinds as readonly string[]).includes(kind)), [], 'no executor may run an in-step judgment');
-  const backlog = await ok(operator, 'POST', 'work', { title: 'held in backlog', plannedFiles: ['src/held-in-backlog.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
-  const held = await reload(backlog.id);
-  assert.equal(held.nextAction!.kind, 'escalate', 'an item nobody released needs a judgment, not an executor');
+  const raised = await released('standing escalation');
+  const claimed = await ok(workerA, 'POST', `work/${raised.id}/claim`, {}) as Work;
+  await ok(workerA, 'POST', `work/${raised.id}/request`, { type: 'escalation', epoch: claimed.epoch, trigger: 'security-concern', reason: 'a judgment, not an executor step' });
+  const held = await reload(raised.id);
+  assert.equal(held.nextAction!.kind, 'escalate', 'a standing escalation needs a judgment, not an executor');
   assert.ok(held.actionQueue!.actions.some(entry => entry.kind === 'escalate'), 'the control plane keeps an open row for that escalation');
   const withEscalation = await ok(coordinator, 'GET', 'actions');
   assert.deepEqual(withEscalation.executors.unserved.map((entry: any) => [entry.key, entry.kind]), [[item.key, 'dispatch']], 'the standing escalation is not an unserved kind, however dead the fleet');
