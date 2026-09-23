@@ -1326,6 +1326,15 @@ no stripped run, and a proof attached to no criterion (post-deployment smoke) ha
 The rule has no lane of its own: an attested `manual:` proof carries `exercise` in the `attest`
 decision's input, and the CI reporter (`scripts/publish-acceptance.mjs`) forwards the report's
 `exercise`, so a CI job that ran no stripped run is recorded as not exercising like any other.
+The validation lane is held to it too: a collector's `result` report carries the same optional
+`exercise`, and a pass without a failing stripped run is minted untrusted with `unexercised`, the
+same history entry, and `unexercised` in the result it returns. Evidence reuse refuses to carry a
+pass onto a new head unless that pass would itself be trusted under this rule, naming the same
+reason in the refused decision.
+
+Evidence trusted before this rule existed carries no `exercise`. It keeps satisfying the gate on
+the head it was recorded for, so items already in flight are not re-proved, but evidence reuse
+never carries it onto another head; a proof submitted for any new head is decided under the rule.
 
 ### The dispatcher's own state
 

@@ -116,7 +116,7 @@ async function start(f: Fixture, r = f.r) {
   await validation.runnerCommand(runner, 'ack', command, id()); await validation.collectionAuthority(collector, command); return command;
 }
 function report(f: Fixture, command: { requestId: string; attemptId: string; epoch: number }, artifacts: Record<string, string> = A, target: Record<string, unknown> = {}) {
-  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: artifactsOf(artifacts), measurement: 'provider', coversEntireRun: true, attribution: 'matched', ...target }, bundleDigest, runnerImageDigest: runnerImage, artifacts: [{ name: 'report', digest: bundleDigest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true };
+  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: artifactsOf(artifacts), measurement: 'provider', coversEntireRun: true, attribution: 'matched', ...target }, bundleDigest, runnerImageDigest: runnerImage, artifacts: [{ name: 'report', digest: bundleDigest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } };
 }
 async function cleanup(f: Fixture) {
   for (const r of (await store.pool.query("SELECT document FROM validation_requests WHERE document->>'workId'=$1", [f.w.id])).rows.map(row => row.document as ValidationRequest)) {
