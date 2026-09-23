@@ -475,7 +475,10 @@ derives it locally: one `git fetch` of the base branch, made lazily on the first
 has to look at, then `git merge-base --is-ancestor MERGE RELEASE` for each delivery whose containment
 the loop has not already established. A merge git cannot place — a commit this checkout does not
 hold, a base branch it could not fetch — is unknown, and unknown containment is never read as
-deployed; the observation's `reason` says when the base branch could not be refreshed. The GitHub
+deployed; the observation's `reason` says when the base branch could not be refreshed. Every
+caller names that checkout — the loop, `master verify-deployment` and the executor's
+`verify-deployment` action all pass the managed repository's root — because the launcher's own
+directory may be a checkout of another repository, where every merge would stay pending. The GitHub
 requests the step makes are only those that find the release: none with `--deployment-url`
 configured, and otherwise one listing of the base branch's deployments plus at most one status
 listing per deployment in it, so at most `1 + 20 = 21` requests (`maxDeploymentRequests` in

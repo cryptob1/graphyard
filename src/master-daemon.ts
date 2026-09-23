@@ -1060,7 +1060,7 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
     ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
-    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.restart}`) });
+    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`) });
   if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
     ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step') });
   return items;
@@ -2067,11 +2067,14 @@ function localAncestry(root: string, baseBranch: string, run: (command: string, 
  * one ancestry check carries the whole retained set onto a release that descends from it — so a
  * steady cycle derives containment only for deliveries newer than the last observed release, and
  * the GitHub requests stay under `maxDeploymentRequests` however long the delivery history grows.
+ * `root` is the managed repository's checkout, which every caller must name: the Graphyard
+ * launcher's directory may be a checkout of another repository, or no checkout at all, and
+ * ancestry asked there would leave every delivery pending without saying why.
  * A release that does not descend from the retained one (a rollback, an unrelated commit) drops
  * the retention and every delivery is derived again.
  */
 export async function observeDeployment(config: MasterConfig, delivered: Work[], run: (command: string, args: string[]) => string, fetcher: typeof fetch = fetch, now = () => Date.now(),
-  options: { root?: string; retained?: ContainmentRetention | null } = {}): Promise<DeploymentObservation> {
+  options: { root: string; retained?: ContainmentRetention | null }): Promise<DeploymentObservation> {
   const at = new Date(now()).toISOString();
   let requests = 0;
   const unavailable = (reason: string): DeploymentObservation => ({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key), requests, derived: 0, retained: 0, containment: options.retained ?? null });
@@ -2102,7 +2105,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     }
     if (!sha) return unavailable('No GitHub deployment for the managed base branch reports a successful status');
   }
-  const ancestry = localAncestry(options.root ?? dirname(config.cliPath), config.baseBranch, run);
+  const ancestry = localAncestry(options.root, config.baseBranch, run);
   // The retained set is carried forward whole, on one ancestry check, or dropped whole.
   const retention = options.retained ?? null;
   const carried = retention && (retention.release === sha || ancestry.contains(retention.release, sha) === true) ? retention : null;
@@ -2136,7 +2139,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
   const liveness = loopLiveness(state, now, intervalMs, hostId);
   return {
     // A loop inside a failed-cycle backoff is running: it announced when its next cycle is due.
-    running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running'),
+    running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running' || liveness.state === 'slow'),
     // Whether the loop is cycling at all, on the two-interval bound, with the restart command.
     liveness,
     // Failed cycles and the process-level events the loop survived (GY-119).

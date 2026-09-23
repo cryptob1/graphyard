@@ -87,7 +87,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // is then refused rather than resumed, so two brokers never drive one merge — see
     // docs/master-agent.md, "Running executors beside the daemon".
     merge: work => m.mergeExecutor(current(), snapshot, mutate, mergeExecutor, randomUUID(), run)(work),
-    observeDeployment: delivered => d.observeDeployment(current(), delivered, run),
+    observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
   });
   // The rule, not the prose: a kind whose judgment happens in the step itself may never have a
