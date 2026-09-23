@@ -184,7 +184,13 @@ The installer performs the plan in order:
    `~/.config/graphyard/<install>/tokens/` (mode `0600`). Nothing is written before that check
    passes; an existing installation keeps the credentials it already has.
 2. Provisions Postgres and the application container on the provider.
-3. Sets `HOST`, `PORT`, `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`, and `GITHUB_BASE_BRANCH`.
+3. Sets `HOST`, `PORT`, `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_REPOSITORY`,
+   `GITHUB_BASE_BRANCH`, `GRAPHYARD_REVIEWER_APPS`, the four capacity limits (see
+   [capacity limits and drift](#capacity-limits-and-drift)), and — when the repository's
+   `scripts/check-docs.mjs --manifest` declares generated files — `GRAPHYARD_GENERATED_FILES`,
+   so the regression guard lets a work item regenerate those files. The plan lists every one
+   under `provider.env.core`, and its `Generated-file manifest` preflight item names what the
+   manifest declares.
 4. Deploys and obtains a public HTTPS URL.
 5. Verifies `GET /healthz`.
 6. Opens the GitHub App manifest flow — **this is the human click**, see Step 4.
@@ -388,6 +394,7 @@ a step to reduce it — and worker identities are never Apps. The reasons are in
 | `<cli> is missing or not authenticated` | the provider CLI is not installed on this machine, or holds no account | nothing was created; the item's `fix` gives the install command and the login command — run both, then rerun. Opening the provider account itself is the human's step 2 |
 | `Railway workspace` preflight is `false` | the Railway account belongs to several workspaces, or `--workspace` names none of them | nothing was created; rerun with `--workspace` set to one of the names the item lists |
 | `Public hostname` preflight is `false` | `hetzner` or `docker-host` ran without `--domain`, or the A record is not pointed yet | nothing was created; pass `--domain HOST` with its record pointed at the host, then rerun |
+| `Generated-file manifest` preflight is `false` | the repository's `scripts/check-docs.mjs` failed, or printed something that is not a list of repository-relative paths, for `--manifest` and `--list` | nothing was created; fix the script so `node scripts/check-docs.mjs --manifest` prints its generated files as JSON, then rerun. A repository without that script declares none and passes |
 | `SSH key` preflight is `false` | `hetzner` ran without `--ssh-key` | nothing was created; rerun with a key name from `hcloud ssh-key list` |
 | `<cli> exited with N: <diagnostic>` | a provider command failed; the provider CLI's own message follows the colon | act on the diagnostic (it is scrubbed of every generated secret), then rerun `--apply`; completed steps are reported as satisfied and repeated for nothing |
 | `The server container runs as uid 1000 and must be able to read …github-private-key.pem` | the connecting user could not give the App private key to the container user: a non-root `--ssh-user`, or a local uid outside the container's | reconnect as `root` (the default `--ssh-user`), or run the `chown 1000:1000` command the error prints, then rerun `--apply` |

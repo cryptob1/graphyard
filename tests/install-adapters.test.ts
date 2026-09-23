@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -134,6 +134,55 @@ test('adding a worker to an existing installation mints only the new credential'
     assert.equal(session.principals.filter(principal => principal.role === 'worker').length, 2);
     assert.ok(session.tokens.get('owner-project-worker-2'), 'the added worker received no credential');
   } finally { await first.cleanup(); if (second) await second.cleanup(); }
+});
+
+// The regression guard exempts only the generated files the deployment declares, so an install
+// that left GRAPHYARD_GENERATED_FILES unset would refuse the first item that regenerates a docs
+// index. The installer derives it from the managed repository's manifest on every provider.
+const generatedManifest = `const generated = ['docs/README.md', 'docs/protocol.md'];
+if (process.argv.includes('--list')) { console.log(generated.join(',')); process.exit(0); }
+if (process.argv.includes('--manifest')) { console.log(JSON.stringify({ generated, regenerate: 'node scripts/check-docs.mjs --write' })); process.exit(0); }
+`;
+
+test('--apply sets GRAPHYARD_GENERATED_FILES from the repository manifest on every adapter, and a broken manifest blocks it', async () => {
+  for (const provider of ['railway', 'hetzner', 'docker-host', 'compose'] as Provider[]) {
+    const fixture = await harness({ provider });
+    try {
+      await mkdir(join(fixture.root, 'scripts'), { recursive: true });
+      await writeFile(join(fixture.root, 'scripts/check-docs.mjs'), generatedManifest);
+      const session = await prepareInstall(fixture.root, inputsFor(provider), fixture.deps);
+      const plan = await buildPlan(session);
+      const planned = plan.actions.find(action => action.id === 'provider.env.core')!.values!.find(value => value.name === 'GRAPHYARD_GENERATED_FILES');
+      assert.equal(planned?.value, 'docs/README.md,docs/protocol.md', `${provider} plan does not list the generated files under provider.env.core`);
+      assert.match(plan.preflight.find(item => item.name === 'Generated-file manifest')!.detail, /declares docs\/README\.md,docs\/protocol\.md/);
+      await applyInstall(session, plan);
+      if (provider === 'railway') assert.ok(fixture.commandLines().some(line => line.includes('--set GRAPHYARD_GENERATED_FILES=docs/README.md,docs/protocol.md')), 'railway did not set GRAPHYARD_GENERATED_FILES');
+      else assert.equal(parseEnv(bundle(fixture, 'server.env')!.content).GRAPHYARD_GENERATED_FILES, 'docs/README.md,docs/protocol.md', `${provider} did not set GRAPHYARD_GENERATED_FILES`);
+    } finally { await fixture.cleanup(); }
+  }
+
+  // A repository without the manifest script declares nothing, and the variable stays unset.
+  const bare = await harness({ provider: 'compose' });
+  try {
+    const session = await prepareInstall(bare.root, inputsFor('compose'), bare.deps);
+    assert.ok(!coreEnv(session).some(value => value.name === 'GRAPHYARD_GENERATED_FILES'));
+    assert.equal((await buildPlan(session)).preflight.find(item => item.name === 'Generated-file manifest')!.ok, true);
+  } finally { await bare.cleanup(); }
+
+  // A declared manifest that fails is a preflight gap: --apply refuses before creating anything.
+  const broken = await harness({ provider: 'compose' });
+  try {
+    await mkdir(join(broken.root, 'scripts'), { recursive: true });
+    await writeFile(join(broken.root, 'scripts/check-docs.mjs'), "console.error('manifest exploded'); process.exit(3);\n");
+    const session = await prepareInstall(broken.root, inputsFor('compose'), broken.deps);
+    const plan = await buildPlan(session);
+    const item = plan.preflight.find(entry => entry.name === 'Generated-file manifest')!;
+    assert.equal(item.ok, false);
+    assert.match(item.detail, /manifest exploded/);
+    assert.match(item.fix!, /scripts\/check-docs\.mjs --manifest/);
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete/);
+    await assert.rejects(stat(session.directory), { code: 'ENOENT' });
+  } finally { await broken.cleanup(); }
 });
 
 test('Railway secrets are sent over standard input and never appear in a process argument', async () => {

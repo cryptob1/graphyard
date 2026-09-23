@@ -7,6 +7,7 @@ import { discover } from '../onboarding.js';
 import { adapterFor, carriesCredential, isProviderReference, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, protectionSatisfied, readProtection, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
+import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
@@ -61,6 +62,12 @@ export interface InstallSession {
   materialized: boolean;
   deps: Required<Pick<InstallDependencies, 'fetch' | 'now' | 'wait' | 'log'>> & InstallDependencies;
   reviewPolicy: 'github' | 'agent'; requiredChecks: string[]; reviewCount: number;
+  /**
+   * The managed repository's generated-file manifest, derived once at preparation: the
+   * assignment the installer sets beside GRAPHYARD_PRINCIPALS (null when the repository declares
+   * none), or the refusal a declared manifest that failed or did not parse produced.
+   */
+  generatedFiles: { assignment: GeneratedFilesAssignment | null; error: string | null };
 }
 
 const CORE_HUMAN_STEPS = [
@@ -90,6 +97,9 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
   const principals = plannedPrincipals(installId, { workers: rawInputs.workers, producerProofs: rawInputs.producerProofs });
   const tokens = await ensureTokens(directory, principals, vault, false);
   const record = await readInstallRecord(directory);
+  let generatedFiles: InstallSession['generatedFiles'];
+  try { generatedFiles = { assignment: generatedFilesAssignment(root), error: null }; }
+  catch (error: any) { generatedFiles = { assignment: null, error: error.message }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
   const inputs = { ...rawInputs, provider, baseBranch: rawInputs.baseBranch ?? 'main' };
   const transport = dependencies.transport ?? localTransport();
@@ -117,7 +127,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
   };
   return {
     root, inputs, installId, directory, adapter: dependencies.adapter ?? adapterFor(provider), context, principals, tokens, vault, record,
-    reviewers: record?.reviewers ?? [], mode, materialized,
+    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles,
     reviewPolicy, requiredChecks: inputs.requiredChecks?.length ? inputs.requiredChecks : detected.proposedChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
     deps: { fetch: dependencies.fetch ?? fetch, now: dependencies.now ?? Date.now, wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))), log: dependencies.log ?? (() => {}), ...dependencies },
@@ -173,6 +183,10 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     // same values when they are unset, and an explicit value keeps the install predictable
     // across upgrades. A re-run after the roster changed reports the old values as drift.
     ...delegationLimitVariables.map(name => ({ name, value: capacity.variables[name], secret: false })),
+    // The generated files the repository's manifest declares, so the regression guard exempts
+    // a regenerated docs index instead of refusing it as an out-of-scope rewrite. A repository
+    // that declares none leaves the variable unset, which is its correct deployment state.
+    ...(session.generatedFiles.assignment ? [{ name: session.generatedFiles.assignment.variable, value: session.generatedFiles.assignment.value, secret: false }] : []),
   ];
 }
 
@@ -227,6 +241,11 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   preflight.push(ghStatus.code === 0
     ? { name: 'GitHub CLI', ok: true, detail: 'authenticated for branch protection and CI discovery' }
     : { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: gh auth login --scopes repo,admin:repo_hook (the account must administer ${session.inputs.repository})` });
+  // A declared manifest the installer cannot read would deploy a server whose regression guard
+  // exempts nothing, so it blocks --apply like any other preflight until the script is fixed.
+  preflight.push(session.generatedFiles.error
+    ? { name: 'Generated-file manifest', ok: false, detail: session.generatedFiles.error, fix: `Fix ${generatedManifestScript} so \`node ${generatedManifestScript} --manifest\` prints the generated files as JSON, then rerun` }
+    : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
 
   const core = coreEnv(session);
