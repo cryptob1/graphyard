@@ -18,6 +18,7 @@ import { masterInit } from './master-init.js';
 import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
 import { executorHostHeader } from '../model/registry.js';
+import { derivedIntent } from './planned-files-intent.js';
 import { readSecretFromStdin } from './context.js';
 import { reviewerCommand } from './master-reviewer.js';
 import { registryCommand, registryHelp } from './master-registry.js';
@@ -109,6 +110,7 @@ export const masterCommands = defineCommands([
       // The CLI's own commit, for the version-skew guard.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
+      if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
         { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
       if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
@@ -259,3 +261,6 @@ export const masterCommands = defineCommands([
 ]);
 
 export { cycleBudget };
+
+// plannedFiles resolved against the base branch (GY-140) lives beside this module.
+export { baseTree, derivedIntent } from './planned-files-intent.js';

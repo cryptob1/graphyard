@@ -870,6 +870,26 @@ attention item too.
 | `run.worktreeRootMinFreeGb` | Free space setup and every launch require of the root's volume, and below which `master status` raises attention, 0.1–10000; default 2 |
 | `run.worktreeRootBudgetGb` | Size the root may reach; `master status` raises attention at four fifths of it, 0.1–10000; default 10 |
 
+### plannedFiles resolved at creation
+
+`master create` and `master requirements` resolve the item's `plannedFiles` against the base branch
+it will be worked on (`origin/BASE` after a fetch, the local branch when there is no remote) before
+anything is recorded, so a worker never discovers a missing file mid-attempt:
+
+- **A path the base does not hold is refused**, unless a criterion describes creating it: a sentence
+  naming the path beside *new*, *create*, *add* or *introduce*, or — for a file under `tests/` or
+  named `*.test.*` — a criterion that requires a test. The refusal names every such path at once;
+  correct it, or state in a criterion that the item creates it.
+- **A file a criterion names is carried in.** Every path a criterion mentions that the base holds is
+  added to `plannedFiles`, and the result reports each under `plannedFilesDerived.added` with the
+  criterion that named it. Only criteria are read — a path the description mentions in prose is not
+  a requirement — and only exact files: a criterion naming a directory widens nothing on its own.
+
+What still slips through is measured: `master status` lists under `impliedScopeRequests`, per open
+item, every scope request (open, or the last one decided) whose paths a criterion already names —
+a request that should never have been needed — with its `count`. A non-zero count is an authoring
+fault to fix at creation, not a worker's.
+
 ### Scope requests the loop decides
 
 A worker that finds it needs a file outside its item's `plannedFiles` records a structured request
