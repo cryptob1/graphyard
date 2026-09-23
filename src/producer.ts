@@ -67,7 +67,7 @@ export type ProducerRecord = z.infer<typeof producerRecordSchema>;
 // boundSessionLedger, GY-131): the same bound, the same retention, the same refusal.
 export const producerLedgerSchema = z.object({ version: z.literal(1), producers: z.array(producerRecordSchema).default([]) }).strict();
 export type ProducerLedger = z.infer<typeof producerLedgerSchema>;
-export const producerLedgerSpec: SessionLedgerSpec = { name: 'producer ledger', path: '.graphyard/producers.json', role: 'producer' };
+export const producerLedgerSpec: SessionLedgerSpec = { name: 'producer ledger', path: '.graphyard/producers.json', role: 'producer', idleGraceMs: 5 * 60_000 };
 
 const ledgerFile = (root: string) => resolve(root, producerLedgerSpec.path);
 export async function readProducerLedger(root: string): Promise<ProducerLedger> {
@@ -78,7 +78,7 @@ export async function readProducerLedger(root: string): Promise<ProducerLedger> 
 export const saveProducerLedger = async (root: string, ledger: ProducerLedger) => atomicPrivateWrite(ledgerFile(root), producerLedgerSchema.parse({ ...ledger, producers: boundSessionLedger(ledger.producers, producerLedgerSpec) }));
 
 /** A finished session that submitted nothing for a proof is given this long to finish submitting before it is recorded as failed. */
-export const producerIdleGraceMs = 5 * 60_000;
+export const producerIdleGraceMs = producerLedgerSpec.idleGraceMs;
 
 /**
  * A session recorded failed or expired does not end its request: the loop relaunches it for the

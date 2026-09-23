@@ -36,6 +36,8 @@ export const reviewRecordSchema = z.object({
   attempt: z.number().int().min(1).max(50).optional(),
   /** When the loop saw the control plane no longer request `requestId`; until then the record is pinned (boundSessionLedger). */
   requestClosedAt: z.string().min(1).max(40).optional(),
+  /** When the loop saw `sha` stop being the undelivered candidate of `key`; until then a record with a verdict is pinned (boundSessionLedger). */
+  headReleasedAt: z.string().min(1).max(40).optional(),
   state: z.enum(['pending', 'completed', 'expired', 'cancelled', 'failed']),
   /** When Herdr first reported the session finished or blocked without a verdict. */
   idleSince: z.string().min(1).max(40).optional(),
@@ -72,8 +74,10 @@ export type ReviewLedger = z.infer<typeof reviewLedgerSchema>;
  * - its request is open (`requestId` without `requestClosedAt`): the request's attempt count, retry
  *   bound, settled state and agent names are read from its records (producer.ts sessionRetry), so
  *   they are kept until the loop sees the control plane stop requesting it (releaseClosedRequests);
- * - it carries a verdict and a pending session reviews the same key and sha: that session's
- *   `answered` set (reconcileReviews) is read from it, so an old verdict is never adopted.
+ * - it carries a verdict and its sha is still the item's undelivered candidate (no `headReleasedAt`),
+ *   or a pending session reviews the same key and sha: a session of that head — pending now, or
+ *   launched later when GitHub dismisses the approval with the head unchanged — reads its
+ *   `answered` set (reconcileReviews) from these records, so an old verdict is never adopted.
  * Every write keeps every live and every pinned record, and only the newest
  * `sessionLedgerRetention` of the other terminal records (by when they settled) for diagnostics,
  * so a session whose record nothing reads is reaped in the write that resolves or releases it.
@@ -87,14 +91,15 @@ export type ReviewLedger = z.infer<typeof reviewLedgerSchema>;
 export const sessionLedgerBound = 200;
 export const sessionLedgerRetention = 50;
 export const terminalSessionStates = ['completed', 'failed', 'cancelled', 'expired'] as const;
-export interface SessionLedgerSpec { name: string; path: string; role: 'reviewer' | 'producer' }
-export const reviewLedgerSpec: SessionLedgerSpec = { name: 'review ledger', path: '.graphyard/reviews.json', role: 'reviewer' };
-type LedgerRecord = { state: string; requestedAt: string; closedAt?: string; requestId?: string; requestClosedAt?: string; key?: string; sha?: string; verdict?: unknown };
+/** `idleGraceMs`: how long a session Herdr reports finished, blocked or gone is given before its record is failed. */
+export interface SessionLedgerSpec { name: string; path: string; role: 'reviewer' | 'producer'; idleGraceMs: number }
+export const reviewLedgerSpec: SessionLedgerSpec = { name: 'review ledger', path: '.graphyard/reviews.json', role: 'reviewer', idleGraceMs: 5 * 60_000 };
+type LedgerRecord = { state: string; requestedAt: string; closedAt?: string; requestId?: string; requestClosedAt?: string; headReleasedAt?: string; key?: string; sha?: string; verdict?: unknown };
 const live = (record: LedgerRecord) => !(terminalSessionStates as readonly string[]).includes(record.state);
-/** The terminal records something still reads: those of an open request, and verdicts a pending session of the same head checks against. */
+/** The terminal records something still reads: those of an open request, and verdicts a session of the same head, pending or relaunched, checks against. */
 export function pinnedSessionRecords<T extends LedgerRecord>(records: T[]): Set<T> {
   const pendingHeads = new Set(records.filter(live).map(record => `${record.key}@${record.sha}`));
-  return new Set(records.filter(record => !live(record) && (!!record.requestId && !record.requestClosedAt || !!record.verdict && pendingHeads.has(`${record.key}@${record.sha}`))));
+  return new Set(records.filter(record => !live(record) && (!!record.requestId && !record.requestClosedAt || !!record.verdict && (!record.headReleasedAt || pendingHeads.has(`${record.key}@${record.sha}`)))));
 }
 
 /** The refusal of a write that would hold more live and pinned records than the bound. */
@@ -104,7 +109,7 @@ export class SessionLedgerFullError extends Error {
     this.name = 'SessionLedgerFullError';
   }
 }
-export const sessionLedgerRemedy = (spec: SessionLedgerSpec) => `settle the live sessions — graphyard master status reconciles every pending record against its session and GitHub, and a session gone from Herdr settles on that pass — and the next write reaps them, as it reaps a request's records once the control plane stops requesting it; ${spec.path} is read-only diagnostics otherwise`;
+export const sessionLedgerRemedy = (spec: SessionLedgerSpec) => `settle the live sessions — graphyard master status reconciles every pending record against its session and GitHub, and a session gone from Herdr is marked idle by the first pass that finds it gone and failed by the first pass after its ${spec.idleGraceMs / 60_000}-minute idle grace, not on the same one — and the next write reaps them, as it reaps a request's records once the control plane stops requesting it; ${spec.path} is read-only diagnostics otherwise`;
 /** Matches a ledger refusal wherever its text was recorded: an action row, a dispatch failure, a launch error. */
 export const sessionLedgerRefusal = /The (review|producer) ledger \((\S+)\) refused the write: its bound is (\d+) records and (\d+) are live/;
 
@@ -126,16 +131,21 @@ export function assertSessionLedgerRoom(records: LedgerRecord[], spec: SessionLe
 }
 /**
  * Marks the terminal records whose request the control plane no longer holds open — answered,
- * withdrawn, superseded, or its item done or gone — so a later write may reap them. Only a work
- * snapshot can say so; without one nothing is released and the records stay pinned.
+ * withdrawn, superseded, or its item done or gone — and the verdicts whose head is no longer the
+ * item's undelivered candidate, so a later write may reap them. Only a work snapshot can say so;
+ * without one nothing is released and the records stay pinned.
  */
 export function releaseClosedRequests(records: LedgerRecord[], work: Work[], now: Date) {
   let released = 0;
   for (const record of records) {
-    if (live(record) || !record.requestId || record.requestClosedAt) continue;
+    if (live(record)) continue;
     const item = work.find(candidate => candidate.key === record.key);
-    const open = !!item && item.stage !== 'done' && [item.autoDispatch?.review ?? null, ...(item.autoDispatch?.producers ?? [])].some(request => !!request && request.id === record.requestId && request.state === 'requested');
-    if (!open) { record.requestClosedAt = now.toISOString(); released++; }
+    if (record.requestId && !record.requestClosedAt) {
+      const open = !!item && item.stage !== 'done' && [item.autoDispatch?.review ?? null, ...(item.autoDispatch?.producers ?? [])].some(request => !!request && request.id === record.requestId && request.state === 'requested');
+      if (!open) { record.requestClosedAt = now.toISOString(); released++; }
+    }
+    const current = !!item && item.stage !== 'done' && !item.observation?.merged && item.candidate?.sha === record.sha;
+    if (record.verdict && !record.headReleasedAt && !current) { record.headReleasedAt = now.toISOString(); released++; }
   }
   return released;
 }
@@ -479,7 +489,7 @@ export function dismissalResolution(record: Pick<ReviewRecord, 'key' | 'sha' | '
  * a verdict it managed to post for the old head settles nothing the record does not already say.
  */
 /** A session Herdr reports finished or blocked is given this long to post its verdict before it is recorded as failed. */
-export const reviewIdleGraceMs = 5 * 60_000;
+export const reviewIdleGraceMs = reviewLedgerSpec.idleGraceMs;
 
 export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, work: Work[] | undefined): string | null {
   const item = work?.find(candidate => candidate.key === record.key);

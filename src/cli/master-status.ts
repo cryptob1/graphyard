@@ -255,10 +255,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   // A launch refused by a full session ledger is named as that ledger, never as session capacity (GY-131).
-  const attributed = ledgerRefusalAttention({ work: status.work, attentionItems: [...attentionItems, ...decisions.attentionItems] }, snapshot.work);
-  return { ...status, work: attributed.work, attentionItems: attributed.attentionItems,
+  return { ...status, ...ledgerRefusalAttention({ work: status.work, attentionItems: [...attentionItems, ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, stalledActions: stalled.length, overlongSessions: overlong.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length } }, snapshot.work),
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,

@@ -1266,16 +1266,19 @@ on a cap the other lacks.
     all read from its own records, so dropping them would reset the request and relaunch it. The
     loop marks a record `requestClosedAt` when a reconcile pass sees its request answered,
     withdrawn or superseded, or its item done or gone; only then may it be reaped.
-  - a record carrying a verdict while a pending session reviews the same item and head. That
-    session is told which GitHub reviews are already answered from those records, so it never
-    adopts an old verdict as its own.
+  - a record carrying a verdict while its head is still the item's undelivered candidate, or while
+    a pending session reviews the same item and head. A session of that head, pending now or
+    launched later because GitHub dismissed the approval with the head unchanged (a recomputed
+    merge base), is told which GitHub reviews are already answered from those records, so it
+    never adopts an old verdict as its own. The loop marks such a record `headReleasedAt` when a
+    reconcile pass sees the item delivered, gone, or on another head; only then may it be reaped.
 - **Reaping.** Every write keeps every live and every pinned record and drops the other terminal
   records beyond the retention window. A session is therefore reaped in the write that resolves
-  it, or, if its request is still open, in the write that releases the request. No ledger fills
+  it, or, if something still reads it, in the write that releases its request or its head. No ledger fills
   with finished records, and nobody prunes one by hand.
 - **Retention for diagnostics.** Of the unpinned terminal records, the newest **50**, by when they
-  settled (`sessionLedgerRetention`), are kept. They are what `master status` lists as recently
-  completed sessions.
+  settled (`sessionLedgerRetention`), are kept. `master status` lists the last 20 terminal records
+  in ledger order, pinned or retained, under `reviews.completed` and `producers.completed`.
 - **Full ledger.** A write that would pass the bound gives up retained terminal records first, even
   inside the window. It is refused only when live and pinned records alone reach the bound. A
   launch checks this before it creates a pane, so a refused launch never leaves a running session
@@ -1284,10 +1287,15 @@ on a cap the other lacks.
   `The review ledger (.graphyard/reviews.json) refused the write: its bound is 200 records and 200 are live sessions …`.
   This is local state, not reviewer or producer capacity. `master status` attributes it that way.
   The row's attention and a single attention item name the ledger, the bound, the live count and
-  the remedy. The item is never reported as waiting on a busy reviewer agent. The remedy is to settle the
-  live sessions: `master status` reconciles every pending record against its session and GitHub,
-  a session gone from Herdr settles on that pass, and the next write reaps it, as it reaps a
-  request's records once the control plane stops requesting it.
+  the remedy, and `counts.attention` counts that one item. The item is never reported as waiting
+  on a busy reviewer agent. Only a refusal that stands now is attributed: a dispatch failure, a
+  stalled action, or an action whose latest event is the failure. An action that failed once on a full ledger and has since
+  been claimed again or completed is not. The remedy is to settle the
+  live sessions: `master status` reconciles every pending record against its session and GitHub.
+  A session gone from Herdr does not settle on the first pass that finds it gone: that pass marks
+  it idle (`idleSince`), and it is failed by the first pass after its idle grace
+  (`reviewIdleGraceMs`, `producerIdleGraceMs`: 5 minutes). The next write then reaps it, as it
+  reaps a request's records once the control plane stops requesting it.
 - **Headroom.** `master status` reports both ledgers under `ledgers.reviews` and
   `ledgers.producers`: `path`, `bound`, `retention`, `records`, `live`, `pinned`, `terminal` and
   `headroom` (how many more live sessions the ledger can record, `bound − live − pinned`). A

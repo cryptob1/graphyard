@@ -161,9 +161,54 @@ test('unit:terminal-reviews-reaped — a pending session never adopts the verdic
     const reconciled = (await reconcileReviews(root, config, { run: herdrRun([]), observe, work: [work()], agents: null })).reviews;
     assert.deepEqual(seen, [[11]], 'the pending session is told verdict 11 is already answered');
     assert.equal(reconciled.find(record => record.id === pending.id)!.state, 'pending', 'it does not adopt the old verdict');
-    // Once the pending session settles, nothing reads the old verdict and it is reaped like any other.
-    await saveReviewLedger(root, { version: 1, reviews: reconciled.map(record => record.id === pending.id ? { ...record, state: 'cancelled' as const, closedAt: at(1000) } : record) });
+    // Once the pending session settles and the item leaves H, nothing reads the old verdict and it is reaped like any other.
+    const settled = reconciled.map(record => record.id === pending.id ? { ...record, state: 'cancelled' as const, closedAt: at(1000) } : record);
+    releaseClosedRequests(settled, [work({ candidate: { sha: sha40('c2'), baseSha: B, pr: 131, branch: 'graphyard/gy-131-1', author: 'implementer' } as any })], new Date(at(1001)));
+    await saveReviewLedger(root, { version: 1, reviews: settled });
     assert.equal((await readReviewLedger(root)).reviews.some(record => record.id === answered.id), false);
+  } finally { await cleanup(); }
+});
+
+test('unit:terminal-reviews-reaped — an approval whose request closed is kept while its head is the candidate, so a relaunch after a same-head dismissal never adopts it', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    const config = await loadMasterConfig(root);
+    const reviewer = `${config.reviewer!.slug}[bot]`;
+    // GY-131 review of 84d2a4f: the approval answered its request, the request closed, and only
+    // then was the approval dismissed with the head unchanged (a recomputed merge base). No session
+    // of H was pending in between, so pinning by a pending session could not keep the record.
+    const approval = review(0, 'completed', { key: 'GY-131', requestId: 'request-first', attempt: 1, verdict: { state: 'APPROVED', reviewer, reviewId: 11, submittedAt: at(1) } });
+    const item = work();
+    let records: ReviewRecord[] = [approval];
+    releaseClosedRequests(records, [item], new Date(at(2)));
+    assert.ok(approval.requestClosedAt, 'the answered request is released');
+    assert.equal(approval.headReleasedAt, undefined, 'the head it approved is still the candidate');
+    for (let index = 0; index < 3 * sessionLedgerRetention; index++) {
+      records = [...records, review(10 + index, 'completed', { closedAt: at(100 + index) })];
+      releaseClosedRequests(records, [item], new Date(at(100 + index)));
+      await saveReviewLedger(root, { version: 1, reviews: records });
+      records = (await readReviewLedger(root)).reviews;
+    }
+    assert.ok(records.some(record => record.id === approval.id), 'the approval outlives the retention window while H is the candidate');
+    assert.equal(records.filter(record => record.id !== approval.id).length, sessionLedgerRetention, 'everything else is reaped to the window');
+    // The dismissal reopens the request for the same commit: a fresh session of H is launched.
+    const relaunch = review(1, 'pending', { key: 'GY-131', requestId: 'request-second', attempt: 1, requestedAt: at(500), tokenExpiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+    await saveReviewLedger(root, { version: 1, reviews: [...records, relaunch] });
+    // GitHub lists review 11 as DISMISSED on H; an observer that does not know it is answered adopts it.
+    const seen: number[][] = [];
+    const observe = (_record: ReviewRecord, _identity: string, ids: Set<number>) => { seen.push([...ids]); return ids.has(11) ? null : { state: 'DISMISSED', reviewer, reviewId: 11, submittedAt: at(1) }; };
+    const reconciled = (await reconcileReviews(root, config, { run: herdrRun([]), observe, work: [item], agents: null })).reviews;
+    assert.deepEqual(seen, [[11]], 'the relaunched session is told verdict 11 is already answered');
+    const after = reconciled.find(record => record.id === relaunch.id)!;
+    assert.equal(after.state, 'pending', 'it is not recorded failed on the dismissed approval the moment it starts');
+    assert.equal(after.verdict, undefined);
+    // Delivered, the item no longer reads H's verdicts: the reconcile releases the head and the next write reaps the approval.
+    const delivered = work({ stage: 'done' } as Partial<Work>);
+    const closing = reconciled.map(record => record.id === relaunch.id ? { ...record, state: 'cancelled' as const, closedAt: at(2000) } : record);
+    releaseClosedRequests(closing, [delivered], new Date(at(2001)));
+    assert.ok(closing.find(record => record.id === approval.id)!.headReleasedAt, 'the head is released once the item is delivered');
+    await saveReviewLedger(root, { version: 1, reviews: closing });
+    assert.equal((await readReviewLedger(root)).reviews.some(record => record.id === approval.id), false, 'and the approval is reaped');
   } finally { await cleanup(); }
 });
 
@@ -268,9 +313,25 @@ test('integration:ledger-refusal-attributed — master status names a full ledge
     assert.match(items[0].text, /not reviewer capacity/);
     assert.doesNotMatch(items[0].text, /is busy in Herdr/, 'it is not reported as waiting on a busy reviewer agent');
     assert.match((items[0] as any).next ?? JSON.stringify(items[0]), /settle the live sessions/, 'it names the remedy');
+    // The remedy says what a reconcile does with a session gone from Herdr: it waits out the idle grace, it does not settle it on that pass.
+    assert.match(JSON.stringify(items[0]), /marked idle by the first pass that finds it gone and failed by the first pass after its 5-minute idle grace, not on the same one/);
+    assert.doesNotMatch(JSON.stringify(items[0]), /settles on that pass/);
     const row = attributed.work.find((entry: { key: string }) => entry.key === 'GY-131') as { attention: string | null };
     assert.match(row.attention!, /review ledger/, 'the row names the ledger too');
     assert.doesNotMatch(row.attention!, /busy/);
+    // counts.attention moves with the list: the superseded items leave the count as the one ledger item joins it.
+    const counted = ledgerRefusalAttention({ work: status.work, attentionItems: [...status.attentionItems, busy], counts: { attention: status.attentionItems.length + 1 } }, [item]);
+    assert.equal(counted.counts!.attention, counted.attentionItems.length, 'the count matches the listed items');
+    // A refusal that no longer stands is not attributed: the action failed once on the full ledger, then was claimed again, or completed.
+    const recovered = (events: object[]) => work({ autoDispatch: { review: request, producers: [], history: [] },
+      actionQueue: { actions: [{ id: 'row-1', key: 'GY-131', gate: 'review', kind: 'request-review', work: 'work-131', state: 'claimed', attempts: 2, history: [failed, ...events], requestedAt: now }], history: [] } } as unknown as Partial<Work>);
+    const running = { subject: 'GY-131', text: 'GY-131 is under review by review-claude-1', owner: 'master' } as any;
+    for (const events of [[{ ...failed, event: 'claimed', reason: 'claimed' }], [{ ...failed, event: 'claimed', reason: 'claimed' }, { ...failed, event: 'completed', reason: 'review requested', result: 'done' }]]) {
+      const later = recovered(events);
+      const quiet = ledgerRefusalAttention({ work: [{ key: 'GY-131', attention: running.text, dispatch: null }], attentionItems: [running], counts: { attention: 1 } }, [later]);
+      assert.deepEqual(quiet.attentionItems, [running], 'the running reviewer is still what the item shows');
+      assert.equal(quiet.counts!.attention, 1);
+    }
     // Nothing is rewritten for an item whose launch was not refused by a ledger.
     const untouched = ledgerRefusalAttention({ work: [{ key: 'GY-7', attention: 'reviewer agent review-claude-1 is busy in Herdr', dispatch: null }], attentionItems: [busy] }, []);
     assert.equal(untouched.attentionItems.length, 1);
