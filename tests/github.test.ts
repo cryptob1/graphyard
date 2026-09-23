@@ -619,9 +619,11 @@ test('a missing blob at the bound base is a new file, and a provider failure oth
   f.baseBlobs({ [`${base}:src/dir/with space.ts`]: 'b'.repeat(40) });
   assert.equal(await f.github.blobAt('src/dir/with space.ts', base), 'b'.repeat(40));
   assert.ok(f.calls.some(call => call.path === `/contents/src/dir/with%20space.ts?ref=${base}`), 'path segments are encoded individually');
-  f.github.request = async (path, method, body) => { if (path.startsWith('/contents/')) throw new Refusal(`GitHub GET ${path} failed (503)`, 502); return request(path, method, body); };
+  // Blobs at a commit SHA never change, so the client memoizes them; this fixture rewrites the answer for the same commit.
+  const forget = () => (f.github as any).blobs.clear();
+  forget(); f.github.request = async (path, method, body) => { if (path.startsWith('/contents/')) throw new Refusal(`GitHub GET ${path} failed (503)`, 502); return request(path, method, body); };
   await assert.rejects(f.github.blobAt('src/none.ts', base), /503/);
-  f.github.request = async () => ({ type: 'file', sha: 'not-a-sha' });
+  forget(); f.github.request = async () => ({ type: 'file', sha: 'not-a-sha' });
   await assert.rejects(f.github.blobAt('src/none.ts', base), /readable blob/);
   f.github.request = async () => [{ type: 'file', sha: 'b'.repeat(40) }];
   assert.equal(await f.github.blobAt('src', base), null, 'a directory is not a file the guard compares');

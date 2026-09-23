@@ -60,6 +60,7 @@ export class GitHub {
   private authentication?: Promise<void>;
   private cache = new Map<string, { etag: string; value: any }>();
   private ancestry = new Map<string, boolean>();
+  private blobs = new Map<string, string | null>();
   private preflightState: AppPermissionReport | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
@@ -494,7 +495,9 @@ export class GitHub {
    * refuses rather than passes.
    */
   private async compareScope(plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
-    const lookup = async (path: string) => budget.remaining-- > 0 ? this.blobAt(path, base) : undefined;
+    // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
+    // then asked a few at a time: in turn they held a final merge verification past its window.
+    const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
     const compared: ScopeFile[] = [];
     for (const file of files) {
       const status: ScopeFile['status'] = ['added', 'modified', 'removed', 'renamed', 'copied', 'changed', 'unchanged'].includes(file.status) ? file.status : 'modified';
@@ -502,14 +505,24 @@ export class GitHub {
       const entry: ScopeFile = { path: file.filename, status, ...(previousPath ? { previousPath } : {}),
         sha: status !== 'removed' && typeof file.sha === 'string' && /^[a-f0-9]{40}$/.test(file.sha) ? file.sha : null,
         additions: Number.isSafeInteger(file.additions) ? file.additions : 0, deletions: Number.isSafeInteger(file.deletions) ? file.deletions : 0, binary: typeof file.patch !== 'string' };
-      if (!file.uncompared && !inPlannedScope(plannedFiles, entry.path)) { const baseSha = await lookup(entry.path); if (baseSha !== undefined) entry.baseSha = baseSha; }
-      if (previousPath && status === 'renamed' && !inPlannedScope(plannedFiles, previousPath)) { const previousBaseSha = await lookup(previousPath); if (previousBaseSha !== undefined) entry.previousBaseSha = previousBaseSha; }
+      if (!file.uncompared && !inPlannedScope(plannedFiles, entry.path) && budget.remaining-- > 0) wanted.push({ entry, field: 'baseSha', path: entry.path });
+      if (previousPath && status === 'renamed' && !inPlannedScope(plannedFiles, previousPath) && budget.remaining-- > 0) wanted.push({ entry, field: 'previousBaseSha', path: previousPath });
       compared.push(entry);
     }
+    const found = await boundedMap(wanted, peerContainmentConcurrency, want => this.blobAt(want.path, base));
+    wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
     return compared;
   }
   /** Blob identity of a path at a ref, or null when the ref holds no file there. */
   async blobAt(path: string, ref: string): Promise<string | null> {
+    // A path's blob at a commit SHA never changes, so it is asked of GitHub once.
+    const pinned = /^[a-f0-9]{40}$/.test(ref) ? `${ref}:${path}` : null;
+    if (pinned && this.blobs.has(pinned)) return this.blobs.get(pinned)!;
+    const found = await this.readBlob(path, ref);
+    if (pinned) { this.blobs.set(pinned, found); if (this.blobs.size > ancestryEntries) this.blobs.delete(this.blobs.keys().next().value!); }
+    return found;
+  }
+  private async readBlob(path: string, ref: string): Promise<string | null> {
     let entry: any;
     try { entry = await this.request(`/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`); }
     catch (error) { if (error instanceof Refusal && /\(404\)/.test(error.message)) return null; throw error; }
