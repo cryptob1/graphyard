@@ -224,7 +224,7 @@ A held slot is released on a bound of **15 minutes** (`consentHoldMs`). The watc
 
 The paste path remains for the three messages that are typed into a running session: the request of a runtime without a request contract, the loop's one re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged. Each is recorded only once its runtime visibly accepted it: Herdr submits the text and waits for the agent to leave `idle`. A runtime that reports ready before its input is (OpenCode does while its UI loads) drops the text and stays idle, which Herdr reports as a stalled prompt. A stalled prompt is delivered again, up to three times; a session that still has not taken its request is closed — for a worker, the claim is released too — and launched once more from scratch before the launch is reported refused. A session is never left idle until a timeout.
 
-The generated `AGENTS.md` section ([onboarding](onboarding.md#3-connect-a-worker-and-herdr)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher writes the same authorization to the session's role file and loads it on the command line (`--append-system-prompt-file`, see [how the request reaches the runtime](#how-the-request-reaches-the-runtime)).
+The generated `AGENTS.md` section ([onboarding](onboarding.md#what-the-generated-instructions-authorize)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher writes the same authorization to the session's role file and loads it on the command line (`--append-system-prompt-file`, see [how the request reaches the runtime](#how-the-request-reaches-the-runtime)).
 
 ### Acknowledgement, the one re-prompt, and never started
 
@@ -446,8 +446,9 @@ a master started for the same decision with `master approver` is adopted rather 
 name is built inside the runtime's own limit — at most 32 characters, starting with a lowercase
 letter, made of lowercase letters, digits, `-` and `_` — and built so that what a human reads first
 survives it: the work key is kept whole and the decision id takes what the limit leaves, up to
-eight characters. A key long enough to crowd the decision id out shortens the role word instead
-(`gy-approver-<key>-<decision>`), because a cut-short key says less than an abbreviated role does;
+eight characters. A key long enough to leave the decision id fewer than six shortens the role word
+instead (`gy-approver-<key>-<decision>`, from `GY-1000` up), because a cut-short key says less than an
+abbreviated role does and a cut-short decision id is how two decisions on one item become one session;
 only a key too long for even that carries a digest of the whole identity, so a shortened name still
 names one decision only. Every other session name Graphyard generates (worker, reviewer, producer,
 master, escalation handler) is built and checked the same way, where it is constructed: a profile
@@ -889,6 +890,77 @@ What still slips through is measured: `master status` lists under `impliedScopeR
 item, every scope request (open, or the last one decided) whose paths a criterion already names —
 a request that should never have been needed — with its `count`. A non-zero count is an authoring
 fault to fix at creation, not a worker's.
+
+### Resource observation
+
+Graphyard gates every work item, and the loop consumes bounded resources of its own: ledgers with a
+record cap, Herdr agent names, session slots, the GitHub App's request budget, its own liveness, the
+code it loaded, the plane's database and the coordinator's disk. Until these were observed, each one
+failed silently and was diagnosed from what it broke downstream — a review ledger at its cap read as
+"reviewer agent … is busy in Herdr" for hours. Every one of them is now declared once, in the
+resource registry (`resourceRegistry` in `src/master-resources.ts`), with its bound, where its usage
+is read, the component that owns it, how it is reclaimed, and the remedy. A test fails when the loop
+consumes a bounded session ledger or a resource the registry does not declare.
+
+| Resource | Bound | Usage read from | Warns when headroom falls below | Reclaimed |
+| --- | --- | --- | --- | --- |
+| `review-ledger` | `sessionLedgerBound`: 200 live and pinned records (retained terminal records do not count; see [The session ledgers](#the-session-ledgers)) | `.graphyard/reviews.json` | a tenth of the bound (20 records) | unpinned terminal records reaped 15 minutes after they settle, unless they answer a live review request; every write also reaps past the retention |
+| `producer-ledger` | `sessionLedgerBound`: 200 live and pinned records | `.graphyard/producers.json` | a tenth of the bound (20 records) | as the review ledger |
+| `agent-names:PROFILE` | the profile's concurrency: its fixed name, or that many derived names | `herdr agent list` | one name, and only when a name is held by a pane no live session owns | a finished pane on the name, its record settled and nothing pending on it, is closed once two passes a minute apart have seen it so; a worker's pane by the loop's first step once its lease ends |
+| `session-slots:ROLE` | the summed concurrency of the role's launch profiles | pending ledger records; live worker leases | one slot, and only while a request waits for one | a pending session blocked on a prompt for 10 minutes, or absent from Herdr on every pass for 10 minutes, is failed, releasing its slot |
+| `github-budget` | the installation's hourly core limit | `/healthz` `resources.github` (the plane reads `GET /rate_limit`, cached a minute; while the GitHub client is paused after a rate-limit refusal, the budget reads as spent until the pause ends) | a tenth of the limit | GitHub restores it at the reset it reports |
+| `executor-liveness` | two cycle intervals past the last cycle, plus any announced backoff | the loop's daemon cursor | half the bound | the supervisor restarts a loop whose watchdog stops hearing it |
+| `loaded-revision` | zero commits behind | the times of the checkout's HEAD reflog entries against the loop process's start time | — (any revision behind is at its bound) | a restart loads the checkout's code |
+| `database-capacity` | `GRAPHYARD_DATABASE_MAX_BYTES` on the plane (default 10 GiB, which only warns; set it to the volume's size) | `/healthz` `resources.database` (`pg_database_size`) | a tenth of the bound | none automatic: the ledger is append-only; grow the volume |
+| `worktree-disk` | the volume holding `.graphyard/worktrees` | statfs | `run.diskThresholdGb` free | [Worktree disk](#worktree-disk) |
+
+**One command reads the whole picture.** `graphyard master status` carries a `resources` block: a
+one-line `summary` naming every reading that is low or exhausted (and any that could not be read),
+then one row per reading — `used`, `bound`, `headroom`, `warnBelow`, `state` (`ok`, `low`,
+`exhausted` or `unknown`), `detail`, `owner`, `reclaim`, `reclaimable` and, for slots, `waiting` —
+and `lastReclaim`, the last pass that took anything back. A reading below its line raises an
+attention item with subject `resource:ID`, owned by the master, naming the resource, its usage, its
+bound, its headroom and its remedy — while there is still headroom, not after the first refusal. The
+namespace and slot readings are judged on what nothing live is using: a name held by a running
+session, or a full slot pool with nobody waiting, is the fleet working.
+
+**Refusals name the resource.** A launch refused by a resource at its bound records that resource
+and its bound as the action's reason — `Herdr agent-name namespace (reviewer-a) is at its bound: 1
+names used of 1 names, 0 names left — …` or `Review ledger is at its bound: 200 records used of 200
+records …` — never "busy in Herdr" or the ledger's schema error; the executor checks the reviewer's
+namespace before it asks the runtime, and attributes a ledger write its cap refused. A stalled
+action repeating that reason carries the same attribution, and `master status` rewrites any older
+attention item that is the downstream symptom of an exhausted resource so that it names the
+resource instead.
+
+**The reclaim pass.** Every cycle, after worktree reclamation, the loop runs the resource reclaim
+pass (`graphyard master run --once` runs it immediately). It reaps terminal ledger records past
+their 15-minute retention that answer no live request; closes a finished pane holding a profile's name,
+releasing the name, once its record has been settled a minute, nothing pending holds it, and an
+earlier pass at least a minute before saw it the same way — a session launched a moment ago holds
+its name before its record is written, so one sighting never closes a pane; and
+fails a pending session that has sat blocked on a prompt (a consent dialog, a question) for 10
+minutes, or that every pass for 10 minutes has found absent from Herdr — one inventory that misses a
+working session is not its end — releasing its slot so the relaunch rule may try again, and closes
+its pane. A session never acknowledged that left Herdr is recorded as `never started`, so the
+launcher's retry policy for unstarted sessions applies. The pass decides from one read of each
+ledger, closes the panes, then applies its decisions to a fresh read: a launch recorded meanwhile is
+kept, and a session that settled meanwhile keeps its own result. Each pass that took anything back is recorded as a `reclaim` action in the loop's cursor
+and appended to `.graphyard/resource-reclaims.json` (the last 50 passes). It never removes a pending
+record, a record the relaunch rule still counts, or a worker's pane.
+
+**A plane that cannot record is not dispatched into.** `/healthz` reports `healthy: false` and
+names each cause under `causes` while a write in a rolled-back transaction is refused — a read-only
+database, a standby, a role without write privilege — or while a resource the plane owns is at its
+bound: its GitHub budget (including while the client is paused after a rate limit), or its database
+once `GRAPHYARD_DATABASE_MAX_BYTES` is set (the unconfigured 10 GiB default only warns in `master
+status`). The plain endpoint answers that verdict with HTTP 200, because it is also the platform's
+liveness probe and a restart gives back neither a budget nor a volume; `/healthz?strict` answers 503
+whenever it is unhealthy, for a monitor that reads the status alone. Before it dispatches, the loop
+reads that verdict; while the plane
+reports itself unhealthy, or cannot be reached, the cycle dispatches nothing and records one
+`escalation:dispatch:plane` action naming the cause, and dispatch resumes on the first cycle after
+the plane reports healthy again.
 
 ### Scope requests the loop decides
 
@@ -2594,6 +2666,72 @@ reads that output. The committed `tests/helpers/timing-baseline.json` is the spr
 regression is judged against: the CI job summary prints each run's measurement beside it, and the
 suite refuses a timing-dependent assertion whose spread was never recorded. On a machine whose
 `/tmp` is under a quota, point `TMPDIR` at a sticky directory outside it for the run.
+
+## Throughput verification after deployment
+
+[Typed actions and stateless executors](#typed-next-actions-and-stateless-executors) shipped with a
+throughput claim: routine deliveries reach merge from their first submission in at most 30 minutes
+at the median, and nothing that has something to do waits longer than the five-minute idle bound
+for somebody to do it — with no master session running. That claim was demonstrated over a
+simulated fleet, which says the arithmetic holds and nothing about what the deployed release does.
+Delivered is not proven, so `master status` carries the claim in one of three states and never
+assumes it, under `throughput`:
+
+- `verified` — a recorded measurement of the revision now serving met both budgets.
+- `unverified`, with `shortfall` — a measurement of this revision missed one, with the values.
+- `unverified`, with the reason — the last measurement was of another release, or none was taken.
+
+Anything but `verified` raises an attention item owned by the master, with the command that
+measures it, as soon as the installation has delivered anything at all.
+
+The measurement is a separate run, because it reads the deployed release's own identity and the
+whole ledger:
+
+```sh
+GRAPHYARD_URL=… GRAPHYARD_TOKEN_FILE=… node scripts/measure-throughput.mjs \
+  --record .graphyard/measurements/throughput
+```
+
+It reads `/api/status` for the release actually serving — its release revision is the deployed
+commit the report names, or, for a build that never stamped one (`GRAPHYARD_BUILD_REVISION`), the
+build identity's `commit` that the platform injects and `/healthz` serves; the report's
+`revisionSource` says which named it, and with neither the claim stays unverified — and `/api/work-snapshot` for the ledger, checks that the deployed revision
+contains the claim's own merge commit (`git merge-base --is-ancestor`, from `--repository`, which
+defaults to the working directory), and judges the window that starts where a release carrying the
+claim began serving: the coordinator's [deployment observation](#deployment-verification) on the
+claim's delivery, or, when there is none, its merge instant — reported as the weaker basis it is,
+never moved later to improve a figure. `--since`, `--until` and `--claim` override the window and
+the item; `--json` prints the whole report; `--record DIR` writes it as one timestamped file, which
+is what `master status` reads. An unverified verdict exits 2, so a scheduled run cannot report a
+miss as a quiet success. A missing local commit, shallow checkout or other ancestry-check failure
+is unverified too: only a positive containment result can verify the claim, and `master status`
+rechecks that fact from the recorded report before displaying `verified`. The arithmetic is the
+module master status uses (`src/throughput.ts`), and the percentiles are the same nearest-rank
+estimator as [pipeline speed](#pipeline-speed).
+
+**The population rule is the delicate part, so it is written to be audited rather than trusted.** A
+delivery is counted when it is a merged pull request of this repository with a recorded submission,
+at most one rework round — the same routine population the speed target is stated over — at least
+one action an executor claimed and completed, and no trace of a coordinator on it: no
+action superseded before an executor ran it — the queue's own record of something outside it moving
+the item on — no coordination session recorded, and no blocked report or requirements revision while
+it was under way. Every delivery the window holds is listed either way, with the executor that
+claimed each of its actions, the host it ran on, its submit→merge time and its longest
+idle-but-actionable wait, and, when it is excluded, the reason. Deliberate waits are not idleness:
+the backoff after a failed attempt is subtracted, and the settle window a completed row holds never
+opens a wait.
+
+Narrowing a population until it passes is the failure this guards against, so the report also
+carries `all` — the same figures over every real delivery in the window, counted or not — and
+`populationEffect`, which says in words when the exclusions flatter the result and by how much.
+Nothing synthetic is admitted: an item with no merge commit, no pull request, no worker who held
+it, or no action an executor completed is refused before the coordinator rule is even asked.
+
+A miss is a finding about the design, never a reason to move a budget or shrink the window. The
+report records the measured values, what missed and by how much, and a follow-up naming it — an
+unnamed release is listed beside the population and budget misses, never instead of them, and a
+figure over no deliveries reads `n/a`, never zero minutes; raise
+that follow-up as a work item against the claim, the same as any other finding.
 
 ## Interventions as product feedback
 

@@ -57,11 +57,12 @@ the exact commit observed. Each refusal names its cause and the fix:
 
 ## Daily checks
 
-- `/healthz` should return 200, confirm database connectivity, and name the release (`version`, `revision`), the deployed `commit` and the schema generation you expect to be running.
+- `/healthz` should return 200 with `healthy: true`, confirm the database accepts writes, and name the release (`version`, `revision`), the deployed `commit` and the schema generation you expect to be running. `healthy: false` names each cause under `causes` (`/healthz?strict` answers 503 then); see [control-plane resources](#control-plane-resources).
+- `graphyard master status` should report `resources.summary` as all within their warning lines.
 - Authenticated `/api/status` should show no persistent integration errors, no `delegationLimits.attention`, and no open `production.incidents`.
 - Inspect the delivery graph for old work, stale observations, and blockers.
 - Keep backups and verify a restore in an isolated environment periodically: `graphyard db backup`, `db verify` and `db restore` are the shipped procedure — see [backup, upgrade, rollback](deployment.md#backup-upgrade-rollback).
-- Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning.
+- Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning; `resources.database` in `/healthz` reports the size against `GRAPHYARD_DATABASE_MAX_BYTES`, and `master status` warns at nine tenths of it.
 
 ## Master coordination loop
 
@@ -153,7 +154,92 @@ Jobs keep the error and retry after 45 seconds. Expired job leases are recoverab
 
 A permission error is different. The server compares the installed App's permissions with the [declared set](github.md#app-permissions) at startup, every five minutes, and after any 403; a shortfall is an attention item in `GET /api/status` (`appPermissions`), the dashboard, and `master status`, naming the missing permission and the installation page. Jobs that need the missing permission are held rather than retried — `diagnose GY-N` shows `integration-held` — and a job that hits an unexpected 401/403 retries at most three times before it is held for thirty minutes, and a passing preflight releases it only if the installation reading changed since the hold (otherwise it re-checks once per hold, so attempts stay bounded even for a 403 the declaration does not explain). Accept the pending permission request (`github-setup --update-permissions` prints the exact steps) and the next preflight releases every job held on it; nothing needs restarting. See [migrating an existing App](github.md#migrating-an-existing-app).
 
-Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, but periodic polling is the fallback. Missing webhooks should delay progress rather than permanently strand it.
+Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, but periodic polling is the fallback. Missing webhooks should delay progress rather than permanently strand it — and a webhook that has gone silent is named as such (see [webhook liveness](#webhook-liveness)) rather than compensated for without a word.
+
+## GitHub request budget
+
+GitHub gives the App installation a fixed number of requests an hour (5,000 for the smallest installation; the limit itself is read from every response) and reports what is left on every response. Before GY-117 observation ignored that: every open candidate was observed again twenty seconds after its last observation whatever state it was in, an observation costs on the order of ten requests, and twenty candidates spent the hour in about forty minutes. The remaining twenty were a blackout in which every gate read stale, including the merge gate of a candidate that had nothing left to prove. The budget is now read from every response and spent by state.
+
+### The live budget
+
+The control plane reads `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` from every installation response and keeps: requests remaining, the reset time, and the spend rate over the last ten minutes (`perMinute`), from which it projects when the budget reaches zero (`projectedExhaustionAt`) and whether that lands before the reset (`exhaustsBeforeReset`). A conditional read GitHub answers with `304 Not Modified` costs nothing and is counted as a request made, not as budget spent. `GET /api/status` and `graphyard status` report all of it under `githubBudget`; `master status` raises an attention item naming the projected exhaustion time whenever the spend rate would exhaust the budget before the reset. The budget is the process's own reading: one replica, one client, one account of what it spent.
+
+### Observation cadence by state
+
+Polling is a backstop to the webhook. A successful observation is repeated after **20 seconds** while its item heads the merge queue (a merge needs an observation under 25 seconds old) and after **five minutes** otherwise; a failed one after 45 seconds. Each observation is also classified into a band from the item's own [next action](master-agent.md#typed-next-actions-and-stateless-executors), which decides what it may spend under the merge-path reserve below and is reported against the job that made it:
+
+| Band | State | Cadence | Why |
+| --- | --- | --- | --- |
+| `merge` | Heads the merge queue; under the reserve, any candidate at the merge gate with every other gate passing still spends | 20 seconds at the head | The merge executor refuses an observation older than two minutes and spends most of that on its own critical path |
+| `active` | Waiting on something GitHub can still deliver: a check, a review, a base refresh | 5 minutes | A webhook naming the pull request wakes it at once; polling covers a missed delivery |
+| `steady` | `active`, and the last observation came back with head, base tip, check state and review state unchanged | 5 minutes, stretched by the fleet bound below | The webhook wakes it the moment any of that moves; polling is the safety net |
+| `idle` | The next action is a dispatch, a rework or an escalation | 5 minutes; when unchanged, stretched by the same fleet bound if longer | Nothing on GitHub can move it |
+
+A webhook delivery wakes at once, whatever its band, the jobs of the pull requests and commits it names (a push to the base branch or a merge-queue ref wakes them all), and a woken job (`woken` on the claimed job) is never held by the reserve. Observation is webhook-first and polling is the safety net: for any non-merge candidate whose head, base tip, check state and review state are unchanged since its last observation, the fleet-wide steady-state spend is bounded to a documented share of the hourly limit — **at most 40%** (`steadyStateShare`) — by stretching its interval past the five-minute backstop when every open candidate polling for an hour would otherwise exceed that share, counting every request (a free 304 included) and using the measured mean cost per observation (ten requests until one is measured). The bound only ever lengthens the backstop. `githubBudget.steadyState` reports the open candidates, the mean cost and the interval in force. The merge path, webhook wakes and the master session's own reads always have the remaining headroom.
+
+### The merge-path reserve
+
+When the remaining budget falls below a reserve sized for the merge path — **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE` on the deployment for an installation with a different limit — non-merge observations yield: they are rescheduled past the reset rather than spent, and `githubBudget.deferrals` lists each one with the reason naming the reserve. Merge-gate candidates, webhook wakes and merge verification (the exact-head read the guarded merge makes) continue, so a candidate that has nothing left to prove still lands while the rest of the fleet waits for the reset.
+
+The reading expires with its reset. A deferred observation makes no request, so only a spent request refreshes the count; once `resetAt` has passed, GitHub has replenished the budget and the count from before it is no longer what is left. `githubBudget` then reports `remaining`, `used` and `resetAt` as unknown (`null`) with `expiredResetAt` naming the reset that passed, the reserve never defers on an unknown reading, and the first observation due after the reset (or after a pause lifts, whose refusal reported zero remaining) is made rather than held: its response reads the fresh budget, and that reading decides the observations that follow.
+
+### What an observation costs
+
+Every request carries its `ETag`, and GitHub charges nothing for the `304` it answers with, so a candidate whose head, base tip and check state are unchanged since the last observation costs at most two uncached requests, usually none. The request count of each observation — every request, and the ones GitHub actually charged — is recorded against the job that made it (`githubBudget.observations.jobs`, with the band and cadence it earned) and `graphyard status` reports the mean cost per observation over the last hour (`githubBudget.observations.meanRequests`, `meanUncached`). The conditional-read cache holds 4,096 entries, enough for tens of open candidates; an entry evicted between two observations of the same candidate turns a free 304 back into a charged read.
+
+### What a pause means for gates
+
+A `403`/`429` GitHub answers for rate limiting pauses every request until the reset (or the `retry-after`, whichever is later). The pause is one incident, not twenty identical job errors: `master status` and the dashboard show one attention item stating that GitHub requests are paused, until when, what exhausted the budget (requests in the last hour by kind: `pulls`, `check-runs`, `compare`, `contents`, …), and that gates read stale until it lifts. Each stopped job keeps its own refusal in the ledger and comes back when the pause lifts rather than retrying into the same refusal every 45 seconds. While paused, the merge gate refuses observations older than two minutes as it always does, so nothing merges on stale evidence; the merge-path reserve exists so that a pause is rare rather than routine.
+
+### Reading the budget
+
+- `graphyard status` (or `GET /api/status`) → `githubBudget`: `remaining` of `limit`, `resetAt`, `perMinute`, `projectedExhaustionAt`, `exhaustsBeforeReset`, `reserve`/`belowReserve`, `paused`, `lastHour.byKind`, `cadence`, `steadyState`, `observations`, `deferrals`. `remaining: null` with `expiredResetAt` set means the last reading's reset has passed and the next spent request refreshes it; `remaining: null` with `observedAt: null` means no installation response has been read yet.
+- `graphyard master status` → `attentionItems` with subject `github`: the pause in force, the projected exhaustion, or the silent webhook, each with who resolves it and what to run.
+- The dashboard's home page shows the pause as one notice.
+
+### Webhook liveness
+
+Polling that quietly compensates for a broken webhook hides the fault and spends the budget doing it. `GET /api/status` and `graphyard status` report `webhooks`: the time of the last verified delivery received (`lastDeliveryAt`), the count in the last hour (`lastHour`), whether a secret is configured, the App settings page (`settingsUrl`) and the open pull requests that could be woken. `master status` raises an attention item when no delivery has arrived for an hour while pull requests are open, naming the App webhook settings page (`https://github.com/settings/apps/APP-SLUG`, or the organization equivalent; recent deliveries under `…/advanced`) and the webhook URL `https://YOUR-HOST/api/github/webhook` the App must post to. A delivery that arrives clears it.
+
+## Control-plane resources
+
+Every bounded resource the loop and the plane consume is declared in one registry — its bound, where
+its usage is read, the component that owns it, how it is reclaimed — and the full table is in the
+[master-agent guide](master-agent.md#resource-observation). Read the whole picture with one command:
+`graphyard master status`, whose `resources.summary` names every reading that is low, exhausted or
+unread, and whose `resources.readings` gives each one as used of bound with its headroom. A reading
+below its warning line is also an attention item with subject `resource:ID` naming the remedy.
+
+- **`review-ledger` / `producer-ledger` low.** Terminal records are reaped 15 minutes after they
+  settle. Run `graphyard master run --once` to reclaim now; records that answer a live request stay
+  until the request is answered or superseded, so a ledger full of those needs the requests settled.
+- **`agent-names:PROFILE` at its bound with a pane no live session owns.** The reclaim pass closes
+  the pane once two passes a minute apart have seen it finished with its record settled. By hand: read the pane, confirm the verdict or result
+  was posted, then `herdr pane close PANE`.
+- **`session-slots:ROLE` at its bound with requests waiting.** Raise `concurrency` on a profile of
+  the role, or add a profile on another account, in `.graphyard/master.json`; the loop adopts it on
+  its next cycle. A session stuck on a prompt, or absent from Herdr, for 10 minutes is failed by the
+  reclaim pass and its slot released.
+- **`github-budget` low.** Fewer open candidates or a longer observation interval until the reset
+  the reading names (while the client is paused after a rate limit, the reading is `exhausted` and
+  names the pause's end); every guarded merge waits on observations younger than two minutes.
+- **`executor-liveness` / `loaded-revision`.** `graphyard master restart` (a supervised deployment:
+  `systemctl --user restart graphyard-master`) restarts the loop onto the checkout's code.
+- **`database-capacity` low.** Grow the database volume, then raise `GRAPHYARD_DATABASE_MAX_BYTES`
+  on the plane to the new size. Left unset, the 10 GiB default only warns; once it is set, the plane
+  reports itself unhealthy at the bound. The ledger is append-only; nothing reclaims it.
+- **`worktree-disk` low.** See the worktree disk procedure in the [master-agent guide](master-agent.md#worktree-disk).
+
+**`/healthz` reports `healthy: false`.** The plane cannot serve its purpose, and `causes` says why:
+`Writes are refused: …` (the database is read-only, a standby, or the role lost write privilege —
+restore write access), or a resource the plane owns at its bound (the database once
+`GRAPHYARD_DATABASE_MAX_BYTES` is set, the GitHub budget). While it is unhealthy — or cannot be
+reached — the master loop dispatches nothing and records one `escalation:dispatch:plane` action with
+the cause; dispatch resumes on the first cycle after it reports healthy. The plain endpoint still
+answers HTTP 200 for this verdict, so the Helm chart's and Railway's probes on it neither restart the
+plane nor pull it from its Service — the API stays up for the operator's recovery — and it fails
+(500) only when the process cannot reach its database. Alert on `/healthz?strict`, which answers 503
+whenever the verdict is unhealthy.
 
 ## GitHub or Graphyard outage
 
@@ -362,7 +448,7 @@ Drift is informational, never auto-repaired: rerun `init --scan`, compare the re
 
 ## Scale limits
 
-The kernel serializes short coordination mutations. The initial reconciler processes up to four provider jobs per tick per replica. The list API returns all work, while the event API returns the most recent 300 events. These are deliberate MVP bounds, not a benchmark claiming hundreds of agents at production load. Monitor latency, database lock wait, job lag, memory, and GitHub rate limits before increasing concurrency.
+The kernel serializes short coordination mutations. The initial reconciler processes up to four provider jobs per tick per replica. The list API returns all work, while the event API returns the most recent 300 events. These are deliberate MVP bounds, not a benchmark claiming hundreds of agents at production load. Monitor latency, database lock wait, job lag, memory, and the [GitHub request budget](#github-request-budget) before increasing concurrency.
 
 ## Dashboard connection and keyboard behavior
 

@@ -47,18 +47,29 @@ export class Store {
   async events(id?: string) {
     return (await this.pool.query('SELECT * FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300', [id ?? null])).rows;
   }
+  /**
+   * Claim the next due job. `woken` says the claim follows a webhook delivery (the generation
+   * moved since the job was last claimed) rather than the schedule its last run set: a woken job
+   * is observed at once whatever its cadence and whatever is left of the GitHub budget.
+   */
   async takeJob() {
     const token = randomUUID();
-    const result = await this.pool.query(`UPDATE jobs SET token=$1, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
-      WHERE work_id=(SELECT work_id FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY available_at FOR UPDATE SKIP LOCKED LIMIT 1)
-      RETURNING *`, [token]);
-    return result.rows[0] as { work_id: string; token: string; attempts: number } | undefined;
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+      UPDATE jobs SET token=$1, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
+      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [token]);
+    return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
   }
-  /** `settleSeconds` is the re-poll delay after a success; the caller slows it for candidates not about to merge. */
-  async finishJob(id: string, token: string, error?: string, retry = false, settleSeconds = 20) {
+  /**
+   * Release a job with its next due time. A clean run comes back at the observation cadence its
+   * item's state earned (`availableInMs`, GY-117; twenty seconds when the caller sets none), a
+   * failed one after 45 seconds, and a concurrency retry after two. A webhook that arrived during
+   * the run has moved the generation, and the job comes back at once whatever was asked.
+   */
+  async finishJob(id: string, token: string, error?: string, retry = false, availableInMs?: number) {
+    const scheduled = availableInMs === undefined ? null : String(Math.max(0, Math.floor(availableInMs)));
     await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=$3,held_until=NULL,held_reason=NULL,held_on=NULL,refusals=CASE WHEN $3::text IS NULL THEN 0 ELSE refusals END,
-      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $3::text IS NULL THEN make_interval(secs => $5::int) ELSE interval '45 seconds' END
-      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, settleSeconds]);
+      available_at=now()+ CASE WHEN generation<>claimed_generation THEN interval '0 seconds' WHEN $4::boolean THEN interval '2 seconds' WHEN $5::text IS NOT NULL THEN ($5::text||' milliseconds')::interval WHEN $3::text IS NULL THEN interval '20 seconds' ELSE interval '45 seconds' END
+      WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, error ?? null, retry, scheduled]);
   }
   /**
    * Parks a job that needs a permission the App does not hold. Webhook wakeups move
@@ -101,6 +112,15 @@ export class Store {
     await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,
       available_at=CASE WHEN generation<>claimed_generation THEN now() ELSE $3::timestamptz END
       WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, until]);
+  }
+  /**
+   * Whether GitHub's webhook is actually delivering: the last verified delivery recorded and the
+   * count in the last hour. Own-App check deliveries are ignored before they are recorded, so this
+   * counts the deliveries that can wake a job.
+   */
+  async webhookLiveness() {
+    const row = (await this.pool.query("SELECT max(created_at) AS last, count(*) FILTER (WHERE created_at > now() - interval '1 hour') AS last_hour FROM webhook_receipts")).rows[0];
+    return { lastDeliveryAt: row.last ? (row.last as Date).toISOString() : null, lastHour: Number(row.last_hour) };
   }
 }
 

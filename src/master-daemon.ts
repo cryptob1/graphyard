@@ -12,6 +12,7 @@ import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
+import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
 import { stalledItems } from './model/action-account.js';
@@ -1223,6 +1224,13 @@ export interface DaemonEffects {
    */
   reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
   /**
+   * The resource reclaim pass (GY-132): reaps terminal ledger records, closes finished sessions
+   * holding profile names, and releases the slots of stuck sessions. Runs every cycle.
+   */
+  reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
+  /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
+  planeHealth?: () => Promise<string | null>;
+  /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
    * A loop configured without these three keeps cycling: each routine decision is then recorded as
    * an escalation naming the command a master session runs, exactly as before.
@@ -1660,6 +1668,19 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  // 3a. Reclaim the loop's own bounded resources (GY-132): ledger records, agent names and
+  //     session slots, each within the bound docs/master-agent.md documents, recorded when it took any.
+  if (effects.reclaimResources) {
+    try {
+      const inventory = await effects.herdr?.();
+      const report = await effects.reclaimResources(snapshot.work, inventory ? (inventory.available ? inventory.agents : null) : agents);
+      const detail = describeReclaim(report);
+      if (detail) performed.push(await record(state, `reclaim:resources:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done', detail: detail.slice(0, 2000), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, `reclaim:resources:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Resource reclaim failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
+
   // 3b. Reclaim the items whose sessions died. A supervised launch fences its worker in a scope
   //     unit; when that session dies the fence outlives it and the item cannot be claimed again
   //     until somebody settles the quarantine. This host is the only one that can verify the
@@ -1774,8 +1795,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }
 
+  // A plane that cannot record what a launch produces is not dispatched into (GY-132): the worker
+  // could not claim, and its work would be recorded nowhere. One escalation names the cause.
+  const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await effects.planeHealth() : null;
+  if (unrecordable && state.actions['escalation:dispatch:plane']?.detail !== `Dispatch held: ${unrecordable}`)
+    performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`.slice(0, 2000), attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   const taken = new Set<string>();
-  for (const item of workersSpent ? [] : claimable) {
+  for (const item of workersSpent || unrecordable ? [] : claimable) {
     const key = dispatchKey(item);
     if (state.actions[key] && state.actions[key].state !== 'failed') continue;
     const free = await effects.agents();
@@ -2614,6 +2640,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     snapshot: deps.snapshot,
     closeSession: pane => closeHerdrPane(pane, run),
+    reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
+    planeHealth: () => dispatchRefusal(current().url, fetcher),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
     recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
     decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
