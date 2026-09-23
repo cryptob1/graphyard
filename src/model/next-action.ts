@@ -66,6 +66,8 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
   { gate: 'build', match: /^Pull request has not been independently observed$/, kind: 'resync' },
   { gate: 'build', match: /has not been compared against the base branch tip/, kind: 'resync' },
   { gate: 'build', match: /^(Candidate changes|Out-of-scope regression)/, kind: 'request-rework' },
+  // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
+  { gate: 'build', match: /the head returns to its worker before review$/, kind: 'request-rework' },
   // A base the control plane cannot merge in cleanly is the worker's to resolve, on a fresh head:
   // the refusal itself says to run `graphyard sync`, resolve it and push, and that approval and
   // proofs do not survive the resolution. Re-reading the pull request cannot produce that head, so
@@ -114,10 +116,13 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
  * reviews a session answers — so this mapping is exhaustive over `ReviewState` and the only state
  * it leaves to `request-review` is the one a launched reviewer can actually answer.
  */
-export function reviewStandstill(work: Work): { kind: NextActionKind; reason: string } | null {
+export function reviewStandstill(work: Work, all: Work[] = [work], now = new Date()): { kind: NextActionKind; reason: string } | null {
   if (!work.candidate || !work.observation) return null;
-  const need = reviewNeed(work);
+  const need = reviewNeed(work, all, now);
   switch (need.state) {
+    // Mechanical proofs precede review (GY-115): producers first; a failed proof owes a new head.
+    case 'proofs-pending': return { kind: 'dispatch', reason: need.reason };
+    case 'proof-failed': return { kind: 'request-rework', reason: need.reason };
     // Changes requested on this exact head — as a GitHub review, or as the verdict an agent
     // reviewer records — means the item needs a new commit, which is a judgment's to make.
     case 'changes-requested': return { kind: 'request-rework', reason: need.reason };
@@ -141,7 +146,7 @@ export function reviewStandstill(work: Work): { kind: NextActionKind; reason: st
  * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue, and a
  * review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
-export function refusalAction(work: Work, gate: string, refusal: string): NextActionKind {
+export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
   if (gate === 'test' && /^Required CI check (.+) has not passed on the current candidate$/.test(refusal)) {
     const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
@@ -149,7 +154,7 @@ export function refusalAction(work: Work, gate: string, refusal: string): NextAc
     return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) ? 'request-rework' : 'resync';
   }
   if (gate === 'review') {
-    const standstill = reviewStandstill(work);
+    const standstill = reviewStandstill(work, all, now);
     if (standstill) return standstill.kind;
   }
   if (gate === 'merge') {
@@ -253,12 +258,13 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
     // A live lease is a session already doing exactly what the build gate is waiting for. Naming
     // a dispatch here would offer the item to a second worker while the first still holds it.
     if (failing.name === 'build' && liveLease) return null;
-    const kind = refusalAction(work, failing.name, refusal);
+    const kind = refusalAction(work, failing.name, refusal, all, now);
     // An unfinished dependency is the dependency's dispatch, not this item's; nothing waits here.
     if (failing.name === 'ready' && /^Dependency .+ is unfinished$/.test(refusal)) return null;
     const binding = `${failing.name}:${work.policyRevision}:${short(work.candidate?.sha)}:${short(work.candidate?.baseSha)}:${refusal}`;
     if (kind === 'dispatch') {
-      if (failing.name === 'acceptance') {
+      // A review refusal is a dispatch only while the head's mechanical proofs have not run (GY-115).
+      if (failing.name === 'acceptance' || failing.name === 'review') {
         const inputs = proofInputs(work, all, now);
         // Every unproven proof is a manual one the operator holds: the control plane cannot
         // dispatch it, and saying so is an escalation rather than a dispatch nobody can run.
@@ -271,14 +277,14 @@ export function nextAction(work: Work, all: Work[], now: Date): NextAction | nul
     // A review refusal the reviewer's own reading already answered says "approval is required"
     // while the item is actually waiting for a new head or a base refresh; the reason and the
     // detail name what it is waiting for rather than the refusal that classified it.
-    const standstill = failing.name === 'review' ? reviewStandstill(work) : null;
+    const standstill = failing.name === 'review' ? reviewStandstill(work, all, now) : null;
     const detail = standstill?.reason ?? refusal;
     if (kind === 'request-review') {
       // Nothing may be asked of a head the control plane has not observed as a live candidate;
       // reviewNeed reads that observation, so ineligibility is decided before it is consulted.
       const ineligible = dispatchIneligibility(work);
       if (ineligible) return make('resync', `${key} cannot be reviewed yet: ${ineligible}`, resyncInputs(work), binding, failing.name, refusal);
-      const need = reviewNeed(work);
+      const need = reviewNeed(work, all, now);
       // The last guard on the invariant this item exists to hold: a review request is opened only
       // while `needed`, so asking for a reviewer when it is false would hand an executor a row
       // nothing can settle. `reviewStandstill` names an action for every such state today; a state

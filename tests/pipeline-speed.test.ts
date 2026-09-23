@@ -234,7 +234,7 @@ function stubEffects(items: () => Work[], log: { kind: string; key: string; sha:
   };
 }
 
-test('integration:speed-auto-dispatch — one passing observation records the review request and one producer request per proof group on the exact head in the same transaction, a single dispatcher tick launches the reviewer and every producer together within the 30-second bound, and no master command is involved', async () => {
+test('integration:speed-auto-dispatch — one passing observation records one producer request per proof group on the exact head in the same transaction, a single dispatcher tick launches every producer together within the 30-second bound, the review request follows the head\'s mechanical proofs (GY-115) and the next tick launches the reviewer, and no master command is involved', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'graphyard-speed-dispatch-'));
   try {
     let item = await submitted('Auto-dispatched head', ['src/pipeline-speed.ts'], { producerProofs: ['manual:speed-target-met'] });
@@ -242,27 +242,37 @@ test('integration:speed-auto-dispatch — one passing observation records the re
     const submittedAt = Date.now();
     item = await engine.observe(item.id, item.revision, observed(item, { sha: H, baseSha: B }));
     assert.ok(item.gates.find(gate => gate.name === 'build')!.passed);
-    const review = item.autoDispatch!.review!;
-    assert.deepEqual([review.state, review.sha, review.baseSha, review.policyRevision, review.pr], ['requested', H, B, item.policyRevision, item.submission!.pr]);
+    // GY-115: no reviewer is asked about the head before its unit and integration proofs have passed.
+    assert.equal(item.autoDispatch!.review, null);
     assert.deepEqual(item.autoDispatch!.producers.map(request => [request.group, request.sha, request.state]), [['unit', H, 'requested'], ['integration', H, 'requested'], ['manual', H, 'requested']]);
     assert.deepEqual(item.autoDispatch!.producers.map(request => request.proofs), [['unit:speed-scope-diff'], ['integration:speed-regression-guard', 'integration:speed-auto-dispatch', 'integration:speed-reconcile-latency', 'integration:speed-ci-proofs', 'integration:speed-metrics'], ['manual:speed-target-met']]);
     const requested = await events(item, 'dispatch.requested');
-    assert.equal(requested.length, 4); assert.ok(requested.every(event => event.actor === 'graphyard'), 'the control plane itself records the requests');
+    assert.equal(requested.length, 3); assert.ok(requested.every(event => event.actor === 'graphyard'), 'the control plane itself records the requests');
     assert.ok(requested.every(event => event.payload.details.sha === H && event.payload.details.baseSha === B));
     assert.ok((await store.events(item.id)).every(event => event.actor !== coordinator.id), 'no coordinator command touched the item');
     // The dispatcher: one tick, every request launched in parallel, each profile bound to its group.
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const log: Parameters<typeof stubEffects>[1] = [];
-    const current = item;
-    const tick = await runDispatchTick(masterConfig(token), emptyDispatchCursor(masterConfig(token)), stubEffects(() => [current], log), () => Date.now());
-    assert.equal(tick.launched.length, 4); assert.deepEqual(tick.refused, []); assert.deepEqual(tick.waiting, []);
-    assert.deepEqual(log.map(entry => [entry.kind, entry.group, entry.profile]).sort(), [['producer', 'integration', 'producer-integration'], ['producer', 'manual', 'producer-manual'], ['producer', 'unit', 'producer-unit'], ['review', null, 'claude-reviewer']]);
+    let current = item;
+    const effects = stubEffects(() => [current], log), cursor = emptyDispatchCursor(masterConfig(token));
+    const tick = await runDispatchTick(masterConfig(token), cursor, effects, () => Date.now());
+    assert.equal(tick.launched.length, 3); assert.deepEqual(tick.refused, []); assert.deepEqual(tick.waiting, []);
+    assert.deepEqual(log.map(entry => [entry.kind, entry.group, entry.profile]).sort(), [['producer', 'integration', 'producer-integration'], ['producer', 'manual', 'producer-manual'], ['producer', 'unit', 'producer-unit']]);
     assert.ok(log.every(entry => entry.sha === H && entry.key === item.key), 'every session is launched on the exact head');
     assert.ok(Math.max(...log.map(entry => entry.at)) - submittedAt < 30_000, 'observation to every launch fits the 30-second bound');
+    // The mechanical proofs pass: the review request is recorded on the same head and the next tick launches the reviewer.
+    for (const proof of ['unit:speed-scope-diff', 'integration:speed-regression-guard', 'integration:speed-auto-dispatch', 'integration:speed-reconcile-latency', 'integration:speed-ci-proofs', 'integration:speed-metrics'])
+      item = await engine.execute(producer, 'evidence', item.id, { proof, sha: H, baseSha: B, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+    const review = item.autoDispatch!.review!;
+    assert.deepEqual([review.state, review.sha, review.baseSha, review.policyRevision, review.pr], ['requested', H, B, item.policyRevision, item.submission!.pr]);
+    current = item;
+    const next = await runDispatchTick(masterConfig(token), cursor, effects, () => Date.now());
+    assert.deepEqual(next.launched.map(entry => [entry.kind, entry.profile, entry.sha]), [['review', 'claude-reviewer', H]]);
     // A head change cancels the whole set and requests the new head afresh, still without a master.
     item = await engine.observe(item.id, item.revision, observed(item, { sha: H2, baseSha: B }));
-    assert.equal(item.autoDispatch!.review!.sha, H2); assert.ok(item.autoDispatch!.producers.every(request => request.sha === H2));
-    assert.equal((await events(item, 'dispatch.cancelled')).length, 4);
+    assert.equal(item.autoDispatch!.review, null); assert.deepEqual(item.autoDispatch!.producers.map(request => [request.group, request.sha]), [['unit', H2], ['integration', H2], ['manual', H2]]);
+    // What was still open for H — its review and the manual proof — is cancelled; the proven groups were satisfied.
+    assert.deepEqual((await events(item, 'dispatch.cancelled')).map(event => event.payload.details.kind).sort(), ['producer', 'review']);
     // Trusted evidence for every proof of a group satisfies its request; the master routes nothing.
     for (const proof of ['unit:speed-scope-diff']) item = await engine.execute(producer, 'evidence', item.id, { proof, sha: H2, baseSha: B, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
     assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['integration', 'manual']);

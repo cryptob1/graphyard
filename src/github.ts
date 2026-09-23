@@ -4,6 +4,7 @@ import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
+import { mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
@@ -784,7 +785,10 @@ export async function processJob(engine: Engine, github: GitHub) {
       // A head that does not contain the base tip is not reviewed: the request is deferred, and
       // diagnose reports why, until the refresh above republishes it, the queue publishes a tip
       // that contains it, or — when the merge conflicts — the worker resolves it and pushes.
-      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && observation.baseTipContained !== false;
+      // Nor is a head whose unit and integration proofs have not all passed: mechanical
+      // verification precedes review for every provider, not only the one a session answers.
+      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && observation.baseTipContained !== false
+        && !mechanicalHold(work, all, new Date());
       // A request binds the exact candidate; an approval Graphyard carried onto its own authored
       // tip already stands for that candidate, so no new request is dispatched for it.
       const unbound = (item: Work, profile?: string) => !carriedApproval(item) && (!item.reviewRequest || item.reviewRequest.sha !== item.candidate?.sha

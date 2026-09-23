@@ -52,6 +52,12 @@ export const dispatchHistoryLimit = 50;
 export const automatableProof = (work: Pick<Work, 'producerProofs'>, proof: string) =>
   /^(unit|integration):/.test(proof) || proof.startsWith('manual:') && (work.producerProofs ?? []).includes(proof);
 export const producerGroupOf = (proof: string): ProducerGroup => proof.slice(0, proof.indexOf(':')) as ProducerGroup;
+/**
+ * A proof a machine settles without judgment: every unit and integration proof. These run before a
+ * reviewer is asked for anything (GY-115); a manual proof, even one a producer session runs, is
+ * judgment and stays beside the review rather than ahead of it.
+ */
+export const mechanicalProof = (proof: string) => /^(unit|integration):/.test(proof);
 
 const short = (sha: string) => sha.slice(0, 12);
 const binds = (request: Pick<DispatchRequest, 'sha' | 'baseSha' | 'policyRevision'>, work: Work) =>
@@ -92,8 +98,8 @@ export function dispatchIneligibility(work: Work): string | null {
  * three that cannot be answered by a launched reviewer say so in their own name.
  */
 export type ReviewState = 'required' | 'not-required' | 'approved' | 'carried' | 'changes-requested'
-  | 'base-not-contained' | 'provider-dispatched' | 'provider-exhausted';
-export function reviewNeed(work: Work): { needed: boolean; reason: string; state: ReviewState } {
+  | 'base-not-contained' | 'provider-dispatched' | 'provider-exhausted' | 'proofs-pending' | 'proof-failed';
+export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): { needed: boolean; reason: string; state: ReviewState } {
   if (!work.policy.review) return { needed: false, state: 'not-required', reason: 'the policy requires no independent review' };
   const provider = reviewProviderOf(work.policy);
   const approval = exactApproval(work);
@@ -109,6 +115,11 @@ export function reviewNeed(work: Work): { needed: boolean; reason: string; state
   if (verdict?.verdict === 'changes-requested' && verdict.provider === provider && verdict.sha === candidate.sha)
     return { needed: false, state: 'changes-requested', reason: `${verdict.profile ?? provider} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
   if (observation.baseTipContained === false) return { needed: false, state: 'base-not-contained', reason: `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')}; a review of it would be dismissed when GitHub recomputes the merge base` };
+  // Mechanical verification precedes judgment, for every provider: no reviewer is asked about a
+  // head whose unit and integration proofs have not run, and a head that fails one goes back to
+  // its worker (the build gate names the criterion) instead of consuming a reviewer session.
+  const held = mechanicalHold(work, all, now);
+  if (held) return held;
   // No reviewer identity is left to ask: the roster is spent for this candidate, and adding
   // capacity or selecting another provider is the operator's judgment, not a step anyone runs.
   if (provider === 'agent' && !reviewerProfileFor(work))
@@ -138,6 +149,32 @@ export function automatableOutcomes(work: Work, all: Work[], now: Date): { proof
     const outcome: ProofOutcome = !evidence ? 'unproven' : evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0 ? 'proven' : 'failed';
     return { proof, group: producerGroupOf(proof), outcome, ...(evidence ? { producer: evidence.producer } : {}) };
   });
+}
+
+/** One mechanical proof of the head, read as the criteria that name it read it. */
+export interface MechanicalVerdict { criteria: string[]; proof: string; outcome: ProofOutcome; producer?: string }
+export function mechanicalVerdicts(work: Work, all: Work[], now: Date): MechanicalVerdict[] {
+  const named = (proof: string) => work.criteria.filter(criterion => !criterion.bootstrap && criterion.proofs.includes(proof)).map(criterion => criterion.id);
+  return automatableOutcomes(work, all, now).filter(entry => mechanicalProof(entry.proof))
+    .map(entry => ({ criteria: named(entry.proof), proof: entry.proof, outcome: entry.outcome, ...(entry.producer ? { producer: entry.producer } : {}) }));
+}
+const criteriaOf = (verdict: MechanicalVerdict) => verdict.criteria.length ? verdict.criteria.join(', ') : 'an inherited obligation';
+/**
+ * The build-gate refusal that returns a head to its worker for one failed mechanical proof, naming
+ * the criterion. Because the build gate refuses, no review request stands for the head.
+ */
+export const mechanicalFailure = (verdict: MechanicalVerdict, sha: string) =>
+  `${criteriaOf(verdict)}: ${verdict.proof} failed on ${short(sha)} (trusted evidence from ${verdict.producer}); the head returns to its worker before review`;
+
+/** Why no reviewer may be asked about this head yet, or null once every mechanical proof has passed on it. */
+export function mechanicalHold(work: Work, all: Work[], now: Date): { needed: false; reason: string; state: ReviewState } | null {
+  if (!work.candidate) return null;
+  const verdicts = mechanicalVerdicts(work, all, now), sha = work.candidate.sha;
+  const failed = verdicts.filter(verdict => verdict.outcome === 'failed');
+  if (failed.length) return { needed: false, state: 'proof-failed', reason: failed.map(verdict => mechanicalFailure(verdict, sha)).join('; ') };
+  const pending = verdicts.filter(verdict => verdict.outcome === 'unproven');
+  if (pending.length) return { needed: false, state: 'proofs-pending', reason: `review follows the mechanical proofs: ${pending.map(verdict => `${criteriaOf(verdict)} ${verdict.proof}`).join(', ')} ${pending.length === 1 ? 'has' : 'have'} not passed on ${short(sha)} yet` };
+  return null;
 }
 
 const requestId = (parts: (string | number)[]) => createHash('sha256').update(['dispatch', ...parts].join('\0')).digest('hex').slice(0, 32);
@@ -176,8 +213,10 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     const candidate = work.candidate!;
     // Review: one live request per head, resolved by the verdict that lands on it.
     if (state.review && !binds(state.review, work)) { resolve(state.review, 'cancelled', staleReason(state.review)); state.review = null; }
-    const need = reviewNeed(work);
-    if (state.review && !need.needed) { resolve(state.review, 'satisfied', need.reason); state.review = null; }
+    const need = reviewNeed(work, all, now);
+    // A standing request over a head whose mechanical proofs are not all passing is withdrawn, not
+    // answered: nothing reviewed it. (A request raised before GY-115 is the only way to hold one.)
+    if (state.review && !need.needed) { resolve(state.review, need.state === 'proofs-pending' || need.state === 'proof-failed' ? 'cancelled' : 'satisfied', need.reason); state.review = null; }
     if (!state.review && need.needed) state.review = open({ kind: 'review', provider: 'github', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: need.reason });
     // Producers: one live request per proof group with something left to prove. A head whose
     // trusted evidence already failed is not asked for again; the master routes that finding.

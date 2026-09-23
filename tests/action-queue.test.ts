@@ -106,6 +106,8 @@ function observation(item: Work, overrides: Partial<Observation> = {}): Observat
     prState: 'open', draft: false, baseTip: base, baseTree: sha40('7e'), baseTipContained: true, ...overrides,
   };
 }
+/** Trusted evidence for the item's one mechanical proof on the head: since GY-115 its review follows it. */
+const proveHead = (item: Work) => engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: item.policyRevision, result: 'pass', executed: 1, skipped: 0 }, randomUUID());
 /** Publish the queue tip the merge authorization requires; the queue's own behaviour has its own tests. */
 async function publishTip(item: Work) {
   const current = await reload(item);
@@ -152,8 +154,17 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(item.nextAction!.kind, 'resync');
   assert.equal(inputs(item).pr, item.submission!.pr);
 
-  // Observed without an approval: the review request, bound to the exact head, base and policy.
+  // Observed, but its mechanical proof has not run (GY-115): the producer is what the head needs
+  // next, and no reviewer is asked about it yet.
   item = await engine.observe(item.id, item.revision, observation(item, { reviews: [] }));
+  assert.equal(item.nextAction!.kind, 'dispatch');
+  assert.deepEqual(inputs(item), { kind: 'dispatch', target: 'proof', group: 'integration', proofs: [PROOF], requestId: item.autoDispatch!.producers[0].id, pr: item.submission!.pr, sha: head, baseSha: base, policyRevision: 1 });
+  assert.equal(item.nextAction!.llmRole, 'produce-evidence');
+  assert.equal(item.nextAction!.gate, 'review'); assert.equal(item.autoDispatch!.review, null);
+  assert.equal(refusalAction(item, 'review', item.nextAction!.refusal!), 'dispatch');
+
+  // Proven and without an approval: the review request, bound to the exact head, base and policy.
+  item = await proveHead(item);
   assert.equal(item.nextAction!.kind, 'request-review');
   assert.deepEqual(inputs(item), { kind: 'request-review', provider: 'github', requestId: item.autoDispatch!.review!.id, pr: item.submission!.pr, sha: head, baseSha: base, policyRevision: 1 });
   assert.equal(item.nextAction!.llmRole, 'review');
@@ -252,14 +263,9 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(answeredAction.llmRole, 'approve-decision', 'a new head is a judgment owed, not a step an executor runs');
   assert.match((answeredAction.inputs as any).detail, /codex requested changes on [0-9a-f]{12}; the next head is reviewed afresh/);
 
-  // Approved and green: the proof the acceptance gate is missing, with its group and proof names.
+  // Approved, green and already proven — the proof dispatch the acceptance gate once named here now
+  // precedes the review (above): the merge, with the queue position it will land in.
   item = await engine.observe(item.id, item.revision, observation(item, { baseTipContained: true, baseTip: base }));
-  assert.equal(item.nextAction!.kind, 'dispatch');
-  assert.deepEqual(inputs(item), { kind: 'dispatch', target: 'proof', group: 'integration', proofs: [PROOF], requestId: item.autoDispatch!.producers[0].id, pr: item.submission!.pr, sha: head, baseSha: base, policyRevision: 1 });
-  assert.equal(item.nextAction!.llmRole, 'produce-evidence');
-
-  // Proven: the merge, with the queue position it will land in.
-  item = await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 4, skipped: 0 }, randomUUID());
   item = await publishTip(item);
   item = await engine.observe(item.id, item.revision, observation(item));
   assert.equal(item.nextAction!.kind, 'merge');
@@ -396,7 +402,7 @@ test('integration:typed-next-action — an unsettled containment fence escalates
 
 test('integration:action-queue-leases — actions are durable leased rows: a dead executor loses its claim, another retries without double-executing, and history names requester, executor, result and reason', async () => {
   const pending = await submitted();
-  let item = await engine.observe(pending.id, pending.revision, observation(pending, { reviews: [] }));
+  let item = await proveHead(await engine.observe(pending.id, pending.revision, observation(pending, { reviews: [] })));
   const open = rows(item);
   assert.equal(open.length, 1);
   assert.equal(open[0].kind, 'request-review');
@@ -466,10 +472,9 @@ test('integration:action-queue-leases — actions are durable leased rows: a dea
     'the document the event carries holds the whole transition history of the row');
 
   // The situation changes: the approval lands, so the row that no longer applies is retired
-  // with the reason, and the acceptance gate's own action takes its place.
+  // with the reason. The head was proven before its review (GY-115), so nothing else is owed yet.
   item = await engine.observe(item.id, item.revision, observation(item));
-  assert.equal(rows(item).length, 1);
-  assert.equal(row(item).kind, 'dispatch');
+  assert.equal(rows(item).length, 0);
   const retired = item.actionQueue!.history.at(-1)!;
   assert.equal(retired.id, claimed.action!.id);
   assert.equal(retired.result, 'done', 'a completed row becomes history untouched when its situation moves on');
@@ -1324,8 +1329,8 @@ test('integration:session-handles-visible — the reviewer and producer launcher
   const item = await submitted();
   await engine.observe(item.id, item.revision, observation(item, { reviews: [] }));
   const withRequests = await reload(item);
-  assert.ok(withRequests.autoDispatch?.review, 'the control plane asked for a review of this head');
-  assert.ok(withRequests.autoDispatch!.producers.length, 'and for the proofs this head still owes');
+  assert.equal(withRequests.autoDispatch?.review, null, 'no reviewer is asked about a head whose proof has not run (GY-115)');
+  assert.ok(withRequests.autoDispatch!.producers.length, 'the control plane asked for the proofs this head still owes');
 
   // A session the control plane itself asked for may record its own handle without holding a
   // lease: the live dispatch request is the item naming that session, and the handle is keyed on
@@ -1367,9 +1372,15 @@ test('integration:session-handles-visible — the reviewer and producer launcher
     recordSession: async (work, handle) => { handles.push({ key: work.key, handle }); return production.recordSession!(work, handle); },
     persist: async () => {},
   };
-  const tick = await runDispatchTick(fleetConfig, emptyDispatchCursor(fleetConfig), effects);
-  assert.deepEqual(tick.launched.map(entry => entry.kind).sort(), ['producer', 'review'], `the tick launched ${JSON.stringify(tick.waiting)}`);
-  assert.ok(tick.launched.every(entry => entry.work === item.key));
+  const cursor = emptyDispatchCursor(fleetConfig);
+  const tick = await runDispatchTick(fleetConfig, cursor, effects);
+  assert.deepEqual(tick.launched.map(entry => entry.kind), ['producer'], `the tick launched ${JSON.stringify(tick.waiting)}`);
+  // The proof passes: the control plane asks for the review, and the next tick launches the reviewer.
+  const reviewable = await proveHead(await reload(item));
+  assert.ok(reviewable.autoDispatch?.review, 'the control plane asked for a review of this head once its proof passed');
+  const next = await runDispatchTick(fleetConfig, cursor, effects);
+  assert.deepEqual(next.launched.map(entry => entry.kind), ['review'], `the tick launched ${JSON.stringify(next.waiting)}`);
+  assert.ok([...tick.launched, ...next.launched].every(entry => entry.work === item.key));
   assert.equal(handles.length, 2, 'a handle was recorded for each launch');
   assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session'], 'each one went to the control plane through the shipped mutation');
   // And a dispatcher built with nothing but a snapshot records them too: the mutation is derived
@@ -1387,8 +1398,8 @@ test('integration:session-handles-visible — the reviewer and producer launcher
   assert.match(proof.subject, new RegExp(`${PROOF}`));
   // The handle is keyed on the dispatch request, so a relaunch for the same request updates it
   // rather than leaving two handles for one session.
-  assert.equal(review.id, withRequests.autoDispatch!.review!.id);
-  assert.equal(launchedSessionHandle('review', withRequests.autoDispatch!.review!, 'subject', 'host-1', undefined, 'claude', 'wF').attach, undefined,
+  assert.equal(review.id, reviewable.autoDispatch!.review!.id);
+  assert.equal(launchedSessionHandle('review', reviewable.autoDispatch!.review!, 'subject', 'host-1', undefined, 'claude', 'wF').attach, undefined,
     'a launcher that reports no pane records no attach command it cannot honour');
 
   // A worker session Herdr reports blocked is waiting on input, not gone: the attempt is recorded
