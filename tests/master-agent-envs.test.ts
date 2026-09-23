@@ -423,7 +423,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     const start = expandTypedCommand(masterCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
     assert.equal(start.kind, 'codex'); assert.deepEqual(start.args.slice(0, 4), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
     assert.ok(start.args.includes('sandbox_workspace_write.network_access=true') && start.args.includes(join(credentialDirectory, 'masters')));
-    assert.deepEqual(masterCalls.map(args => args[1]), ['create', 'run', 'get', 'rename'], 'typed, seen ready, named; nothing pasted'); assert.match(start.args.at(-1)!, /dedicated Graphyard master agent/);
+    assert.deepEqual(masterCalls.map(args => args[1]), ['create', 'run', 'get', 'read', 'rename'], 'typed, seen ready with no consent prompt on screen (GY-130), named; nothing pasted'); assert.match(start.args.at(-1)!, /dedicated Graphyard master agent/);
 
     // The master harness covers everything the master owns, and still no merge path or credential
     // read: master.json is read, never edited — its owned settings change through `master config` —

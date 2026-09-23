@@ -719,7 +719,8 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     assert.equal(held['env-a'].reason, `You've hit your weekly limit · resets ${resetsAt}`);
     const tabs = calls.filter(args => args[0] === 'tab' && args[1] === 'create').map(args => args.find(arg => arg.startsWith('CLAUDE_CONFIG_DIR='))!.split('/').at(-1));
     assert.deepEqual(tabs, ['env-a', 'env-b']);
-    assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'read').map(args => args[2]), ['pane-env-a'], 'the pane is read once, at the first observation and before its tab is closed: the notice is never waited out against the start bound');
+    // env-b's one read is its idle start checked for a first-run consent prompt (GY-130).
+    assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'read').map(args => args[2]), ['pane-env-a', 'pane-env-b'], 'the exited pane is read once, at the first observation and before its tab is closed: the notice is never waited out against the start bound');
     assert.equal(calls.some(args => args[0] === 'agent' && args[1] === 'rename' && args[2] === 'pane-env-a'), false, 'nothing is named on the exited pane');
     assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'close').map(args => args[2]), ['pane-env-a'], 'the exited session\'s tab is closed; the running one stays');
     const skipped = (await readEnvironmentLog(config)).skipped.at(-1)!;
