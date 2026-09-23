@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { childRunner, type ChildRun } from './child-runner.js';
 import type { Work } from './model.js';
 import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
 import { runtimeEndedStates } from './harness.js';
@@ -211,8 +211,8 @@ export function selectReviewerProfile(config: MasterConfig): { profile: Reviewer
 
 export interface DispatchEffects {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
-  /** Herdr's agent list, or null when Herdr could not be read. */
-  agents: () => HerdrAgent[] | null;
+  /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
+  agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
@@ -264,10 +264,9 @@ export class InstantExitError extends Error {
 }
 /** How many times one profile launches again on its next account within a single tick after such exits. */
 export const instantExitRelaunchLimit = 4;
-export type HerdrRun = (command: string, args: string[]) => string;
 export interface InstantExitWatch {
   /** The launcher's Herdr calls, with each read of the pane it typed the launch into remembered. */
-  run: HerdrRun;
+  run: ChildRun;
   /** The launcher's pause between polls of that pane: a pane already showing the notice is refused here, never waited out. */
   start: StartBounds;
   /** A refusal the launcher raised at its bound, classified from the pane's last read; any other error as it came. */
@@ -279,23 +278,24 @@ export interface InstantExitWatch {
  * own `pane read`, so the pane is read no more often than the launcher reads it and never after
  * the launcher closed it.
  */
-export function watchInstantExit(run: HerdrRun, now: () => number = Date.now): InstantExitWatch {
+export function watchInstantExit(run: ChildRun, now: () => number = Date.now): InstantExitWatch {
   let pane: string | null = null, screen: string | null = null, missing: unknown = null;
   const exit = () => { const notice = pane && screen !== null ? detectExhaustion(screen, now()) : null; return notice ? new InstantExitError({ pane: pane!, words: sessionWords(screen), notice }, missing) : null; };
   return {
-    run: (command, args) => {
+    run: (command, args, options) => {
       const herdr = command === 'herdr';
       if (herdr && args[0] === 'pane' && args[1] === 'run') { pane = args[2] ?? null; screen = null; missing = null; }
-      try {
-        const result = run(command, args);
-        if (herdr && pane && args[0] === 'pane' && args[1] === 'read' && args[2] === pane) screen = String(result);
-        return result;
-      } catch (error) {
-        if (herdr && pane && args[0] === 'agent' && args[1] === 'get' && args[2] === pane && herdrErrorCode(error) === 'agent_not_found') missing = error;
-        throw error;
-      }
+      const read = (result: string) => { if (herdr && pane && args[0] === 'pane' && args[1] === 'read' && args[2] === pane) screen = String(result); return result; };
+      const refused = (error: unknown): never => { if (herdr && pane && args[0] === 'agent' && args[1] === 'get' && args[2] === pane && herdrErrorCode(error) === 'agent_not_found') missing = error; throw error; };
+      // The runner's answer is passed on as it came: a test's table answers at once, the process's
+      // bounded runner (GY-125) answers on the event loop, and the watch notes the read either way.
+      let result: Promise<string> | string;
+      try { result = run(command, args, options); } catch (error) { return refused(error); }
+      return typeof result === 'string' ? read(result) : result.then(read, refused);
     },
-    start: { wait: ms => { const exited = exit(); if (exited) throw exited; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } },
+    // A pane already showing the notice is refused before the pause; otherwise the pause is a timer
+    // the launcher awaits, never a blocking sleep, so the cycle's reads beside it are served.
+    start: { wait: ms => { const exited = exit(); if (exited) throw exited; return new Promise<void>(resolve => setTimeout(resolve, ms)); } },
     classify: error => error instanceof SessionStartError && error.pane === pane && error.startCase !== 'blocked' ? exit() ?? error : error,
   };
 }
@@ -477,7 +477,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
-  const herdr = effects.agents();
+  const herdr = await effects.agents();
   const { reviews } = await effects.reconcileReviews(snapshot.work, herdr);
   const { producers } = await effects.reconcileProducers(snapshot.work, herdr);
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
@@ -731,8 +731,10 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
-export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: HerdrRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
-  const run = deps.run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }));
+export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
+  // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
+  // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
+  const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
   const current = typeof config === 'function' ? config : () => config;
   const log = deps.log ?? (line => console.error(line));
   // A repair is logged once per path: the same over-long string would otherwise be reported on
@@ -752,7 +754,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   });
   return {
     snapshot: deps.snapshot,
-    agents: () => { try { return listHerdrAgents(run); } catch { return null; } },
+    agents: () => listHerdrAgents(run).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
