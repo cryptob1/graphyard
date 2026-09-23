@@ -112,12 +112,16 @@ export interface SupervisedSession {
   unconsented?: () => string | null;
 }
 
+/** How long a delivered request may take to be visibly accepted, inside the probe's own 10-second command bound. */
+export const consentRequestAcceptMs = 8_000;
 /**
  * The launcher's consent hold on this supervisor's session (GY-130): the record it leaves beside
  * the launch files in the worktree when the runtime stopped on a first-run prompt outside its
  * allow-list. While the prompt is on the pane's screen the session has not read its request; a
  * prompt a human answered clears the hold, and one still showing past the hold's `releaseAt`
- * answers the cause the supervisor surrenders the assignment for instead of renewing it again.
+ * answers the cause the supervisor surrenders the assignment for instead of renewing it again. A
+ * runtime without a request contract, whose request is pasted after it starts, is sent it here
+ * once its prompt clears (the hold's `request`).
  */
 export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[]) => string = (command, args) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 })), now: () => number = Date.now): () => string | null {
   return () => {
@@ -127,7 +131,19 @@ export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.P
     let screen: string | null = null;
     try { screen = run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', '40']); } catch { screen = null; }
     const verdict = consentHoldVerdict(hold, screen, now());
-    if (verdict === 'cleared') clearConsentHold(hold.path);
+    if (verdict === 'cleared') {
+      // A runtime prompted after it starts was never sent its request while the dialog was up: it
+      // is delivered now, and the hold stays until the runtime visibly accepts it, so a failed
+      // delivery is tried again on the next check and, past the bound, gives the slot back.
+      if (hold.request) {
+        try {
+          run('herdr', ['agent', 'prompt', pane, readFileSync(hold.request, 'utf8'), '--wait', '--until', 'working', '--until', 'blocked', '--timeout', String(consentRequestAcceptMs)]);
+        } catch (error) {
+          return now() >= Date.parse(hold.releaseAt) ? `its session never took its request: the ${hold.kind} consent prompt was answered, but the request could not be delivered by the hold bound (${hold.releaseAt}): ${error instanceof Error ? error.message.split('\n')[0].slice(0, 200) : String(error)}` : null;
+        }
+      }
+      clearConsentHold(hold.path);
+    }
     return verdict === 'release' ? `its session never took its request: it waited on a ${hold.kind} consent prompt outside the launcher's allow-list from ${hold.since} past the hold bound (${hold.releaseAt}) — "${hold.prompt}"` : null;
   };
 }

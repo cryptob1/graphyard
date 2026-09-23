@@ -1304,9 +1304,11 @@ export function startAgentSession(name: string, kind: string, pane: string, args
     // name before its dialog is answered does not turn the hold into a failed start.
     if (!started.awaiting) throw error;
   }
-  // A session awaiting consent has not read its request, so a paste would land in the dialog.
+  // A session awaiting consent has not read its request, so a paste would land in the dialog: the
+  // request waits in its launch file instead, for whoever clears the hold to deliver.
   if (delivery === 'paste' && !started.awaiting) deliverPrompt(name, text, run, options);
-  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting,
+  const pending = delivery === 'paste' && started.awaiting ? writeLaunchFiles(options.directory, name, { request: text }).request : null;
+  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: pending } : undefined,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
@@ -2832,8 +2834,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
-export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind'] }, now = Date.now()): ConsentHold {
-  return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString() };
+export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null }, now = Date.now()): ConsentHold {
+  return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}) };
 }
 
 async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds) {

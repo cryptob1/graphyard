@@ -9,9 +9,10 @@ import { z } from 'zod';
  * Codex asks whether to trust hooks that are new or changed, Claude Code whether to trust the
  * folder, others whether to send telemetry. Herdr reports such a pane `idle`, which is also what a
  * started session looks like, so the launcher reads the pane's screen for the dialog itself rather
- * than taking the state on trust. A screen is a consent prompt only when it both asks one of these
- * questions and offers a numbered choice — a session merely printing the words (this item's own
- * description quotes the dialog) is not a menu waiting for a keystroke.
+ * than taking the state on trust. A screen is a consent prompt only when it ends on one dialog that
+ * asks one of these questions directly above a numbered choice — a session merely printing the
+ * words (this item's own description quotes the dialog), or printing them above some unrelated
+ * list, is not a menu waiting for a keystroke.
  *
  * The launcher answers a prompt only when a rule below names it, and only with the option the rule
  * picks off the screen by its label, never by a guessed number: the least-privilege answer, which
@@ -57,22 +58,42 @@ export const neverAnswered: ConsentKind[] = ['credential', 'payment'];
 /** How much of the screen bottom a dialog is read from, and how much of it a record keeps. */
 export const consentScreenLines = 25, consentTextLimit = 400;
 
+/**
+ * The dialog the screen ends on: its last numbered menu, and the few lines just above it that ask
+ * the question. A menu is options no more than one line apart (an option may carry a description
+ * line); the dialog must be the last thing drawn, with at most `consentFooterLines` below its
+ * last option (a key hint, a box border), and its question must sit within `consentQuestionLines`
+ * of the first option. Words that ask a consent question elsewhere in the tail — output above an
+ * unrelated numbered list, or a list printed long ago — are not a dialog waiting for a keystroke.
+ */
+export const consentQuestionLines = 5, consentFooterLines = 2;
+function trailingDialog(lines: string[]): { lines: string[]; question: string[] } | null {
+  let last = -1;
+  for (let index = lines.length - 1; index >= Math.max(0, lines.length - 1 - consentFooterLines); index--) if (menuOption.test(lines[index])) { last = index; break; }
+  if (last < 0) return null;
+  let first = last;
+  for (let index = last - 1; index >= 0 && first - index <= 2; index--) if (menuOption.test(lines[index])) first = index;
+  const question = lines.slice(Math.max(0, first - consentQuestionLines), first);
+  return { lines: [...question, ...lines.slice(first, last + 1)], question };
+}
+
 /** The consent prompt on a pane's screen, or null when the screen is not stopped on one. */
 export function detectConsentPrompt(screen: string | null | undefined): ConsentPrompt | null {
   if (!screen) return null;
-  const lines = screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-consentScreenLines);
-  const bottom = lines.join('\n');
-  if (!menuOption.test(bottom)) return null;
-  const kind = promptKinds.find(([, asks]) => asks.test(bottom))?.[0];
+  const tail = screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-consentScreenLines);
+  const dialog = trailingDialog(tail);
+  if (!dialog) return null;
+  const { lines } = dialog, asked = dialog.question.join('\n'), bottom = lines.join('\n');
+  // The question decides the kind; the options only ever pick the answer.
+  const kind = promptKinds.find(([, asks]) => asks.test(asked))?.[0];
   if (!kind) return null;
   // The prompt's own text: from the first line that asks through the last option offered.
   const first = lines.findIndex(line => promptKinds.some(([, asks]) => asks.test(line)));
-  const last = lines.reduce((found, line, index) => menuOption.test(line) ? index : found, -1);
-  const shown = lines.slice(Math.max(0, first), Math.max(first, last) + 1).join(' / ');
+  const shown = lines.slice(Math.max(0, first)).join(' / ');
   const text = shown.length > consentTextLimit ? `${shown.slice(0, consentTextLimit - 1)}…` : shown;
   if (neverAnswered.includes(kind)) return { kind, text, rule: null, keys: null };
   for (const rule of consentAnswers) {
-    if (!rule.asks.test(bottom)) continue;
+    if (!rule.asks.test(asked)) continue;
     const option = rule.choose.exec(bottom)?.[1];
     if (option) return { kind: rule.kind, text, rule, keys: [option] };
   }
@@ -86,7 +107,11 @@ export function detectConsentPrompt(screen: string | null | undefined): ConsentP
  */
 export const consentHoldMs = 15 * 60_000;
 /** A held session's record, beside its launch files: `.graphyard/launch/NAME.consent`. */
-export interface ConsentHold { key: string; epoch: number; agentName: string; pane: string; attach: string; prompt: string; kind: ConsentKind; since: string; releaseAt: string }
+export interface ConsentHold {
+  key: string; epoch: number; agentName: string; pane: string; attach: string; prompt: string; kind: ConsentKind; since: string; releaseAt: string;
+  /** A runtime prompted after it starts (no request contract) has not been sent its request: the file holding it, pasted once the prompt clears. */
+  request?: string | null;
+}
 export const consentHoldSuffix = '.consent';
 export const consentHoldPath = (stem: string) => `${stem}${consentHoldSuffix}`;
 export function writeConsentHold(stem: string, hold: ConsentHold) {
@@ -115,13 +140,15 @@ export function consentHoldAttention(hold: ConsentHold) {
 
 /**
  * What the watch supervisor does about its session's hold on each check: nothing while there is
- * none, `cleared` once the prompt is off the screen (a human answered it, and the session has its
- * request), `release` once the hold has outlived its bound with the prompt still showing.
+ * none, `cleared` once the prompt is off the screen (a human answered it), `release` once the hold
+ * has outlived its bound and a successful read shows the prompt still up.
  */
 export function consentHoldVerdict(hold: ConsentHold | null, screen: string | null, now: number): 'none' | 'holding' | 'cleared' | 'release' {
   if (!hold) return 'none';
-  // A screen that could not be read is a signal not collected; only the bound decides then.
-  if (screen !== null && !detectConsentPrompt(screen)) return 'cleared';
+  // A screen that could not be read is a signal not collected: the prompt may already be answered,
+  // so the hold stays pending until a read confirms it either way, however late that is.
+  if (screen === null) return 'holding';
+  if (!detectConsentPrompt(screen)) return 'cleared';
   return now >= Date.parse(hold.releaseAt) ? 'release' : 'holding';
 }
 
