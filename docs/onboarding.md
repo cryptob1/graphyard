@@ -354,6 +354,8 @@ node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 
 The worker pushes the assigned branch, opens a PR, and runs `node "$GRAPHYARD_CLI" complete GY-1 EPOCH PR_NUMBER`. Graphyard waits for current-head review, CI, and trusted acceptance evidence.
 
+The worker writes to its assigned branch only: plain pushes of that branch, `sync` to merge the base, and — to restore the branch after an ejected or contaminated tip — `git reset --hard REVIEWED_HEAD` followed by `git push --force-with-lease origin BRANCH`. An unconditional `--force`, a push to any other ref and a push to the base branch stay denied; the lease push succeeds only while the remote still holds the tip the worker last fetched. See [worker push rights](master-agent.md#worker-push-rights).
+
 Launch the independent review from the master; it verifies the exact observed candidate first and binds the session to that head, base, and policy revision:
 
 ```sh
