@@ -25,6 +25,15 @@ export interface Evidence {
    */
   scopeFiles?: string[];
   revocation?: { at: string; actor: string; reason: string };
+  /**
+   * The same proof run against the candidate's base tree — the tree as it stood before the
+   * implementation — as the producer reports it. A proof that passes there as well does not
+   * exercise its criterion, so the control plane records the entry `unexercised` and it
+   * satisfies nothing; see `unexercisedProof` and docs/master-agent.md#verify-before-review.
+   */
+  baseline?: { sha: string; result: 'pass' | 'fail'; executed: number; skipped: number };
+  /** Derived by the control plane from `baseline` when the record is accepted; never asserted by a producer. */
+  unexercised?: boolean;
   provenance?: {
     provider: 'github-actions'; repository: string; workflowCommit: string;
     runId: string; runAttempt: number;
@@ -92,3 +101,10 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
 }
+
+/**
+ * A proof that passes against the base tree proves nothing about the change: it passed before the
+ * implementation existed, so its passing on the candidate cannot be what the criterion asked for.
+ */
+export const unexercisedProof = (evidence: Pick<Evidence, 'result' | 'baseline'>) =>
+  evidence.result === 'pass' && !!evidence.baseline && evidence.baseline.result === 'pass' && evidence.baseline.executed > 0;

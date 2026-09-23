@@ -1009,10 +1009,11 @@ it records on the item, under `autoDispatch`:
 
 - one **review request** when the policy expects a GitHub verdict and no approval binds the
   head: neither an exact approval of it nor one the merge queue [carried](#merge-queue) onto a
-  Graphyard-authored tip. A head that does not contain the base tip is not requested until it
-  does, because a review of it would be dismissed when GitHub recomputes the merge base. `codex`
-  and `agent` policies are dispatched by the control plane through GitHub itself and record no
-  request here;
+  Graphyard-authored tip — and only once every unit and integration proof the item's criteria
+  name has passed on the head ([verify before review](#verify-before-review)). A head that does
+  not contain the base tip is not requested until it does, because a review of it would be
+  dismissed when GitHub recomputes the merge base. `codex` and `agent` policies are dispatched by
+  the control plane through GitHub itself and record no request here, under the same hold;
 - one **producer request per proof group** — `unit`, `integration`, and `manual` for the
   proofs the item lists in `producerProofs` — naming every proof of that group that no trusted
   passing evidence binds, exactly or carried. A proof whose trusted evidence already failed on
@@ -1179,6 +1180,61 @@ A tick whose snapshot read fails or times out is retried promptly with a widenin
 each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…), up to the
 dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
 later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
+
+### Verify before review
+
+Mechanical verification precedes review. The stage order still reads `build → review → test →
+acceptance`, but a reviewer is the most expensive reader in the system, and a failure a test can
+state in a line should never be found by one reading thirty files. So the control plane asks no
+reviewer about a head until the unit and integration proofs its criteria name have run on it:
+
+- **Proofs pending.** A submitted, observed head gets its producer requests at once and no review
+  request. `reviewNeed` reports `proofs-pending`, naming each criterion and proof that has not run,
+  and the next action is the producers' dispatch, not a review. The same hold stops the GitHub
+  reviewer request and the control plane's own `codex`/`agent` dispatch, so no provider is asked.
+- **A proof failed.** Trusted evidence that a unit or integration proof failed on the head refuses
+  the build gate with the criterion named — `AC-1: integration:… failed on <sha> (trusted evidence
+  from <producer>); the head returns to its worker before review` — and the next action is
+  `request-rework`. No review request is raised and no reviewer session is consumed; the next head
+  is proven afresh and only then reviewed.
+- **All passed.** The review request is raised for exactly that head. Manual proofs — judgment,
+  even when a producer session runs them — wait beside the review rather than ahead of it.
+
+**What a worker runs before `complete`.** `graphyard verify GY-N` runs exactly the unit and
+integration proofs the item's criteria name, against the working tree as it stands — a proof's
+cases are the tests whose title begins with the proof name, which is how producers find them too
+— and names every other proof (manual, e2e, or deferred by a bootstrap criterion) as outstanding
+rather than pretending to settle it. It exits non-zero when a proof fails and records its result,
+bound to `HEAD`, in `.graphyard/verify/GY-N.json`. `graphyard complete GY-N EPOCH PR` then reports
+that record beside the submission, under `selfVerification`: which proofs ran and their outcome
+(`passing` or `failing`), which are outstanding, `stale` when `HEAD` moved after the check, or
+`not-run` when nothing was checked. The report is the worker's own reading and never evidence;
+trusted evidence still comes only from an independent producer, and the gates decide from it
+alone. A worker that runs `verify` first learns in seconds what would otherwise cost a producer
+run and a returned head.
+
+**Why a proof that passes on the base tree proves nothing.** A proof is attached to a criterion
+to show the change meets it. If the same cases already pass on the candidate's base — the tree as
+it stood before the implementation — then passing on the candidate says nothing about the change:
+the proof checks something that was already true, and the criterion's correspondence to its proof
+is assumed rather than shown. That is how a criterion carries a green proof while its reviewer
+still has to ask for the test that would actually hold it. So producers run every unit and
+integration proof on the base tree too and report it as `baseline` (`{sha, result, executed,
+skipped}`, where `sha` must be the candidate's own base; a base where the cases do not exist yet is
+`fail` with `executed` 0). A passing record whose baseline also passed is kept, marked
+`unexercised`, and satisfies nothing: the acceptance gate says `the passing record is unexercised`,
+and the build gate returns the head before review naming the criterion. The worker sees the same
+verdict first with `graphyard verify GY-N --baseline [REF]` (default: the merge base with
+`origin/main`), which runs each proof a second time on a temporary checkout of the base and marks
+the ones that pass there.
+
+**The effect is measured, not assumed.** `node scripts/measure-preventable-rework.mjs` reads the
+work snapshot and reports, for the deliveries merged before and after GY-115 landed (`--split`
+names another item), the rework rounds, the returned heads, and how many of those a unit or
+integration proof of the item's own criteria had caught — split by whether a reviewer had been
+asked about the head first. Before this change such heads were typically reviewed; after it they
+return to their worker without a review. The count covers failures a proof recorded; a finding
+no proof could have caught stays with review, where it belongs.
 
 ### The dispatcher's own state
 

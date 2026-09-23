@@ -46,7 +46,19 @@ function work(overrides: Partial<Work> = {}): Work {
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-69', branch: 'graphyard/gy-69-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 69 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
 }
-const requested = (overrides: Partial<Work> = {}) => { const item = work(overrides); reconcileAutoDispatch(item, [item], new Date()); return item; };
+/**
+ * Since GY-115 a review request is raised only once the head's mechanical proofs pass, so it no
+ * longer stands beside producer requests from reconciliation alone. The retry schedule is the
+ * launcher's, whatever raised the request: this fixture holds the review request a proven twin of
+ * the head raises beside the producers the unproven head raises, so one tick exercises both.
+ */
+const requested = (overrides: Partial<Work> = {}) => {
+  const item = work(overrides); reconcileAutoDispatch(item, [item], new Date());
+  const proven = ['integration:producer-session-retry', 'unit:autonomous-session-prompts'].map((proof, index) => ({ id: `twin-${index}`, proof, sha: H, baseSha: B, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at }));
+  const twin = work({ ...overrides, evidence: proven }); reconcileAutoDispatch(twin, [twin], new Date());
+  item.autoDispatch!.review = twin.autoDispatch!.review;
+  return item;
+};
 
 async function repository() {
   const root = await mkdtemp(join(tmpdir(), 'graphyard-resilience-'));

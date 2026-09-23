@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { defineCommands, workMutation } from './registry.js';
+import { verifyCommand } from './verify.js';
+import { completeCommand } from './complete.js';
 
 /** The worker protocol on one claimed item: lease, blockers, submission and evidence. */
 export const leaseCommands = defineCommands([
@@ -33,16 +35,8 @@ export const leaseCommands = defineCommands([
     help: ["  blocked GY-N EPOCH REASON     Set blocker; use '-' to clear"],
     run: async (context, work) => context.print(await workMutation(context, work)('blocked', { epoch: Number(context.args[0]), reason: context.args[1] === '-' ? null : context.args.slice(1).join(' ') })),
   },
-  {
-    name: 'complete',
-    scope: 'work',
-    help: [
-      '  complete GY-N EPOCH PR        Submit implementation and end the lease; gates decide',
-      '                                completion. Refused when the PR reverts, deletes or',
-      '                                rewrites files outside plannedFiles relative to the base',
-    ],
-    run: async (context, work) => context.print(await workMutation(context, work)('submit', { epoch: Number(context.args[0]), pr: Number(context.args[1]) })),
-  },
+  verifyCommand,
+  completeCommand,
   {
     name: 'evidence',
     scope: 'work',

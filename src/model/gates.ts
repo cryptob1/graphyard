@@ -9,6 +9,7 @@ import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerPro
 import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
+import { mechanicalFailure, mechanicalVerdicts } from './dispatch.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
@@ -25,8 +26,12 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   // A base the control plane cannot merge in cleanly is the other thing only the worker can fix:
   // the conflict is named here, the attempt returns to build, and nothing carries across it.
   const conflict = baseRefreshConflict(work);
+  // Mechanical verification precedes review (GY-115). A unit or integration proof that failed on
+  // this head — or passed on the base tree too, and so exercises nothing — returns the head to its
+  // worker here, naming the criterion, before any reviewer session is spent on it.
+  const mechanical = current && work.submission && !work.reworkRequested ? mechanicalVerdicts(work, all, now).filter(verdict => verdict.outcome === 'failed').map(verdict => mechanicalFailure(verdict, candidate!.sha)) : [];
   add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : []),
-    ...(conflict ? [conflict] : []), ...(current ? regressionRefusals(work, obs!, all) : [])]);
+    ...(conflict ? [conflict] : []), ...(current ? regressionRefusals(work, obs!, all) : []), ...mechanical]);
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const agentReview = current ? obs!.agentReview : undefined;
@@ -51,14 +56,15 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   const reasons: string[] = [];
   const unproven = (proof: string) => {
     const evidence = currentEvidence(work, proof, now);
-    return !evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0;
+    return !evidence || evidence.result !== 'pass' || evidence.executed < 1 || evidence.skipped !== 0 || !!evidence.unexercised;
   };
   const demanded = (proof: string) => {
     const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
     // Name an explicit revocation: an operator otherwise cannot tell a revoked
     // candidate apart from one that was never proven.
     const revoked = work.evidence.some(e => e.proof === proof && e.trusted && !!e.revocation && evidenceBindsCandidate(work, e) && e.policyRevision === work.policyRevision);
-    return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked && !currentEvidence(work, proof, now) ? '; previously accepted evidence was revoked' : ''}`;
+    const unexercised = currentEvidence(work, proof, now)?.unexercised;
+    return `${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy${scenario ? `; scenario v${scenario.revision} in ${scenario.environment}` : ''}${revoked && !currentEvidence(work, proof, now) ? '; previously accepted evidence was revoked' : ''}${unexercised ? '; the passing record is unexercised: the proof passes on the base tree too' : ''}`;
   };
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.

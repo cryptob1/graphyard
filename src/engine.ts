@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, currentEvidence, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, currentEvidence, unexercisedProof, decideCarry, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -79,7 +79,9 @@ const commands = {
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
   // scope syntax; the merge queue carries a proof across its own authored tip only inside it.
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
-    scopeFiles: z.array(z.string().min(1).max(500)).min(1).max(100).optional(), provenance: z.object({
+    scopeFiles: z.array(z.string().min(1).max(500)).min(1).max(100).optional(),
+    // The same proof run on the candidate's base tree; a pass there marks the record unexercised.
+    baseline: z.object({ sha, result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0) }).strict().optional(), provenance: z.object({
     provider: z.literal('github-actions'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowCommit: sha,
     runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.number().int().positive(),
     artifact: z.object({ id: z.number().int().positive(), name: z.string().min(1).max(200), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/), url: publicArtifactUrl, createdAt: z.iso.datetime() }).strict(),
@@ -852,7 +854,10 @@ export class Engine {
             `${deploySmokeProof} evidence must name the observed deployed commit ${work.delivery!.deployment!.sha} as sha and merge commit ${work.delivery!.mergeSha} as baseSha`);
           demand(data.policyRevision === work.policyRevision, 'Policy revision does not match this delivery');
         }
-        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString(), ...(ciRun ? { ciRun } : {}) };
+        // A baseline is the proof run on the tree before the implementation: the candidate's own
+        // base, never another commit. When it passes too, the record is kept — as unexercised.
+        demand(!data.baseline || data.baseline.sha === data.baseSha, `A baseline run must be made on the candidate's base ${data.baseSha}, not ${data.baseline?.sha}`);
+        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString(), ...(ciRun ? { ciRun } : {}), ...(unexercisedProof(data) ? { unexercised: true } : {}) };
         work.evidence.push(evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
