@@ -99,6 +99,18 @@ An account that fails either check is skipped with its reason — `claude-a quot
 
 `master status` shows, under `dispatch.accounts`, every environment as the last launch check saw it (login, quota, usage windows, the login command when it is logged out) and the recent launches that skipped an account, with role, profile, item and reason. The same record is kept beside the coordinator credential (`*.environments.json`, mode 0600); it never holds a provider token.
 
+### The agent registry
+
+The fleet is control-plane state. The **agent registry** stores the *runtimes* (each agent CLI with its launch contract), the *accounts* of each runtime (a credential held by reference — host and login home — with the quota state and reset time executors observed), the *model* each account runs with its cost and capability, and the *roles* — `worker`, `reviewer`, `producer`, `approver`, `escalation-handler` — each naming its eligible accounts in preference order with a concurrency limit. It is configured through the API (`/api/agent-registry`), `graphyard master registry …`, and the dashboard's Agent fleet page, by the admin or the coordinator identity; [onboarding](onboarding.md#configure-the-fleet) adds a runtime, an account and a role in that order, and `master registry propose --apply` builds the whole thing from the logins a host already has. Changing the fleet is the master's own call, not the operator's — logging an account in, or buying one, is the only human part.
+
+**Selection.** When an executor runs an action — a worker dispatch, a reviewer or producer launch, an approver session — it probes the logins on its own host, reports what it saw, and asks the control plane for a session. Inside the coordination transaction the control plane folds those observations in, closes sessions whose work has moved on, and picks **the first account of the role, in the role's order,** that is enabled, placed on the asking host, logged in, within quota, and under its session limit, provided the role is under its concurrency limit. It records the choice as an `agent-registry.selected` event with its reason and every account passed over (`claude-c is the first eligible account for worker (preference 3 of 4; 2 of 4 concurrent) — passed over codex-a quota is exhausted until …; claude-b is not logged in`), and a refusal once per distinct reason. The launch then uses the registry runtime's contract and the account's model; the profile contributes only the Graphyard identity (and its own `agentArgs` when it is the same runtime). Because selection is serialized in the control plane, the limits hold across every executor host.
+
+**Live sessions** need no bookkeeping by the executor: a worker session lives as long as its item's lease, a reviewer or producer session as long as the request it answers stands, an approver session for thirty minutes, and every session through a five-minute launch grace. A launch that fails gives its session back at once, on every path — worker, reviewer, producer and approver alike — for every failure after the choice: a credential mismatch, a token mint, a session harness, a Herdr tab, a prompt the runtime never took. And a request supersedes the session it replaces before any limit is counted: a relaunch for the same work — the next attempt of a request, a review of a new head — takes over the slot of the session it follows (a producer within its own proof group, so the groups of one item still run side by side), so a role is never refused by the session of its own previous attempt. The one end the control plane cannot infer — a launcher killed mid-flight, a host that went away — is `master registry session end ID --reason …`.
+
+**No restart, no file edit.** Nothing is cached between actions, so adding an account, marking one exhausted, reordering a role or removing a whole runtime takes effect on the next action of a running `master run`. An operator's exhausted mark holds against the probe until its reset or until it is cleared; a probe-observed exhaustion clears itself when its window resets. If the control plane cannot be reached, a role the registry decides launches nothing until it answers — an outage never hands a role back to a file. A role the registry does not define yet launches from the profile's own `accounts` as described above, which is how an installation migrates role by role; `master status` says so under `fleet.next` while no role is configured.
+
+**Visibility.** `master status` reports the registry under `fleet`: per account its runtime, model (id, cost, capability tier), host, role eligibility with its place in each role's order, live sessions, login, quota, usage windows, reset time, and `ineligible` — the reason it cannot take a session now; per role the account its next action would run on, or what blocks it; the recent selections with their reasons; and the recent refusals. A blocked role, an account that serves no role, and an unconfigured role are raised as `fleet` attention items the master resolves itself with `master registry`. The dashboard's Agent fleet page shows the same view and carries the forms that configure it. The registry is kept on the append-only event ledger (every change and selection is an `agent-registry.*` event carrying the resulting registry), so its full history is `master registry history` and every logical backup carries it.
+
 ### Exhaustion in the middle of a session
 
 The launch check reads an account before a session starts. An account that runs out **while its session works** does not fail: the runtime prints its provider's limit notice — `You've hit your weekly limit · resets …`, `Weekly usage limit reached … reset at …`, `You've reached your spend limit … resets on 10/8` — and the session stops there, holding its lease or its request. Until GY-89 a master noticed by reading panes and repointed profiles by hand, at 20–60 minutes each. The durable loop now does it on the cycle it sees it:
@@ -110,6 +122,8 @@ The launch check reads an account before a session starts. An account that runs 
 5. **Re-queue.** A worker's item is claimable again once that quarantine settles, and the dispatch step of the next cycle launches it on the profile's next account or on another profile — twenty seconds after detection at the default interval, inside the two-minute bound. A reviewer or producer session is ended on its ledger as `failed` with the exhaustion as its resolution and its request is launched again at once, the exhausted profile last.
 
 Each failover is one `failover` action in `daemon.actions`, and `master status` shows the item's recent exhaustions under `work[].capacity`.
+
+A session that exits **at launch** on the same notice — the account was spent before its session started, and the launch check did not see it — is classified by the automatic dispatcher from what its pane printed and failed over the same three ways (hold, record, relaunch on the next account) without a ledger record to end; see [a session that exits at launch](#the-dispatchers-own-state).
 
 ### When a role has no account left
 
@@ -125,15 +139,36 @@ When **every** launch profile of a role is unavailable for the same reason — e
 
 Every session Graphyard launches — a worker under `watch`, the reviewer and producer sessions the loop starts, the approver, the master itself — receives its instruction as the session's own first request, on the runtime's command line: Claude Code, Codex and Cursor take it as the positional prompt after their flags, OpenCode through `--prompt`. It is never typed into the running session. `herdr agent prompt` delivers text through bracketed paste, and a coding agent treats pasted text as untrusted data rather than as a request from its operator — correctly, against prompt injection — so a session launched that way often ended its first turn having refused to act, and the loop recorded it as failed with `finished (done) without trusted evidence` and spent a retry on work that was never attempted (GY-93). `master status` shows `delivery: request` on the session, or `paste` for a runtime Graphyard has no request contract for, which is still prompted after it starts.
 
-A runtime busy on its request may not show Herdr a prompt-ready session within the start bound; a start that times out on a pane where Herdr sees the expected runtime acting is a session that started, and the launcher names it rather than closing it. A worker is likewise accepted as started when the supervisor's session is first seen `working`.
+#### How the request reaches the runtime
+
+The request is not typed into the pane. Herdr types a launch command into an interactive shell keystroke by keystroke, and the shell redraws the line as it grows, so a request of several kilobytes took the whole start bound just to echo on a loaded host and the runtime was declared dead before it existed (GY-121). The launcher writes the request and, for a Claude Code session under a [role file](#session-harness-rules), the launch authorization to files inside the session's own checkout directory — `.graphyard/launch/NAME.request` and `NAME.role`, mode 0600, under the worker's assigned worktree, the reviewer's or producer's session checkout, or the repository root for the master, an approver and an escalation handler — and types a short command line that references them through their shared stem:
+
+```
+GY=/path/to/checkout/.graphyard/launch/NAME; claude --permission-mode bypassPermissions --setting-sources user --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
+```
+
+The pane's shell (a POSIX shell: bash or zsh) expands `"$(cat "$GY.request")"` before the runtime starts, so the request is still the runtime's own first argument — the positional prompt for Claude Code, Codex and Cursor, `--prompt` for OpenCode — and never a paste; a worker's line carries the same references after `node CLI watch GY-N EPOCH -- KIND`. What is typed holds only the runtime, its flags and one path, and is bounded at **512 bytes** whatever the request is: a line that would exceed it is refused before anything is typed, naming its length, which only a very long repository path, managed worktree root or `agentArgs` can cause. The files are replaced on every launch under the same name and removed with the checkout; those in the repository root stay under `.graphyard/launch/` (ignored by Git) until the next launch under that name overwrites them.
 
 The positional request follows the profile's `agentArgs` and the role harness on the command line. A runtime that takes a variadic flag (Claude Code's `--add-dir` and `--allowedTools`, for example) would read the request as one more value of that flag if it were the last thing before the request, so `agentArgs` must not end in such a flag: put its values first and a single-valued flag (`--model …`) or nothing after it. When the launcher passes a [role file](#session-harness-rules), its flags come between the profile's arguments and the request; otherwise the request follows `agentArgs` directly.
+
+#### The start bound reads the pane
+
+The start bound is not a guess against a clock. The producers this was filed for died with Claude Code on screen — the request under its own `∙` spinner — while Herdr still reported the pane's runtime `unknown` at 30 seconds, and the launcher, which adopted a timed-out start only on Herdr's `working`, `idle` or `done`, closed a live session. After typing the command the launcher now reads the pane every half second — `herdr agent get` for the runtime Herdr sees occupying it and its state, `herdr pane read` for the terminal text — and distinguishes these cases. The runtime is **ready** once Herdr reports the expected kind `idle`, `done` or `working` (already at work on its request), or once Herdr reports the runtime under the pane in any state and the runtime's own screen is showing — its banner, its status line, or its spinner (`∙ ✻ ✶ ✳ ✢`) at the start of a line; the launch is reported started and Herdr's record of the pane takes the session's name (`started.detail` says which sighting it was, `the claude runtime is on screen while Herdr reports it unknown` for the case above). A runtime Graphyard has no request contract for, which is prompted after it starts, is ready only on Herdr's `idle` or `done`. It is **starting** when the launch command has been accepted and the runtime's process exists under the pane but nothing of it is drawn yet, or the runtime's banner is on screen before Herdr sees a process. It is **blocked** when Herdr reports it at a dialog before it was ever ready — the folder-trust question, an approval — which no launcher answers: refused at once, with the dialog as the pane's last line. It is **absent** when none of these holds: the command is still echoing, the shell is back at its prompt after an error, or the pane holds something else.
+
+A runtime ready within **30 seconds** has started. One that is *starting* at 30 seconds is given more time, up to a ceiling of **120 seconds**, and the launch result says so (`started.extended`); one that is *absent* at 30 seconds, or still starting at the ceiling, is refused. The refusal names which case was seen and the pane's last non-empty line (bounded to 200 characters), never Herdr's own `agent_not_found`:
+
+- `the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing); the pane last showed: "… ❯ GY=…; claude --permission-mode …"` — the shell had not finished taking the command: the host is overloaded, or the pane was not at a prompt.
+- `the claude runtime never started within 30 s in pane w1V:pR6 (no runtime under the pane); the pane last showed: "claude: command not found"` — the runtime's own error, or the shell's: the last line is what to fix.
+- `the claude runtime was still starting after 120 s in pane w1V:pR6 (the claude runtime process exists under the pane, Herdr reports it unknown); the pane last showed: "…"` — the runtime's process exists but nothing of it ever reached the screen.
+- `the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"` — a dialog the runtime raised before taking its request; what it asks is the last line.
+
+A refused start is recorded with that reason wherever launches are recorded: the dispatcher's `failures` for a reviewer or producer request, the row's `attention` in `master status` (`Automatic producer launch for GY-N refused 1 time(s): the claude runtime never started …`), and a worker dispatch's error. The tab is closed and, for a reviewer or producer, the session checkout removed; the loop retries on its widening schedule. One case is not a refusal: a reviewer or producer runtime whose pane shows its provider's limit notice exited on it, and the automatic dispatcher fails the launch over to the next account instead, without waiting for the bound — see [a session that exits at launch](#the-dispatchers-own-state).
 
 #### Confirmed prompt delivery
 
 The paste path remains for the three messages that are typed into a running session: the request of a runtime without a request contract, the loop's one re-prompt of a session that has shown no activity, and the reviewer's reminder to post a verdict it already judged. Each is recorded only once its runtime visibly accepted it: Herdr submits the text and waits for the agent to leave `idle`. A runtime that reports ready before its input is (OpenCode does while its UI loads) drops the text and stays idle, which Herdr reports as a stalled prompt. A stalled prompt is delivered again, up to three times; a session that still has not taken its request is closed — for a worker, the claim is released too — and launched once more from scratch before the launch is reported refused. A session is never left idle until a timeout.
 
-The generated `AGENTS.md` section ([onboarding](onboarding.md#3-connect-a-worker-and-herdr)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher passes the same authorization on its command line (`--append-system-prompt`).
+The generated `AGENTS.md` section ([onboarding](onboarding.md#3-connect-a-worker-and-herdr)) tells every runtime that reads it what those pastes are: the session's own request again, from the launcher that started it, to act on without waiting for confirmation. A Claude Code session launched under a [role file](#session-harness-rules) loads only the user settings, which leaves the repository's `AGENTS.md` out, so the launcher writes the same authorization to the session's role file and loads it on the command line (`--append-system-prompt-file`, see [how the request reaches the runtime](#how-the-request-reaches-the-runtime)).
 
 ### Acknowledgement, the one re-prompt, and never started
 
@@ -341,10 +376,13 @@ why nothing else on that list is moving. `master status` reports `daemon.livenes
 `stalled` (no completed cycle for more than two intervals) or `absent` (no lock, or a lock whose
 process is gone on this host), each with the command that restarts it — `master restart` — and a
 supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
-limit, and the loop sends its supervisor a keep-alive after every completed cycle, so a cycle that
-hangs is restarted as surely as a process that exits. `WatchdogSec` must stay longer than two cycle
-intervals; a window that would restart a healthy loop mid-cycle is recorded by name in
-`master status` rather than obeyed. The keep-alive is sent with `systemd-notify`, a short-lived
+limit, and the loop sends its supervisor a keep-alive after every cycle, completed or failed, so a
+cycle that hangs is restarted as surely as a process that exits. That restart is reserved for a hung
+process, which only the watchdog detects; a cycle that throws is not one (see
+[a cycle that fails](#a-cycle-that-fails)), and a loop waiting out a failed-cycle backoff announces
+when its next cycle is due, so it reads as `running` until that cycle is overdue by two intervals.
+`WatchdogSec` must stay longer than two cycle intervals; a window that would restart a healthy loop
+mid-cycle is recorded by name in `master status` rather than obeyed. The keep-alive is sent with `systemd-notify`, a short-lived
 child the unit admits with `NotifyAccess=all`. From systemd 246 that tool waits until the manager
 has processed the message, so it cannot exit before it is attributed to the unit; on an older
 systemd one can be lost to that race, which is why the packaged window is 180 seconds against a
@@ -378,6 +416,53 @@ whether or not its first approver session could be launched:
 | approval → merge | p90 at or under 10 minutes over at least ten deliveries |
 | mergeable → merge | 5 minutes, per candidate |
 | standing verdict → rework requested | 5 minutes, per candidate |
+
+### A cycle that fails
+
+A rejection that escapes a cycle — the control plane's snapshot read aborting on its timeout, a
+Herdr command that fails, a `.graphyard/master.json` reload that no longer parses — fails that
+cycle and nothing more. The process does not exit. The cycle counter advances, the failure is
+written to the cursor and logged with its cycle number, and the next cycle runs after a delay; a
+cycle that hangs is the watchdog's to restart, and a cycle that threw has just proved it did not
+hang. Before GY-119 the same rejection ended the process with exit status 1, costing the in-flight
+cycle, the dispatcher beside it and every approver watch in memory, and under a longer network fault
+the unit crash-looped at `RestartSec` cadence while `master status` advised restarting a loop that
+was restarting itself every ten seconds.
+
+**Where to read it.** `master status` reports the loop's own failures under `daemon.failures`:
+
+| Field | Meaning |
+| --- | --- |
+| `consecutive` | Failed cycles since the last one that completed; the backoff and the attention item read it |
+| `total` | Every failed cycle this cursor has seen, so a loop that failed and recovered still says so |
+| `last` | The most recent failure: its `cycle`, when (`at`), the `phase` (`cycle` or `reload`), the `call` it escaped from (`snapshot`, `credentials`, `merge`, ... or `reload`), the runtime's `reason`, and the `delayMs` and `nextAt` chosen for the next cycle |
+| `unhandled` | Unhandled rejections and uncaught exceptions the process caught and survived |
+| `lastUnhandled` | The most recent of those: `origin` (`unhandledRejection` or `uncaughtException`), `reason`, and the cycle it landed during |
+
+The journal carries the same facts as one line per event: `cycle 41 failed in the snapshot call:
+The operation was aborted due to timeout; 2 consecutive failure(s), the next cycle runs in 40s at
+…`, and `cycle 43 complete … recovered after 2 failed cycle(s)` when the run ends. `master run
+--once` reports `failedCycles` and `lastFailure` beside `cycles` in its result.
+
+**Backoff.** The first failure waits the configured interval, as any cycle would: one timed-out read
+is not a fault. Each consecutive failure doubles the wait — 20, 40, 80, 160 seconds on the default
+interval — to a ceiling of five minutes, or the interval itself when that is longer. Under a
+supervisor with a watchdog the ceiling is half the watchdog window (90 seconds against the packaged
+180), so a loop backing off is never mistaken for one that hung. The first cycle that completes
+resets the count and the wait; `total` keeps the history.
+
+**Attention.** Three consecutive failures raise an attention item at the head of the list, naming
+the failing call and its reason — `The master loop has failed 3 consecutive cycles, the last (cycle
+42 at …) in the snapshot call: The operation was aborted due to timeout` — and saying that the loop
+keeps cycling in-process, with `daemon.failures` as the place to read it. Its owner is the master:
+the next command is to clear what that call is refusing on (a control plane that is not answering,
+a Herdr that is not running), because a restart does not clear a read that times out every time.
+
+**Outside the cycle.** An unhandled rejection or uncaught exception anywhere in the loop process — a
+detached promise in the dispatcher, an approver watch, a Herdr read nobody awaited — is caught at
+the process level, logged with its origin (`unhandledRejection caught at the process level during
+cycle 41 …`), counted under `daemon.failures.unhandled`, and survived. It is not a failed cycle:
+the cycle it landed during completes as usual. Only a stop signal ends the loop.
 
 ### Restartability
 
@@ -721,6 +806,37 @@ row. An executor that dies mid-action renews nothing, its claim expires, another
 a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
 handler that throws returns its row to the queue with the reason and a widening backoff.
 
+### A row that keeps failing for the same reason
+
+A retry is a bet that something about the next attempt can change, and three identical failures say
+it cannot. Three consecutive failures with an unchanged reason classify the row as **stalled**
+rather than retrying: it is not waiting out a transient fault, it is re-running an impossibility.
+One reason that differs from the last ends the run, and the widening backoff comes back with it.
+
+A stall is the signal for a fleet that reads as idle and is not. A row inside its backoff can be
+claimed by nobody, so before this it appeared in no count and no list: on 21 September 2026 three
+items each held a `request-review` action failing for the identical reason — one reviewer profile,
+one fixed session name, so the second and third reviews could never be launched while the first
+ran — and for ninety-seven minutes `master status` reported eight pending actions, none of them
+those three, while the board showed the items at review. Where a stall is now visible:
+
+- `master status` → `actions.stalled`, one entry per stalled row with the reason it keeps failing,
+  the failures that shared it, every attempt it has made and when it is offered again;
+  `actions.backoff` lists the rows waiting out a backoff and `actions.open` counts every open row,
+  so `pending + claimed + settling + backingOff` accounts for all of them;
+- one attention item per stall, naming the item, the action kind, the unchanged reason and the
+  master as the agent that resolves it — raised as soon as the row is classified, which is inside
+  the five-minute idle bound a row nobody is acting on has;
+- the dashboard, on the item's own card: the step that keeps failing, how many times, and for how
+  long, in place of the gate sentence the stalled action was going to clear.
+
+Clearing the condition the reason names is the whole of the fix — reviewer or producer capacity, an
+overlap ahead of a dispatch, a credential, a provider — and nothing needs a forced retry
+afterwards. A stalled row rechecks once a minute whatever its attempt count, rather than waiting
+out the ten-minute ceiling its attempts against the impossibility would have earned, so a condition
+that clears is acted on within a minute. Backoff earned while a blocking condition stood never
+outlives it.
+
 A claim is a two-minute lease, and the handlers are not two-minute operations: a dispatch prepares
 a worktree and waits on a runtime, and a guarded merge chains provider calls that each have their
 own timeout. An executor that is still inside a handler says so every thirty seconds and keeps the
@@ -853,6 +969,74 @@ retires finished handles first and never evicts a running one to make room.
 A session Herdr reports blocked is waiting on input, not gone: the attempt is recorded as failed
 with that reason, and the handle stays `running` carrying why, so the attach command still works
 at the one moment somebody needs it.
+
+### Session liveness is reconciled, not trusted
+
+**The control plane reconciles session liveness; closing finished sessions is not the master's
+manual duty.** A handle used to say `running` until a session, its launcher or an admin said
+otherwise, and a session that died said nothing — so a crashed, killed or vanished session stayed
+recorded as running for good, and every reader believed it, including the launcher's own busy check.
+That is what made a dead session hold its role slot until a person noticed.
+
+**On what interval.** The liveness sweep runs on every automatic-dispatch tick — `run.dispatchIntervalSeconds`
+in `.graphyard/master.json`, 10 seconds by default and 30 at most. It is a sweep, not a reaction to
+something reporting in, because a session that died reports nothing. A handle whose session the
+runtime no longer reports is left alone for a 60-second grace first, counted from the first sweep
+that missed it and never shorter than the handle's own age, since a session recorded at launch
+appears in its runtime's listing a moment later and one listing that comes back short is not a
+death. So a vanished session's record is closed within 90 seconds of the runtime dropping it, and a
+session the runtime reports again in the meantime starts the grace over. `master status` reports the
+bound, the closures the last tick made, how many handles are inside their grace, and any closure it
+could not write back, under `dispatch.sessionReconcile`.
+
+The sweep judges what this host's runtime answers for. A handle another host launched is left to
+that host's loop — this inventory was never asked about it — and holds its slot until then, exactly
+as an unreadable runtime does.
+
+**What it closes, and with which reason.**
+
+- **Vanished** — the runtime has not reported the pane or the session name its launcher recorded
+  for the whole grace. This is how a coding session that exited is recognised: it is simply absent
+  from the runtime's listing. The outcome names that it vanished, from which runtime and host, how
+  long the runtime has not reported it, and how long after its last observed activity.
+- **Ended** — the runtime still lists it and reports one of that runtime's terminal states
+  (`src/harness.ts`), which today only Muse has (`exited-error`, `terminated`). `idle`, `done` and
+  `blocked` are deliberately not terminal anywhere: each is a live session waiting at its prompt —
+  Herdr reports `done` for one that finished work nobody has looked at yet, the same underlying
+  state as `idle` — and that is the one moment somebody needs its attach command.
+- **Superseded** — a review or proof session bound to something the item has moved past: a candidate
+  that merged, an item already delivered, a head the item no longer has, or an item returned to a
+  worker for rework. The outcome names which of those it was. A delivered item is closed the same
+  way as any other: delivery makes an item's decisions immutable, and ending a handle it still
+  carries decides nothing. An implementation session is never closed this way; its lease decides
+  what it may still do.
+- **Duplicate** — two live review or proof sessions for one role and head cannot both stand, so the
+  older is closed naming the session that holds the slot. One item holds one live review of a head
+  and one producer session per proof group of it. Implementation handles are left alone here too.
+
+A closure is a record, never authority: it decides no gate, ends no lease, and stops no process —
+the runtime already did, or the session is stalled rather than gone.
+
+**The role slot follows the reconciled record.** A profile's concurrency is counted against live
+sessions only: the runtime's own listing, plus every recorded handle the sweep has not judged over.
+So a handle holds its profile's slot even before the runtime lists the session and across a restart
+of the loop, and a name is busy only while a live session has it. A launcher still refuses a name
+the runtime lists in any state — a name in use cannot be taken again, whatever state it is in.
+
+**A session that is running and making no progress** is not closed, because only a reader can tell
+whether it is working. It is surfaced instead: `master status` raises one attention item per session
+past its role's maximum — 4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer
+session, 12h coordination — naming the item, the role, how long it has run, when it was last
+observed doing anything, and whether the runtime still reports it live. A session that died is as
+visible as one that is stuck, and neither needs a person to go looking.
+
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died — the sweep closes its record and frees its slot on the next tick, and
+`graphyard master run --once` does one sweep when the loop is stopped. For a session the attention
+item names as live but overlong, attach to it with the command on the handle and see what it is
+doing; stop it there if it is stuck, and the record closes within the bound on its own. Never mark
+another session's handle finished to free a slot: the handle belongs to the session it names, its
+launcher or an admin, and the slot was never held by anything but a live session.
 
 ## Automatic dispatch at submit
 
@@ -1036,6 +1220,69 @@ A tick whose snapshot read fails or times out is retried promptly with a widenin
 each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…), up to the
 dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
 later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
+
+### The dispatcher's own state
+
+The dispatch cursor (`*.dispatch.json` beside the coordinator credential) is the dispatcher's
+memory: its tick count, the last tick's counts and the reasons nothing launched, every refused
+launch with its widening retry, and each role's capacity hold. Every string in it has a cap, and
+until GY-120 the cap was checked only when the cursor was persisted: a refusal whose error text
+reached the failure reason's cap (a Herdr JSON error, for one) was wrapped in a longer wait
+sentence on the next tick, the sentence failed the cursor's schema, the tick failed, and the
+dispatcher retried the identical tick forever — no reviewer or producer launched for *any* item,
+while the tick count and the cursor's timestamp made it look alive. Three rules now hold:
+
+- **The dispatcher bounds its own state where it composes it.** Every string it writes into the
+  cursor — a tick reason, a failure reason, a capacity reason, a session resolution it wraps — is
+  bounded before it is stored, and each cut is marked with an ellipsis rather than hidden. The
+  bounds nest: a stored failure reason (300 characters) leaves room for the wait sentence that
+  wraps it (`launch refused 12 time(s): …; no further automatic attempt`), and that sentence is
+  bounded again (500) before it becomes a tick reason, so a failure reason at its cap still
+  yields a valid tick. A launch that fails with a 2,000-character error is a refusal whose
+  reason ends in `…`, not a tick that cannot persist.
+- **A cursor that fails its schema is repaired, not fatal.** On load and again before every
+  persist, a string past its cap is truncated in place and the repair is logged once with the
+  path that failed (`[graphyard-dispatch] repaired the dispatch cursor while persisting it:
+  lastTick.reasons[1] — 612 characters exceeded its cap of 500 and it was truncated`). A defect
+  of this class degrades one reason string; it never takes launching away from the other items.
+  Anything else the schema refuses — a count out of range, a missing field — is still refused,
+  naming its path, and `master status` reports a cursor it cannot read as one attention item
+  rather than a dispatcher silently absent.
+- **A tick failure is attributed and surfaced.** A tick that cannot persist names the field it
+  could not write and the request and item that field was composed for: `master status` shows it
+  under `dispatch.lastFailure` (`field`, `kind`, `request`, `work`) beside `consecutiveFailures`
+  and `lastSuccessAt`. Three consecutive failures raise one attention item, addressed to the
+  master, saying that no reviewer or producer session is being launched for any item and why —
+  the reason, and for a persist failure the field and the request behind it — with the repair
+  path (`graphyard master restart` re-reads and repairs the cursor) or the fault to fix (the
+  control plane, its credential, Herdr). Every request keeps reading as `waiting` meanwhile, so
+  the dispatcher's own health is named before the requests it is not launching.
+
+**A session that exits at launch is classified from its pane.** The launcher types the launch
+into the pane and [reads the pane](#the-start-bound-reads-the-pane) until the runtime is ready:
+`herdr agent get` answers `agent_not_found` while the runtime is not there, which says nothing
+about why, and `herdr pane read` shows what the runtime printed. A runtime that printed its
+provider's limit notice and exited leaves the notice under its banner, and the banner alone would
+hold the start bound to its 120-second ceiling before the refusal. The dispatcher therefore
+watches each launch's own reads of the pane it typed into — the pane is read no more often than
+the launcher reads it, and never after the launcher closed it — and classifies from the last read:
+
+- a **provider limit notice** (the same notices [mid-session detection](#exhaustion-in-the-middle-of-a-session)
+  matches) is account exhaustion: the launch is refused at the launcher's next pause between
+  polls, within seconds rather than at the bound, and the exit is recorded for the account the
+  launcher selected — `profile:NAME` for a profile that names no `accounts` — and it
+  fails over exactly as a mid-session exhaustion does: the account is held until the reset the notice named,
+  `capacity.exhausted` is recorded on the item with `requestId`, profile, account and runtime, and
+  the same profile launches again at once on its next account; a profile with no account left
+  fails over to the next profile, or the role waits for capacity. The tick's launch entry lists
+  each account passed over this way under `failover`, and `master status` shows the hold under
+  `dispatch.accounts`. A refusal the launcher raised at its bound while the notice was on the pane
+  is classified the same way; a runtime Herdr found at a dialog (`blocked`) did not exit and is not;
+- **any other cause** is the refusal the launcher worded — which case it saw (`no runtime under
+  the pane`, `command still echoing`, the dialog) and the pane's last words as the reason — rather
+  than the CLI's error, and it is retried on the usual widening schedule. A dispatcher wired
+  without an account hold records the notice itself as the refusal
+  (`the session exited within seconds of its launch on its provider's limit notice: …`).
 
 ### Managing profiles
 
@@ -1620,8 +1867,14 @@ The master clears blockers and adds requirements as its operator-agent identity;
 
 | Command | Purpose |
 | --- | --- |
-| `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
+| `master init --token-stdin [--browser-profile PROFILE] [--replace-supervisor]` | Install the operating mode and, run by an operator from the coordinator checkout, the loop's systemd user unit; name the operator's browser profile; `--replace-supervisor` takes over a unit that runs another checkout or launcher |
 | `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
+| `master registry` | The fleet the control plane holds: every account with its runtime, model, roles, live sessions, quota, reset and ineligible reason ([the agent registry](#the-agent-registry)) |
+| `master registry propose [--directory DIR] [--apply]` | Discover the agent CLIs logged in on this host and propose (or store) the runtimes, models, accounts and roles for them |
+| `master registry runtime\|model\|account\|role set … --reason R` | Add or change one registry entry; a `set` names only what changes |
+| `master registry account quota NAME exhausted\|available\|unknown [--resets-at ISO] --reason R` | Mark an account's quota by hand; an exhausted mark holds until its reset or until cleared |
+| `master registry runtime\|model\|account\|role remove NAME --reason R` | Remove an entry; removing a runtime removes its accounts, and roles fall back in order |
+| `master registry history [--limit N]` | Every registry change and selection, newest first |
 | `master start KIND` | Launch the visible master session with its harness rules |
 | `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), `disk` (free space and what a reclaim would return), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
@@ -1644,7 +1897,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master context GY-N [TRIGGER] [--budget N]` | The assembled [escalation context](#escalation-context), read by key alone and verified against its fingerprint |
 | `master escalation GY-N [TRIGGER] [--budget N] [precedent\|KIND]` | Spawn a fresh handler on that context alone: `precedent` follows the newest applied line in this process, an agent `KIND` launches a judging session |
 | `master decisions GY-N` | An item's decisions with requester, approver, reasons, outcome, and refusals |
-| `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision |
+| `master approver GY-N DECISION [KIND]` | Launch the independent approver session for one decision, on the registry's `approver` role (KIND overrides the runtime) |
 | `master approve GY-N DECISION REASON` | Approve, from the approver session only |
 | `master principals [--apply]` | Preview or apply an agent-principal roster rotation that keeps every live principal |
 | `master restart` | Stop this host's durable loop and start it again detached |
