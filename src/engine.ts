@@ -3,12 +3,12 @@ import { z } from 'zod';
 import { Store, save, wakeJob } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
@@ -86,7 +86,9 @@ const commands = {
   }).strict().optional(),
     // The CI producer names the workflow job that ran the contract; the control plane reads that
     // job back from GitHub and accepts the record only when it completed on this commit.
-    ciRun: ciRunBindingSchema.optional() }).strict(),
+    ciRun: ciRunBindingSchema.optional(),
+    // GY-135: the same proof run against a tree with its criterion's behaviour removed.
+    exercise: proofExerciseSchema.optional() }).strict(),
   // The coordinator's observation of the running release covering a delivered merge. It names the
   // serving commit and where it was read; whether it is exact is derived, never asserted.
   deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
@@ -875,7 +877,12 @@ export class Engine {
             `${deploySmokeProof} evidence must name the observed deployed commit ${work.delivery!.deployment!.sha} as sha and merge commit ${work.delivery!.mergeSha} as baseSha`);
           demand(data.policyRevision === work.policyRevision, 'Policy revision does not match this delivery');
         }
-        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted, at: now.toISOString(), ...(ciRun ? { ciRun } : {}) };
+        // GY-135: a pass is trusted only beside a recorded run that fails with the criterion's
+        // behaviour removed; otherwise it is kept, untrusted, as not exercising its criterion.
+        const unexercised = trusted && data.proof !== deploySmokeProof ? exerciseRefusal(work, all, data) : null;
+        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(ciRun ? { ciRun } : {}), ...(unexercised ? { unexercised } : {}) };
+        if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'evidence.exercise.refused',
+          JSON.stringify({ details: { proof: data.proof, criteria: attachedCriteria(work, all, data.proof), behaviour: data.exercise?.behaviour ?? null, sha: data.sha, reason: unexercised } })]);
         work.evidence.push(evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
@@ -1282,16 +1289,19 @@ export class Engine {
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
       demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
-      const carry = work.candidate && speculation.tip !== work.candidate.sha ? this.decideTipCarry(work, all, speculation, now) : null;
+      // A tip re-bound to a tree-identical prediction keeps the carry it was first bound with (GY-100).
+      const kept = keptTipCarry(work, speculation);
+      const carry = kept === undefined ? this.decideTipCarry(work, all, speculation, now) : kept;
       work.queue!.speculation = { ...speculation, carry };
       // The prediction names what the tip was built behind and from, so the restore an ejection
       // owes (see merge-queue.ts ejectedTipRestore) reads it from the record alone.
       work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip,
         predecessors: speculation.predecessors, from: speculation.reviewedHead ?? speculation.merge?.from ?? speculation.tip }].slice(-queueHistoryLimit);
       this.evaluate(work, all, now);
-      if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
+      if (carry && kept === undefined) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors,
+        ...(kept !== undefined && speculation.carriedBase ? { carriedBase: speculation.carriedBase } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
       return work;

@@ -1,6 +1,7 @@
 import { deliveryState, type Gate, type Work } from '../src/model';
+import type { PipelineTimeline } from '../src/pipeline-speed';
 import { assignment } from './assignment';
-import { formatAge } from './duration';
+import { formatAge, statusDuration, type StatusDuration } from './duration';
 
 /**
  * Plain-English status for people who have never read the Graphyard docs. Every sentence is
@@ -174,6 +175,54 @@ export function plainStatus(work: Work, now: number): PlainStatus {
     case 'merge': return make(first.some(r => r.raw.startsWith('Merge queue position')) ? `Queued to merge — ${next!.replace(/ to merge,/, ',')}` : `Ready to merge${on} — ${next ? lowerFirst(next) : 'waiting its turn'}`, 'waiting', next);
     default: return make(`Ready to merge${on}`, 'waiting', null);
   }
+}
+
+/** The phases an item is in once it has been handed in: the card names review, not building. */
+const handedInPhases: Phase[] = ['review', 'checks', 'proof', 'merging'];
+
+/**
+ * The instant the item entered the status its card names, from the control plane's own record.
+ *
+ * `stageEnteredAt` is the spine: the engine rewrites it when, and only when, the evaluated stage
+ * changes, so an observation, a heartbeat or a failed retry of the same action leaves it alone
+ * and a stalled item cannot appear fresh. Three moves the stage does not see get their own
+ * instant, because the card's sentence does see them. Handing the work in, which the build gate
+ * keeps in the build stage until GitHub is observed. A claim, which after a send-back leaves the
+ * stage at build (the old submission still stands) while the card turns from waiting for a
+ * builder to being built. And an attempt ending — a claim running out, work sent back — which
+ * reads as nobody working on it before, or without, the next evaluation writing a new stage.
+ * The latest instant wins, and one in the future — a clock that disagrees — is ignored rather
+ * than trusted.
+ */
+export function statusSince(work: Work, now: number): string {
+  const phase = phaseOf(work, now);
+  const pipeline = (work as Work & { pipeline?: PipelineTimeline }).pipeline;
+  const attempts = pipeline?.attempts ?? [];
+  const moves: (string | undefined | null)[] = [work.stageEnteredAt];
+  if (handedInPhases.includes(phase)) moves.push(pipeline?.resubmittedAt ?? pipeline?.submittedAt);
+  if (phase === 'building' && work.lease) {
+    // The claim that opened the attempt being built, never an earlier attempt's.
+    moves.push(attempts.find(attempt => attempt.epoch === work.lease!.epoch)?.claimedAt);
+    if (work.lastAssignment?.epoch === work.lease.epoch) moves.push(work.lastAssignment.claimedAt);
+  }
+  if (phase === 'needs-worker') {
+    if (work.lease && Date.parse(work.lease.expiresAt) <= now) moves.push(work.lease.expiresAt);
+    // The last attempt's end: submitted, sent back, released or lapsed, the builder left then.
+    moves.push(attempts.at(-1)?.endedAt);
+    // Work sent back after it was handed in cannot have been waiting since before the hand-in.
+    if (work.reworkRequested) moves.push(pipeline?.resubmittedAt ?? pipeline?.submittedAt);
+  }
+  const instants = moves.map(at => at ? Date.parse(at) : Number.NaN).filter(at => Number.isFinite(at) && at <= now);
+  return instants.length ? new Date(Math.max(...instants)).toISOString() : work.stageEnteredAt;
+}
+
+/**
+ * How long this item has held the status its card names, and whether that is past the one
+ * configured threshold. Every view — the list, the board, the item view — draws from this call,
+ * so the number and the verdict cannot differ between two places that show the same item.
+ */
+export function statusHeld(work: Work, now: number): StatusDuration {
+  return statusDuration(statusSince(work, now), now, phaseOf(work, now) === 'shipped');
 }
 
 /** Stuck items first, then the oldest in its phase; the order people should look at them. */

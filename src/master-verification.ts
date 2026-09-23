@@ -167,11 +167,12 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
 }
 
 /** Effects bound to the real coordinator process, mirroring the daemon's. */
-export function verificationEffects(config: MasterConfig, deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown) => Promise<any>; run?: Run }): VerificationEffects {
+export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown) => Promise<any>; run?: Run }): VerificationEffects {
   const run = deps.run ?? defaultRun;
   return {
     snapshot: deps.snapshot, repository: config.repository,
-    observe: delivered => observeDeployment(config, delivered, run),
+    // Containment is derived in the managed repository's checkout, never the launcher's directory.
+    observe: delivered => observeDeployment(config, delivered, run, fetch, () => Date.now(), { root: deps.root }),
     release: () => checkoutRelease(config.cliPath, run),
     emit: () => emitInstructions(config, run),
     record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
