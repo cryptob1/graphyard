@@ -1,4 +1,5 @@
 import { elapsed, sessionReconcileIntervalMs } from './model/sessions.js';
+import { herdrErrorCode } from './master.js';
 
 /**
  * Settling a reviewer or producer request whose session is over (GY-137).
@@ -15,7 +16,8 @@ import { elapsed, sessionReconcileIntervalMs } from './model/sessions.js';
 /** An absent pane satisfies the close: the settlement names it on the resolution, and records no failure. Any other close failure is still one. */
 export const paneAbsentCode = 'pane_not_found';
 export function paneAlreadyGone(error: unknown): boolean {
-  if ((error as { herdrCode?: unknown } | null)?.herdrCode === paneAbsentCode) return true;
+  // Herdr names the code on the error, or in the JSON it printed on stdout or stderr.
+  if (herdrErrorCode(error) === paneAbsentCode) return true;
   return error instanceof Error && error.message.includes(paneAbsentCode);
 }
 export const paneGoneNote = (pane: string) => `pane ${pane} was already gone when the session was closed, so there was nothing left to close`;
