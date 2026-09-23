@@ -143,6 +143,15 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     assert.equal(await readFile(pasteHeld.awaiting!.request!, 'utf8'), 'Implement GY-130');
     assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-paste', 'w1V:pC1', pasteHeld.awaiting!, clock).request, pasteHeld.awaiting!.request);
     assert.equal(held.awaiting!.request, null, 'a runtime that read its request from the command line has nothing pending');
+    assert.equal(held.awaiting!.named, true);
+
+    // A rename Herdr fails while the dialog is up keeps the hold, recorded unnamed for the supervisor to retry.
+    const unnamedPane = new ConsentPane('claude', folderDialog);
+    const unnamedRun = (command: string, args: string[]) => { if (args[0] === 'agent' && args[1] === 'rename') throw new Error('herdr: agent busy'); return unnamedPane.run(command, args); };
+    const unnamed = startAgentSession('eng-consent', 'claude', 'w1V:pC1', [], 'Implement GY-130', unnamedRun, { directory, ...unnamedPane.bounds(), holdConsent: true });
+    assert.equal(unnamed.started.state, 'awaiting consent'); assert.equal(unnamed.awaiting!.named, false);
+    assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', unnamed.awaiting!, clock).named, false);
+    assert.equal('named' in consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', held.awaiting!, clock), false, 'a named session\'s hold says nothing about it');
 
     // Without a hold the same launch is refused as awaiting consent, carrying the prompt's text.
     const refusedPane = new ConsentPane('claude', folderDialog);
@@ -360,6 +369,35 @@ test('integration:unconsented-session-releases-its-slot — the watch supervisor
     assert.equal(sent.length, 1, 'the same dialog is not answered again');
     const [telemetryItem] = consentHoldItems([checkout], { work: [leased], now: new Date().toISOString() });
     assert.match(telemetryItem.text, /The launcher answered this telemetry prompt from its allow-list and it is still showing/);
+
+    // A session Herdr has not taken the name of is renamed on every check, and its hold is not
+    // cleared — nor its request delivered — until Herdr reports it under the profile's agent name;
+    // past the bound it gives the slot back rather than run where the master cannot find it.
+    for (const path of readConsentHolds(checkout).map(entry => entry.path)) await rm(path);
+    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), { ...hold, request: requestFile, named: false });
+    let takesName = false, herdrName = 'claude-1';
+    const renames: string[][] = [], delivered: string[][] = [];
+    const renaming = (_command: string, args: string[]) => {
+      if (args[0] === 'pane' && args[1] === 'read') return workingScreen;
+      if (args[0] === 'agent' && args[1] === 'rename') { renames.push(args); if (!takesName) throw new Error('herdr: agent busy'); herdrName = args[3]; return '{}'; }
+      if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { name: herdrName, pane_id: args[2] } } });
+      delivered.push(args); return '{}';
+    };
+    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, renaming, () => clock)(), null);
+    assert.equal(readConsentHolds(checkout)[0].named, false, 'a refused rename keeps the hold, though the prompt is cleared');
+    assert.equal(delivered.length, 0, 'the request waits for the name');
+    assert.match(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, renaming, () => clock + consentHoldMs)() ?? '', /Herdr did not take the session's name eng-consent by the hold bound/);
+    takesName = true;
+    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, renaming, () => clock + 60_000)(), null);
+    assert.deepEqual(renames.map(args => args.slice(2)), [['w1V:pC1', 'eng-consent'], ['w1V:pC1', 'eng-consent'], ['w1V:pC1', 'eng-consent']]);
+    assert.equal(herdrName, 'eng-consent');
+    assert.deepEqual(delivered.map(args => args.slice(0, 3)), [['agent', 'prompt', 'w1V:pC1']], 'named, the request is delivered');
+    assert.equal(readConsentHolds(checkout).length, 0, 'named and delivered, the hold is cleared');
+    // A rename Herdr accepts but does not report is not confirmed: the hold stays unnamed.
+    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), { ...folderHold, named: false });
+    const unconfirmed = (_command: string, args: string[]) => args[0] === 'pane' ? folderDialog : args[1] === 'get' ? JSON.stringify({ result: { agent: { name: 'claude-1' } } }) : '{}';
+    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, unconfirmed, () => clock)(), null);
+    assert.equal(readConsentHolds(checkout)[0].named, false);
   } finally { await rm(checkout, { recursive: true, force: true }); }
 });
 

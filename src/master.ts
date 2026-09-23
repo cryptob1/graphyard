@@ -1295,6 +1295,7 @@ export function startAgentSession(name: string, kind: string, pane: string, args
   const command = launchCommand(kind, args, files, options.prefix);
   herdrRun(['pane', 'run', pane, command], run);
   const started = awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });
+  let named = true;
   try { herdrJson(['agent', 'rename', pane, name], run); }
   catch (error) {
     // A runtime whose own naming rules are narrower than the ones checked above says so in its
@@ -1302,13 +1303,15 @@ export function startAgentSession(name: string, kind: string, pane: string, args
     if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
     // A held session is still named so a human can find it, but a runtime that will not take the
     // name before its dialog is answered does not turn the hold into a failed start.
+    // The hold records it unnamed, so the watch supervisor retries the name before it clears.
     if (!started.awaiting) throw error;
+    named = false;
   }
   // A session awaiting consent has not read its request, so a paste would land in the dialog: the
   // request waits in its launch file instead, for whoever clears the hold to deliver.
   if (delivery === 'paste' && !started.awaiting) deliverPrompt(name, text, run, options);
   const pending = delivery === 'paste' && started.awaiting ? writeLaunchFiles(options.directory, name, { request: text }).request : null;
-  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: pending } : undefined,
+  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: pending, named } : undefined,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
@@ -2834,8 +2837,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
-export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null }, now = Date.now()): ConsentHold {
-  return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}) };
+export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
+  return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
 async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ((command: string, args: string[]) => string) | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds) {

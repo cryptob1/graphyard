@@ -113,6 +113,8 @@ export interface ConsentHold {
   request?: string | null;
   /** Allow-listed prompts the watch supervisor answered after a first dialog was cleared, each as a session record keeps it. */
   answered?: ConsentAnswer[];
+  /** `false` when Herdr has not taken the session's name (a failed or refused rename while the dialog was up): the watch supervisor retries it, and confirms it, before it clears the hold. */
+  named?: boolean;
 }
 export const consentHoldSuffix = '.consent';
 export const consentHoldPath = (stem: string) => `${stem}${consentHoldSuffix}`;

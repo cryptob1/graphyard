@@ -123,13 +123,29 @@ export const consentRequestAcceptMs = 8_000;
  * runtime without a request contract, whose request is pasted after it starts, is sent it here
  * once its prompt clears (the hold's `request`). A different dialog that replaces the held one is
  * a new prompt: the hold is rewritten for it with a fresh bound, and one on the launcher's
- * allow-list is answered once with its least-privilege option, as the launcher would have.
+ * allow-list is answered once with its least-privilege option, as the launcher would have. A
+ * session Herdr has not taken the name of (the hold's `named: false`) is renamed on every check
+ * until Herdr reports it under that name, and its hold is never cleared before: the master finds a
+ * worker only by its profile's agent name, and would otherwise count the profile free and the held
+ * worker's supervisor orphaned.
  */
 export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[]) => string = (command, args) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 })), now: () => number = Date.now): () => string | null {
   return () => {
     const hold = readConsentHolds(checkout)[0];
     if (!hold) return null;
     const pane = env.HERDR_PANE_ID ?? hold.pane;
+    let named = hold.named !== false;
+    if (!named) {
+      try {
+        run('herdr', ['agent', 'rename', pane, hold.agentName]);
+        const parsed = JSON.parse(run('herdr', ['agent', 'get', pane])), agent = (parsed?.result ?? parsed)?.agent ?? (parsed?.result ?? parsed);
+        named = agent?.name === hold.agentName;
+      } catch { named = false; }
+      if (named) {
+        const { path: _path, named: _named, ...kept } = hold;
+        writeConsentHold(hold.path.slice(0, -consentHoldSuffix.length), kept);
+      }
+    }
     let screen: string | null = null;
     try { screen = run('herdr', ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', '40']); } catch { screen = null; }
     const verdict = consentHoldVerdict(hold, screen, now());
@@ -142,10 +158,13 @@ export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.P
           answer = { rule: prompt.rule.id, kind: prompt.kind, prompt: prompt.text, answer: prompt.rule.answer, keys: prompt.keys, at: new Date(now()).toISOString() };
         } catch { /* unanswered, it stays held for a human */ }
       }
-      writeConsentHold(stem, reclassifyConsentHold(hold, prompt, now(), answer));
+      writeConsentHold(stem, { ...reclassifyConsentHold(hold, prompt, now(), answer), ...(named ? { named: undefined } : {}) });
       return null;
     }
     if (verdict === 'cleared') {
+      // Unnamed, the session stays held — the request undelivered — until a rename takes, and past
+      // the bound gives the slot back rather than run where the master cannot see it.
+      if (!named) return now() >= Date.parse(hold.releaseAt) ? `its session never took its request: the ${hold.kind} consent prompt was answered, but Herdr did not take the session's name ${hold.agentName} by the hold bound (${hold.releaseAt})` : null;
       // A runtime prompted after it starts was never sent its request while the dialog was up: it
       // is delivered now, and the hold stays until the runtime visibly accepts it, so a failed
       // delivery is tried again on the next check and, past the bound, gives the slot back.
