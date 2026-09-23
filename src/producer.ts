@@ -10,6 +10,7 @@ import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { readReviewLedger } from './reviewer.js';
+import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -303,16 +304,19 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
       }
     } else if (record.idleSince) { delete record.idleSince; changed++; }
     if (!next) continue;
-    let closeFailure: string | undefined;
+    let closeFailure: string | undefined, paneGone = false;
+    // A pane that is already gone is the state the close wanted (GY-137), so it settles the record
+    // with the absence named on the resolution; any other close failure keeps it pending and retried.
+    // A session Herdr no longer reports is not closed at all, so an expired request settles as expired.
     try { if (record.pane && (agent || agents === null)) closeHerdrPane(record.pane, run); }
-    catch (error) { closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
+    catch (error) { if (paneAlreadyGone(error)) paneGone = true; else closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
     record.closeFailure = closeFailure;
     if (!closeFailure) {
       // The session is gone, so its checkout goes with it — whatever the outcome. One that cannot
       // be removed is said so on the record and taken back by the next reclaim pass.
       const failure = await settleCheckout(root, record.checkout);
       if (failure) record.checkoutFailure = failure; else delete record.checkoutFailure;
-      record.state = next.state; record.resolution = next.resolution; record.closedAt = now.toISOString();
+      record.state = next.state; record.resolution = paneGone ? withPaneGone(next.resolution, record.pane!) : next.resolution; record.closedAt = now.toISOString();
     }
     changed++;
   }
