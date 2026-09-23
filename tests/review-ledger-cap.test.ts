@@ -10,7 +10,7 @@ import { buildMasterStatus, loadMasterConfig, setupMaster } from '../src/master.
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { assertSessionLedgerRoom, unrecordedPaneStopped, bindReviewer, boundSessionLedger, launchReview, readReviewLedger, reconcileReviews, releaseClosedRequests, reviewLedgerSpec, saveReviewLedger, saveReviewerProfile, sessionLedgerBound, sessionLedgerHeadroom, sessionLedgerRetention, SessionLedgerFullError, type ReviewRecord } from '../src/reviewer.js';
 import { producerLedgerSpec, readProducerLedger, saveProducerLedger, sessionRetry, sessionRetryLimit, type ProducerRecord } from '../src/producer.js';
-import { ledgerRefusalAttention } from '../src/cli/master-status.js';
+import { ledgerRefusalAttention } from '../src/master-status.js';
 import type { Observation, Work } from '../src/model.js';
 
 // Each test is named for the proof it produces (GY-131): unit:terminal-reviews-reaped,
