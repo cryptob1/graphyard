@@ -332,6 +332,32 @@ test('integration:ledger-refusal-attributed — master status names a full ledge
       assert.deepEqual(quiet.attentionItems, [running], 'the running reviewer is still what the item shows');
       assert.equal(quiet.counts!.attention, 1);
     }
+    // A reclaimed action keeps its last failure, resolution and stall while the new attempt runs; that is not a standing refusal.
+    const reclaimed = work({ autoDispatch: { review: request, producers: [], history: [] },
+      actionQueue: { actions: [{ id: 'row-1', key: 'GY-131', gate: 'review', kind: 'request-review', work: 'work-131', state: 'claimed', attempts: 4, history: [failed, failed, failed, { ...failed, event: 'claimed', reason: 'attempt 4 claimed', result: null }],
+        result: 'failed', resolution: refusal.message, stall: { reason: refusal.message }, requestedAt: now }], history: [] } } as unknown as Partial<Work>);
+    const stillRunning = ledgerRefusalAttention({ work: [{ key: 'GY-131', attention: running.text, dispatch: null }], attentionItems: [running], counts: { attention: 1 } }, [reclaimed]);
+    assert.deepEqual(stillRunning.attentionItems, [running], 'a reclaimed action is running again, not refused');
+    // A row reporting something ranked above a launch keeps it: the ledger item is listed beside it, never in its place.
+    const parked = work({ ...item, humanRequest: { id: 'hr-1', kind: 'money-or-accounts', reason: 'needs a paid plan', needed: 'a paid plan', requestedBy: 'graphyard-claude-1', epoch: 1, at: now } } as unknown as Partial<Work>);
+    const parkedStatus = buildMasterStatus({ work: [parked], now }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined,
+      { producers: { pending: [], completed: [] }, failures: [{ requestId: request.id, kind: 'review', attempts: 3, reason: refusal.message, at: now, nextAt: now }] });
+    const parkedRow = parkedStatus.work.find((entry: { key: string }) => entry.key === 'GY-131') as { attention: string | null; attentionOwner: unknown };
+    assert.match(parkedRow.attention!, /parked on a human-only decision/);
+    const kept = ledgerRefusalAttention({ work: parkedStatus.work, attentionItems: parkedStatus.attentionItems, counts: { attention: parkedStatus.attentionItems.length } }, [parked]);
+    const keptRow = kept.work.find((entry: { key: string }) => entry.key === 'GY-131') as { attention: string | null; attentionOwner: unknown };
+    assert.equal(keptRow.attention, parkedRow.attention, 'the row still reports the human-only park');
+    assert.deepEqual(keptRow.attentionOwner, parkedRow.attentionOwner, 'with its owner and next command');
+    const listed = kept.attentionItems.filter(entry => entry.subject === 'GY-131').map(entry => entry.text);
+    assert.ok(listed.includes(parkedRow.attention!), 'the park is still an attention item');
+    assert.ok(listed.some(text => /review ledger \(\.graphyard\/reviews\.json\) refused the write/.test(text)), 'the ledger item is listed beside it');
+    assert.equal(kept.counts!.attention, kept.attentionItems.length);
+    // A quarantined row's attention is kept the same way.
+    const quarantined = { key: 'GY-131', attention: 'Containment quarantine from epoch 1 blocks dispatch: Supervisor absence has not been verified on the registered host', dispatch: { review: { failure: { reason: refusal.message } }, producers: [] } };
+    const fence = { subject: 'GY-131', text: quarantined.attention, owner: 'master' } as any;
+    const fenced = ledgerRefusalAttention({ work: [quarantined], attentionItems: [fence] }, []);
+    assert.equal((fenced.work[0] as { attention: string }).attention, quarantined.attention);
+    assert.ok(fenced.attentionItems.includes(fence) && fenced.attentionItems.some(entry => /review ledger/.test(entry.text)), 'quarantine and ledger are both listed');
     // Supersession is per launch: a review ledger refusal never hides a stalled producer launch of the same item.
     const producerStall = { subject: 'GY-131', text: 'Automatic producer launch for GY-131 refused 3 time(s): every independent producer profile is busy or unavailable', owner: 'master' } as any;
     const both = ledgerRefusalAttention({ work: status.work, attentionItems: [...status.attentionItems, busy, producerStall], counts: { attention: status.attentionItems.length + 2 } }, [item]);

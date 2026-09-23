@@ -13,8 +13,10 @@ import { reviewLedgerSpec, sessionLedgerRefusal, sessionLedgerRemedy } from './r
  * the real fault was the file. Every row whose review or producer launch carries a ledger refusal
  * (a dispatch failure, or a failed action row) gets one attention item naming the ledger, its bound,
  * the live count and the remedy, and every other attention for that item that blamed capacity or
- * repeated the raw refusal is replaced by it. Only a refusal that stands now counts: a dispatch
- * failure, a failed resolution, a stall, or an action whose latest event is a failure — an action
+ * repeated the raw refusal is replaced by it. The row's own attention is replaced only when it is
+ * about a launch; one ranked above it (quarantine, a human-only park, a merge violation) stays,
+ * with its owner, and the ledger item is listed beside it. Only a refusal that stands now counts:
+ * a dispatch failure, or an action back in the queue whose latest event is a failure — an action
  * that failed once on a full ledger and has since been claimed again or completed says nothing
  * about the file.
  * `counts.attention`, when given, is moved by exactly the items removed and added, so it keeps
@@ -24,7 +26,10 @@ export function ledgerRefusalAttention<T extends { work: any[]; attentionItems: 
   // Per item, one standing refusal per ledger: a refused review and a refused producer launch are separate faults.
   const refusals = new Map<string, Map<LedgerKind, RegExpMatchArray>>();
   // What an action says now: its failed resolution, its stall, or a latest event that is a failure.
-  const standing = (action: ActionRow) => [action.result === 'failed' ? action.resolution : undefined, action.stall?.reason, action.history.at(-1)?.event === 'failed' ? action.history.at(-1)!.reason : undefined];
+  // A reclaimed row keeps its last failure and stall while the new attempt runs, so only a row
+  // back in the queue with a failure as its latest event is still refused.
+  const standing = (action: ActionRow) => action.state !== 'pending' || action.history.at(-1)?.event !== 'failed' ? []
+    : [action.resolution, action.stall?.reason, action.history.at(-1)!.reason];
   for (const row of status.work as { key: string; dispatch?: { review: { failure?: { reason: string } | null } | null; producers: { failure?: { reason: string } | null }[] } | null }[]) {
     const item = work.find(candidate => candidate.key === row.key);
     const reasons = [row.dispatch?.review?.failure?.reason, ...(row.dispatch?.producers ?? []).map(request => request.failure?.reason), ...(item?.actionQueue?.actions ?? []).flatMap(standing)];
@@ -42,7 +47,11 @@ export function ledgerRefusalAttention<T extends { work: any[]; attentionItems: 
       const text = `${row.key}'s ${kind === 'review' ? 'review' : 'proof producer'} cannot be requested because the ${spec.name} (${path}) refused the write: its bound is ${bound} records and ${live} are live sessions. This is local state, not ${spec.role} capacity`;
       return { subject: row.key, text, ...agentOwner('master', `${sessionLedgerRemedy(spec)}; master status reports the ledger's headroom under ledgers`) } as AttentionItem;
     });
-    items.push(...own); replaced.set(row.key, row.attention);
+    items.push(...own);
+    // A row reporting something ranked above a launch — quarantine, a human-only park, an
+    // unauthorized or reverted merge, an offline worker — keeps it; the ledger item is listed beside it.
+    if (!aboutLaunch(row)) return row;
+    replaced.set(row.key, row.attention);
     const { subject, text: attention, ...owner } = own[0];
     return { ...row, attention, attentionOwner: owner };
   });
@@ -52,7 +61,7 @@ export function ledgerRefusalAttention<T extends { work: any[]; attentionItems: 
   const superseded = (entry: AttentionItem) => {
     const byKind = refusals.get(entry.subject);
     if (!byKind) return false;
-    if (entry.text === replaced.get(entry.subject)) return true;
+    if (replaced.has(entry.subject) && entry.text === replaced.get(entry.subject)) return true;
     const kind = attentionLaunchKind(entry.text);
     return !!kind && byKind.has(kind);
   };
@@ -62,6 +71,18 @@ export function ledgerRefusalAttention<T extends { work: any[]; attentionItems: 
 }
 
 type LedgerKind = 'review' | 'producer';
+
+/**
+ * Whether a row's attention is the item's launch, or nothing ranked above it: no attention, the
+ * gate or dwell fallback, a refused, retried, unacknowledged or exhausted review or producer launch.
+ */
+function aboutLaunch(row: { attention: string | null; refusal?: { reason: string } | null }): boolean {
+  const text = row.attention;
+  if (!text || text === row.refusal?.reason || /^Work has remained at \S+ for more than one hour$/.test(text)) return true;
+  if (/^Every configured reviewer profile is exhausted/.test(text)) return true;
+  if (/^(Reviewer session|Producer session for \S+ proofs) of \S+ ((failed|expired) after attempt|\(\S+\) is awaiting acknowledgement)/.test(text)) return true;
+  return !!attentionLaunchKind(text);
+}
 
 /** Which launch an attention text is about, when it is about a launch at all. */
 function attentionLaunchKind(text: string): LedgerKind | null {

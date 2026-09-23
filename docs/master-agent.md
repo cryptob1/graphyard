@@ -1318,13 +1318,17 @@ on a cap the other lacks.
   The refusal names the ledger, its bound, the live count and any pinned count:
   `The review ledger (.graphyard/reviews.json) refused the write: its bound is 200 records and 200 are live sessions …`.
   This is local state, not reviewer or producer capacity. `master status` attributes it that way.
-  The row's attention and one attention item per refusing ledger name the ledger, the bound, the
-  live count and the remedy, and `counts.attention` counts those items. The item is never reported
-  as waiting on a busy reviewer agent. Only attention about the refused launch gives way: a review
-  ledger refusal replaces the busy reviewer and the stalled `request-review` action, never a
-  producer launch failure of the same item, and the reverse. Only a refusal that stands now is attributed: a dispatch failure, a
-  stalled action, or an action whose latest event is the failure. An action that failed once on a full ledger and has since
-  been claimed again or completed is not. The remedy is to settle the
+  One attention item per refusing ledger names the ledger, the bound, the live count and the
+  remedy, and `counts.attention` counts those items. The item is never reported as waiting on a
+  busy reviewer agent. Only attention about the refused launch gives way: a review ledger refusal
+  replaces the busy reviewer and the stalled `request-review` action, never a producer launch
+  failure of the same item, and the reverse. The row's attention names the ledger too, unless it
+  reports something ranked above a launch — a containment quarantine, a human-only park, an
+  unauthorized or reverted merge, an offline worker session, a proof gap or a base conflict. That
+  row keeps its attention and owner, and the ledger item is listed beside it. Only a refusal that
+  stands now is attributed: a dispatch failure, or an action back in the queue whose latest event
+  is the failure. An action that failed once on a full ledger and has since been claimed again or
+  completed is not, even though a claimed row still carries its last failure and stall. The remedy is to settle the
   live sessions: `master status` reconciles every pending record against its session and GitHub.
   A session gone from Herdr does not settle on the first pass that finds it gone: that pass marks
   it idle (`idleSince`), and it is failed by the first pass after its idle grace
