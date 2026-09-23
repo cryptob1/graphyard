@@ -18,7 +18,7 @@ import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } f
 import { CHECK_NAME, carriedApproval, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
-import { consentHoldAttention, consentHoldMs, detectConsentPrompt, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
+import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
 import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
@@ -1228,6 +1228,9 @@ export function observeStart(pane: string, kind: string, command: string, run?: 
   const screen = readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
   const prompt = detectConsentPrompt(screen);
   if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
+  // An unread pane rules nothing out: an idle runtime may be sitting on a consent prompt, so it is
+  // polled again until a read shows its screen, never taken as ready without one.
+  if (screen === null && agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'starting', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status} but its pane could not be read, so a consent prompt is not ruled out`, line };
   if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
   const showing = screen !== null && !!runtimeScreens[kind]?.test(screen);
   if (agent?.agent === kind && agent.agent_status === 'blocked') return { state: 'blocked', agent, detail: 'Herdr reports it blocked', line };
@@ -1251,11 +1254,14 @@ export function awaitRuntimeStart(pane: string, kind: string, command: string, r
     if (observed.state === 'ready') return { ...observed, waitedMs, extended, consent, awaiting: null };
     if (observed.state === 'consent') {
       const prompt = observed.prompt!, rule = prompt.rule;
-      const answeredAt = consent.findLast(answer => answer.rule === rule?.id)?.at;
+      // Answers are counted per dialog, not per rule: a second dialog the same rule matches (a
+      // crash-report question after a usage-statistics one) gets its own bounded attempts.
+      const answered = consent.filter(answer => answer.rule === rule?.id && sameConsentPrompt({ kind: answer.kind, prompt: answer.prompt }, prompt));
+      const answeredAt = answered.at(-1)?.at;
       if (answeredAt && clock() - Date.parse(answeredAt) < consentSettleMs && waitedMs < ceilingMs) { wait(pollMs); continue; }
       // An allow-listed prompt is answered with its least-privilege option, and the answer is
       // recorded; the start bound keeps running, so a prompt that returns is not answered forever.
-      if (rule && prompt.keys && consent.filter(answer => answer.rule === rule.id).length < consentAnswerAttempts && waitedMs < ceilingMs) {
+      if (rule && prompt.keys && answered.length < consentAnswerAttempts && waitedMs < ceilingMs) {
         herdrRun(['pane', 'send-keys', pane, ...prompt.keys], run);
         consent.push({ rule: rule.id, kind: prompt.kind, prompt: prompt.text, answer: rule.answer, keys: prompt.keys, at: new Date(clock()).toISOString() });
         wait(pollMs);

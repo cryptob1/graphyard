@@ -153,6 +153,18 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', unnamed.awaiting!, clock).named, false);
     assert.equal('named' in consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', held.awaiting!, clock), false, 'a named session\'s hold says nothing about it');
 
+    // A pane read that fails rules nothing out: an idle runtime whose screen could not be read is
+    // still starting and read again, so the dialog behind it is found, never taken as started.
+    const flaky = new ConsentPane('claude', folderDialog);
+    let unread = 3;
+    const flakyRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read' && unread-- > 0) throw new Error('herdr: pane read failed'); return flaky.run(command, args); };
+    const found = awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', flakyRun, { ...flaky.bounds(), holdConsent: true });
+    assert.equal(found.state, 'consent'); assert.equal(found.awaiting!.kind, 'folder');
+    const blind = new ConsentPane('claude', folderDialog);
+    const blindRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read') throw new Error('herdr: pane read failed'); return blind.run(command, args); };
+    assert.throws(() => awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', blindRun, { ...blind.bounds(), holdConsent: true }),
+      (error: unknown) => error instanceof SessionStartError && error.startCase === 'still starting' && /Herdr reports the claude runtime idle but its pane could not be read, so a consent prompt is not ruled out/.test(error.message));
+
     // Without a hold the same launch is refused as awaiting consent, carrying the prompt's text.
     const refusedPane = new ConsentPane('claude', folderDialog);
     assert.throws(() => awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', refusedPane.run, refusedPane.bounds()),
@@ -211,6 +223,21 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
     assert.deepEqual(stubborn.keys, [['3'], ['3']]);
     assert.ok(Date.parse(stuck.consent[1].at) - Date.parse(stuck.consent[0].at) >= 5_000, 'no second keystroke inside the settle period');
     assert.match(stuck.awaiting!.why, /answered it 2 times and it is still showing/);
+    // Attempts are counted per dialog: a second dialog the same rule matches, drawn after the first
+    // took both its answers, still gets its own least-privilege answer.
+    const crashDialog = [' Send crash reports?', ' Allow the CLI to send crash reports when it fails?', '', '● 1. Yes, send crash reports', '  2. No, do not send'].join('\n');
+    const second = new ConsentPane('gemini', telemetryDialog);
+    const secondRun = (command: string, args: string[]) => {
+      const result = second.run(command, args);
+      // The first dialog ignores both its answers, then gives way to the crash-report question.
+      if (args[0] === 'pane' && args[1] === 'send-keys' && second.keys.length === 2) Object.assign(second as unknown as { screen: string; accepts: string[] }, { screen: crashDialog, accepts: ['2'] });
+      return result;
+    };
+    const both = awaitRuntimeStart('w1V:pC1', 'gemini', 'GY=/s; gemini', secondRun, { ...second.bounds(), holdConsent: true });
+    assert.equal(both.state, 'ready'); assert.equal(both.awaiting, null);
+    assert.deepEqual(both.consent.map(answer => answer.rule), ['telemetry-decline', 'telemetry-decline', 'telemetry-decline']);
+    assert.equal(both.consent[0].prompt, both.consent[1].prompt); assert.match(both.consent[2].prompt, /crash reports when it fails/);
+    assert.deepEqual(second.keys, [['2'], ['2'], ['2']]);
 
     await saveProducerLedger(root, { version: 1, producers: [] });
     for (const [screen, kind] of [[loginDialog, 'credential'], [paymentDialog, 'payment']] as const) {
