@@ -48,6 +48,52 @@ The item view opens with the status sentence, the owner, the pull request and th
 
 **More details** holds everything else: the description, type, priority, policy and revision, worker ID and assignment, workspaces, coordination diagnosis, file overlaps, merge-queue position, review provider, the raw gate reasons, proof details, bootstrap obligations, observed delivery, evidence with its artifacts, and history. Admin sessions get an **Edit** menu for actions that change the item's rules: switching the review provider, requesting a fresh provider review, and revising requirements.
 
+## Shipping pulse
+
+**Insights → Shipping pulse** summarizes repository delivery flow: exact merges per week, intent-to-merge, and the pull-request-to-production split. The full definitions and bounds are in [Shipping pulse](shipping-pulse.md); this section explains what the production figures on the page mean and how to make them measurable.
+
+### What the pull-request-to-production split measures
+
+For each delivery in the 12-week window the split runs from GitHub's observed pull-request creation time, through the exact accepted merge, to the first production instant recorded for that merge. The page shows the average, median and 90th percentile of the whole interval, the average of its two components (*PR created → merge* and *merge → production*), and a coverage line: how many deliveries in the window had a production instant, out of how many were eligible. Every instant is compared on the repository clock. Empty figures read `Unavailable`, never zero.
+
+### Which observations feed it
+
+Two sources give a delivery a production instant. A provider observation is preferred; the master's verification stands in only where no provider reported.
+
+| Source | Recorded by | Instant used |
+| --- | --- | --- |
+| Deployment-provider observation | A collector posting `POST /api/production-observations` ([deployment observations](shipping-pulse.md#source-and-definitions)) with a `producer` credential whose `deploymentProviders` allowlist names the provider. The observation carries the deployment's own finish time, the measured clock bracket, and the exact merge commits it contains. | The earliest repository instant the deployment can have finished at, no earlier than the merge. |
+| Master verification | `graphyard master verify-deployment GY-N`, which records the release it observed serving the delivered merge against the delivery, in the append-only ledger the pulse reads. | The repository-clock instant the verification was recorded. The release was already serving then, so this *merge → production* duration is an upper bound on the real one. |
+
+`POST /api/deployments` ([recording deployment-provider observations](protocol/deployment-observations.md)) records deployments for [flow analytics](#flow-analytics) — frequency, latency, failure and rollback — and does **not** feed this metric. `GET /api/status` reports `production.provider`, the provider the control plane itself [watches](deployment.md#production-deployment-observation) for the base branch; that watch raises deployment incidents and does not feed this metric either.
+
+### Not configured versus sparse
+
+The page tells two empty states apart, because they call for different actions.
+
+- **Production endpoint not configured.** No deployment-provider observation has ever been recorded and no delivery in the window carries a verification. The metric has no inputs, so no delivery can be measured until one of the two sources above exists; waiting for more deliveries changes nothing. `GET /api/shipping-pulse` reports `prToProduction.configured: false` with the same explanation in `unconfiguredReason`, and `prToProduction.sources` says which source is absent.
+- **Sparse sample.** At least one source exists but fewer than five deliveries in the window have a production instant. The durations are real and should be read cautiously.
+
+### Configuring the deployment provider for this deployment
+
+This control plane runs on Railway, and Railway does not call `POST /api/production-observations` on its own. To make the metric measurable:
+
+1. Add a `producer` principal to `GRAPHYARD_PRINCIPALS` ([deployment](deployment.md#railway)) with `"deploymentProviders": ["railway"]` and no `proofs`, then redeploy. The `producer` role alone is refused; the allowlist is the authority, and it is granted to a credential of its own rather than by widening an acceptance collector's grants.
+2. Run a collector with that credential that, after each successful Railway deployment of the base branch, posts one observation naming the deployment, its finish time, the clock bracket it measured against the repository clock (within twenty seconds), the deployed commit, and every merge commit the deployment contains. The request shape and the refusals are in [Shipping pulse](shipping-pulse.md#source-and-definitions).
+3. Until the collector exists, `graphyard master verify-deployment GY-N` on each delivered item gives it a production instant, and the master loop runs that step on its own.
+
+### What each exclusion reason means
+
+The coverage line names the single most frequent reason and its count beside the figures, so `0% coverage` is never shown without its cause; **Why records were excluded** holds the full breakdown, and `GET /api/shipping-pulse` returns the same reasons in `prToProduction.exclusions` and `prToProduction.dominantExclusion`.
+
+| Reason | Meaning |
+| --- | --- |
+| `no-verifiable-production-deployment` | No successful provider observation records containment of this merge, and the master has not verified the delivery. With no observation source at all, every delivery is excluded for this reason and the page says the endpoint is not configured. |
+| `superseded-deployment` | Every deployment that contained this merge was later reported `superseded`, so none of them stands as a production endpoint. |
+| `production-observation-cap` | More than 100 observations matched this merge; the pulse stops at its explicit cap and marks the response partial rather than guessing which one was first. |
+| `missing-pr-created-at` | The delivery observation carries no GitHub pull-request creation time, so the interval has no start. |
+| `invalid-clock-order` | The pull request was created after its own merge, or the production instant precedes the merge, on the repository clock; the record is excluded rather than reported as a negative duration. |
+
 ## Flow analytics
 
 Flow analytics opens on two things: where undelivered work is waiting, counted per wait category under the plain names the home page uses (for example "Waiting for proof that it works"; the server's category names and definitions are under **Show details**), and the time from *handed in* to *merged* (p50 and p90). The clock starts when that version of the code was handed in, so a pull request that was pushed again is measured from its last push, not from the moment it was opened.
