@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { CHECK_NAME, GitHub } from '../src/github.js';
 import { describeQueueBinding, exactApproval, type Observation, type Work } from '../src/model.js';
 import { nameUnobtainableReviews, reconcileAutoDispatch, reviewNeed, unansweredRequest, unobtainableReview, type RequestProgress, type SettledReviewSession } from '../src/model/dispatch.js';
-import { baseRefreshConflict, pendingBaseRefresh, predictQueue, queueRef, treeIdenticalPrediction, type QueueSpeculation } from '../src/merge-queue.js';
+import { baseRefreshConflict, keptTipCarry, pendingBaseRefresh, predictQueue, queueRef, treeIdenticalPrediction, type QueueSpeculation } from '../src/merge-queue.js';
+import { carriedApproval, currentCarry, evidenceBindsCandidate, type QueueCarry } from '../src/model/carry.js';
 import { buildMasterStatus, loadMasterConfig, setupMaster } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, saveReviewerProfile, summarizeReviews, withdrawnBeforeLaunch } from '../src/reviewer.js';
 import { sessionRetry } from '../src/producer.js';
@@ -310,6 +311,31 @@ test('integration:tip-republication-preserves-approval — a merge-queue tip is 
   const rebound = predictQueue(legacy, clock + 2000);
   assert.deepEqual([rebound[1].current, rebound[1].binding, rebound[1].publishable], [true, 'tree-equivalent', false]);
   assert.equal(exactApproval(legacy[1])!.reviewId, 31);
+  // Nearly every follower's tip is Graphyard's own merge of the reviewed head: its approval and
+  // proofs bind through the carry decided when the tip first replaced that head. Re-binding the
+  // same tip keeps that decision — the engine binds the returned record with keptTipCarry — so
+  // the carried approval and every carried proof still stand on the unchanged commit.
+  const carry: QueueCarry = { from: { sha: H, baseSha: B }, to: { sha: TIP, baseSha: P1 }, policyRevision: 4, at: iso(-300_000), predecessor: 'GY-99', changedFiles: ['README.md'], reviewedFiles: ['src/reviewer.ts'],
+    approval: { carried: true, provider: 'github', reviewer, sha: TIP, reviewId: 30, originalSha: H, reason: 'approval of H carried' },
+    evidence: [{ proof: 'manual:stale-dismissal', carried: true, evidenceId: 'evidence-h', producer: 'producer', reason: 'scope disjoint' }] };
+  const merged = [ahead(P2), mine()];
+  delete merged[0].queue!.speculation!.tipTree;
+  merged[1].observation!.reviews = [];
+  merged[1].queue!.speculation!.carry = carry;
+  const carriedEvidence = { id: 'evidence-h', proof: 'manual:stale-dismissal', sha: H, baseSha: B };
+  const bound = (item: Work) => [currentCarry(item)?.from.sha, carriedApproval(item)?.reviewId, evidenceBindsCandidate(item, carriedEvidence)];
+  assert.deepEqual(bound(merged[1]), [H, 30, true]);
+  const again = await queueProvider({ tip: TIP, boundBase: P1, predictedBase: P2, branchTip: B, trees }).github
+    .publishSpeculativeTip(merged[1], predictQueue(merged, clock + 1000)[1], async () => { throw new Error('nothing may be written'); });
+  const kept = keptTipCarry(merged[1], again);
+  assert.deepEqual(kept, carry, 'the carry decided for the tip is kept, not reset');
+  merged[1].queue!.speculation = { ...again, carry: kept };
+  assert.deepEqual(bound(merged[1]), [H, 30, true], 'the carried approval and the carried proof still bind the unchanged tip');
+  assert.deepEqual([predictQueue(merged, clock + 2000)[1].current, again.predecessors], [true, ['GY-99']]);
+  // A tip that replaces the head is decided afresh; a tip the record does not hold carries nothing.
+  assert.equal(keptTipCarry(merged[1], { ...again, tip: sha40('e2') }), undefined);
+  assert.equal(keptTipCarry(merged[1], { ...again, base: sha40('c4') }), null);
+  assert.match(await readFile(fileURLToPath(new URL('../src/engine.ts', import.meta.url)), 'utf8'), /const kept = keptTipCarry\(work, speculation\);\n\s*const carry = kept === undefined \? this\.decideTipCarry\(/);
   // A prediction that really brings content is still merged and published, as before.
   const moved = [ahead(sha40('c3')), mine()];
   const ahead3 = predictQueue(moved, clock + 3000);

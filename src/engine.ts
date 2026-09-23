@@ -8,7 +8,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, type BaseRefresh, type QueueSpeculation } from './merge-queue.js';
+import { keptTipCarry, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, type BaseRefresh, type QueueSpeculation } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
@@ -1259,13 +1259,16 @@ export class Engine {
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
       demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
-      const carry = work.candidate && speculation.tip !== work.candidate.sha ? this.decideTipCarry(work, all, speculation, now) : null;
+      // A tip re-bound to a tree-identical prediction keeps the carry it was first bound with (GY-100).
+      const kept = keptTipCarry(work, speculation);
+      const carry = kept === undefined ? this.decideTipCarry(work, all, speculation, now) : kept;
       work.queue!.speculation = { ...speculation, carry };
       work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip }].slice(-queueHistoryLimit);
       this.evaluate(work, all, now);
-      if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
+      if (carry && kept === undefined) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors,
+        ...(kept !== undefined && speculation.carriedBase ? { carriedBase: speculation.carriedBase } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
       return work;

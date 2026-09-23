@@ -204,6 +204,20 @@ export function treeIdenticalPrediction(work: Pick<Work, 'candidate' | 'queue' |
   if (!speculation || !candidate || speculation.tip !== candidate.sha || speculation.base !== candidate.baseSha || speculation.policyRevision !== work.policyRevision) return null;
   return speculation.base !== predictedBase && !!speculation.baseTree && speculation.baseTree === predictedBaseTree ? speculation : null;
 }
+/**
+ * The carry decision a speculation being bound keeps without deciding again, or undefined when
+ * the tip replaces the candidate's head and the carry must be decided for it. A tip that already
+ * is the candidate — the same published tip re-bound to a tree-identical prediction (see
+ * treeIdenticalPrediction) — keeps the decision recorded when it first replaced the reviewed
+ * head: that decision is what binds the carried approval and every carried proof to the tip, and
+ * nothing about the tip changed. A tip the record does not already hold carries nothing.
+ */
+export function keptTipCarry(work: Pick<Work, 'candidate' | 'queue'>, speculation: QueueSpeculation): QueueCarry | null | undefined {
+  const candidate = work.candidate, recorded = work.queue?.speculation;
+  if (!candidate) return null;
+  if (speculation.tip !== candidate.sha) return undefined;
+  return recorded && recorded.tip === speculation.tip && recorded.base === speculation.base && recorded.policyRevision === speculation.policyRevision ? recorded.carry ?? null : null;
+}
 
 export function predictQueue(all: Work[], now: number): QueuePlacement[] {
   const entries = queueOrder(all);

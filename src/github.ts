@@ -665,7 +665,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const ref = queueRef(work.key);
     // Re-binding a published tip to a tree-identical prediction: recorded, never republished.
     const rebound = treeIdenticalPrediction(work, placement.predictedBase!, baseTree);
-    if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() } };
+    // The re-bound record keeps its carry (see keptTipCarry) and names the entries now ahead of it.
+    if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), predecessors: placement.predecessors,
+      carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() } };
     await beforeWrite();
     const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
     const tip = merged ?? pr.head.sha;
