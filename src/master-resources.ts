@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFile, statfs } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
+import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { readReviewLedger, reviewLedgerSchema, saveReviewLedger, type ReviewRecord } from './reviewer.js';
 import { producerLedgerSchema, readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import type { Work } from './model.js';
@@ -19,7 +19,7 @@ import type { Work } from './model.js';
  * where its usage is read, the component that owns it, how it is reclaimed and within what bound,
  * and what to do when it runs low. `master status` reports each one as used-of-bound with its
  * headroom and raises attention before exhaustion; a refusal caused by one is attributed to it;
- * the reclaim pass gives each one back; and `/healthz` fails while the plane cannot record.
+ * the reclaim pass gives each one back; and `/healthz` reports the plane unhealthy while it cannot record.
  */
 
 export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk'] as const;
@@ -39,7 +39,8 @@ export interface ResourceReading {
   waiting?: number;
 }
 
-export interface PlaneReading { used: number | null; bound: number | null; detail?: string | null }
+/** `advisory`: the bound is a default nobody configured, so reaching it warns but does not fail health. */
+export interface PlaneReading { used: number | null; bound: number | null; detail?: string | null; advisory?: boolean }
 /** What `/healthz` reports about the plane's own resources. */
 export interface PlaneResources { writable: boolean; writeError: string | null; database: PlaneReading | null; github: PlaneReading | null }
 
@@ -82,7 +83,7 @@ export interface ResourceDefinition {
 
 /** Terminal ledger records are kept this long after they settle, then reaped. */
 export const ledgerRetentionMs = 15 * 60_000;
-/** A pending session blocked on a prompt, or never seen in Herdr, releases its slot after this long. */
+/** A pending session blocked on a prompt this long, or absent from Herdr on every pass this long, releases its slot. */
 export const stuckSessionMs = 10 * 60_000;
 /** A finished session is closed once its record has been settled this long (the launcher's own close gets the first chance). */
 export const finishedSessionGraceMs = 60_000;
@@ -174,7 +175,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'session-slots', title: 'Session slots', unit: 'sessions',
     bound: 'the summed concurrency of the role\'s launch profiles in .graphyard/master.json',
     usage: 'pending reviewer and producer ledger records, and live worker leases held by launch-profile principals', owner: 'the master loop and its dispatcher (src/master-daemon.ts, src/auto-dispatch.ts)',
-    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session blocked on a prompt, or never seen in Herdr, after ${stuckSessionMs / 60_000} minutes, which releases its slot`,
+    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
     remedy: 'raise concurrency on a profile of the role, or add a profile on another account, in .graphyard/master.json',
     warnBelow: () => 1, symptoms: [/every (?:reviewer|independent producer) profile is busy/, /is at its concurrency limit/],
     read: input => (['worker', 'reviewer', 'producer'] as const).map(role => {
@@ -197,7 +198,7 @@ export const resourceRegistry: ResourceDefinition[] = [
   {
     id: 'github-budget', title: 'GitHub App request budget', unit: 'requests',
     bound: 'the installation token\'s hourly core rate limit, as GitHub reports it on GET /rate_limit',
-    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget)', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
+    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget); while the client is paused after a rate-limit refusal it reads as spent until the pause ends', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
     reclaim: 'GitHub restores the budget at the reset time it reports; the client pauses every request until then once it is spent',
     remedy: 'lower observation load (fewer open candidates, a longer job interval) until the reset; every merge waits on fresh observations',
     warnBelow: tenthOf, symptoms: [/GitHub requests paused until/, /rate limited; requests paused/],
@@ -223,7 +224,7 @@ export const resourceRegistry: ResourceDefinition[] = [
   },
   {
     id: 'database-capacity', title: 'Control-plane database', unit: 'bytes',
-    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane (default ${defaultDatabaseMaxBytes / 1024 ** 3} GiB): set it to the database volume's size`,
+    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane (default ${defaultDatabaseMaxBytes / 1024 ** 3} GiB, which only warns; a configured bound also fails health): set it to the database volume's size`,
     usage: '/healthz resources.database: pg_database_size of the plane\'s database', owner: 'the control plane (src/store)',
     reclaim: 'none automatic: the ledger is append-only history; grow the volume, or restore a backup onto a larger one (docs/operations-reference.md)',
     remedy: 'grow the database volume and raise GRAPHYARD_DATABASE_MAX_BYTES to match before writes fail',
@@ -374,7 +375,7 @@ export async function readPlaneResources(url: string, fetcher: typeof fetch = fe
 
 /**
  * How far the checkout moved past the code a process loaded: the HEAD it had when the process
- * started (from the checkout's reflog) against HEAD now. Null when the process is gone or the
+ * started (from the times of the checkout's reflog entries) against HEAD now. Null when the process is gone or the
  * reflog does not reach back to its start.
  */
 export function loadedRevision(root: string, pid: number, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }), now = Date.now()) {
@@ -383,7 +384,10 @@ export function loadedRevision(root: string, pid: number, run: (command: string,
     if (!Number.isFinite(elapsed)) return null;
     const startedAt = Math.floor(now / 1000) - elapsed;
     const checkout = run('git', ['-C', root, 'rev-parse', 'HEAD']).trim();
-    const moves = run('git', ['-C', root, 'reflog', 'show', '--format=%H %ct', '-n', '200', 'HEAD']).trim().split('\n').map(line => line.split(' ')).filter(([sha, at]) => sha && at);
+    // The reflog entry's own time (`%gd` under --date=unix is HEAD@{<seconds>}), not the commit's:
+    // a checkout that fast-forwards onto an older commit moved after the process started.
+    const moves = run('git', ['-C', root, 'reflog', 'show', '--date=unix', '--format=%H %gd', '-n', '200', 'HEAD']).trim().split('\n')
+      .map(line => { const [sha, selector] = line.split(' '); return [sha, /@\{(\d+)\}/.exec(selector ?? '')?.[1]] as const; }).filter(([sha, at]) => sha && at);
     const loaded = moves.find(([, at]) => Number(at) <= startedAt)?.[0] ?? (moves.length && moves.length < 200 ? moves.at(-1)![0] : null);
     if (!loaded) return null;
     return { loaded, checkout, behind: loaded === checkout ? 0 : Number(run('git', ['-C', root, 'rev-list', '--count', `${loaded}..${checkout}`]).trim()) || 0 };
@@ -423,8 +427,10 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * documents: a terminal ledger record is reaped once it has been settled `ledgerRetentionMs` and
  * answers no live request; a finished pane holding a profile's name whose record settled
  * `finishedSessionGraceMs` ago, with no pending record on the name, is closed and its name
- * released once an earlier pass at least that long before saw it the same way; a pending session blocked on a prompt or never seen in Herdr for `stuckSessionMs` is
- * failed — its slot released and the relaunch rule free to try again — and its pane closed.
+ * released once an earlier pass at least that long before saw it the same way; a pending session
+ * blocked on a prompt for `stuckSessionMs`, or absent from every pass for that long, is failed —
+ * its slot released and the relaunch rule free to try again — and its pane closed. The ledger is
+ * written from a fresh read once the panes are closed, so a launch recorded meanwhile survives.
  *
  * It runs every cycle of the loop and from `master run --once`. It removes nothing a live request
  * or a running session needs, and it never touches a worker's pane: the loop's first step closes
@@ -436,48 +442,81 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], errors: [] };
   // A pane is closed only once it has been seen finished and unowned by an earlier pass at least
   // the grace ago: a session launched a moment ago holds its name before its record is written.
+  // A pending session is failed as absent only once every pass for `stuckSessionMs` missed it: one
+  // inventory that omits a working session is not its end.
   const file = await readReclaimFile(root);
   const seen: Record<string, string> = {};
   const live = liveRequests(observed.work);
-  const reclaimLedger = async <R extends { state: string; agentName: string; pane: string | null; requestId?: string; closedAt?: string; idleSince?: string; requestedAt: string; resolution?: string }>(
-    kind: 'review' | 'producer', records: R[], profiles: { name: string; agentName: string; concurrency?: number }[]) => {
-    let changed = false;
-    // 1. Pending sessions stuck on a prompt, or never started: failed, so their slot is released.
+  type Settleable = { id: string; state: string; agentName: string; pane: string | null; requestId?: string; closedAt?: string; idleSince?: string; requestedAt: string; resolution?: string; acknowledgedAt?: string };
+  const identity = (record: Settleable) => record.id;
+  /** Decides from one read what to fail, close and reap; the ledger is written from a fresh read afterwards. */
+  const reclaimLedger = async (kind: 'review' | 'producer', records: Settleable[], profiles: { name: string; agentName: string; concurrency?: number }[]) => {
+    const failed = new Map<string, { resolution: string }>();
+    // 1. Pending sessions stuck on a prompt, or absent from Herdr for the whole bound: failed, so their slot is released.
     for (const record of records) {
       if (!stuckSession(record, observed.agents, now)) continue;
       const agent = observed.agents?.find(candidate => candidate.name === record.agentName);
-      const reason = agent ? `blocked on a prompt in Herdr for over ${stuckSessionMs / 60_000} minutes without a result` : `never seen in Herdr ${stuckSessionMs / 60_000} minutes after launch`;
-      Object.assign(record, { state: 'failed', resolution: `Reclaimed: the session was ${reason}; its slot is released and the request may be launched again`, closedAt: report.at });
+      if (!agent) {
+        const key = `missing:${identity(record)}`;
+        const first = file.seen[key] ?? report.at;
+        if (now - Date.parse(first) < stuckSessionMs) { seen[key] = first; continue; }
+      }
+      const reason = agent ? `blocked on a prompt in Herdr for over ${stuckSessionMs / 60_000} minutes without a result` : `absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes`;
+      // A session never acknowledged and gone from Herdr never started: the launcher's retry policy for that case applies.
+      const resolution = !agent && !record.acknowledgedAt
+        ? `${neverStartedReason}: the session left Herdr without acting on its request (reclaimed; its slot is released and the request may be launched again)`
+        : `Reclaimed: the session was ${reason}; its slot is released and the request may be launched again`;
+      failed.set(identity(record), { resolution });
       report.released.push({ name: record.agentName, ledger: kind, reason });
-      changed = true;
     }
     // 2. Panes on a profile's names whose session settled and nothing pending holds the name.
     for (const agent of observed.agents ?? []) {
       if (!agent.pane_id || !agent.name || !profiles.some(profile => isProfileSession(profile, agent.name))) continue;
-      if (records.some(record => record.state === 'pending' && record.agentName === agent.name)) continue;
+      if (records.some(record => record.state === 'pending' && record.agentName === agent.name && !failed.has(identity(record)))) continue;
       const settled = records.filter(record => record.agentName === agent.name).at(-1);
       // A session this pass just released is closed at once; any other waits out the grace, finished.
       const released = report.released.some(entry => entry.name === agent.name);
       if (!settled || (!released && (now - settledAt(settled) < finishedSessionGraceMs || !finished.includes(agent.agent_status ?? '')))) continue;
       const first = file.seen[agent.pane_id] ?? report.at;
       if (!released && now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id] = first; continue; }
-      try { await close(agent.pane_id); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${settled.state}${settled.resolution ? `: ${settled.resolution.slice(0, 160)}` : ''}` }); }
+      const state = failed.has(identity(settled)) ? 'failed' : settled.state, resolution = failed.get(identity(settled))?.resolution ?? settled.resolution;
+      try { await close(agent.pane_id); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}` }); }
       catch (error) { report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`); }
     }
     // 3. Terminal records past retention that answer no live request.
-    const kept = records.filter(record => record.state === 'pending' || (record.requestId && live.has(record.requestId)) || now - settledAt(record) < ledgerRetentionMs);
+    const reap = new Set(records.filter(record => record.state !== 'pending' && !(record.requestId && live.has(record.requestId)) && now - settledAt(record) >= ledgerRetentionMs).map(identity));
+    return { failed, reap };
+  };
+  /**
+   * Applies the decisions to the ledger as it is now, not as it was read before the panes were
+   * closed: a launcher that appended a record meanwhile keeps it, and a record that settled
+   * meanwhile is not failed over its own result.
+   */
+  const apply = <R extends Settleable>(kind: 'review' | 'producer', records: R[], decided: { failed: Map<string, { resolution: string }>; reap: Set<string> }) => {
+    let changed = false;
+    const kept = records.filter(record => {
+      const fail = decided.failed.get(identity(record));
+      if (fail && record.state === 'pending') { Object.assign(record, { state: 'failed', resolution: fail.resolution, closedAt: report.at }); changed = true; }
+      return !(decided.reap.has(identity(record)) && record.state !== 'pending');
+    });
     report.reaped[kind] = records.length - kept.length;
     return { records: kept, changed: changed || kept.length !== records.length };
   };
   try {
-    const ledger = await readReviewLedger(root);
-    const result = await reclaimLedger('review', ledger.reviews, config.reviewers);
-    if (result.changed) await saveReviewLedger(root, { ...ledger, reviews: result.records });
+    const decided = await reclaimLedger('review', (await readReviewLedger(root)).reviews, config.reviewers);
+    if (decided.failed.size || decided.reap.size) {
+      const ledger = await readReviewLedger(root);
+      const result = apply('review', ledger.reviews, decided);
+      if (result.changed) await saveReviewLedger(root, { ...ledger, reviews: result.records });
+    }
   } catch (error) { report.errors.push(`Review ledger: ${error instanceof Error ? error.message : String(error)}`); }
   try {
-    const ledger = await readProducerLedger(root);
-    const result = await reclaimLedger('producer', ledger.producers, config.producers);
-    if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
+    const decided = await reclaimLedger('producer', (await readProducerLedger(root)).producers, config.producers);
+    if (decided.failed.size || decided.reap.size) {
+      const ledger = await readProducerLedger(root);
+      const result = apply('producer', ledger.producers, decided);
+      if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
+    }
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.errors.length);
   if (took || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
@@ -519,42 +558,68 @@ export async function probeWrites(pool: { connect(): Promise<{ query(sql: string
   finally { client?.release(); }
 }
 
-/** The plane's database size against its declared bound. */
+/**
+ * The plane's database size against its declared bound. The default bound is a guess at a volume
+ * nobody sized, so it is advisory: `master status` warns on it, but only a configured bound fails health.
+ */
 export async function readDatabaseCapacity(pool: { query(sql: string): Promise<{ rows: any[] }> }, env: NodeJS.ProcessEnv = process.env): Promise<PlaneReading> {
   const configured = Number(env.GRAPHYARD_DATABASE_MAX_BYTES);
-  const bound = Number.isFinite(configured) && configured > 0 ? configured : defaultDatabaseMaxBytes;
+  const set = Number.isFinite(configured) && configured > 0;
+  const bound = set ? configured : defaultDatabaseMaxBytes;
   try {
     const used = Number((await pool.query('SELECT pg_database_size(current_database()) AS size')).rows[0].size);
-    return { used, bound, detail: `pg_database_size against ${Number.isFinite(configured) && configured > 0 ? 'GRAPHYARD_DATABASE_MAX_BYTES' : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset)'}` };
-  } catch (error) { return { used: null, bound, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
+    return { used, bound, advisory: !set, detail: `pg_database_size against ${set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset; it warns but does not fail health)'}` };
+  } catch (error) { return { used: null, bound, advisory: !set, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
 }
 
 const budgetCache = new WeakMap<object, { at: number; reading: PlaneReading }>();
-/** The App installation's core budget, read at most once a minute; `/rate_limit` costs nothing against it. */
+/** The installation's documented minimum hourly limit: the bound shown for a pause before any budget read succeeded. */
+const minimumInstallationLimit = 5000;
+/**
+ * The App installation's core budget, read at most once a minute; `/rate_limit` costs nothing
+ * against it. The client pauses every request once a rate limit refuses one (src/github.ts), and
+ * only a rate limit pauses it, so a live pause is the budget spent: it reads as used to its bound
+ * until the pause ends, and no request is made while it lasts.
+ */
 export async function readGitHubBudget(github: object | null, now = Date.now()): Promise<PlaneReading | null> {
   if (!github) return null;
+  const client = github as unknown as { blockedUntil?: number; apiRequest(path: string): Promise<any> };
+  const paused = () => {
+    const until = client.blockedUntil ?? 0;
+    if (until <= now) return null;
+    const bound = budgetCache.get(github)?.reading.bound ?? minimumInstallationLimit;
+    return { used: bound, bound, detail: `the GitHub client paused every request until ${new Date(until).toISOString()} after a rate-limit refusal; the budget is spent until then` };
+  };
+  const pause = paused();
+  if (pause) return pause;
   const cached = budgetCache.get(github);
   if (cached && now - cached.at < 60_000) return cached.reading;
   let reading: PlaneReading;
   try {
     // The client's own authenticated request path; /rate_limit is not a repository route.
-    const body = await (github as unknown as { apiRequest(path: string): Promise<any> }).apiRequest('/rate_limit');
+    const body = await client.apiRequest('/rate_limit');
     const core = body?.resources?.core ?? body?.rate;
     reading = { used: Number(core.limit) - Number(core.remaining), bound: Number(core.limit), detail: `${core.remaining} of ${core.limit} left; resets ${new Date(Number(core.reset) * 1000).toISOString()}` };
-  } catch (error) { reading = { used: null, bound: null, detail: `GET /rate_limit failed: ${error instanceof Error ? error.message : String(error)}` }; }
+  } catch (error) {
+    // The read itself may be the request a rate limit refused, which starts the pause.
+    const started = paused();
+    if (started) return started;
+    reading = { used: null, bound: null, detail: `GET /rate_limit failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
   budgetCache.set(github, { at: now, reading });
   return reading;
 }
 
 /**
  * The plane's own health: unhealthy while writes are refused or a resource it owns is exhausted,
- * each cause named. A plane that cannot record results must not be dispatched into.
+ * each cause named. A plane that cannot record results must not be dispatched into. A database
+ * at an advisory (default) bound is reported by `master status`, not here.
  */
 export function planeVerdict(writeError: string | null, resources: { database: PlaneReading | null; github: PlaneReading | null }) {
   const causes: string[] = [];
   if (writeError) causes.push(`Writes are refused: ${writeError}`);
   const exhausted = (reading: PlaneReading | null) => !!reading && reading.used !== null && reading.bound !== null && reading.used >= reading.bound;
-  if (exhausted(resources.database)) causes.push(`Control-plane database is at its bound: ${resources.database!.used} of ${resources.database!.bound} bytes (${resources.database!.detail ?? 'pg_database_size'}); grow the volume and raise GRAPHYARD_DATABASE_MAX_BYTES`);
+  if (exhausted(resources.database) && !resources.database!.advisory) causes.push(`Control-plane database is at its bound: ${resources.database!.used} of ${resources.database!.bound} bytes (${resources.database!.detail ?? 'pg_database_size'}); grow the volume and raise GRAPHYARD_DATABASE_MAX_BYTES`);
   if (exhausted(resources.github)) causes.push(`GitHub App request budget is at its bound: ${resources.github!.used} of ${resources.github!.bound} requests (${resources.github!.detail ?? ''}); observations stop until the reset`);
   return { healthy: causes.length === 0, writable: !writeError, causes };
 }

@@ -8,6 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server, type Credential } from '../src/server.js';
+import { GitHub } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
 import { capacityRoles } from '../src/model/capacity.js';
 import { claimAction, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
@@ -19,7 +20,7 @@ import { runExecutorTick } from '../src/auto-dispatch.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
-import { dispatchRefusal, finishedSessionGraceMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
+import { dispatchRefusal, loadedRevision, planeVerdict, finishedSessionGraceMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
 
 /**
  * GY-132: Graphyard observes its own resources.
@@ -106,9 +107,9 @@ before(async () => {
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
-async function plane(onto: Store, run: (url: string) => Promise<void>) {
+async function plane(onto: Store, run: (url: string) => Promise<void>, github: GitHub | null = null) {
   const engine = new Engine(onto, [15368], 120, 'owner/project');
-  const http = server(engine, [credential(operator)], null, undefined, { env: {} });
+  const http = server(engine, [credential(operator)], github, undefined, { env: {} });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   try { await run(`http://127.0.0.1:${(http.address() as any).port}`); }
   finally { await new Promise<void>(resolve => http.close(() => resolve())); }
@@ -159,6 +160,15 @@ test('integration:headroom-warned-before-exhaustion — status reports each reso
     for (const entry of reported) assert.doesNotMatch(entry.text, /busy in Herdr|Too big: expected array/, `no symptom is reported in place of the resource: ${entry.text}`);
     assert.match(reported.find(entry => entry.subject === 'GY-7')!.text, /Herdr agent-name namespace/);
     assert.match(reported.find(entry => entry.subject === 'GY-8')!.text, /Review ledger is at its bound/);
+
+    // The loop's loaded revision is judged by when the checkout moved (the reflog entry), not by the
+    // commit's own date: a fast-forward after the loop started onto an older commit leaves it behind.
+    const started = Math.floor(Date.now() / 1000) - 600;
+    const git = (command: string, args: string[]) => command === 'ps' ? '600\n'
+      : args.includes('rev-parse') ? `${'c'.repeat(40)}\n`
+      : args.includes('reflog') ? `${'c'.repeat(40)} HEAD@{${started + 60}}\n${'l'.repeat(40)} HEAD@{${started - 60}}\n`
+      : '3\n';
+    assert.deepEqual(loadedRevision('/nonexistent', 1, git), { loaded: 'l'.repeat(40), checkout: 'c'.repeat(40), behind: 3 });
   });
 });
 
@@ -265,6 +275,31 @@ test('integration:resources-reclaimed-within-bound — a finished session and a 
   assert.deepEqual(reports.map(report => report.closed.map(entry => entry.pane)), [['pane-2'], ['pane-1'], []]);
   assert.equal(reports[2].reaped.review, 1);
 
+  // A pending session absent from Herdr is failed only once every pass for the bound missed it: one
+  // inventory that omits a working session is not its end. Never acknowledged, it never started.
+  const absentRoot = await scratchRoot();
+  const absent = record(3, { profile: 'reviewer-b', agentName: 'reviewer-b', state: 'pending', requestId: randomUUID(), requestedAt: iso(settled - 30 * 60_000), closedAt: undefined });
+  await saveReviewLedger(absentRoot, { version: 1, reviews: [absent] });
+  const missed = await reclaimResources(absentRoot, config, { work: [], agents: [] }, { now: settled });
+  assert.deepEqual(missed.released, [], 'a single missing sighting releases nothing');
+  assert.equal((await readReviewLedger(absentRoot)).reviews[0].state, 'pending');
+  const gone = await reclaimResources(absentRoot, config, { work: [], agents: [] }, { now: settled + stuckSessionMs });
+  assert.deepEqual(gone.released.map(entry => [entry.name, entry.reason]), [['reviewer-b', 'absent from Herdr on every pass for 10 minutes']]);
+  assert.match((await readReviewLedger(absentRoot)).reviews[0].resolution!, /^never started: /, 'the launcher\'s unstarted-retry policy applies');
+
+  // The ledger is written from a fresh read once the panes are closed: a launch the executor
+  // recorded while the pass was closing a pane is kept.
+  const raceRoot = await scratchRoot();
+  const blocked = record(4, { profile: 'reviewer-b', agentName: 'reviewer-b', state: 'pending', requestId: randomUUID(), requestedAt: iso(settled - 30 * 60_000), idleSince: iso(settled - 20 * 60_000), closedAt: undefined });
+  await saveReviewLedger(raceRoot, { version: 1, reviews: [blocked] });
+  const launchedMeanwhile = record(5, { state: 'pending', requestId: randomUUID(), requestedAt: iso(settled), closedAt: undefined });
+  const raced = await reclaimResources(raceRoot, config, { work: [], agents: [{ name: 'reviewer-b', pane_id: 'pane-7', agent_status: 'blocked' }] }, { now: settled, closePane: async () => {
+    const ledger = await readReviewLedger(raceRoot);
+    await saveReviewLedger(raceRoot, { ...ledger, reviews: [...ledger.reviews, launchedMeanwhile] });
+  } });
+  assert.deepEqual(raced.closed.map(entry => entry.pane), ['pane-7']);
+  assert.deepEqual((await readReviewLedger(raceRoot)).reviews.map(entry => [entry.id, entry.state]), [[blocked.id, 'failed'], [launchedMeanwhile.id, 'pending']], 'the record appended meanwhile survives the pass');
+
   // The loop runs the pass every cycle and records what it took back.
   const state = emptyDaemonState(master('https://graphyard.example'));
   await runCycle(master('https://graphyard.example'), state, { ...loopEffects([]), reclaimResources: async () => bound } as DaemonEffects, () => Date.parse(iso(settled)));
@@ -292,17 +327,46 @@ test('integration:health-reflects-write-capability — /healthz is unhealthy nam
     assert.deepEqual({ ok: health.ok, healthy: health.healthy, writable: health.writable, causes: health.causes }, { ok: true, healthy: true, writable: true, causes: [] });
     assert.equal(await dispatchRefusal(url), null, 'a healthy plane is dispatched into');
 
-    // A resource the plane owns at its bound fails health, naming it.
+    // A resource the plane owns at a configured bound fails health, naming it. The plain endpoint
+    // answers the verdict with 200 — it is the platform's liveness probe, and a restart gives back
+    // no volume — and `?strict` answers 503 for a monitor that reads the status alone.
     const previous = process.env.GRAPHYARD_DATABASE_MAX_BYTES;
     process.env.GRAPHYARD_DATABASE_MAX_BYTES = '1024';
     try {
       const exhausted = await fetch(`${url}/healthz`);
       const body = await exhausted.json() as any;
-      assert.equal(exhausted.status, 503);
-      assert.equal(body.healthy, false); assert.equal(body.writable, true);
+      assert.equal(exhausted.status, 200, 'the liveness probe is not failed by a full volume');
+      assert.equal(body.healthy, false); assert.equal(body.ok, false); assert.equal(body.writable, true);
       assert.match(body.causes[0], /^Control-plane database is at its bound: \d+ of 1024 bytes/);
+      const strict = await fetch(`${url}/healthz?strict`);
+      assert.equal(strict.status, 503, 'the strict check fails');
+      assert.match((await strict.json() as any).causes[0], /^Control-plane database is at its bound/);
+      assert.match((await dispatchRefusal(url))!, /control plane reports itself unhealthy \(Control-plane database is at its bound/, 'the loop reads the verdict from the body');
     } finally { if (previous === undefined) delete process.env.GRAPHYARD_DATABASE_MAX_BYTES; else process.env.GRAPHYARD_DATABASE_MAX_BYTES = previous; }
+    // The unconfigured default bound is advisory: it warns in `master status` and fails nothing.
+    assert.equal(planeVerdict(null, { database: { used: 20 * 1024 ** 3, bound: 10 * 1024 ** 3, advisory: true }, github: null }).healthy, true);
   });
+
+  // The GitHub budget: the client pauses every request once a rate limit refuses one, which is the
+  // budget spent. Health names it, and `master status` reports it exhausted, not unread.
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-while-paused' });
+  const until = Date.now() + 30 * 60_000;
+  (github as unknown as { blockedUntil: number }).blockedUntil = until;
+  await plane(store, async url => {
+    const response = await fetch(`${url}/healthz?strict`);
+    const health = await response.json() as any;
+    assert.equal(response.status, 503);
+    assert.equal(health.healthy, false); assert.equal(health.writable, true);
+    assert.match(health.causes[0], new RegExp(`^GitHub App request budget is at its bound: 5000 of 5000 requests \\(the GitHub client paused every request until ${new Date(until).toISOString().replace(/\./g, '\\.')}`));
+    assert.match((await dispatchRefusal(url))!, /control plane reports itself unhealthy \(GitHub App request budget is at its bound/);
+    const directory = await scratchRoot();
+    const status = await resourceStatus(directory, master(url), { reviews: [], producers: [], agents: [], work: [], loop: null });
+    const budget = status.readings.find(reading => reading.id === 'github-budget')!;
+    assert.equal(budget.state, 'exhausted', 'a paused client reads as a spent budget, not an unread one');
+    assert.ok(status.attention.some(item => item.subject === 'resource:github-budget' && /GitHub App request budget is at its bound: 5000 requests used of 5000 requests/.test(item.text)));
+    const symptom = { subject: 'GY-9', text: `GY-9's observe action is stalled — GitHub requests paused until ${new Date(until).toISOString()} after a rate/access refusal`, role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names' };
+    assert.match(attributeAttention([symptom], status.readings)[0].text, /^GY-9 is held by a registered resource at its bound: GitHub App request budget is at its bound/, 'the pause is attributed to the budget');
+  }, github);
 
   // Refuse writes: every new session of the plane's database is read-only.
   await store.pool.query('ALTER DATABASE resources_test SET default_transaction_read_only = on');
@@ -311,8 +375,9 @@ test('integration:health-reflects-write-capability — /healthz is unhealthy nam
     await plane(readOnly, async url => {
       const response = await fetch(`${url}/healthz`);
       const health = await response.json() as any;
-      assert.equal(response.status, 503, 'the plane fails its own health check');
+      assert.equal(response.status, 200, 'the process still answers its liveness probe');
       assert.equal(health.healthy, false); assert.equal(health.ok, false); assert.equal(health.writable, false);
+      assert.equal((await fetch(`${url}/healthz?strict`)).status, 503, 'the plane fails its own health check');
       assert.match(health.causes[0], /^Writes are refused: cannot execute UPDATE in a read-only transaction/);
       assert.ok(health.commit !== undefined && health.schema, 'health still names the build it serves');
 

@@ -57,7 +57,7 @@ the exact commit observed. Each refusal names its cause and the fix:
 
 ## Daily checks
 
-- `/healthz` should return 200 with `healthy: true`, confirm the database accepts writes, and name the release (`version`, `revision`), the deployed `commit` and the schema generation you expect to be running. A 503 names each cause under `causes`; see [control-plane resources](#control-plane-resources).
+- `/healthz` should return 200 with `healthy: true`, confirm the database accepts writes, and name the release (`version`, `revision`), the deployed `commit` and the schema generation you expect to be running. `healthy: false` names each cause under `causes` (`/healthz?strict` answers 503 then); see [control-plane resources](#control-plane-resources).
 - `graphyard master status` should report `resources.summary` as all within their warning lines.
 - Authenticated `/api/status` should show no persistent integration errors, no `delegationLimits.attention`, and no open `production.incidents`.
 - Inspect the delivery graph for old work, stale observations, and blockers.
@@ -173,23 +173,28 @@ below its warning line is also an attention item with subject `resource:ID` nami
   was posted, then `herdr pane close PANE`.
 - **`session-slots:ROLE` at its bound with requests waiting.** Raise `concurrency` on a profile of
   the role, or add a profile on another account, in `.graphyard/master.json`; the loop adopts it on
-  its next cycle. A session stuck on a prompt for 10 minutes is failed by the reclaim pass and its
-  slot released.
+  its next cycle. A session stuck on a prompt, or absent from Herdr, for 10 minutes is failed by the
+  reclaim pass and its slot released.
 - **`github-budget` low.** Fewer open candidates or a longer observation interval until the reset
-  the reading names; every guarded merge waits on observations younger than two minutes.
+  the reading names (while the client is paused after a rate limit, the reading is `exhausted` and
+  names the pause's end); every guarded merge waits on observations younger than two minutes.
 - **`executor-liveness` / `loaded-revision`.** `graphyard master restart` (a supervised deployment:
   `systemctl --user restart graphyard-master`) restarts the loop onto the checkout's code.
 - **`database-capacity` low.** Grow the database volume, then raise `GRAPHYARD_DATABASE_MAX_BYTES`
-  on the plane to the new size (default 10 GiB). The ledger is append-only; nothing reclaims it.
+  on the plane to the new size. Left unset, the 10 GiB default only warns; once it is set, the plane
+  reports itself unhealthy at the bound. The ledger is append-only; nothing reclaims it.
 - **`worktree-disk` low.** See the worktree disk procedure in the [master-agent guide](master-agent.md#worktree-disk).
 
-**`/healthz` answers 503.** The plane cannot serve its purpose, and `causes` says why: `Writes are
-refused: …` (the database is read-only, a standby, or the role lost write privilege — restore write
-access), or a resource the plane owns at its bound (the database, the GitHub budget). While it
-answers 503 — or cannot be reached — the master loop dispatches nothing and records one
-`escalation:dispatch:plane` action with the cause; dispatch resumes on the first cycle after it
-reports healthy. A platform health check on `/healthz` will also refuse a new deployment that cannot
-write, which leaves the previous release serving.
+**`/healthz` reports `healthy: false`.** The plane cannot serve its purpose, and `causes` says why:
+`Writes are refused: …` (the database is read-only, a standby, or the role lost write privilege —
+restore write access), or a resource the plane owns at its bound (the database once
+`GRAPHYARD_DATABASE_MAX_BYTES` is set, the GitHub budget). While it is unhealthy — or cannot be
+reached — the master loop dispatches nothing and records one `escalation:dispatch:plane` action with
+the cause; dispatch resumes on the first cycle after it reports healthy. The plain endpoint still
+answers HTTP 200 for this verdict, so the Helm chart's and Railway's probes on it neither restart the
+plane nor pull it from its Service — the API stays up for the operator's recovery — and it fails
+(500) only when the process cannot reach its database. Alert on `/healthz?strict`, which answers 503
+whenever the verdict is unhealthy.
 
 ## GitHub or Graphyard outage
 
