@@ -411,33 +411,54 @@ test('the loop records the observed deployment, requests the trusted smoke proof
 test('deployment verification reports the served commit and which delivered items it covers', async () => {
   const { directory, token } = await privateDirectory();
   try {
-    const head = 'c'.repeat(40), earlier = 'd'.repeat(40), unrelated = 'e'.repeat(40);
+    // Containment is git ancestry over the coordinator's own checkout, so the fixture is a real
+    // history: an earlier merge the release descends from, the release itself, and a merge on a
+    // branch the release does not contain.
+    const origin = join(directory, 'origin'), checkout = join(directory, 'checkout');
+    const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    execFileSync('git', ['init', '-q', '-b', 'main', origin]);
+    git(origin, 'config', 'user.email', 'loop@graphyard.example');
+    git(origin, 'config', 'user.name', 'Graphyard');
+    git(origin, 'commit', '--allow-empty', '-q', '-m', 'GY-1: earlier');
+    const earlier = git(origin, 'rev-parse', 'HEAD');
+    git(origin, 'commit', '--allow-empty', '-q', '-m', 'GY-2: release');
+    const head = git(origin, 'rev-parse', 'HEAD');
+    git(origin, 'checkout', '-q', '-b', 'unrelated');
+    git(origin, 'commit', '--allow-empty', '-q', '-m', 'GY-3: not on main');
+    const unrelated = git(origin, 'rev-parse', 'HEAD');
+    git(origin, 'checkout', '-q', 'main');
+    execFileSync('git', ['clone', '-q', origin, checkout]);
     const delivered = [
       work({ id: 'a', key: 'GY-1', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: earlier, authorizationRevision: 1 } }),
       work({ id: 'b', key: 'GY-2', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: head, authorizationRevision: 2 } }),
       work({ id: 'c', key: 'GY-3', stage: 'done', delivery: { mergedAt: iso(0), mergeSha: unrelated, authorizationRevision: 3 } }),
     ];
-    const run = (_command: string, args: string[]) => {
-      if (args[1].includes(`compare/${earlier}...${head}`)) return JSON.stringify({ status: 'ahead' });
-      if (args[1].includes(`compare/${unrelated}...${head}`)) return JSON.stringify({ status: 'behind' });
+    const calls: string[] = [];
+    const run = (command: string, args: string[]) => {
+      calls.push(`${command} ${args.join(' ')}`);
+      if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       if (args[1].includes('/deployments/9/statuses')) return JSON.stringify([{ state: 'success' }]);
       if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, sha: head }]);
       throw new Error(`unexpected ${args.join(' ')}`);
     };
-    const fromProvider = await observeDeployment(config(token), delivered, run, fetch, () => clock);
+    const fromProvider = await observeDeployment(config(token), delivered, run, fetch, () => clock, { root: checkout });
     assert.equal(fromProvider.source, 'github-deployment');
     assert.equal(fromProvider.sha, head);
     assert.deepEqual(fromProvider.deployed, ['GY-1', 'GY-2']);
     assert.deepEqual(fromProvider.pending, ['GY-3'], 'a merge the running release does not contain is not deployed');
+    assert.equal(calls.filter(entry => entry.includes('/compare/')).length, 0, 'containment is local ancestry, never a compare per delivery');
+    assert.equal(fromProvider.requests, 2);
+    assert.deepEqual(fromProvider.containment, { release: head, settled: { 'GY-1': head, 'GY-2': head } }, 'what the release was shown to serve is retained for the next cycle');
 
     const endpoint = config(token, { run: { intervalSeconds: 20, deploymentUrl: 'https://app.example/version', deploymentShaField: 'build.commit' } });
     const fetcher = (async () => new Response(JSON.stringify({ build: { commit: head.toUpperCase() } }))) as typeof fetch;
-    const fromEndpoint = await observeDeployment(endpoint, delivered, run, fetcher, () => clock);
+    const fromEndpoint = await observeDeployment(endpoint, delivered, run, fetcher, () => clock, { root: checkout });
     assert.equal(fromEndpoint.source, 'endpoint');
     assert.equal(fromEndpoint.sha, head);
+    assert.equal(fromEndpoint.requests, 0);
 
     const silent = (async () => new Response(JSON.stringify({ ok: true }))) as typeof fetch;
-    const missing = await observeDeployment(endpoint, delivered, run, silent, () => clock);
+    const missing = await observeDeployment(endpoint, delivered, run, silent, () => clock, { root: checkout });
     assert.equal(missing.source, 'unavailable');
     assert.match(missing.reason!, /did not report a commit at build\.commit/);
     assert.deepEqual(missing.pending, ['GY-1', 'GY-2', 'GY-3'], 'an unverifiable deployment leaves every delivery pending, never assumed live');

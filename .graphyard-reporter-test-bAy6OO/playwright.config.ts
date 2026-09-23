@@ -1,0 +1,1 @@
+export default { testDir: '.', retries: 0, workers: 1, reporter: [["/home/vish/code/graphyard/.graphyard/worktrees/GY-144-1/src/playwright-reporter.ts"]] };

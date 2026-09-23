@@ -54,6 +54,33 @@ export function launchPlan(kind: string | undefined, approvals: ApprovalMode = '
 export interface HarnessRule { rule: string; why: string }
 export interface HarnessPlan { harness: string; file: string | null; allow: HarnessRule[]; deny: HarnessRule[]; manual: string | null; note: string }
 
+/**
+ * How Claude Code judges one shell command against a rule set: a matching deny wins, then a
+ * matching allow; anything else is asked (and, under bypassPermissions, run). A compound command
+ * is judged per part, so one denied part denies the whole and an allow needs every part allowed.
+ * `*` matches any text; a trailing ` *` or the legacy `:*` also matches the bare prefix.
+ */
+export function bashRuleMatches(rule: string, command: string) {
+  const body = /^Bash\((.*)\)$/s.exec(rule)?.[1];
+  if (body === undefined) return false;
+  const text = command.trim().replace(/\s+/g, ' ');
+  const prefix = body.endsWith(':*') ? body.slice(0, -2) : body.endsWith(' *') ? body.slice(0, -2) : null;
+  const glob = (pattern: string) => new RegExp(`^${pattern.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`, 's');
+  if (prefix !== null) return glob(prefix).test(text) || glob(`${prefix} *`).test(text);
+  return glob(body).test(text);
+}
+export type HarnessDecision = { decision: 'allow' | 'deny' | 'ask'; rule: HarnessRule | null };
+const commandParts = (command: string) => command.split(/\s*(?:&&|\|\||;|\|)\s*/).map(part => part.trim()).filter(Boolean);
+export function harnessDecision(plan: Pick<HarnessPlan, 'allow' | 'deny'>, command: string): HarnessDecision {
+  const parts = commandParts(command);
+  for (const part of parts) {
+    const denied = plan.deny.find(entry => bashRuleMatches(entry.rule, part));
+    if (denied) return { decision: 'deny', rule: denied };
+  }
+  const allowed = parts.map(part => plan.allow.find(entry => bashRuleMatches(entry.rule, part)));
+  return parts.length && allowed.every(Boolean) ? { decision: 'allow', rule: allowed[0]! } : { decision: 'ask', rule: null };
+}
+
 // The master's own loop, and nothing else. A harness allowlist is a prompt policy, not an
 // authority boundary: branch protection and Graphyard's required check remain the enforcement.
 export function masterHarnessPlan(input: { harness: string; root: string; cliPath: string; repository: string; baseBranch: string; credentialHome: string }): HarnessPlan {

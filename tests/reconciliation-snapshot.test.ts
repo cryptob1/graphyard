@@ -93,7 +93,7 @@ async function candidate(options: { proven?: boolean; queue?: boolean; alone?: b
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, id());
   if (alone) await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
   w = await engine.observe(w.id, w.revision, observation(w));
-  if (proven) w = await engine.execute(producer, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head(w), baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0 }, id());
+  if (proven) w = await engine.execute(producer, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head(w), baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   w = await engine.observe(w.id, (await reload(w.id)).revision, observation(w));
   if (proven && queue) {
     assert.ok(w.queue, `${w.key} entered the merge queue: ${w.gates.flatMap(gate => gate.reasons).join('; ')}`);

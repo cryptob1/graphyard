@@ -202,7 +202,7 @@ export const masterCommands = defineCommands([
         const snapshot = await masterApi('work-snapshot');
         const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
         if (!work) throw new Error(`Unknown work item ${args[0]}`);
-        const result = await verifyDeployment(work, verificationEffects(master, { snapshot: () => masterApi('work-snapshot'), mutate: masterMutation }));
+        const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation }));
         if (result.result === 'refused') process.exitCode = 1;
         return print(result);
       }

@@ -177,9 +177,9 @@ test('integration:decision-pinning-scope — resolve is pinned to what it acts o
   let item = await candidate('pinned-attest');
   const binding = { sha: head, baseSha: base, policyRevision: item.policyRevision };
   const atCandidate = item.revision;
-  const attestRequest = await decide(master.token, item, 'attest', { proof: 'manual:audit', ...binding, result: 'pass', executed: 1, skipped: 0 }, 'Audit recorded against the goal');
+  const attestRequest = await decide(master.token, item, 'attest', { proof: 'manual:audit', ...binding, result: 'pass', executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, 'Audit recorded against the goal');
   assert.equal(attestRequest.status, 200, JSON.stringify(attestRequest.body));
-  await engine.execute(producer, 'evidence', item.id, { proof: 'unit:works', ...binding, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+  await engine.execute(producer, 'evidence', item.id, { proof: 'unit:works', ...binding, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   item = await reload(item.id);
   assert.ok(item.revision > atCandidate, 'the producer record moved the item revision');
   assert.deepEqual(standingEscalations(item), []);
