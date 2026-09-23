@@ -1035,6 +1035,36 @@ doing; stop it there if it is stuck, and the record closes within the bound on i
 another session's handle finished to free a slot: the handle belongs to the session it names, its
 launcher or an admin, and the slot was never held by anything but a live session.
 
+### A reviewer or producer request always settles
+
+A reviewer or producer request stays `pending` in `.graphyard/reviews.json` or
+`.graphyard/producers.json` until reconciliation closes its session's pane, and a pending request
+refuses every later launch of that role for its item (`already pending on SHA; reconcile it with
+master status before launching another`). Two rules keep a request whose session is over from
+pending for good:
+
+- **A pane that is already gone counts as closed.** When Herdr answers the close with
+  `pane_not_found` — the pane was closed by hand, which is safe to do, or the runtime exited —
+  reconciliation treats the session as closed, settles the request in its terminal state, and
+  names that on its `resolution` (`pane … was already gone when the session was closed`), with no
+  close failure recorded. A close that fails for any other reason is still a failure: it is kept on
+  the request as `attention`, and the close is retried on the next pass.
+- **No request outlives its own token.** A request whose `tokenExpiresAt` (a producer's
+  `expiresAt`) has passed, and whose session Herdr no longer reports, is settled as `expired` on the
+  next reconcile pass whatever its pane's state; a close that failed stays on the record as
+  attention rather than holding it open. Reconciliation runs on every dispatch tick and every
+  `master status`, so the bound is 30 seconds after the expiry. A session Herdr still lists past
+  its expiry is closed, and settles once the close succeeds or its pane is gone.
+
+**Reading a request pending past its expiry.** `master status` reconciles first, so a request
+still pending there past its expiry, or holding a close failure, is genuinely stuck. It is counted
+under `dispatch.sessionReconcile.stuck` (with `sessionReconcile.stuckRequests` listing each item,
+request, since when and why) and in `counts.stuckRequests`, and raised as an attention item naming
+the item, the request, how long it has been stuck and the remedy: close its pane in Herdr
+(`herdr pane close PANE`) or stop the session it names — a pane that is already gone is fine —
+and the next `master status` settles the request, as expired within 30 seconds once Herdr no
+longer reports the session. The next launch for the item then proceeds on its own.
+
 ## Automatic dispatch at submit
 
 Review and proof collection start the moment a candidate is ready for them, not when someone
