@@ -62,8 +62,7 @@ export interface ArtifactOptions { backend: ArtifactBackend | null; capacityByte
 /**
  * What an embedder tells the control plane about the installation: the principals it already
  * ran with (the seeded proof-grant roster, deciding whether an over-limit roster warns or
- * refuses), the environment the limits are read from, the deployment watch to report, and the
- * closed-question responder (read from GRAPHYARD_RESPONDER in `env` when not given).
+ * refuses), the environment the limits are read from, the deployment watch, and the responder.
  */
 export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null; responder?: Responder | null }
 
