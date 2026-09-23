@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
-import type { Work } from '../model.js';
+import { impliedScopeRequests, type Work } from '../model/work.js';
 import { elapsed } from '../model/sessions.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
@@ -267,7 +267,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: actionReport(snapshot), sessions: sessionReport(snapshot),
-    requests: agentRequestReport(snapshot),
+    requests: agentRequestReport(snapshot), impliedScopeRequests: impliedScopeRequests(snapshot.work),
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
     disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
     runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } };
