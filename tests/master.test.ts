@@ -108,13 +108,13 @@ test('Muse launch profiles validate like every other runtime and carry no embedd
   assert.equal(workerProfileSchema.safeParse({ ...muse, kind: 'muse-code' }).success, false);
 });
 
-test('master status derives ownership from Graphyard and only joins Herdr health', () => {
+test('master status derives ownership from Graphyard and only joins Herdr health', async () => {
   const active = work({ stage: 'build', lease: { owner: 'worker-a', epoch: 3, expiresAt: '2030-01-01T00:10:00Z' }, gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted'] }] });
   const result = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [{ name: 'profile-a', principal: 'worker-a', agentName: 'eng-a', mode: 'existing', agentArgs: [], approvals: 'auto', environment: {} }], [{ name: 'eng-a', agent_status: 'working', pane_id: 'p1' }]);
   assert.equal(result.work[0].owner, 'worker-a'); assert.equal(result.work[0].session, 'working'); assert.equal(result.counts.active, 1);
   const spoofed = buildMasterStatus({ work: [active], now: '2030-01-01T00:20:00Z' }, [], [{ name: 'worker-a', agent_status: 'working' }]);
   assert.equal(spoofed.work[0].owner, null, 'Herdr cannot extend an expired Graphyard assignment');
-  const unavailable = observeHerdrAgents(() => { throw new Error('daemon unavailable'); });
+  const unavailable = await observeHerdrAgents(() => { throw new Error('daemon unavailable'); });
   assert.equal(unavailable.available, false); assert.deepEqual(unavailable.agents, []); assert.match(unavailable.reason!, /Graphyard work state remains authoritative/);
 });
 
@@ -707,7 +707,7 @@ test('master status reports queue position, predicted tip, and per-entry wait ti
   assert.equal(status.work[1].mergeable, false, 'only the queue head can hold a merge authorization');
 });
 
-test('unit:landing-real-base-tip — a merge only proceeds while the validated tip still lands its tested tree on the real base branch head', () => {
+test('unit:landing-real-base-tip — a merge only proceeds while the validated tip still lands its tested tree on the real base branch head', async () => {
   const tip = 'a'.repeat(40), validatedBase = 'b'.repeat(40), baseTree = 'e'.repeat(40), advanced = 'f'.repeat(40), stale = '3'.repeat(40);
   const queued = work({ queue: queueEntry(1, '2030-01-01T00:30:00Z', { ref: 'refs/graphyard/queue/gy-42', tip, base: validatedBase, baseTree, predecessors: ['GY-41'], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' }) } as Partial<Work>);
   const authorization = { sha: tip, baseSha: validatedBase };
@@ -722,15 +722,15 @@ test('unit:landing-real-base-tip — a merge only proceeds while the validated t
     return JSON.stringify({ sha, commit: { tree: { sha: trees[sha] } } });
   };
   // 1. The real base is exactly the validated base: no tree read is needed.
-  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(validatedBase, {})), { baseTip: validatedBase, baseTree: null });
+  assert.deepEqual(await assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(validatedBase, {})), { baseTip: validatedBase, baseTree: null });
   assert.deepEqual(reads, [['api', 'repos/owner/project/git/ref/heads/main']], 'an unchanged base needs only the ref read');
   // 2. The real base advanced through the queue: its tree is the validated tree, so the tip lands.
   reads.length = 0;
-  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: baseTree })), { baseTip: advanced, baseTree });
+  assert.deepEqual(await assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: baseTree })), { baseTip: advanced, baseTree });
   assert.deepEqual(reads, [['api', 'repos/owner/project/git/ref/heads/main'], ['api', `repos/owner/project/commits/${advanced}`]]);
   // 3. The real base tree differs: refused, naming both commits and both trees.
   reads.length = 0;
-  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: '9'.repeat(40) })), (error: Error) => {
+  await assert.rejects(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: '9'.repeat(40) })), (error: Error) => {
     assert.match(error.message, /would no longer land its tested tree/);
     for (const named of [advanced, '9'.repeat(40), validatedBase, baseTree]) assert.ok(error.message.includes(named), `the refusal names ${named}`);
     return true;
@@ -739,19 +739,19 @@ test('unit:landing-real-base-tip — a merge only proceeds while the validated t
   // while the real ref is tree-identical: the check never consults the cached value, so it passes.
   reads.length = 0;
   const cached = { baseRefOid: stale };
-  assert.deepEqual(assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: baseTree, [stale]: '9'.repeat(40) })), { baseTip: advanced, baseTree });
+  assert.deepEqual(await assertQueuedLanding(queued, authorization, 'main', 'owner/project', github(advanced, { [advanced]: baseTree, [stale]: '9'.repeat(40) })), { baseTip: advanced, baseTree });
   assert.equal(reads.some(args => args[1].includes(cached.baseRefOid)), false, 'the cached pull-request base is never read');
   assert.equal(reads.some(args => args[1].includes('/pulls/') || args[0] === 'pr'), false, 'the landing check never asks the pull request for its base');
   // Unreadable answers refuse rather than pass.
-  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', () => JSON.stringify({ object: { type: 'tag', sha: advanced } })), /readable head for refs\/heads\/main/);
-  assert.throws(() => assertQueuedLanding(queued, authorization, 'main', 'owner/project', (_command, args) => args[1].includes('/git/ref/') ? JSON.stringify({ object: { type: 'commit', sha: advanced } }) : JSON.stringify({ sha: advanced })), /did not return a tree/);
+  await assert.rejects(assertQueuedLanding(queued, authorization, 'main', 'owner/project', () => JSON.stringify({ object: { type: 'tag', sha: advanced } })), /readable head for refs\/heads\/main/);
+  await assert.rejects(assertQueuedLanding(queued, authorization, 'main', 'owner/project', (_command, args) => args[1].includes('/git/ref/') ? JSON.stringify({ object: { type: 'commit', sha: advanced } }) : JSON.stringify({ sha: advanced })), /did not return a tree/);
   // Branch names with slashes are addressed segment by segment.
   reads.length = 0;
-  assertQueuedLanding(queued, authorization, 'release/2030', 'owner/project', (_command, args) => { reads.push(args); return JSON.stringify({ object: { type: 'commit', sha: validatedBase } }); });
+  await assertQueuedLanding(queued, authorization, 'release/2030', 'owner/project', (_command, args) => { reads.push(args); return JSON.stringify({ object: { type: 'commit', sha: validatedBase } }); });
   assert.deepEqual(reads[0], ['api', 'repos/owner/project/git/ref/heads/release/2030']);
   // No published tip, or a tip other than the authorized commit, is refused before any read.
-  assert.throws(() => assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, 'main', 'owner/project', github(validatedBase, {})), /no published merge-queue tip/);
-  assert.throws(() => assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, 'main', 'owner/project', github(validatedBase, {})), /no published merge-queue tip/);
+  await assert.rejects(assertQueuedLanding(work({ queue: null } as Partial<Work>), authorization, 'main', 'owner/project', github(validatedBase, {})), /no published merge-queue tip/);
+  await assert.rejects(assertQueuedLanding(work({ queue: { ...queued.queue!, speculation: { ...queued.queue!.speculation!, tip: '7'.repeat(40) } } } as Partial<Work>), authorization, 'main', 'owner/project', github(validatedBase, {})), /no published merge-queue tip/);
 });
 
 test('integration:landing-follower-merges — the broker lands a queued follower after its predecessor merged while GitHub still caches the pre-merge pr.baseRefOid, and refuses a base whose tree differs', async () => {
@@ -868,7 +868,7 @@ test('agent review policies keep Graphyard branch protection without a native ap
   assert.throws(() => assertMergeProtection(protection(), config, work({ policy: { checks: ['test'], review: true } })), /protection changed/);
 });
 
-test('master status reports each containment quarantine and only claims verification it performed', () => {
+test('master status reports each containment quarantine and only claims verification it performed', async () => {
   const observedAt = '2030-01-01T12:00:00.000Z';
   const lapsed = new Date(Date.parse(observedAt) - 600_000).toISOString();
   const quarantine = { owner: 'worker-a', epoch: 1, at: lapsed, settlementHash: 'a'.repeat(64), launchAcknowledgedAt: lapsed, launchExpiresAt: lapsed, leaseExpiresAt: lapsed };
@@ -883,7 +883,7 @@ test('master status reports each containment quarantine and only claims verifica
       attestation: 'Confirm the previous worker is stopped and use the operator attestation path: rework GY-42 --previous-worker-stopped REASON, or recover-containment GY-42 --previous-worker-stopped REASON once the work is delivered' });
   assert.match(unverified.attention!, /Containment quarantine from epoch 1 blocks dispatch/);
 
-  const verified = assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: -5, max: 5 }, localNow: new Date(observedAt), probe } as any);
+  const verified = await assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: -5, max: 5 }, localNow: new Date(observedAt), probe } as any);
   const row = buildMasterStatus({ work: [stranded], now: observedAt }, [], [], {}, verified).work[0];
   assert.deepEqual({ settleable: row.containment?.settleable, refusals: row.containment?.refusals, host: row.containment?.host, verifiedAt: row.containment?.verifiedAt, attestation: row.containment?.attestation },
     { settleable: true, refusals: [], host: 'coordinator-host', verifiedAt: observedAt, attestation: null });
@@ -891,17 +891,17 @@ test('master status reports each containment quarantine and only claims verifica
 
   // Another machine's quarantine is not this coordinator's to verify, and a probe that
   // cannot run is a refusal rather than a silent absence.
-  assert.deepEqual(assessContainment([stranded], { hostId: 'other-host', observedAt, clockOffset: { min: 0, max: 1 }, probe }), {});
-  const broken = assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, probe: () => { throw new Error('systemctl vanished'); } });
+  assert.deepEqual(await assessContainment([stranded], { hostId: 'other-host', observedAt, clockOffset: { min: 0, max: 1 }, probe }), {});
+  const broken = await assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, probe: () => { throw new Error('systemctl vanished'); } });
   assert.deepEqual({ settleable: broken['work-id'].settleable, refusals: broken['work-id'].refusals },
     { settleable: false, refusals: ['Host verification could not be completed: systemctl vanished'] });
   assert.match(broken['work-id'].attestation, /rework GY-42 --previous-worker-stopped REASON/);
 
-  const live = assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, localNow: new Date(observedAt),
+  const live = await assessContainment([stranded], { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, localNow: new Date(observedAt),
     probe: () => ({ ...clean, processes: [{ pid: 4242, evidence: 'command' as const }] }) } as any);
   assert.deepEqual(live['work-id'].settleable, false);
   assert.match(live['work-id'].refusals[0], /Process 4242 of the contained worker is still present/);
-  assert.equal(verifyContainmentDeath(work({ containmentQuarantine: null }), { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, probe }).refusals[0],
+  assert.equal((await verifyContainmentDeath(work({ containmentQuarantine: null }), { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, probe })).refusals[0],
     'No containment quarantine is recorded for this task');
 });
 
@@ -911,8 +911,8 @@ test('the clock the coordinator verifies with is bounded by the read that produc
   assert.deepEqual({ now: snapshot.now, clockOffset }, { now: new Date(1_200).toISOString(), clockOffset: { min: -200, max: 200 } });
   const unreadable = await snapshotWithClock(async () => ({ work: [], now: 'not-a-time' }), () => 1_000);
   assert.deepEqual(unreadable.clockOffset, { min: NaN, max: NaN });
-  assert.deepEqual(verifyContainmentDeath(work({ containmentQuarantine: { owner: 'worker-a', epoch: 1, at: '2030-01-01T00:00:00Z', settlementHash: 'a'.repeat(64) },
+  assert.deepEqual((await verifyContainmentDeath(work({ containmentQuarantine: { owner: 'worker-a', epoch: 1, at: '2030-01-01T00:00:00Z', settlementHash: 'a'.repeat(64) },
     workspaces: [{ host: 'coordinator-host', path: '/srv/worktrees/GY-42-1', branch: 'graphyard/gy-42-1', epoch: 1, owner: 'worker-a' }] }),
-  { hostId: 'coordinator-host', observedAt: '2030-01-01T12:00:00.000Z', clockOffset: unreadable.clockOffset }).refusals,
+  { hostId: 'coordinator-host', observedAt: '2030-01-01T12:00:00.000Z', clockOffset: unreadable.clockOffset })).refusals,
   ['The control-plane clock could not be compared with this host']);
 });

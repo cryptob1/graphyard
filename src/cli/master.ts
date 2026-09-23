@@ -114,14 +114,14 @@ export const masterCommands = defineCommands([
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
         const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
         if (separator > 1 || separator < 0 && args.length > 1) throw new Error('Put agent-specific arguments after --');
-        return print(await startMaster(root, kind.data, agentArgs, listHerdrAgents()));
+        return print(await startMaster(root, kind.data, agentArgs, await listHerdrAgents()));
       }
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
       if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
       if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
       if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
       if (id === 'reviewer') return reviewerCommand(root, master, args, print);
-      if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), listHerdrAgents()));
+      if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), await listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
         const snapshot = await masterApi('work-snapshot');
@@ -154,7 +154,7 @@ export const masterCommands = defineCommands([
         const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
         if (!work) throw new Error(`Unknown work item ${args[0]}`);
         if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
-        const assessment = verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
+        const assessment = await verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
         if (!assessment.settleable) {
           // Every process still holding the fence is printed with its command line and working
           // directory: the master verifies whose it is before stopping anything.
@@ -179,7 +179,7 @@ export const masterCommands = defineCommands([
           const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
           if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
         }
-        return print(await dispatchWork(root, work, profile, listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'] }));
+        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'] }));
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
