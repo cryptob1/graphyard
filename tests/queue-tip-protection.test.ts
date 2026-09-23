@@ -8,8 +8,8 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { GitHub, processJob } from '../src/github.js';
-import { baseRefreshConflict, branchContamination, currentRestore, dismissedApproval, ejectedTipRestore, pendingBaseRefresh, pendingRestore, restoredApproval, reviewDismissal } from '../src/merge-queue.js';
-import { CHECK_NAME, Refusal, carriedApproval, exactApproval, type Principal, type Work } from '../src/model.js';
+import { baseRefreshConflict, branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, ejectedTipRestore, pendingBaseRefresh, pendingRestore, restoredApproval, reviewDismissal, tipReplacesHead, type IdentityCarryInput } from '../src/merge-queue.js';
+import { CHECK_NAME, Refusal, carriedApproval, exactApproval, type Evidence, type Principal, type Work } from '../src/model.js';
 import { branchReport, buildMasterStatus, masterConfigSchema, repostCarriedApproval, runAutonomyCommand, type MasterConfig } from '../src/master.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
@@ -176,6 +176,29 @@ async function clearQueue() { await store.pool.query("UPDATE work_items SET docu
 const dismissedReview = (work: Work) => work.observation!.reviews.find(review => review.state === 'DISMISSED')!;
 
 test('integration:tip-publication-keeps-approval — publishing a tip that changes the merge base costs no approval: the review gate passes on the carried binding, no review is requested, and the reviewer App re-posts it', async () => {
+  // The identity carry as a rule: a tip that is the reviewed head itself carries by the same
+  // per-file decision as a Graphyard-authored merge, on the base changes GitHub listed.
+  {
+    const A = sha40('a1'), B = sha40('b1'), P = sha40('c1'), at = '2026-09-22T08:00:00.000Z';
+    const record = (id: string, overrides: Partial<Evidence> = {}): Evidence => ({ id, proof: 'unit:queue', sha: A, baseSha: B, policyRevision: 1, producer: 'ci-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at, ...overrides });
+    const same = (overrides: Partial<IdentityCarryInput> = {}): IdentityCarryInput => ({ from: { sha: A, baseSha: B }, to: { sha: A, baseSha: P }, policyRevision: 1, at, baseChanges: ['src/other.ts', 'docs/other.md'], predecessor: { key: null, validated: true },
+      reviewedFiles: ['src/queue.ts', 'tests/queue.test.ts'], approval: { provider: 'github', reviewer: REVIEWER, sha: A, reviewId: 900 },
+      proofs: [{ proof: 'unit:queue', evidence: record('ev-unit', { scopeFiles: ['src/queue.ts', 'tests/'] }) }, { proof: 'integration:docs', evidence: record('ev-docs', { scopeFiles: ['docs/'] }) }, { proof: 'manual:unscoped', evidence: record('ev-manual') }, { proof: 'e2e:missing', evidence: undefined }], ...overrides });
+    const states = (carry: ReturnType<typeof decideIdentityCarry>) => [carry.approval.carried, ...carry.evidence.map(entry => entry.carried)];
+    const carry = decideIdentityCarry(same());
+    assert.deepEqual([carry.from, carry.to, carry.predecessor, carry.changedFiles], [{ sha: A, baseSha: B }, { sha: A, baseSha: P }, 'base branch', ['src/other.ts', 'docs/other.md']]);
+    assert.deepEqual({ ...carry.approval, reason: undefined }, { carried: true, provider: 'github', reviewer: REVIEWER, sha: A, reviewId: 900, originalSha: A, reason: undefined });
+    assert.match(carry.approval.reason, /carried to tip a1ffffffffff, the reviewed head itself republished unchanged onto predicted base c1ffffffffff: the base branch changed none of the 2 reviewed files/);
+    assert.deepEqual(carry.evidence.map(entry => [entry.proof, entry.carried, entry.evidenceId]), [['unit:queue', true, 'ev-unit'], ['integration:docs', false, 'ev-docs'], ['manual:unscoped', false, 'ev-manual'], ['e2e:missing', false, undefined]]);
+    assert.deepEqual(states(decideIdentityCarry(same({ baseChanges: [] }))), [true, true, true, true, false], 'a predicted base that changed nothing carries every proof');
+    const touched = decideIdentityCarry(same({ baseChanges: ['src/queue.ts'] }));
+    assert.equal(touched.approval.carried, false); assert.match(touched.approval.reason, /the base branch changed reviewed files src\/queue\.ts; a fresh independent approval/);
+    assert.deepEqual(touched.evidence.map(entry => entry.carried), [false, true, false, false]);
+    for (const [overrides, pattern] of [[{ baseChanges: null }, /could not be listed completely/], [{ baseChanges: undefined }, /could not be listed completely/], [{ predecessor: { key: 'GY-1', validated: false } }, /predecessor GY-1 is not fully validated/], [{ to: { sha: sha40('d1'), baseSha: P } }, /was not produced by Graphyard's merge of the approved head/]] as [Partial<IdentityCarryInput>, RegExp][]) {
+      const refused = decideIdentityCarry(same(overrides));
+      assert.deepEqual(states(refused), [false, false, false, false, false], pattern.source); assert.match(refused.approval.reason, pattern);
+    }
+  }
   await clearQueue();
   const repo = new Repo(), github = repo.adapter();
   // GitHub words the dismissal of a publication that changed the merge base with its merge-base
@@ -241,6 +264,8 @@ test('integration:tip-publication-keeps-approval — publishing a tip that chang
   assert.equal(ejected.queue, null);
   survivor = await cycle(provider, survivor);
   const identity = survivor.queue!.speculation!;
+  assert.equal(tipReplacesHead(survivor), heads.survivor, 'until the tip is observed, the replaced head is what the record still names');
+  assert.equal(survivor.autoDispatch!.review, null, 'nothing is requested for the replaced head meanwhile');
   assert.deepEqual([identity.tip, identity.reviewedHead, identity.merge, identity.base, identity.predecessors, identity.baseChanges], [heads.survivor, heads.survivor, null, root, [], []], 'the rebuilt tip is the reviewed head itself, with no commit produced');
   assert.equal(graph.refs.get(`heads/${branchOf(survivor)}`), heads.survivor, 'the branch was moved back to the reviewed head');
   assert.deepEqual([identity.carry!.from.sha, identity.carry!.to, identity.carry!.approval.carried, identity.carry!.evidence.map(entry => entry.carried)], [heads.survivor, { sha: heads.survivor, baseSha: root }, true, [true]]);
@@ -364,8 +389,9 @@ test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unch
   assert.equal(gate(unnamed, 'review').passed, false);
   assert.equal(restoredApproval(unnamed), null);
 
-  // A merge-base dismissal on a head whose base refresh conflicted is restored into that record:
-  // the conflict the worker owes stays named, and the refresh is not retried for it.
+  // A merge-base dismissal on a head whose base refresh conflicted leaves that record as it is
+  // and restores nothing: the conflict the worker owes stays named, the refresh is not retried
+  // for it, and no review is asked for a head that does not contain the base tip.
   let conflicted = await submitted(repo, 'Refresh conflicted', () => repo.commit([main], 'feat: conflicted'));
   const conflictedHead = repo.refs.get(`heads/${branchOf(conflicted)}`)!;
   repo.approve(conflicted.submission!.pr, conflictedHead);
@@ -379,14 +405,13 @@ test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unch
   repo.dismiss(conflicted.submission!.pr, mergeBaseMessage, null, 'owner');
   conflicted = await cycle(github, conflicted);
   assert.equal(conflicted.candidate!.sha, conflictedHead);
-  assert.ok(restoredApproval(conflicted) && carriedApproval(conflicted)?.originalSha === conflictedHead, 'the approval is restored on the conflicted head');
-  assert.ok(gate(conflicted, 'review').passed, gate(conflicted, 'review').reasons.join('; '));
-  assert.ok(baseRefreshConflict(conflicted), 'the conflict record survives the restore');
+  assert.deepEqual([reviewDismissal(dismissedReview(conflicted))!.mergeBase, restoredApproval(conflicted), carriedApproval(conflicted)], [true, null, null]);
+  assert.ok(baseRefreshConflict(conflicted), 'the conflict record survives the dismissal');
   assert.equal(conflicted.baseRefresh!.head, null); assert.equal(pendingBaseRefresh(conflicted), null);
   assert.equal(merges(), mergesBefore, 'the refresh is not retried for a conflict already recorded');
   assert.equal((await events(conflicted, 'base.conflict')).length, 1);
-  assert.equal((await events(conflicted, 'review.restored')).length, 1);
-  assert.equal(conflicted.autoDispatch!.review, null);
+  assert.equal((await events(conflicted, 'review.restored')).length, 0);
+  assert.equal(conflicted.autoDispatch!.review, null, 'no review is asked for a head that does not contain the base tip');
 
   // A timeline GitHub will not serve leaves the dismissal recorded as unread, and restores nothing.
   const request = github.request.bind(github);
@@ -500,7 +525,7 @@ test('integration:contaminated-branch-repaired — a branch already carrying ano
   work = await engine.execute(coordinator, 'repair', work.id, { reason: 'The branch carries a tip published behind the foreign item' }, randomUUID());
   assert.deepEqual([pendingRestore(work)!.cause, pendingRestore(work)!.requested!.by, pendingRestore(work)!.contaminated], ['repair', 'master', contaminated]);
   await assert.rejects(engine.execute(coordinator, 'repair', work.id, { reason: 'again' }, randomUUID()), /already requested/);
-  // A merge-base dismissal landing on the head meanwhile is restored into the pending repair, which it must not replace.
+  // A merge-base dismissal landing on the head meanwhile restores nothing and leaves the pending repair, which it must not replace.
   repo.approve(work.submission!.pr, contaminated);
   repo.dismiss(work.submission!.pr, mergeBaseMessage, null, 'owner');
   assert.match(buildMasterStatus({ work: [await reload(work), foreign], now: new Date().toISOString() }, [], []).work.find(entry => entry.key === work.key)!.attention!, /A restore is requested \(repair\) and runs on the next reconciliation/);
@@ -521,7 +546,7 @@ test('integration:contaminated-branch-repaired — a branch already carrying ano
   work = await cycle(github, work);
   const performed = currentRestore(work)!;
   assert.deepEqual([performed.restore!.outcome, performed.restore!.own, performed.restore!.cause, performed.restore!.requested!.reason], ['restored', ownHead, 'repair', 'The branch carries a tip published behind the foreign item']);
-  assert.equal((await events(work, 'review.restored')).length, 1, 'the dismissal was restored on the contaminated head without dropping the requested repair');
+  assert.equal((await events(work, 'review.restored')).length, 0, 'the dismissal on the contaminated head restored nothing and did not drop the requested repair');
   const repaired = repo.refs.get(`heads/${branchOf(work)}`)!;
   assert.equal(performed.head, repaired);
   assert.deepEqual(repo.commits.get(repaired)!.parents, [ownHead, moved], 'the restored head is the item\'s own reviewed head merged onto the base');

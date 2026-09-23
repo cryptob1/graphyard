@@ -8,7 +8,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, currentRestore, dismissedApproval, pendingRestore, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, type BaseRefresh, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, pendingRestore, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
@@ -1309,16 +1309,18 @@ export class Engine {
     const observed = !!observation && observation.candidate.sha === candidate.sha && observation.candidate.baseSha === candidate.baseSha;
     // A tip is built from the item's own reviewed head (GY-127): the replaced head when the worker
     // pushed it, or the head under the tip it replaces. The bindings carried are the ones that
-    // bind the replaced head now — exact on it, or already carried onto it. A tip that is the
-    // reviewed head itself (no merge: the head already contained its predicted base) is decided
-    // as an identity carry on the files the predicted base changed, never refused for lacking a
-    // merge; a record that predates `reviewedHead` names the merge's own `from`.
-    return decideCarry({
+    // bind the replaced head now — exact on it, or already carried onto it. `from` is that
+    // reviewed head in every case; a record that predates `reviewedHead` names the merge's own.
+    const input = {
       from: { sha: speculation.reviewedHead ?? speculation.merge?.from ?? candidate.sha, baseSha: candidate.baseSha }, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
-      merge: speculation.merge, baseChanges: speculation.baseChanges, predecessor: { key: aheadKey, validated }, reviewedFiles: observed ? observation!.files : [],
+      predecessor: { key: aheadKey, validated }, reviewedFiles: observed ? observation!.files : [],
       approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
-      app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane',
-    });
+    };
+    // A tip that is the reviewed head itself — no merge, because the head already contained its
+    // predicted base — is decided as an identity carry on the files the predicted base changed,
+    // never refused for lacking a merge (see merge-queue.ts decideIdentityCarry).
+    if (!speculation.merge && speculation.tip === input.from.sha) return decideIdentityCarry({ ...input, baseChanges: speculation.baseChanges });
+    return decideCarry({ ...input, merge: speculation.merge, app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane' });
   }
   /**
    * Records what the control plane did about a base branch that moved under an in-flight
@@ -1415,10 +1417,12 @@ export class Engine {
       work.baseRefresh.carry = carry(work.baseRefresh.carry); work.baseRefresh.restoredApproval = restored;
     } else if (work.baseRefresh && work.baseRefresh.head === null && work.baseRefresh.from.sha === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
       // A record of this very head that republished nothing — a refresh whose merge conflicted, or
-      // a repair the coordinator requested that has not run yet — keeps what it says, and the
-      // restored binding is written into it: replacing it would drop the conflict the worker owes
-      // or the pending repair, and a refresh would be retried for a conflict already recorded.
-      work.baseRefresh.carry = carry(work.baseRefresh.carry); work.baseRefresh.restoredApproval = restored;
+      // a repair the coordinator requested that has not run yet — is left as it says, and nothing
+      // is restored: such a head is replaced before it could land (the worker resolves the
+      // conflict, the repair moves the branch), and replacing the record would drop the conflict
+      // the worker owes or the pending repair, and have the refresh retried for a conflict already
+      // recorded. No review is asked for it meanwhile: the head does not contain the base tip.
+      return null;
     } else {
       // The head is neither a queue tip nor a refreshed head: the restored binding is recorded as
       // a refresh of the head onto the base it is bound to, which republished nothing.
@@ -1494,7 +1498,10 @@ export class Engine {
     }
     // What the exact head still needs from a launched reviewer or producer, decided from the
     // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
-    this.dispatchTransitions.set(work, reconcileAutoDispatch(work, all, now));
+    // A queued entry whose published tip is not this head is being replaced by it (GY-127): the
+    // tip is observed and bound on the next reconciliation, and a request opened for the replaced
+    // head now would be cancelled as stale then — after a session had been launched for it.
+    this.dispatchTransitions.set(work, tipReplacesHead(work) ? [] : reconcileAutoDispatch(work, all, now));
     // The typed instruction the inverted loop runs on: what this item needs next, named from the
     // gates just evaluated, and the durable row that says whether an executor has it.
     // The queue's own transitions are recorded on each row's history and travel to the ledger

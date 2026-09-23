@@ -1,6 +1,7 @@
-import type { Observation, ScopeFile, Work } from './model.js';
-import { evidenceBindsCandidate, type QueueCarry, type TipMerge } from './model/carry.js';
+import type { Evidence, Observation, ScopeFile, Work } from './model.js';
+import { evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
 import { reviewProviderOf } from './model/review.js';
+import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions } from './regression-guard.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
@@ -16,7 +17,7 @@ export interface QueueSpeculation {
    * For a tip that is the reviewed head itself, republished over an earlier tip because the head
    * already contained its new predicted base (GY-127): the paths that changed between the
    * replaced tip's bound base and the predicted base, as GitHub listed them, or null when it could
-   * not list them completely. The identity carry (model/carry.ts) is decided on this list.
+   * not list them completely. The identity carry (`decideIdentityCarry`) is decided on this list.
    */
   baseChanges?: string[] | null;
   /** Which bindings of the replaced head carried to the tip, decided when the tip was bound. */
@@ -35,6 +36,58 @@ export interface QueueSpeculation {
   restoredApproval?: RestoredApproval | null;
 }
 export interface QueueEntry { sequence: number; enqueuedAt: string; policyRevision: number; speculation: QueueSpeculation | null }
+/** The published tip that replaces a queued entry's head on the next observation, or null when the head is the tip. */
+export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>): string | null {
+  const speculation = work.queue?.speculation, candidate = work.candidate;
+  return speculation && candidate && speculation.tip !== candidate.sha && speculation.policyRevision === work.policyRevision ? speculation.tip : null;
+}
+export interface IdentityCarryInput {
+  from: { sha: string; baseSha: string }; to: { sha: string; baseSha: string }; policyRevision: number; at: string;
+  /** `QueueSpeculation.baseChanges`: what the predicted base changed relative to the replaced tip's bound base, or null/absent when unlisted. */
+  baseChanges: string[] | null | undefined;
+  predecessor: { key: string | null; validated: boolean };
+  reviewedFiles: string[];
+  approval: ApprovalIdentity | null;
+  proofs: { proof: string; evidence: Evidence | undefined }[];
+}
+const shortSha = (sha: string) => sha.slice(0, 12);
+const listPaths = (paths: string[]) => paths.length > 6 ? `${paths.slice(0, 6).join(', ')} and ${paths.length - 6} more` : paths.join(', ');
+/**
+ * The carry decision for a tip that is the reviewed head itself (GY-127). When the reviewed head
+ * already contains its new predicted base — the entry ahead was ejected and the base branch did
+ * not move — the queue republishes that head as the tip and produces no commit, so the rule in
+ * model/carry.ts, which admits only a Graphyard-authored two-parent merge, has nothing to check
+ * about parents or author: the tip is provably the reviewed content. The per-binding rule is the
+ * same one: the approval carries when the predicted base changed none of the reviewed files, and
+ * each proof when its declared scope is disjoint from that change, decided on the files GitHub
+ * listed between the replaced tip's bound base and the predicted base. What GitHub said when it
+ * dismissed the approval on the earlier publication plays no part. An unvalidated predecessor or
+ * an unlisted change refuses every binding, exactly as the merge rule does.
+ */
+export function decideIdentityCarry(input: IdentityCarryInput): QueueCarry {
+  const { from, to, predecessor } = input;
+  const who = predecessor.key ?? 'the base branch';
+  const base = { from, to, policyRevision: input.policyRevision, at: input.at, predecessor: predecessor.key ?? 'base branch', changedFiles: input.baseChanges ?? null, reviewedFiles: input.reviewedFiles };
+  const refuse = (reason: string): QueueCarry => ({ ...base, approval: { carried: false, reason }, evidence: input.proofs.map(({ proof }) => ({ proof, carried: false, reason })) });
+  if (to.sha !== from.sha) return refuse(`tip ${shortSha(to.sha)} was not produced by Graphyard's merge of the approved head ${shortSha(from.sha)}`);
+  if (!predecessor.validated) return refuse(predecessor.key ? `predecessor ${predecessor.key} is not fully validated on tip ${shortSha(to.baseSha)}` : `the predicted base ${shortSha(to.baseSha)} is not validated`);
+  const changed = input.baseChanges;
+  if (!changed) return refuse(`the files ${who} changed between ${shortSha(from.baseSha)} and ${shortSha(to.baseSha)} could not be listed completely`);
+  const tip = `tip ${shortSha(to.sha)}, the reviewed head itself republished unchanged onto predicted base ${shortSha(to.baseSha)}`;
+  const reviewedTouched = input.reviewedFiles.filter(path => changed.includes(path));
+  const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the reviewed head ${shortSha(from.sha)}` }
+    : reviewedTouched.length ? { carried: false, reason: `${who} changed reviewed files ${listPaths(reviewedTouched)}; a fresh independent approval of ${shortSha(to.sha)} is required` }
+    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${shortSha(from.sha)} by ${input.approval.reviewer} carried to ${tip}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
+  const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => {
+    if (!evidence) return { proof, carried: false, reason: `no trusted evidence was bound to the reviewed head ${shortSha(from.sha)}` };
+    if (!changed.length) return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${tip}: ${who} changed no file relative to ${shortSha(from.baseSha)}` };
+    if (!evidence.scopeFiles?.length) return { proof, carried: false, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} declares no scopeFiles, so its independence from the ${changed.length} files ${who} changed cannot be shown; fresh evidence for ${shortSha(to.sha)} is required` };
+    const intersecting = changed.filter(path => evidence.scopeFiles!.some(scope => pathScopesOverlap(scope, path)));
+    if (intersecting.length) return { proof, carried: false, evidenceId: evidence.id, producer: evidence.producer, reason: `${who} changed ${listPaths(intersecting)} inside the scope of evidence ${evidence.id}; fresh evidence for ${shortSha(to.sha)} is required` };
+    return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${tip}: its scope (${listPaths(evidence.scopeFiles)}) is disjoint from the ${changed.length} files ${who} changed` };
+  });
+  return { ...base, approval, evidence };
+}
 export interface QueueEjection { at: string; sequence: number; reason: string; sha: string | null; policyRevision: number }
 export interface QueueHistoryEntry {
   at: string; event: 'enqueued' | 'predicted' | 'ejected'; sequence: number; reason?: string; tip?: string;
@@ -112,11 +165,8 @@ export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseR
   if (!candidate) return null;
   const speculation = work.queue?.speculation;
   if (speculation?.tip === candidate.sha && speculation.policyRevision === work.policyRevision && speculation.restoredApproval?.sha === candidate.sha) return speculation.restoredApproval;
-  // A record that republished nothing for this head (a conflict, or a repair not yet run) holds
-  // the restored approval of the head it is bound to; see Engine.restoreDismissedApproval.
   const refresh = work.baseRefresh;
-  const bound = !!refresh && (refresh.head === candidate.sha || refresh.head === null && refresh.from.sha === candidate.sha);
-  return bound && refresh!.policyRevision === work.policyRevision && refresh!.restoredApproval?.sha === candidate.sha ? refresh!.restoredApproval! : null;
+  return refresh?.head === candidate.sha && refresh.policyRevision === work.policyRevision && refresh.restoredApproval?.sha === candidate.sha ? refresh.restoredApproval : null;
 }
 export interface QueuePlacement {
   id: string; key: string; position: number; size: number; sequence: number; enqueuedAt: string; waitMs: number;

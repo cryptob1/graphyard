@@ -15,13 +15,6 @@ import type { Work } from './work.js';
  * scope is disjoint from those changes. Everything else is re-required with the reason recorded.
  * The decision is made once, at publication, from facts the control plane observed itself; it is
  * never asserted by a worker, a producer, or a reviewer.
- *
- * One tip needs no merge at all: when the reviewed head already contains its predicted base — the
- * entry ahead was ejected and the base branch did not move — Graphyard republishes the reviewed
- * head as the tip and produces no commit (GY-127). The tip is then that head itself, the identity
- * carry below: nothing about its parents or author needs checking, and the bindings carry under
- * the same per-file rule, decided on the files that changed between the replaced tip's bound base
- * and the predicted base — what the ejected predecessor held that the tip no longer does.
  */
 
 /** What Graphyard's merge produced when it published a tip, as GitHub reports the commit. */
@@ -58,12 +51,6 @@ export interface QueueCarry {
 export interface CarryInput {
   from: { sha: string; baseSha: string }; to: { sha: string; baseSha: string }; policyRevision: number; at: string;
   merge: TipMerge | null | undefined;
-  /**
-   * For a tip that is the reviewed head itself (`to.sha === from.sha`, no merge): the paths that
-   * changed between the replaced tip's bound base and the predicted base, or null when GitHub
-   * could not list them completely. Ignored when a merge describes the tip.
-   */
-  baseChanges?: string[] | null;
   predecessor: { key: string | null; validated: boolean };
   reviewedFiles: string[];
   approval: ApprovalIdentity | null;
@@ -76,55 +63,43 @@ export interface CarryInput {
 const short = (sha: string) => sha.slice(0, 12);
 const list = (paths: string[]) => paths.length > 6 ? `${paths.slice(0, 6).join(', ')} and ${paths.length - 6} more` : paths.join(', ');
 
-/** True when the tip is the reviewed head itself: Graphyard produced no commit because that head already contained its predicted base. */
-export function identityCarry(input: Pick<CarryInput, 'from' | 'to' | 'merge'>): boolean {
-  return !input.merge && input.to.sha === input.from.sha;
-}
 /** The one reason that refuses every binding at once, or null when the tip qualifies for per-binding decisions. */
-export function carryRefusal(input: Pick<CarryInput, 'from' | 'to' | 'merge' | 'baseChanges' | 'predecessor' | 'app'>): string | null {
+export function carryRefusal(input: Pick<CarryInput, 'from' | 'to' | 'merge' | 'predecessor' | 'app'>): string | null {
   const { from, to, merge, predecessor } = input;
-  const identity = identityCarry(input);
-  if (!identity) {
-    if (!merge || merge.from !== from.sha) return `tip ${short(to.sha)} was not produced by Graphyard's merge of the approved head ${short(from.sha)}`;
-    const expected = new Set([from.sha, to.baseSha]);
-    const parents = new Set(merge.parents);
-    if (parents.size !== expected.size || [...expected].some(sha => !parents.has(sha))) return `tip ${short(to.sha)} has parents ${merge.parents.map(short).join(', ') || 'none'} rather than exactly the approved head ${short(from.sha)} and its predicted base ${short(to.baseSha)}, so it carries commits Graphyard did not produce`;
-    if (!merge.authoredByApp) return `tip ${short(to.sha)} was authored by ${merge.author ?? 'an unknown identity'}, not by the ${input.app} App`;
-    if (merge.conflicts) return `tip ${short(to.sha)} needed conflict resolution, which is new content nobody reviewed or proved`;
-  }
+  if (!merge || merge.from !== from.sha) return `tip ${short(to.sha)} was not produced by Graphyard's merge of the approved head ${short(from.sha)}`;
+  const expected = new Set([from.sha, to.baseSha]);
+  const parents = new Set(merge.parents);
+  if (parents.size !== expected.size || [...expected].some(sha => !parents.has(sha))) return `tip ${short(to.sha)} has parents ${merge.parents.map(short).join(', ') || 'none'} rather than exactly the approved head ${short(from.sha)} and its predicted base ${short(to.baseSha)}, so it carries commits Graphyard did not produce`;
+  if (!merge.authoredByApp) return `tip ${short(to.sha)} was authored by ${merge.author ?? 'an unknown identity'}, not by the ${input.app} App`;
+  if (merge.conflicts) return `tip ${short(to.sha)} needed conflict resolution, which is new content nobody reviewed or proved`;
   if (!predecessor.validated) return predecessor.key ? `predecessor ${predecessor.key} is not fully validated on tip ${short(to.baseSha)}` : `the predicted base ${short(to.baseSha)} is not validated`;
-  const changes = identity ? input.baseChanges : merge!.baseChanges;
-  if (changes === null || changes === undefined) return `the files ${predecessor.key ?? 'the base branch'} changed between ${short(from.baseSha)} and ${short(to.baseSha)} could not be listed completely`;
+  if (merge.baseChanges === null) return `the files ${predecessor.key ?? 'the base branch'} changed between ${short(from.baseSha)} and ${short(to.baseSha)} could not be listed completely`;
   return null;
 }
 
 /** Decide, for one published tip, which bindings of the replaced head carry and which are re-required. */
 export function decideCarry(input: CarryInput): QueueCarry {
   const { from, to, merge, predecessor } = input;
-  const identity = identityCarry(input);
-  const base = { from, to, policyRevision: input.policyRevision, at: input.at, predecessor: predecessor.key ?? 'base branch', changedFiles: (identity ? input.baseChanges : merge?.baseChanges) ?? null, reviewedFiles: input.reviewedFiles };
+  const base = { from, to, policyRevision: input.policyRevision, at: input.at, predecessor: predecessor.key ?? 'base branch', changedFiles: merge?.baseChanges ?? null, reviewedFiles: input.reviewedFiles };
   const refusal = carryRefusal(input);
   if (refusal) {
     return { ...base, approval: { carried: false, reason: refusal }, evidence: input.proofs.map(({ proof }) => ({ proof, carried: false, reason: refusal })) };
   }
-  const changed = base.changedFiles!;
+  const changed = merge!.baseChanges!;
   const who = predecessor.key ?? 'the base branch';
-  // What the tip is, for the recorded reason: a commit Graphyard produced, or the reviewed head
-  // republished unchanged because it already contained its predicted base.
-  const tip = identity ? `tip ${short(to.sha)}, the reviewed head itself republished unchanged onto predicted base ${short(to.baseSha)}` : `Graphyard-authored tip ${short(to.sha)}`;
   const reviewedTouched = input.reviewedFiles.filter(path => changed.includes(path));
   const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the replaced head ${short(from.sha)}` }
     : reviewedTouched.length ? { carried: false, reason: `${who} changed reviewed files ${list(reviewedTouched)}; a fresh independent approval of ${short(to.sha)} is required` }
-    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${short(from.sha)} by ${input.approval.reviewer} carried to ${tip}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
+    : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${short(from.sha)} by ${input.approval.reviewer} carried to Graphyard-authored tip ${short(to.sha)}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
   const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => {
     if (!evidence) return { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` };
     // A predicted base that changed nothing relative to the bound base leaves the tested tree
     // untouched, so no declared scope is needed to show the proof still applies.
-    if (!changed.length) return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${tip}: ${who} changed no file relative to ${short(from.baseSha)}` };
+    if (!changed.length) return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: ${who} changed no file relative to ${short(from.baseSha)}` };
     if (!evidence.scopeFiles?.length) return { proof, carried: false, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} declares no scopeFiles, so its independence from the ${changed.length} files ${who} changed cannot be shown; fresh evidence for ${short(to.sha)} is required` };
     const intersecting = changed.filter(path => evidence.scopeFiles!.some(scope => pathScopesOverlap(scope, path)));
     if (intersecting.length) return { proof, carried: false, evidenceId: evidence.id, producer: evidence.producer, reason: `${who} changed ${list(intersecting)} inside the scope of evidence ${evidence.id}; fresh evidence for ${short(to.sha)} is required` };
-    return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${tip}: its scope (${list(evidence.scopeFiles)}) is disjoint from the ${changed.length} files ${who} changed` };
+    return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: its scope (${list(evidence.scopeFiles)}) is disjoint from the ${changed.length} files ${who} changed` };
   });
   return { ...base, approval, evidence };
 }
@@ -143,10 +118,8 @@ export function currentCarry(work: CarryBearer): QueueCarry | null {
     && carry.to.baseSha === candidate.baseSha && carry.policyRevision === work.policyRevision ? carry : null;
   const speculation = work.queue?.speculation;
   if (speculation?.tip === candidate.sha) { const carried = applies(speculation.carry); if (carried) return carried; }
-  // A refresh record that republished nothing for this head — a merge conflict, or a repair not
-  // yet run — still carries a restored approval of the head it is bound to (see Engine.restoreDismissedApproval).
   const refresh = work.baseRefresh;
-  return refresh && (refresh.head === candidate.sha || refresh.head === null && refresh.from.sha === candidate.sha) ? applies(refresh.carry) : null;
+  return refresh?.head === candidate.sha ? applies(refresh.carry) : null;
 }
 /**
  * True when a trusted evidence record binds the current candidate: exactly, or carried across a
