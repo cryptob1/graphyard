@@ -134,7 +134,7 @@ async function delivered(sessionId: string) {
   item = await engine.observe(item.id, (await reload(item)).revision, approved());
   await engine.execute(coordinator, 'session', item.id, { id: sessionId, kind: 'review', runtime: 'claude', host: 'host-1', agentName: 'review-claude',
     pane: `pane-${sessionId}`, role: 'review', head, subject: `${item.key}: review ${head.slice(0, 12)}`, state: 'running' }, randomUUID());
-  item = await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0 }, randomUUID());
+  item = await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   // One candidate is in the queue at a time; nothing else in this file is waiting behind it.
   await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [item.id]);
   const speculation: QueueSpeculation = { ref: queueRef(item.key), tip: head, base, baseTree: sha40('7e'), predecessors: [], policyRevision: item.policyRevision, publishedAt: new Date().toISOString() };

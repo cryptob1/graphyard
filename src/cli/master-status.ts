@@ -3,24 +3,26 @@ import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
-import { elapsed } from '../model/sessions.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type CycleMetrics, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
-import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
+import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
+import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
+import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
+export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
 
 /**
  * One attention item per open worker scope request whose epoch still holds the lease: addressed
@@ -62,30 +64,6 @@ export function approverLaunchAttention(daemon: {
 }
 
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
-
-/** Who answers a request whose session settled unanswered, and with which command. */
-export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
-  return request.kind === 'review'
-    ? agentOwner('master', `graphyard master review ${key} [PROFILE] forces the next attempt for the open request`)
-    : agentOwner('master', `graphyard master decide ${key} rework REASON, approved by the approver agent, so the group's proofs are requested afresh on the next head`, 'approver');
-}
-
-/**
- * One attention item per live request whose session settled without satisfying its gate. Such a
- * request is the one state `master status` used to show as nothing at all: no session running, no
- * launch refused, no failure — just a `sinceMs` climbing past the hour while the gate goes on
- * refusing. It is named here with the verdict that settled the session, how long the request has
- * stood, and the command that gets it answered, and counted apart from the requests with a
- * session actually running (`counts.dispatchRunning`).
- */
-export function unansweredRequestAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[]): AttentionItem[] {
-  return rows.flatMap(row => unansweredRequests(row.dispatch).map(request => {
-    const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
-    const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
-    return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
-      ...unansweredRequestOwner(row.key, request) };
-  }));
-}
 
 /**
  * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
@@ -195,7 +173,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // filling is exactly the condition that stops it. The plan behind the number is the same one the
   // loop and `master reclaim` compute, so the attention item never promises room reclaiming cannot give.
   const worktrees = worktreesDirectory(root);
-  const reclaimPlan = planWorktreeReclaim(await inventoryWorktrees(root).catch(() => []), snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
+  const trees = await inventoryWorktrees(root).catch(() => []), reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
   // live there, and it is judged against its own minimum and budget, before a write there fails.
@@ -218,18 +196,21 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, the sessions running against the declared limit and the longest wait for a slot.
-  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }),
+  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
   // A required check that failed on the clock says so, with the measurement against its budget.
   const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
+  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot), ...consentHoldItems(trees, snapshot)];
   // A session past its role's maximum: running but making no progress is as visible as one that died.
   const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
+  // A review every session settled on a dismissal for is the stronger statement of the same
+  // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
+  const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
   // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
@@ -255,10 +236,12 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   }
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
-  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
+  return { ...status, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stuck.attentionItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
+    // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
+    unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),

@@ -305,7 +305,7 @@ async function job(work: Work, github: GitHub) {
   assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [work.id])).rows[0]?.error ?? null, null, 'the reconciliation job ran clean');
   return reload(work);
 }
-const prove = async (work: Work) => engine.execute(producer, 'evidence', work.id, { proof: 'unit:landing', sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+const prove = async (work: Work) => engine.execute(producer, 'evidence', work.id, { proof: 'unit:landing', sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
 
 /** The guarded merge as the control plane performs it, through to the provider's landing and the item's own reconciliation. */
 async function landed(work: Work, pr: number, sha: string, github: GitHub, repo: Repository) {

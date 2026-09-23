@@ -25,6 +25,18 @@ export interface ShippingPulse {
     averageHours: number | null; medianHours: number | null; p90Hours: number | null;
     sampleSize: number; eligible: number; excluded: number; coveragePercent: number;
     sparse: boolean; exclusions: Record<string, number>;
+    /**
+     * False when nothing has ever recorded a production observation for this repository: no
+     * deployment provider has reported through `POST /api/production-observations`, and no
+     * delivery in the window carries a `master verify-deployment` record. A metric with no
+     * inputs is unconfigured, not sparse - the fix is configuration, not waiting for more
+     * deliveries - and `unconfiguredReason` says so, naming the endpoint and the credential.
+     */
+    configured: boolean; unconfiguredReason: string | null;
+    /** Where the production instants come from: whether any provider observation exists at all, and how many deliveries carry a master verification. */
+    sources: { providerObservations: boolean; verifiedDeliveries: number };
+    /** The single most frequent exclusion reason with its count, so a coverage figure is never shown without the cause behind it. */
+    dominantExclusion: { reason: string; count: number } | null;
     split: { prToMergeAverageHours: number | null; mergeToProductionAverageHours: number | null };
   };
   weeks: { start: string; end: string; count: number }[];
@@ -45,7 +57,18 @@ type DeliveryRow = {
   work_id: string; key: string; title: string; pull_request: number; merge_sha: string;
   merged_at: Date; evidence_as_of: Date | null; intent_at: Date | null; authorized_work: AuthorizedSnapshot | null; delivery_violations: unknown;
   pr_created_at: Date | null; production_at: Date | null; production_matches: number; superseded_matches: number;
+  verified_at: Date | null; verified_sha: string | null;
 };
+
+/** The endpoint that feeds this metric, and the one that does not, named wherever the page or the API explains an empty measurement. */
+export const PRODUCTION_OBSERVATION_ENDPOINT = 'POST /api/production-observations';
+export const FLOW_DEPLOYMENT_ENDPOINT = 'POST /api/deployments';
+/**
+ * The unconfigured state in the metric's own words. It is a statement about inputs, not
+ * about the sample: no delivery can be measured until an observation source exists, so
+ * it names the two ways one comes to exist and the endpoint that looks like one but is not.
+ */
+export const PRODUCTION_UNCONFIGURED_REASON = `The production endpoint is not configured: no deployment-provider observation has ever been recorded for this repository, so no deliveries can be measured until it is. This metric ends at observations recorded through ${PRODUCTION_OBSERVATION_ENDPOINT}, which needs a producer credential whose deploymentProviders scope names the provider; ${FLOW_DEPLOYMENT_ENDPOINT} records deployments for flow analytics and does not feed this metric. A delivery verified with graphyard master verify-deployment also counts as a production observation.`;
 
 function startOfUtcWeek(date: Date) {
   const result = new Date(date);
@@ -187,7 +210,8 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
             AND e.payload->'work'->>'revision' = d.work->'delivery'->>'authorizationRevision'
           ORDER BY e.seq DESC LIMIT 1
         ) a) END AS authorized_work,
-      production.production_at, production.production_matches::int, production.superseded_matches::int
+      production.production_at, production.production_matches::int, production.superseded_matches::int,
+      verification.verified_at, verification.verified_sha
     FROM ranked d
     LEFT JOIN LATERAL (
       SELECT created_at FROM events
@@ -220,6 +244,23 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
         ORDER BY pom.deployed_at_repository ASC, pom.observation_id ASC LIMIT $4
       ) o
     ) production ON true
+    -- The release the master verified serving this merge with \`master verify-deployment\`,
+    -- read from the append-only \`deployment\` event that recorded it against the delivery.
+    -- Its instant is the repository-clock time the verification was written: the release was
+    -- serving then, so it is the latest instant production can have begun, and a duration
+    -- measured to it is an upper bound rather than a guess. The mutable document is only
+    -- consulted to ask whether such a record exists at all - one primary-key probe - so
+    -- the ledger walk runs solely for the few items that carry one instead of reading the
+    -- whole history of every unverified delivery in the window.
+    LEFT JOIN LATERAL (
+      SELECT graphyard_instant(e.payload->'work'->'delivery'->'deployment'->>'at') AS verified_at,
+        e.payload->'work'->'delivery'->'deployment'->>'sha' AS verified_sha
+      FROM events e
+      WHERE e.work_id=d.work_id AND e.kind='deployment'
+        AND lower(e.payload->'work'->'delivery'->'deployment'->>'mergeSha')=lower(d.work->'delivery'->>'mergeSha')
+        AND (SELECT wi.document->'delivery'->'deployment' IS NOT NULL FROM work_items wi WHERE wi.id=d.work_id)
+      ORDER BY e.seq DESC LIMIT 1
+    ) verification ON true
     ORDER BY d.merged_at DESC, d.work_id ASC`,
     [rangeStart.toISOString(), now.toISOString(), SHIPPING_PULSE_LIMIT + 1, SHIPPING_PULSE_PRODUCTION_LIMIT + 1, SHIPPING_PULSE_RECENT_LIMIT]);
   const deliveryPartial = result.rows.length > SHIPPING_PULSE_LIMIT;
@@ -234,14 +275,29 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
   const productionDurations: number[] = [], prToMerge: number[] = [], mergeToProduction: number[] = [];
   const exclusions: Record<string, number> = {};
   const exclude = (reason: string) => { exclusions[reason] = (exclusions[reason] ?? 0) + 1; };
+  let verifiedDeliveries = 0;
   for (const row of rows) {
+    // A provider observation is the deployment's own finish time and is preferred; the master's
+    // verification is an upper bound on it and stands in only where no provider reported. The
+    // release cannot have begun serving before the merge it contains, so the verification
+    // instant is clamped to the merge the way the provider instant is in the query.
+    const verifiedAt = row.verified_at ? new Date(Math.max(row.verified_at.getTime(), row.merged_at.getTime())) : null;
+    if (verifiedAt) verifiedDeliveries++;
     if (!row.pr_created_at) { exclude('missing-pr-created-at'); continue; }
-    if (!row.production_at) { exclude(row.production_matches > SHIPPING_PULSE_PRODUCTION_LIMIT ? 'production-observation-cap' : row.superseded_matches > 0 && row.production_matches === row.superseded_matches ? 'superseded-deployment' : 'no-verifiable-production-deployment'); continue; }
-    if (row.pr_created_at > row.merged_at || row.production_at < row.merged_at) { exclude('invalid-clock-order'); continue; }
-    productionDurations.push((row.production_at.getTime() - row.pr_created_at.getTime()) / 3_600_000);
+    const productionAt = row.production_at ?? verifiedAt;
+    if (!productionAt) { exclude(row.production_matches > SHIPPING_PULSE_PRODUCTION_LIMIT ? 'production-observation-cap' : row.superseded_matches > 0 && row.production_matches === row.superseded_matches ? 'superseded-deployment' : 'no-verifiable-production-deployment'); continue; }
+    if (row.pr_created_at > row.merged_at || productionAt < row.merged_at) { exclude('invalid-clock-order'); continue; }
+    productionDurations.push((productionAt.getTime() - row.pr_created_at.getTime()) / 3_600_000);
     prToMerge.push((row.merged_at.getTime() - row.pr_created_at.getTime()) / 3_600_000);
-    mergeToProduction.push((row.production_at.getTime() - row.merged_at.getTime()) / 3_600_000);
+    mergeToProduction.push((productionAt.getTime() - row.merged_at.getTime()) / 3_600_000);
   }
+  // Whether anything has ever recorded a production observation. An empty table and a table
+  // whose observations happen to match nothing in the window are different states: the first
+  // is a metric with no inputs, and the page must say so instead of calling the sample thin.
+  const providerObservations = (await pool.query('SELECT EXISTS (SELECT 1 FROM production_observations) AS present')).rows[0].present as boolean;
+  const configured = providerObservations || verifiedDeliveries > 0;
+  // Ties break on the reason name so the same fixture always names the same dominant cause.
+  const dominantExclusion = Object.entries(exclusions).sort(([a, x], [b, y]) => y - x || a.localeCompare(b)).map(([reason, count]) => ({ reason, count }))[0] ?? null;
   const weeks = Array.from({ length: SHIPPING_PULSE_WEEKS }, (_, index) => {
     const start = new Date(rangeStart); start.setUTCDate(start.getUTCDate() + index * 7);
     const end = new Date(start); end.setUTCDate(end.getUTCDate() + 7); end.setMilliseconds(end.getMilliseconds() - 1);
@@ -259,6 +315,8 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
       sampleSize: productionDurations.length, eligible: rows.length, excluded: rows.length - productionDurations.length,
       coveragePercent: rows.length ? Math.round(productionDurations.length / rows.length * 1000) / 10 : 0,
       sparse: productionDurations.length < 5, exclusions,
+      configured, unconfiguredReason: configured ? null : PRODUCTION_UNCONFIGURED_REASON,
+      sources: { providerObservations, verifiedDeliveries }, dominantExclusion,
       split: { prToMergeAverageHours: rounded(average(prToMerge)), mergeToProductionAverageHours: rounded(average(mergeToProduction)) },
     },
     weeks,

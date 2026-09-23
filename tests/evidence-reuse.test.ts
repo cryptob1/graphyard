@@ -88,7 +88,7 @@ async function start(f: Fixture, requestId = f.r.id) {
   await validation.collectionAuthority(collector, command); return command;
 }
 function report(f: Fixture, command: { requestId: string; attemptId: string; epoch: number }, overrides: Record<string, unknown> = {}) {
-  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true, ...overrides };
+  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'report', digest, url: 'https://private.example.test/report' }], artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, ...overrides };
 }
 /** Execute the fixture's queued request to a passing, settled result. */
 async function pass(f: Fixture, overrides: Record<string, unknown> = {}) {
@@ -196,6 +196,17 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   assert.equal(acceptance(w).passed, false);
 });
 
+test('GY-135: a pass with no failing run against the stripped tree is never carried onto a new head', async () => {
+  const f = await fixture(); await pass(f);
+  // A pass trusted before the exercise rule: the same record with its stripped run erased.
+  const stored = await current(f.w.id), legacy = stored.evidence.at(-1)!;
+  delete legacy.exercise;
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [stored.id, JSON.stringify(stored)]);
+  const decision = await decide(f, heads.two, [file('src/app.ts', 'a'), file('docs/guide.md', 'h')]);
+  assert.equal(decision.outcome, 'refused'); assert.equal(decision.evidenceId, null);
+  assert.match(decision.reasons.join('\n'), new RegExp(`${f.proof} does not exercise AC-1: it passed, but no run of it against a tree with the criterion's behaviour removed was recorded`));
+  assert.equal(acceptance(await current(f.w.id)).passed, false);
+});
 test('D6-2 requirement, scenario, proof policy, bundle, environment, freshness and independence changes invalidate reuse when source is unchanged', async () => {
   // Requirement revision: the pass at policy v1 cannot stand for v2 even with no file changed.
   const f = await fixture(); await pass(f);
