@@ -23,16 +23,16 @@ function launched(leaseExpiresAt: string | null, launchAt = at(-60_000)) {
 }
 const worker = { name: 'claude-a', principal: 'worker-a', agentName: 'claude-a', mode: 'worker' } as any;
 const herdr = { name: 'claude-a', agent_status: 'working', pane_id: 'p1' } as any;
-const status = (work: Work, probe = () => clean) => {
-  const containment = assessContainment([work], { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, localNow: new Date(observedAt), probe } as any);
+const status = async (work: Work, probe = () => clean) => {
+  const containment = await assessContainment([work], { hostId: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, localNow: new Date(observedAt), probe } as any);
   return buildMasterStatus({ work: [work], now: observedAt }, [worker], [herdr], {}, containment);
 };
 
-test('unit:containment-attention-live-worker a renewed lease on the quarantined epoch raises no attention and is never probed', () => {
+test('unit:containment-attention-live-worker a renewed lease on the quarantined epoch raises no attention and is never probed', async () => {
   // The launch deadlines have passed long ago, but the worker keeps renewing its lease.
   const live = launched(at(90_000), at(-3_600_000));
   let probed = 0;
-  const report = status(live, () => { probed++; return clean; });
+  const report = (await status(live, () => { probed++; return clean; }));
   const row = report.work[0];
   assert.equal(probed, 0, 'a live worker\'s supervisor is not inspected for absence');
   assert.equal(row.attention, null);
@@ -46,9 +46,9 @@ test('unit:containment-attention-live-worker a renewed lease on the quarantined 
   assert.doesNotMatch(JSON.stringify(report), /blocks dispatch|grace window/);
 });
 
-test('unit:containment-attention-live-worker a lapsed lease inside the grace window raises attention with the time remaining', () => {
+test('unit:containment-attention-live-worker a lapsed lease inside the grace window raises attention with the time remaining', async () => {
   const lapsing = launched(at(-30_000));
-  const row = status(lapsing).work[0];
+  const row = (await status(lapsing)).work[0];
   assert.equal(row.containment?.phase, 'grace');
   assert.equal(row.containment?.graceRemainingMs, 90_000);
   assert.equal(row.containment?.settleable, false);
@@ -56,33 +56,33 @@ test('unit:containment-attention-live-worker a lapsed lease inside the grace win
   assert.match(row.attentionOwner!.next, /settle-containment GY-74 REASON once settleable/);
   assert.equal(row.attentionOwner!.human, false);
   // Reconciliation may already have cleared the lapsed lease; the quarantine's own deadlines still time the window.
-  assert.equal(status(launched(null, at(-30_000))).work[0].containment?.phase, 'grace');
+  assert.equal((await status(launched(null, at(-30_000)))).work[0].containment?.phase, 'grace');
 });
 
-test('unit:containment-attention-live-worker a lease past its grace window names the elapsed window and the settle command once settleable', () => {
+test('unit:containment-attention-live-worker a lease past its grace window names the elapsed window and the settle command once settleable', async () => {
   const stranded = launched(null, at(-600_000));
-  const settleable = status(stranded).work[0];
+  const settleable = (await status(stranded)).work[0];
   assert.equal(settleable.containment?.phase, 'lapsed');
   assert.equal(settleable.containment?.settleable, true);
   assert.equal(settleable.attention, 'Containment quarantine from epoch 1 is verified settleable; run master settle-containment GY-74');
   assert.equal(settleable.attentionOwner!.next, 'graphyard master settle-containment GY-74 REASON');
 
-  const held = status(stranded, () => ({ ...clean, processes: [{ pid: 4242, evidence: 'command' as const }] }) as any).work[0];
+  const held = (await status(stranded, () => ({ ...clean, processes: [{ pid: 4242, evidence: 'command' as const }] }) as any)).work[0];
   assert.equal(held.containment?.settleable, false);
   assert.match(held.attention!, new RegExp(`^Containment quarantine from epoch 1 blocks dispatch: worker lease lapsed at ${at(-600_000).replace(/\./g, '\\.')}, past the 120s grace window; Process 4242 of the contained worker is still present`));
   assert.match(held.attentionOwner!.next, /Stop the recorded supervisor/);
 });
 
-test('unit:containment-hold-wording a live worker holds dispatch as the item in progress by its owner, not as a quarantine', () => {
+test('unit:containment-hold-wording a live worker holds dispatch as the item in progress by its owner, not as a quarantine', async () => {
   const live = launched(at(90_000));
   const hold = containmentHold(live, Date.parse(observedAt));
   assert.equal(hold, `GY-74 is in progress by worker-a under lease epoch 1 (active until ${at(90_000)})`);
   assert.doesNotMatch(hold!, /quarantin|containment/i);
   assert.throws(() => assertDispatchable(live, [live], observedAt), (error: Error) => error.message === hold);
-  assert.equal(status(live).work[0].containment?.hold, hold);
+  assert.equal((await status(live)).work[0].containment?.hold, hold);
 });
 
-test('unit:containment-hold-wording a lapsed or superseded owner still holds dispatch as unverified containment', () => {
+test('unit:containment-hold-wording a lapsed or superseded owner still holds dispatch as unverified containment', async () => {
   const lapsed = launched(null, at(-600_000));
   assert.throws(() => assertDispatchable(lapsed, [lapsed], observedAt), /^Error: Dispatch blocked by unverified worker containment from epoch 1$/);
   // A lease held by someone else, or on another epoch, is not the contained worker at work.

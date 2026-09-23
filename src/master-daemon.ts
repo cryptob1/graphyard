@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
@@ -19,6 +19,7 @@ import { launchReview, readReviewLedger, saveReviewLedger } from './reviewer.js'
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
+import { probeSupervisorAbsence } from './containment-probe.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -46,8 +47,48 @@ export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
 const percentileSchema = z.object({ count: z.number().int().min(0), p50Ms: z.number().int().min(0), p90Ms: z.number().int().min(0) }).strict();
 const noMeasurement = { count: 0, p50Ms: 0, p90Ms: 0 };
+/**
+ * The six phases of one cycle, in the order the cycle runs them. Each carries the milliseconds
+ * the cycle spent in it (`ms`) and, of those, how many it spent waiting on a child process
+ * (`childWaitMs`): Herdr, gh, git or systemctl, run through the asynchronous runner and metered
+ * by its ledger (child-runner.ts). The difference is the step's own work. A cycle that outgrows
+ * its interval therefore says both which step took the time and whether that step was computing
+ * or waiting — eighty seconds waiting on gh and eighty seconds of the loop's own work are
+ * different faults, and only the second is a loop to worry about. The six sum to a little under
+ * `durationMs`: the remainder is the cursor writes and the measurement itself, which belong to no
+ * step.
+ */
+export const cycleStepNames = ['observe', 'close', 'decisions', 'dispatch', 'merge', 'deployment'] as const;
+export type CycleStepName = typeof cycleStepNames[number];
+const stepCostSchema = z.object({ ms: z.number().int().min(0), childWaitMs: z.number().int().min(0) }).strict();
+export type StepCost = z.infer<typeof stepCostSchema>;
+export const cycleStepsSchema = z.object({
+  /** Reading the coordination snapshot and reconciling the actions an interrupted cycle left. */
+  observe: stepCostSchema,
+  /** Closing finished sessions, failing over exhausted ones, stopping orphaned supervisors, and reclaiming worktrees and quarantines. */
+  close: stepCostSchema,
+  /** Deciding scope requests and requesting, supervising and retiring the routine decisions an approver applies. */
+  decisions: stepCostSchema,
+  /** Dispatching claimable work and shepherding the review and proof requests. */
+  dispatch: stepCostSchema,
+  /** The guarded merges. */
+  merge: stepCostSchema,
+  /** Observing the deployed release and the post-deployment smoke requests. */
+  deployment: stepCostSchema,
+}).strict();
+export type CycleSteps = z.infer<typeof cycleStepsSchema>;
+export const emptyCycleSteps = (): CycleSteps => Object.fromEntries(cycleStepNames.map(step => [step, { ms: 0, childWaitMs: 0 }])) as CycleSteps;
+
 export const cycleMetricsSchema = z.object({
   cycle: z.number().int().min(0), at: z.string(), durationMs: z.number().int().min(0),
+  /**
+   * Of `durationMs`, the wall-clock time at least one child process was in flight, and the rest,
+   * which is the loop's own work. Absent on a cycle recorded before the loop metered its waits.
+   */
+  childWaitMs: z.number().int().min(0).optional(),
+  workMs: z.number().int().min(0).optional(),
+  /** Where `durationMs` went, step by step. Absent on a cycle recorded before the loop measured its steps. */
+  steps: cycleStepsSchema.optional(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
   /**
    * What the cycle could act on, and the longest any one of those has gone unacted (see
@@ -476,12 +517,12 @@ export function orphanedSupervisors(work: Work[], profiles: WorkerProfile[], age
  * `watch KEY EPOCH --` invocation: a pid the kernel has since handed to something else is reported,
  * never signalled. A refusal of one half is recorded; only a stop that reached neither throws.
  */
-export function stopWatchSupervisor(orphan: OrphanSupervisor, signal: NodeJS.Signals, run: (command: string, args: string[]) => string,
+export async function stopWatchSupervisor(orphan: OrphanSupervisor, signal: NodeJS.Signals, run: ChildRun,
   kill: (pid: number, signal: NodeJS.Signals) => void = process.kill, readCommand: (pid: number) => string = pid => readFileSync(`/proc/${pid}/cmdline`, 'utf8')) {
   if (!scopePattern.test(orphan.scope.unit)) throw new Error(`Recorded containment scope ${orphan.scope.unit} is not a Graphyard watch scope`);
   const refusals: string[] = [];
   let stopped = 0;
-  try { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, orphan.scope.unit]); stopped++; }
+  try { await run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, orphan.scope.unit]); stopped++; }
   catch (error) { refusals.push(`containment scope ${orphan.scope.unit} could not be signalled: ${message(error)}`); }
   let argv: string[] | null = null;
   try { argv = readCommand(orphan.scope.pid).split('\0').filter(Boolean); }
@@ -843,14 +884,57 @@ export function latencyBudget(samples: LatencySample[]): LatencyBudget {
 }
 
 // ---- The loop's own liveness ---------------------------------------------------------------
-export type LoopState = 'running' | 'stalled' | 'absent';
-export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledAfterMs: number; cycle: number; lock: DaemonState['lock']; detail: string; restart: string }
+export type LoopState = 'running' | 'slow' | 'stalled' | 'absent';
+export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledAfterMs: number; cycle: number; lock: DaemonState['lock']; detail: string; restart: string; cost: CycleCost | null }
+
+/**
+ * What the last measured cycle cost, against the cadence it is judged on. A cycle is the loop's
+ * whole clock: while one runs nothing else coordinates, so a cycle longer than the interval is the
+ * interval, and a cycle past the two-interval liveness bound is indistinguishable from a stopped
+ * loop unless the measurement says otherwise. The bound is compared against the cycle's own work
+ * (`workMs`), never against what it spent waiting on children: a cycle that waited eighty seconds
+ * on gh is a slow provider, and one that computed for eighty seconds is a slow loop — only the
+ * second has a step to shorten, which `slowest` names.
+ */
+export interface CycleCost {
+  cycle: number; at: string; durationMs: number; childWaitMs: number; workMs: number; intervalMs: number; stalledAfterMs: number;
+  steps: CycleSteps | null;
+  /** The step with the most of its own work, when any step worked at all. */
+  slowest: { step: CycleStepName; ms: number; childWaitMs: number } | null;
+  /** The step that waited longest on children, when any step waited at all. */
+  longestWait: { step: CycleStepName; childWaitMs: number } | null;
+  /** Both judged on `workMs`: the loop's own time, net of its child waits. */
+  withinInterval: boolean; withinLivenessBound: boolean;
+  /** The step breakdown as an operator sentence, longest first, each step's wait beside it. */
+  breakdown: string;
+}
+const seconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
+export function cycleCost(metrics: CycleMetrics | null | undefined, intervalMs: number): CycleCost | null {
+  if (!metrics) return null;
+  const steps = metrics.steps ?? null;
+  const childWaitMs = metrics.childWaitMs ?? (steps ? Object.values(steps).reduce((total, step) => total + step.childWaitMs, 0) : 0);
+  const workMs = metrics.workMs ?? Math.max(0, metrics.durationMs - childWaitMs);
+  const ordered = steps ? (Object.entries(steps) as [CycleStepName, StepCost][]).sort((a, b) => (b[1].ms - b[1].childWaitMs) - (a[1].ms - a[1].childWaitMs)) : [];
+  const slowest = ordered.length && ordered[0][1].ms - ordered[0][1].childWaitMs > 0 ? { step: ordered[0][0], ms: ordered[0][1].ms - ordered[0][1].childWaitMs, childWaitMs: ordered[0][1].childWaitMs } : null;
+  const waits = ordered.filter(([, cost]) => cost.childWaitMs > 0).sort((a, b) => b[1].childWaitMs - a[1].childWaitMs);
+  const longestWait = waits.length ? { step: waits[0][0], childWaitMs: waits[0][1].childWaitMs } : null;
+  return { cycle: metrics.cycle, at: metrics.at, durationMs: metrics.durationMs, childWaitMs, workMs, intervalMs, stalledAfterMs: 2 * intervalMs, steps, slowest, longestWait,
+    withinInterval: workMs <= intervalMs, withinLivenessBound: workMs <= 2 * intervalMs,
+    breakdown: ordered.length
+      ? `${seconds(workMs)} of its own work and ${seconds(childWaitMs)} waiting on child processes; ${ordered.map(([step, cost]) => `${step} ${seconds(cost.ms)}${cost.childWaitMs ? ` (${seconds(cost.childWaitMs)} waiting)` : ''}`).join(', ')}`
+      : 'no step breakdown was recorded for this cycle' };
+}
+
 /**
  * Whether the loop is cycling, from its own cursor. Nothing else in the installation notices a
  * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
  * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence.
+ * A measured cycle that itself accounts for the lag is `slow`, not stalled: the loop is inside a
+ * long cycle, and the cost says whether that cycle is computing (a step to shorten) or waiting on
+ * a child (a provider to look at), so nobody restarts a loop that is still cycling.
  */
-export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures'>>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
+  const cost = cycleCost(state.metrics?.at(-1) ?? null, intervalMs);
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
   // A loop backing off from failed cycles is waiting on purpose, not hung: its bound is two
@@ -861,19 +945,24 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
   const lock = state.lock;
   const gone = !!lock && !!hostId && lock.host === hostId && !liveProcess(lock.pid);
   if (!lock || gone) {
-    return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+    return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
       detail: gone ? `No master loop is running: the cursor's lock (pid ${lock!.pid} on ${lock!.host}) names a process that is gone, last cycle ${state.lastCycleAt ?? 'never'}. Nothing is dispatching, deciding or merging until it is restarted.`
         : `No master loop holds this repository${state.lastCycleAt ? `; the last cycle was at ${state.lastCycleAt}` : ' and none has ever cycled'}. Nothing is dispatching, deciding or merging until it is started.` };
   }
   if (lagMs === null || lagMs > stalledAfterMs) {
-    return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+    // The last measured cycle explains the lag while the lag is no longer than that cycle plus the
+    // bound: the loop is inside another cycle like it. Past that, nothing explains the silence.
+    const slow = cost && lagMs !== null && cost.durationMs > stalledAfterMs && lagMs <= cost.durationMs + stalledAfterMs;
+    if (slow) return { state: 'slow', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
+      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle for ${Math.round(lagMs / 1000)}s, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s, but cycle ${cost.cycle} took ${Math.round(cost.durationMs / 1000)}s of its own: ${cost.breakdown}. The loop is inside a slow cycle, not stalled${cost.withinLivenessBound ? `: its own work fits the bound, and the time went to child processes${cost.longestWait ? ` in the ${cost.longestWait.step} step` : ''}` : cost.slowest ? `; the ${cost.slowest.step} step is the one to shorten` : ''}.` };
+    return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
       detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled.` };
   }
   if (backoff) {
-    return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+    return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
       detail: `Cycle ${backoff.last.cycle} failed ${Math.round(lagMs / 1000)}s ago in ${describeFailingCall(backoff.last)} (${backoff.last.reason}); ${backoff.consecutive} consecutive failure(s), the next cycle is due at ${backoff.last.nextAt}` };
   }
-  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago` };
+  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago` };
 }
 
 // ---- A cycle that fails (GY-119) -----------------------------------------------------------
@@ -957,9 +1046,24 @@ export function namedEffects(effects: DaemonEffects): DaemonEffects {
  * The loop's own attention, ahead of every work item: a coordinator that is not cycling is why
  * nothing else on the list is moving. A breached silence bound or latency budget follows it.
  */
-export function loopAttention(report: { liveness: LoopLiveness; silence?: SilenceReport | null; budget?: LatencyBudget | null; failures?: CycleFailures | null }): AttentionItem[] {
+export function loopAttention(report: { liveness: LoopLiveness; silence?: SilenceReport | null; budget?: LatencyBudget | null; failures?: CycleFailures | null; cost?: CycleCost | null }): AttentionItem[] {
   const items: AttentionItem[] = [];
-  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.restart) });
+  const cost = report.cost ?? report.liveness.cost;
+  // What to do about a long cycle depends on where its time went: a step that computed too long
+  // is shortened; one that waited on a child is a provider or a runtime to look at, and since
+  // GY-125 that wait blocks nothing else in the process. Neither is a restart.
+  const shorten = cost?.withinLivenessBound && cost.longestWait
+    ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; the time went to child processes in the ${cost.longestWait.step} step (${Math.round(cost.longestWait.childWaitMs / 1000)}s), so look at what Herdr, gh or git is slow on rather than restarting a loop that is still cycling`
+    : cost?.slowest ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; shorten the ${cost.slowest.step} step rather than restarting a loop that is still cycling`
+      : 'graphyard master status shows the last cycle under daemon.cost';
+  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart) });
+  // A cycle whose own work does not fit its interval is raised whatever the lag says: the loop
+  // looks healthy the instant a long cycle ends, and the cost is the only reading that names
+  // what took the time. A cycle that merely waited is reported net: its work fit, and the wait is
+  // in the breakdown for anyone reading it.
+  if (cost && !cost.withinInterval && report.liveness.state !== 'slow' && report.liveness.state !== 'absent') {
+    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.slowest ? `. The ${cost.slowest.step} step is the slowest, at ${Math.round(cost.slowest.ms / 1000)}s of work` : ''}`, ...agentOwner('master', shorten) });
+  }
   // A cycle that keeps failing is retried in-process with backoff; past the bound it names the
   // failing call, because a restart would not clear a read that times out every time.
   const failures = report.failures;
@@ -1054,18 +1158,18 @@ export interface DaemonEffects {
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
-  containment?: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number } }) => Record<string, ContainmentAssessment>;
+  containment?: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number } }) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
   /** Settles one quarantine this host verified dead, so the item can be claimed again. */
   settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
-  notify?: (state: 'ready' | 'alive') => void;
+  notify?: (state: 'ready' | 'alive') => void | Promise<void>;
   /**
    * Mid-session capacity (GY-89). `sessionOutput` reads the tail of a stopped session's own
    * terminal, which is where a runtime says its provider account is spent; `reportCapacity`
    * records what the loop observed on the item. A loop wired without the two never fails a
    * session over and never escalates capacity: it cycles exactly as it did before.
    */
-  sessionOutput?: (agent: HerdrAgent) => string | null;
+  sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
@@ -1081,13 +1185,20 @@ export interface DaemonEffects {
   relaunch?: (session: LaunchedSession, work: Work, snapshot: { work: Work[]; now: string }) => Promise<{ profile: string }>;
   /** Account health of the reviewer and producer profiles, as the worker profiles' arrives in `credentials`. */
   roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
-  agents: () => HerdrAgent[];
+  /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
+  agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
    * reached reports no sessions, and stopping a supervisor on that would kill live work, so the
    * orphan step acts only on an inventory that says it is available.
    */
-  herdr?: () => { agents: HerdrAgent[]; available: boolean };
+  herdr?: () => { agents: HerdrAgent[]; available: boolean } | Promise<{ agents: HerdrAgent[]; available: boolean }>;
+  /**
+   * Milliseconds this process spent waiting on child processes since the previous call — the
+   * runner's ledger (child-runner.ts), drained at each step boundary so every step of the cycle
+   * reports its own `childWaitMs`. A loop wired without it reports every step as its own work.
+   */
+  childWaits?: () => number;
   /** Stops an orphaned watch supervisor through the containment scope it recorded at launch. */
   stopSupervisor?: (orphan: OrphanSupervisor, signal: NodeJS.Signals) => void | Promise<void>;
   /**
@@ -1125,8 +1236,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const performed: DaemonAction[] = [];
   const resumed = reconcilePendingActions(state, snapshot.work, clock);
   if (resumed.length) { performed.push(...resumed); await effects.persist(state); }
+  // Where this cycle's time goes. Each `spent` closes the step that just ran with its wall time
+  // and, of that, the time at least one child process was in flight (the runner's ledger, drained
+  // at the boundary), so the cycle can say which step outgrew the interval and whether that step
+  // was computing or waiting on Herdr, gh or git.
+  const steps = emptyCycleSteps();
+  let stepStartedAt = startedAt;
+  const spent = (step: CycleStepName) => {
+    const at = now(), ms = Math.max(0, at - stepStartedAt);
+    steps[step].ms += ms; steps[step].childWaitMs += Math.min(ms, Math.max(0, Math.round(effects.childWaits?.() ?? 0)));
+    stepStartedAt = at;
+  };
+  spent('observe');
 
-  const agents = effects.agents();
+  const agents = await effects.agents();
   const credentials = await effects.credentials(config.workers);
   const open = snapshot.work.filter(item => item.stage !== 'done');
   const owns = (principal: string) => open.some(item => !!item.lease && item.lease.owner === principal && Date.parse(item.lease.expiresAt) > clock);
@@ -1158,7 +1281,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const failedOver = new Set<string>();
   if (effects.sessionOutput && effects.reportCapacity) {
     const stopped = (name: string) => { const agent = agents.find(candidate => candidate.name === name); return agent && stoppedStates.includes(agent.agent_status ?? '') ? agent : null; };
-    const notice = (agent: HerdrAgent) => { try { const output = effects.sessionOutput!(agent); return output ? detectExhaustion(output, clock) : null; } catch { return null; } };
+    const notice = async (agent: HerdrAgent) => { try { const output = await effects.sessionOutput!(agent); return output ? detectExhaustion(output, clock) : null; } catch { return null; } };
     const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
       const selected = await effects.selectedAccount?.(role, profile) ?? null;
       const account = selected?.environment ?? null;
@@ -1171,7 +1294,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (!agent || !item || item.submission?.epoch === item.lease!.epoch) continue;
       const key = failoverKey('worker', item, item.lease!.epoch), previous = state.actions[key];
       if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) { if (previous) failedOver.add(item.id); continue; }
-      const signal = notice(agent);
+      const signal = await notice(agent);
       if (!signal) continue;
       failedOver.add(item.id);
       const epoch = item.lease!.epoch, attempts = (previous?.attempts ?? 0) + 1;
@@ -1201,7 +1324,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (!agent || !item) continue;
       const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
       if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
-      const signal = notice(agent);
+      const signal = await notice(agent);
       if (!signal) continue;
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
       await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
@@ -1251,7 +1374,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //     one lease expiry later than the one first seen with the session already gone — and the
   //     supervisor is then stopped through the containment scope it recorded at launch, rather
   //     than left for a master to find with `pgrep` and kill by hand.
-  const runtime = effects.herdr?.();
+  const runtime = await effects.herdr?.();
   if (runtime?.available && effects.stopSupervisor) {
     const orphans = orphanedSupervisors(open, config.workers, runtime.agents, clock);
     for (const id of Object.keys(state.orphans)) if (!orphans.some(orphan => orphan.id === id)) delete state.orphans[id];
@@ -1282,7 +1405,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   }
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
-  const health = profileHealth(config.workers, credentials, effects.agents(), state, clock);
+  const health = profileHealth(config.workers, credentials, await effects.agents(), state, clock);
+
+  spent('close');
 
   // 2. Decide the open scope requests. A worker that needs a file its own criteria — or this
   //    repository's documentation rule — already imply must not wait for a master session to run
@@ -1338,6 +1463,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
+  spent('decisions');
+
   // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
   //    it. Every attempt and every rework checks the repository out again, so without this step
   //    the host fills and the loop starts failing at whatever it happens to write next. The
@@ -1378,7 +1505,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //     supervisor is gone, so it does: the probe is the same one `master settle-containment`
   //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
-  const assessments = effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
+  const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) {
     const epoch = item.containmentQuarantine!.epoch;
     const assessment = assessments[item.id];
@@ -1401,6 +1528,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Containment settlement refused for ${item.key} epoch ${epoch}: ${message(error)}`, attempts: state.actions[key].attempts, epoch, cycle: state.cycle }, now(), effects.persist));
     }
   }
+
+  spent('close');
 
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
@@ -1466,7 +1595,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   for (const item of workersSpent ? [] : claimable) {
     const key = dispatchKey(item);
     if (state.actions[key] && state.actions[key].state !== 'failed') continue;
-    const free = effects.agents();
+    const free = await effects.agents();
     const choice = health.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no
@@ -1529,6 +1658,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
+  spent('dispatch');
+
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
   //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
   //     used to wait for a master session to notice. The loop requests the decision with the
@@ -1543,12 +1674,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const stamp = new Date(clock).toISOString();
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
-  const sessions = () => inventory ??= effects.herdr?.() ?? { agents: effects.agents(), available: true };
+  const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
   /** Close the approver session a watch names, if Herdr still lists it. False only when it could not be closed. */
   const closeApprover = async (item: Work, watch: ApprovalWatch, why: string) => {
-    const session = watch.agentName ? sessions().agents.find(agent => agent.name === watch.agentName) : undefined;
+    const session = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
     if (!session?.pane_id) return true;
     const key = `close:approver:${watch.decision}:${session.pane_id}`;
     try { await effects.closeSession(session.pane_id); inventory = null; await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true; }
@@ -1556,7 +1687,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   };
   /** Put a watched decision to an approver session. The launch is counted before it is made. */
   const launch = async (item: Work, watch: ApprovalWatch, adopt: boolean) => {
-    const name = approverSessionName(item, watch.decision), seen = sessions();
+    const name = approverSessionName(item, watch.decision), seen = await sessions();
     // A session a master started for the same decision (`master approver`) is the approver it has.
     const listed = adopt && seen.available ? seen.agents.find(agent => agent.name === name) : undefined;
     Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp });
@@ -1616,7 +1747,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   /** Look again at a decision already requested: its state on the control plane, and its session. */
   const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
     const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
-    const step = approvalStep(watch, history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null, sessions(), clock);
+    const step = approvalStep(watch, history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null, await sessions(), clock);
     if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
     const base = `approver:${watch.decision}`;
     if (step.step === 'settled') {
@@ -1682,7 +1813,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // seat, and the watch goes with it; one Herdr cannot be read for stays until it can.
   for (const [key, watch] of Object.entries(state.approvals)) {
     if (needed.has(key)) continue;
-    if (!sessions().available) continue;
+    if (!(await sessions()).available) continue;
     const item = snapshot.work.find(candidate => candidate.key === watch.work);
     // A request the item moved past is taken back by the identity that made it, whatever its
     // action: left `requested`, it would be adopted for some later round on a reason that describes
@@ -1705,6 +1836,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // after a few tries; the session name is this decision's alone, so it can refuse no other launch.
     if ((closed && withdrawn) || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];
   }
+
+  spent('decisions');
 
   // 5. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
   //    and trusted producers publish evidence; the daemon records exactly one request per candidate
@@ -1751,6 +1884,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  spent('dispatch');
+
   // 6. Merge. The only path is the guarded command, which rechecks the exact candidate, every gate,
   //    branch protection and the published queue tip immediately before the provider call.
   //    An item GitHub already merged with no valid execution behind it is not a candidate: the
@@ -1796,6 +1931,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
+
+  spent('merge');
 
   // 7. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
   //    marked the work Done on an observed merge, and a lagging rollout must stay visible as lag.
@@ -1858,6 +1995,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  spent('deployment');
+
   // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have
   //    acted on and how long the longest of those has waited, and the passage of every item it
   //    watches: ready→claim, ready→first push, approval→merge and how long a mergeable candidate
@@ -1870,7 +2009,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals });
   const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
-  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length,
+  // The cycle's duration, and of it the time at least one child was in flight: the difference is
+  // the loop's own work, which is what the liveness bound is judged on (cycleCost).
+  const durationMs = Math.max(0, Math.round(now() - startedAt));
+  const childWaitMs = Math.min(durationMs, Object.values(steps).reduce((total, step) => total + step.childWaitMs, 0));
+  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs, steps, open: open.length, actions: performed.length,
     actionable: silence.actionable, idleMs: silence.longestIdleMs, stages, lead, production, postDeploy, postDeployFailures,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
@@ -1902,7 +2045,7 @@ function deploymentDetail(observation: DeploymentObservation) {
  * deployment record. A delivered item counts as deployed when the serving commit is its merge commit
  * or a descendant of it, so later merges do not make earlier ones look undeployed.
  */
-export async function observeDeployment(config: MasterConfig, delivered: Work[], run: (command: string, args: string[]) => string, fetcher: typeof fetch = fetch, now = () => Date.now()): Promise<DeploymentObservation> {
+export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now()): Promise<DeploymentObservation> {
   const at = new Date(now()).toISOString();
   const unavailable = (reason: string): DeploymentObservation => ({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key) });
   if (!delivered.length) return { source: 'unavailable', sha: null, at, reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [] };
@@ -1919,12 +2062,12 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     sha = value.toLowerCase(); source = 'endpoint';
   } else {
     let deployments: any[];
-    try { deployments = JSON.parse(run('gh', ['api', `repos/${config.repository}/deployments?per_page=20&ref=${encodeURIComponent(config.baseBranch)}`])); }
+    try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=20&ref=${encodeURIComponent(config.baseBranch)}`])); }
     catch (error) { return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`); }
     if (!Array.isArray(deployments) || !deployments.length) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
     for (const deployment of deployments) {
       let statuses: any[];
-      try { statuses = JSON.parse(run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
+      try { statuses = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
       catch { continue; }
       if (Array.isArray(statuses) && statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
     }
@@ -1935,7 +2078,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     const mergeSha = item.delivery!.mergeSha.toLowerCase();
     if (mergeSha === sha) { deployed.push(item.key); continue; }
     try {
-      const comparison = JSON.parse(run('gh', ['api', `repos/${config.repository}/compare/${mergeSha}...${sha}`]));
+      const comparison = JSON.parse(await run('gh', ['api', `repos/${config.repository}/compare/${mergeSha}...${sha}`]));
       (comparison?.status === 'ahead' || comparison?.status === 'identical' ? deployed : pending).push(item.key);
     } catch { pending.push(item.key); }
   }
@@ -1963,6 +2106,10 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     escalations: recent.filter(action => action.kind === 'escalation').slice(0, 20),
     actions: recent.slice(0, 40),
     metrics: state.metrics.at(-1) ?? null,
+    // Where the last cycle's time went, against the interval and the liveness bound it is judged
+    // on: its own work, its child waits, and the step behind each, so a long cycle is a step to
+    // shorten or a provider to look at, never a loop to restart.
+    cost: cycleCost(state.metrics.at(-1) ?? null, intervalMs),
     deployment: state.deployment,
     profiles: state.profiles,
     config: state.config,
@@ -2033,7 +2180,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // supervisor's configuration rather than worked around.
   const watchdog = watchdogPlan(options.environment ?? process.env, interval());
   for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
-  if (watchdog.supervised) { try { effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+  if (watchdog.supervised) { try { await effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
   let stopping = false;
   // A supervisor's SIGTERM must land during the wait, not one whole interval later.
   const waking = new AbortController();
@@ -2050,7 +2197,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   };
   const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
   host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
-  const cycles: { cycle: number; actions: number; durationMs: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
+  const cycles: { cycle: number; actions: number; durationMs: number; childWaitMs: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
   try {
     do {
       let phase: 'reload' | 'cycle' = 'reload', wait: number;
@@ -2063,10 +2210,10 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         // The end of a run of failures is written at once, so `master status` stops naming it.
         const recovered = noteCycleSuccess(state);
         if (recovered) await effects.persist(state);
-        cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs });
+        cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs, childWaitMs: result.metrics.childWaitMs ?? 0 });
         for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
         // Both halves of every cycle: what it could act on, and what it did about it.
-        log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms; ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
+        log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms (${result.metrics.childWaitMs ?? 0}ms waiting on child processes); ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
         // The configured interval is the idle cadence; while anything is actionable the loop comes
         // back inside the responsive window so ready work cannot sit out a long interval.
         wait = cycleDelay(interval(), result.silence);
@@ -2080,7 +2227,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       }
       // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
       // is for a cycle that hangs, and a thrown one has just proved it did not.
-      if (watchdog.supervised) { try { effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+      if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
       if (options.once || stopping) break;
       try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
     } while (!stopping);
@@ -2103,10 +2250,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
    * acquired is resumed by this process alone and never by an interactive merge or a second loop.
    */
   executor: MergeExecutor;
-  run?: (command: string, args: string[]) => string;
+  /** The child runner; a test's stub, or the process's own bounded asynchronous runner. */
+  run?: ChildRun;
   fetcher?: typeof fetch;
 }): DaemonEffects {
-  const run = deps.run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }));
+  // One runner, one ledger, for everything this loop runs — Herdr, gh, git, systemctl — so the
+  // cycle's `childWaitMs` counts the cycle's own children and not the dispatcher's beside it.
+  // Every child is awaited on the event loop and bounded by the runner's timeout (GY-125).
+  const ledger = new ChildWaitLedger();
+  const run = deps.run ?? childRunner({ timeoutMs: 90_000, ledger });
   const current = typeof source === 'function' ? source : () => source;
   const fetcher = deps.fetcher ?? fetch;
   /**
@@ -2126,14 +2278,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const decide: DaemonEffects['decide'] = async (work, action, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, {}), reason });
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   return {
-    agents: () => { try { return listHerdrAgents(run); } catch { return []; } },
+    agents: () => listHerdrAgents(run).catch(() => []),
+    childWaits: () => ledger.drain(),
     // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
-    sessionOutput: agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
+    sessionOutput: async agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
     reportCapacity: (work, event) => deps.mutate(`work/${work.id}/capacity`, event),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending').map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
@@ -2149,13 +2302,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     endSession: async (session, resolution) => {
       // A pane that is already gone is closed (GY-137): the record still settles, and says so.
       let paneGone = false;
-      try { if (session.pane) closeHerdrPane(session.pane, run); } catch (error) { if (!paneAlreadyGone(error)) throw error; paneGone = true; }
+      try { if (session.pane) await closeHerdrPane(session.pane, run); } catch (error) { if (!paneAlreadyGone(error)) throw error; paneGone = true; }
       const closedAt = new Date().toISOString(), ended = { state: 'failed' as const, resolution: paneGone ? withPaneGone(resolution, session.pane!, 500) : resolution.slice(0, 500), closedAt };
       if (session.role === 'reviewer') { const ledger = await readReviewLedger(root); await saveReviewLedger(root, { ...ledger, reviews: ledger.reviews.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
       else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
     },
     relaunch: async (session, work, snapshot) => {
-      const config = current(), agents = listHerdrAgents(run);
+      const config = current(), agents = await listHerdrAgents(run);
       const request = session.role === 'reviewer' ? work.autoDispatch?.review : work.autoDispatch?.producers.find(entry => entry.id === session.requestId);
       if (!request || request.id !== session.requestId || request.state !== 'requested') throw new Error(`${work.key} no longer requests this ${session.role} session`);
       // The profile that just ran out goes last: its other accounts are still its own failover.
@@ -2180,25 +2333,25 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         ...(config.producers.length ? { producer: { profiles: config.producers, health: await inspectProducerCredentials(root, config.producers) } } : {}),
       };
     },
-    herdr: () => { const runtime = observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
-    stopSupervisor: (orphan, signal) => { stopWatchSupervisor(orphan, signal, run); },
+    herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
+    stopSupervisor: async (orphan, signal) => { await stopWatchSupervisor(orphan, signal, run); },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     snapshot: deps.snapshot,
     closeSession: pane => closeHerdrPane(pane, run),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
     recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
     decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
-    requestProof: work => {
+    requestProof: async work => {
       const config = current();
-      run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
+      await run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
     merge: work => mergeExecutor(current(), deps.snapshot, deps.mutate, deps.executor, randomUUID(), run)(work),
     observeDeployment: delivered => observeDeployment(current(), delivered, run),
     recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
-    requestSmoke: work => {
+    requestSmoke: async work => {
       const config = current();
-      run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
+      await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
         '-f', `work_id=${work.id}`, '-f', `deployed_sha=${work.delivery!.deployment!.sha}`, '-f', `merge_sha=${work.delivery!.mergeSha}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
     // The idle bound comes from the live configuration, so a host under pressure can shorten it
@@ -2218,7 +2371,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
-    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset }),
+    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
@@ -2228,7 +2381,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // the manager has processed the message, so it cannot exit before it is attributed; on an
     // older systemd a keep-alive can be lost to that race, which is why the packaged window is
     // 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row.
-    notify: state => { run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
+    // The keep-alive is a child too: it runs through the same runner, awaited on the event loop
+    // and bounded like every other child, and a keep-alive that fails is logged by the loop.
+    notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     persist: state => writeDaemonState(current(), state),
   };
 }

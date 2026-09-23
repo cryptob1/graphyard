@@ -153,7 +153,7 @@ test('unit:generated-session-names-valid — every session name Graphyard genera
     // refusal names the limit, the name attempted and how to retry.
     const calls: string[][] = [];
     const run = (_command: string, args: string[]) => { calls.push(args); return JSON.stringify({ result: {} }); };
-    assert.throws(() => startAgentSession('Approver-GY-101', 'claude', 'pane-1', [], 'Judge it', run, { directory: root, retry: 'graphyard master approver GY-101 4cb51514' }),
+    await assert.rejects(startAgentSession('Approver-GY-101', 'claude', 'pane-1', [], 'Judge it', run, { directory: root, retry: 'graphyard master approver GY-101 4cb51514' }),
       (error: unknown) => error instanceof SessionNameRefusedError && /1-32 characters/.test(error.message) && /Approver-GY-101/.test(error.message) && /graphyard master approver GY-101 4cb51514/.test(error.message));
     assert.deepEqual(calls, [], 'the runtime was never asked to start a session it would refuse to name');
 
