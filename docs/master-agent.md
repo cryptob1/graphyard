@@ -123,6 +123,8 @@ The launch check reads an account before a session starts. An account that runs 
 
 Each failover is one `failover` action in `daemon.actions`, and `master status` shows the item's recent exhaustions under `work[].capacity`.
 
+A session that exits **at launch** on the same notice — the account was spent before its session started, and the launch check did not see it — is classified by the automatic dispatcher from what its pane printed and failed over the same three ways (hold, record, relaunch on the next account) without a ledger record to end; see [a session that exits at launch](#the-dispatchers-own-state).
+
 ### When a role has no account left
 
 When **every** launch profile of a role is unavailable for the same reason — each of its accounts is spent — that is capacity, not a launch failure. A logged-out account, an unreadable credential, or an `accounts:` name that is not a configured environment is something a master can fix in one command, so it is never capacity: the account selector carries *why* it passed each account over, and only a profile every one of whose accounts was passed over as spent reports itself out of capacity. The daemon and the automatic reviewer/producer dispatcher both key on that, so a role whose accounts are merely logged out keeps its counted launch refusal, its widening retry and its `launch-review` / `launch-producer` attention item addressed to the master, rather than reading as a wait for a provider reset that would never come.
@@ -160,7 +162,7 @@ A runtime ready within **30 seconds** has started. One that is *starting* at 30 
 - `the claude runtime was still starting after 120 s in pane w1V:pR6 (the claude runtime process exists under the pane, Herdr reports it unknown); the pane last showed: "…"` — the runtime's process exists but nothing of it ever reached the screen.
 - `the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"` — a dialog the runtime raised before taking its request; what it asks is the last line.
 
-A refused start is recorded with that reason wherever launches are recorded: the dispatcher's `failures` for a reviewer or producer request, the row's `attention` in `master status` (`Automatic producer launch for GY-N refused 1 time(s): the claude runtime never started …`), and a worker dispatch's error. The tab is closed and, for a reviewer or producer, the session checkout removed; the loop retries on its widening schedule.
+A refused start is recorded with that reason wherever launches are recorded: the dispatcher's `failures` for a reviewer or producer request, the row's `attention` in `master status` (`Automatic producer launch for GY-N refused 1 time(s): the claude runtime never started …`), and a worker dispatch's error. The tab is closed and, for a reviewer or producer, the session checkout removed; the loop retries on its widening schedule. One case is not a refusal: a reviewer or producer runtime whose pane shows its provider's limit notice exited on it, and the automatic dispatcher fails the launch over to the next account instead, without waiting for the bound — see [a session that exits at launch](#the-dispatchers-own-state).
 
 #### Confirmed prompt delivery
 
@@ -1178,6 +1180,69 @@ each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…)
 dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
 later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
 
+### The dispatcher's own state
+
+The dispatch cursor (`*.dispatch.json` beside the coordinator credential) is the dispatcher's
+memory: its tick count, the last tick's counts and the reasons nothing launched, every refused
+launch with its widening retry, and each role's capacity hold. Every string in it has a cap, and
+until GY-120 the cap was checked only when the cursor was persisted: a refusal whose error text
+reached the failure reason's cap (a Herdr JSON error, for one) was wrapped in a longer wait
+sentence on the next tick, the sentence failed the cursor's schema, the tick failed, and the
+dispatcher retried the identical tick forever — no reviewer or producer launched for *any* item,
+while the tick count and the cursor's timestamp made it look alive. Three rules now hold:
+
+- **The dispatcher bounds its own state where it composes it.** Every string it writes into the
+  cursor — a tick reason, a failure reason, a capacity reason, a session resolution it wraps — is
+  bounded before it is stored, and each cut is marked with an ellipsis rather than hidden. The
+  bounds nest: a stored failure reason (300 characters) leaves room for the wait sentence that
+  wraps it (`launch refused 12 time(s): …; no further automatic attempt`), and that sentence is
+  bounded again (500) before it becomes a tick reason, so a failure reason at its cap still
+  yields a valid tick. A launch that fails with a 2,000-character error is a refusal whose
+  reason ends in `…`, not a tick that cannot persist.
+- **A cursor that fails its schema is repaired, not fatal.** On load and again before every
+  persist, a string past its cap is truncated in place and the repair is logged once with the
+  path that failed (`[graphyard-dispatch] repaired the dispatch cursor while persisting it:
+  lastTick.reasons[1] — 612 characters exceeded its cap of 500 and it was truncated`). A defect
+  of this class degrades one reason string; it never takes launching away from the other items.
+  Anything else the schema refuses — a count out of range, a missing field — is still refused,
+  naming its path, and `master status` reports a cursor it cannot read as one attention item
+  rather than a dispatcher silently absent.
+- **A tick failure is attributed and surfaced.** A tick that cannot persist names the field it
+  could not write and the request and item that field was composed for: `master status` shows it
+  under `dispatch.lastFailure` (`field`, `kind`, `request`, `work`) beside `consecutiveFailures`
+  and `lastSuccessAt`. Three consecutive failures raise one attention item, addressed to the
+  master, saying that no reviewer or producer session is being launched for any item and why —
+  the reason, and for a persist failure the field and the request behind it — with the repair
+  path (`graphyard master restart` re-reads and repairs the cursor) or the fault to fix (the
+  control plane, its credential, Herdr). Every request keeps reading as `waiting` meanwhile, so
+  the dispatcher's own health is named before the requests it is not launching.
+
+**A session that exits at launch is classified from its pane.** The launcher types the launch
+into the pane and [reads the pane](#the-start-bound-reads-the-pane) until the runtime is ready:
+`herdr agent get` answers `agent_not_found` while the runtime is not there, which says nothing
+about why, and `herdr pane read` shows what the runtime printed. A runtime that printed its
+provider's limit notice and exited leaves the notice under its banner, and the banner alone would
+hold the start bound to its 120-second ceiling before the refusal. The dispatcher therefore
+watches each launch's own reads of the pane it typed into — the pane is read no more often than
+the launcher reads it, and never after the launcher closed it — and classifies from the last read:
+
+- a **provider limit notice** (the same notices [mid-session detection](#exhaustion-in-the-middle-of-a-session)
+  matches) is account exhaustion: the launch is refused at the launcher's next pause between
+  polls, within seconds rather than at the bound, and the exit is recorded for the account the
+  launcher selected — `profile:NAME` for a profile that names no `accounts` — and it
+  fails over exactly as a mid-session exhaustion does: the account is held until the reset the notice named,
+  `capacity.exhausted` is recorded on the item with `requestId`, profile, account and runtime, and
+  the same profile launches again at once on its next account; a profile with no account left
+  fails over to the next profile, or the role waits for capacity. The tick's launch entry lists
+  each account passed over this way under `failover`, and `master status` shows the hold under
+  `dispatch.accounts`. A refusal the launcher raised at its bound while the notice was on the pane
+  is classified the same way; a runtime Herdr found at a dialog (`blocked`) did not exit and is not;
+- **any other cause** is the refusal the launcher worded — which case it saw (`no runtime under
+  the pane`, `command still echoing`, the dialog) and the pane's last words as the reason — rather
+  than the CLI's error, and it is retried on the usual widening schedule. A dispatcher wired
+  without an account hold records the notice itself as the refusal
+  (`the session exited within seconds of its launch on its provider's limit notice: …`).
+
 ### Managing profiles
 
 Profiles change while the loop runs; it adopts each change on its next tick.
@@ -1778,7 +1843,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 
 | Command | Purpose |
 | --- | --- |
-| `master init --token-stdin [--browser-profile PROFILE]` | Install the operating mode; name the operator's browser profile |
+| `master init --token-stdin [--browser-profile PROFILE] [--replace-supervisor]` | Install the operating mode and, run by an operator from the coordinator checkout, the loop's systemd user unit; name the operator's browser profile; `--replace-supervisor` takes over a unit that runs another checkout or launcher |
 | `master environments [--create KINDS] [--apply]` | Discover or create agent environments, report login and quota, generate profiles from the logged-in ones |
 | `master registry` | The fleet the control plane holds: every account with its runtime, model, roles, live sessions, quota, reset and ineligible reason ([the agent registry](#the-agent-registry)) |
 | `master registry propose [--directory DIR] [--apply]` | Discover the agent CLIs logged in on this host and propose (or store) the runtimes, models, accounts and roles for them |
