@@ -254,8 +254,12 @@ Each cycle:
 7. **shepherds reviews and proofs** — the reviewer and producer sessions the control plane
    requested for each exact head are launched on the dispatcher's own cadence (see
    [automatic dispatch at submit](#automatic-dispatch-at-submit)), a request goes to the trusted
-   producer workflow when automatable proof is missing and one is configured, and anything that needs
-   a judgement no rule covers is surfaced in `master status` with its owner and next command;
+   producer workflow when automatable proof is missing and one is configured, a proof its criterion
+   declares answerable as a closed question is first put to the configured responder and needs no
+   session once a confident answer decides it (see
+   [closed-question criteria](onboarding.md#judge-mechanical-criteria-with-a-closed-question)), and
+   anything that needs a judgement no rule covers is surfaced in `master status` with its owner and
+   next command;
 8. **invokes only the guarded merge** for a candidate whose gates are all green. With automatic
    merging off it merges exactly the candidate an approver agent approved, and step 6 is what asked
    for that approval;

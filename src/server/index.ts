@@ -14,6 +14,7 @@ import { ProductionDelivery } from '../production-delivery.js';
 import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
 import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
+import { responderFromEnv, type Responder } from '../closed-question.js';
 import { Next, Sent, matchRoute, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import type { Credential } from './principals.js';
@@ -61,9 +62,10 @@ export interface ArtifactOptions { backend: ArtifactBackend | null; capacityByte
 /**
  * What an embedder tells the control plane about the installation: the principals it already
  * ran with (the seeded proof-grant roster, deciding whether an over-limit roster warns or
- * refuses), the environment the limits are read from, and the deployment watch to report.
+ * refuses), the environment the limits are read from, the deployment watch to report, and the
+ * closed-question responder (read from GRAPHYARD_RESPONDER in `env` when not given).
  */
-export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null }
+export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null; responder?: Responder | null }
 
 /** Wire the engine, its integrations and the principals into the shared services. */
 export function assembleServices(engine: Engine, credentials: Credential[], github: GitHub | null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}): Services {
@@ -97,7 +99,7 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const configured = credentials.map(({ token, ...actor }) => actor);
   engine.principals = configured;
   const proofGrants = new ProofGrants(engine.store, configured);
-  return { engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store) };
+  return { engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
 }
 
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {
