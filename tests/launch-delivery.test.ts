@@ -28,8 +28,8 @@ const at = '2026-09-22T05:27:00.000Z';
 const clock = Date.parse(at);
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 /** The error a call throws, for assertions on its fields. */
-function caught<T extends Error>(fn: () => unknown, type: new (...args: any[]) => T): T {
-  try { fn(); } catch (error) { assert.ok(error instanceof type, `threw ${String(error)}`); return error as T; }
+async function caught<T extends Error>(pending: Promise<unknown>, type: new (...args: any[]) => T): Promise<T> {
+  try { await pending; } catch (error) { assert.ok(error instanceof type, `threw ${String(error)}`); return error as T; }
   assert.fail('nothing was thrown');
 }
 const producerVerify = async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } });
@@ -124,7 +124,7 @@ test('unit:launch-command-bounded — the typed launch command line is short and
     assert.ok(Buffer.byteLength(request) > 20_000, `the request is ${Buffer.byteLength(request)} bytes`);
     const role = launchAuthorization.replace(/\s+/g, ' ');
     const pane = new FakePane(readyAtOnce);
-    const started = startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, request, pane.run, { directory, role, ...pane.bounds() });
+    const started = await startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, request, pane.run, { directory, role, ...pane.bounds() });
     assert.equal(started.delivery, 'request');
     assert.equal(pane.renamed, 'produce-a', 'the started runtime takes the session name in Herdr');
     const typed = pane.typed!;
@@ -148,19 +148,19 @@ test('unit:launch-command-bounded — the typed launch command line is short and
     assert.equal(positionalOf(expanded.words.slice(1)), request, 'the runtime reads the exact request as its own first argument');
     // Constant size: a request forty times longer types the same line.
     const longer = new FakePane(readyAtOnce);
-    startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, request.repeat(40), longer.run, { directory, role, ...longer.bounds() });
+    await startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, request.repeat(40), longer.run, { directory, role, ...longer.bounds() });
     assert.equal(longer.typed, typed);
     assert.equal(await readFile(started.files.request!, 'utf8'), request.repeat(40), 'a launch under the same name replaces the file');
 
     // The other contracts reference the same file: OpenCode through --prompt, Codex and Cursor positionally; a runtime without a contract is pasted and has no request file.
     for (const [kind, expected] of [['opencode', '--prompt "$(cat "$GY.request")"'], ['codex', '"$(cat "$GY.request")"'], ['cursor', '"$(cat "$GY.request")"']] as const) {
       const other = new FakePane(() => ({ agent: { agent: kind, agent_status: 'working' } }));
-      const result = startAgentSession(`${kind}-1`, kind, 'w1V:pR6', ['--flag'], request, other.run, { directory, ...other.bounds() });
+      const result = await startAgentSession(`${kind}-1`, kind, 'w1V:pR6', ['--flag'], request, other.run, { directory, ...other.bounds() });
       assert.ok(other.typed!.endsWith(` ${kind} --flag ${expected}`), `${kind}: ${other.typed}`); assert.equal(result.delivery, 'request'); assert.equal(result.files.role, null);
     }
     assert.equal(launchDelivery('muse'), 'paste'); assert.equal(launchDelivery(undefined), 'paste');
     const pasted = new FakePane(() => ({ agent: { agent: 'muse', agent_status: 'idle' } }));
-    const paste = startAgentSession('muse-1', 'muse', 'w1V:pR6', [], request, pasted.run, { directory, ...pasted.bounds(), attempts: 1 });
+    const paste = await startAgentSession('muse-1', 'muse', 'w1V:pR6', [], request, pasted.run, { directory, ...pasted.bounds(), attempts: 1 });
     assert.equal(paste.delivery, 'paste'); assert.equal(pasted.typed, 'muse'); assert.deepEqual(paste.files, { stem: join(directory, '.graphyard/launch/muse-1'), role: null, request: null });
     assert.ok(pasted.calls.some(call => call[0] === 'agent' && call[1] === 'prompt' && call[3] === request), 'a runtime without a contract is prompted after it starts, as before');
 
@@ -197,7 +197,7 @@ test('unit:start-bound-reads-the-pane — before a start is declared failed the 
     assert.equal(agentStartTimeoutMs, 30_000); assert.equal(agentStartCeilingMs, 120_000);
     // Ready at 45 s: the process exists under the pane from 2 s (Herdr reports the kind, state unknown) with nothing of it drawn yet, interactive at 45 s.
     const slow = new FakePane(elapsed => elapsed < 2_000 ? { screen: `${echoLine}\n` } : elapsed < 45_000 ? { agent: { agent: 'claude', agent_status: 'unknown' }, screen: `${echoLine}\n` } : readyAtOnce());
-    const started = startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, 'Produce evidence', slow.run, { directory, ...slow.bounds() });
+    const started = await startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, 'Produce evidence', slow.run, { directory, ...slow.bounds() });
     assert.ok(started.started.waitedMs >= 45_000 && started.started.waitedMs < 46_000, `reported started after ${started.started.waitedMs} ms`);
     assert.equal(started.started.extended, 'the claude runtime process exists under the pane, Herdr reports it unknown at 30 s; waiting up to 120 s', 'the launch says why it waited past the bound');
     assert.equal(started.started.detail, 'Herdr reports the claude runtime idle'); assert.equal(slow.renamed, 'produce-a');
@@ -205,27 +205,27 @@ test('unit:start-bound-reads-the-pane — before a start is declared failed the 
     // already working on, while Herdr reports the pane's runtime `unknown` — a live session, adopted
     // at once rather than closed at the bound.
     const spinning = new FakePane(() => ({ agent: { agent: 'claude', agent_status: 'unknown' }, screen: `${echoLine}\n\n❯ Produce trusted evidence for GY-121\n\n∙ Crunching… (esc to interrupt)\n` }));
-    const adopted = startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, 'Produce trusted evidence for GY-121', spinning.run, { directory, ...spinning.bounds() });
+    const adopted = await startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, 'Produce trusted evidence for GY-121', spinning.run, { directory, ...spinning.bounds() });
     assert.equal(adopted.started.detail, 'the claude runtime is on screen while Herdr reports it unknown'); assert.equal(adopted.started.waitedMs, 0); assert.equal(spinning.renamed, 'produce-a');
     // A runtime still to be prompted is ready only when Herdr reports it idle: its screen alone keeps it starting.
     const pasteKind = new FakePane(elapsed => ({ agent: { agent: 'muse', agent_status: elapsed < 40_000 ? 'unknown' : 'idle' }, screen: 'muse ready\n' }));
-    assert.match(awaitRuntimeStart('w1V:pR6', 'muse', 'muse', pasteKind.run, { ...pasteKind.bounds(), readyStates: ['idle', 'done'] }).extended!, /^the muse runtime process exists under the pane, Herdr reports it unknown at 30 s/);
+    assert.match((await awaitRuntimeStart('w1V:pR6', 'muse', 'muse', pasteKind.run, { ...pasteKind.bounds(), readyStates: ['idle', 'done'] })).extended!, /^the muse runtime process exists under the pane, Herdr reports it unknown at 30 s/);
     // The banner alone, before Herdr classifies the pane, is a runtime starting too.
     const banner = new FakePane(elapsed => elapsed < 40_000 ? { screen: ' ▐▛███▛█   Claude Code v2.1.278\n▝▜██████▀  Fable 5.1 · Claude Max\n' } : readyAtOnce());
-    assert.match(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', banner.run, banner.bounds()).extended!, /^the claude banner is on screen at 30 s/);
+    assert.match((await awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', banner.run, banner.bounds())).extended!, /^the claude banner is on screen at 30 s/);
     // A runtime at work on its request has started: no wait past the first sighting. One blocked
     // before it is ready sits at a dialog no launcher answers, and is refused at once with the dialog.
     for (const status of ['working', 'done', 'idle']) {
       const quick = new FakePane(() => ({ agent: { agent: 'claude', agent_status: status } }));
-      assert.equal(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', quick.run, quick.bounds()).waitedMs, 0, status);
+      assert.equal((await awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', quick.run, quick.bounds())).waitedMs, 0, status);
     }
     const dialog = new FakePane(() => ({ agent: { agent: 'claude', agent_status: 'blocked' }, screen: ' ❯ No, exit\n   Yes, I trust this folder\n' }));
-    const blocked = caught(() => awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', dialog.run, dialog.bounds()), SessionStartError);
+    const blocked = await caught(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', dialog.run, dialog.bounds()), SessionStartError);
     assert.equal(blocked.startCase, 'blocked'); assert.equal(blocked.message, 'the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"'); assert.equal(blocked.waitedMs, 0);
 
     // Never starts: the command is still echoing at 30 s. The refusal names the case and the pane's last line, not Herdr's agent_not_found.
     const echoing = new FakePane(() => ({ screen: `Last login: Mon Sep 22 05:27:00 2026\n${echoLine}\n` }));
-    const refusal = caught(() => startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, 'Produce evidence', echoing.run, { directory, ...echoing.bounds() }), SessionStartError);
+    const refusal = await caught(startAgentSession('produce-a', 'claude', 'w1V:pR6', producerArgs, 'Produce evidence', echoing.run, { directory, ...echoing.bounds() }), SessionStartError);
     assert.equal(refusal.startCase, 'never started'); assert.equal(refusal.pane, 'w1V:pR6'); assert.equal(refusal.screen, echoLine);
     assert.equal(refusal.message, `the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing); the pane last showed: "${echoLine}"`);
     assert.equal(refusal.message.includes('not found'), false);
@@ -233,18 +233,18 @@ test('unit:start-bound-reads-the-pane — before a start is declared failed the 
     assert.equal(echoing.renamed, null, 'a refused start takes no name');
     // The runtime's own error is the last line; the line is bounded.
     const missing = new FakePane(() => ({ screen: `${echoLine}\nzsh: command not found: claude\n\nvish@host ~/code/project ❯ \n` }));
-    assert.throws(() => awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', missing.run, missing.bounds()), { message: 'the claude runtime never started within 30 s in pane w1V:pR6 (no runtime under the pane); the pane last showed: "vish@host ~/code/project ❯"' });
+    await assert.rejects(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', missing.run, missing.bounds()), { message: 'the claude runtime never started within 30 s in pane w1V:pR6 (no runtime under the pane); the pane last showed: "vish@host ~/code/project ❯"' });
     assert.equal(paneLastLine(`x\n${'y'.repeat(300)}\n\n`).length, 201); assert.equal(paneLastLine(null), '');
     const stranger = new FakePane(() => ({ agent: { agent: 'codex', agent_status: 'idle' }, screen: 'OpenAI Codex\n' }));
-    assert.throws(() => awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', stranger.run, stranger.bounds()), /never started within 30 s in pane w1V:pR6 \(the pane holds codex, not claude\)/);
+    await assert.rejects(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', stranger.run, stranger.bounds()), /never started within 30 s in pane w1V:pR6 \(the pane holds codex, not claude\)/);
     // Starting at the bound but never ready: refused at the ceiling as still starting, with the last line.
     const stuck = new FakePane(() => ({ agent: { agent: 'claude', agent_status: 'unknown' }, screen: `${echoLine}\n` }));
-    const ceiling = caught(() => awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', stuck.run, stuck.bounds()), SessionStartError);
+    const ceiling = await caught(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', stuck.run, stuck.bounds()), SessionStartError);
     assert.equal(ceiling.startCase, 'still starting'); assert.equal(ceiling.message, `the claude runtime was still starting after 120 s in pane w1V:pR6 (the claude runtime process exists under the pane, Herdr reports it unknown); the pane last showed: "${echoLine}"`);
     assert.ok(stuck.now - clock >= 120_000 && stuck.now - clock < 121_000);
     // A shorter bound for a caller that asks for one; the ceiling never falls below it.
     const brief = new FakePane(() => ({ screen: '' }));
-    assert.throws(() => awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', brief.run, { ...brief.bounds(), timeoutMs: 5_000, ceilingMs: 1_000 }), /never started within 5 s in pane w1V:pR6 \(no runtime under the pane\); the pane showed nothing/);
+    await assert.rejects(awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', brief.run, { ...brief.bounds(), timeoutMs: 5_000, ceilingMs: 1_000 }), /never started within 5 s in pane w1V:pR6 \(no runtime under the pane\); the pane showed nothing/);
     assert.ok(brief.now - clock >= 5_000 && brief.now - clock < 6_000);
     assert.ok(echoing.calls.some(call => call[0] === 'pane' && call[1] === 'read' && call[2] === 'w1V:pR6' && call.includes('recent-unwrapped')), 'the pane is read, unwrapped');
   } finally { await rm(directory, { recursive: true, force: true }); }
