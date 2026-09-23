@@ -240,7 +240,7 @@ let http: ReturnType<typeof server>, origin = '';
 const adminToken = 'o'.repeat(40);
 let port = 0, databases = 0;
 before(async () => {
-  port = Number(process.env.GRAPHYARD_RATE_BUDGET_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 33);
+  port = Number(process.env.GRAPHYARD_RATE_BUDGET_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 117);
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-rate-budget-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start();
 });
