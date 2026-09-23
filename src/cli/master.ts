@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../coordination.js';
 import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
-import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
+import { daemonEffects, readDaemonState, runDaemon, type DaemonState } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { reviewCommand } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
@@ -14,7 +14,7 @@ import { applyProtection, protectionPlan, readProtection } from '../protection.j
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
-import { approveScopeRequest, cycleBudget, masterStatusReport } from './master-status.js';
+import { approveScopeRequest, masterStatusReport } from './master-status.js';
 import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
 import { executorHostHeader } from '../model/registry.js';
@@ -253,4 +253,20 @@ export const masterCommands = defineCommands([
   ...sessionCommands,
 ]);
 
-export { cycleBudget };
+/**
+ * How the coordination cycle keeps to its configured interval, from the durations the daemon
+ * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
+ * longer than its interval means the loop is falling behind the work it shepherds.
+ */
+export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
+  const metrics = state.metrics;
+  const last = metrics.at(-1) ?? null;
+  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
+  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
+  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
+  return {
+    intervalMs, measured: metrics.length, lastCycle: last ? { cycle: last.cycle, at: last.at, durationMs: last.durationMs } : null,
+    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
+    lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
+  };
+}
