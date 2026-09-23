@@ -31,8 +31,8 @@ export interface ControlPlaneEffects {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   /** A coordinator-authenticated mutation against the control plane. */
   mutate: (path: string, body: unknown, requestId?: string) => Promise<any>;
-  /** Herdr's agent inventory, or null when it could not be read. */
-  agents: () => HerdrAgent[] | null;
+  /** Herdr's agent inventory, or null when it could not be read; read asynchronously. */
+  agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   workerCredentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   producerCredentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   dispatchWorker: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<any>;
@@ -73,8 +73,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     if (!work) throw new Error(`${action.key} is not in the work snapshot this executor can read`);
     return { work, all: snapshot.work, observedAt: snapshot.now };
   };
-  const herdr = () => {
-    const agents = effects.agents();
+  const herdr = async () => {
+    const agents = await effects.agents();
     if (!agents) throw new Error('Herdr session inventory is unavailable; a launch needs it to keep one session per profile');
     return agents;
   };
@@ -88,7 +88,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const request = (work.autoDispatch?.producers ?? []).find(entry => entry.id === requestId)
       ?? (work.autoDispatch?.producers ?? []).find(entry => entry.group === group && entry.state === 'requested');
     if (!request) throw new Error(`${work.key} has no open producer request for the ${group} proof group; the control plane raises one when the candidate passes the build gate`);
-    const agents = herdr();
+    const agents = await herdr();
     const independent = independentProducerProfiles(work, config().producers);
     if (!independent.length) throw new Error(`no producer principal is independent of ${work.key}; its evidence would not be trusted`);
     const credentials = await effects.producerCredentials(independent);
@@ -100,7 +100,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
   };
 
   const launchWorker = async (action: ActionRow, work: Work, all: Work[], observedAt: string) => {
-    const agents = herdr();
+    const agents = await herdr();
     const workers = config().workers;
     const health = profileHealth(workers, await effects.workerCredentials(workers), agents, statelessProfiles, Date.parse(observedAt) || Date.now());
     const choice = health.find(entry => entry.healthy);
@@ -132,7 +132,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       if (!request || request.state !== 'requested') throw new Error(`${work.key} has no open review request; the control plane raises one for each observed head`);
       const { profile, reason } = selectReviewerProfile(config());
       if (!profile) throw new Error(reason!);
-      const agents = herdr();
+      const agents = await herdr();
       if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
       const launched = await effects.launchReview(work, request, agents, observedAt);
       await record(work, launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, launched, profile.kind, config().herdrWorkspace));

@@ -19,7 +19,6 @@
 // unit it runs under when that cannot be read from the process itself (only a graphyard-executor
 // service is accepted); `graphyard master executors restart` restarts every registered executor
 // through that unit, and no claim starts while its fence stands.
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
@@ -51,11 +50,46 @@ export async function load() {
   return { master, daemon, dispatch, executor, reviewer, producer, actions, view, fleet };
 }
 
+/**
+ * The effects the handlers run actions with, built in one place so they can be held against stub
+ * modules in a test rather than only against a live control plane.
+ *
+ * Every call here reaches the runtime through the asynchronous runner and every module call is
+ * awaited (GY-125). The Herdr inventory read is the one to watch: `observeHerdrAgents` is async,
+ * so reading `.available` off the promise rather than off its value is silently falsy — this
+ * executor would claim every dispatch row and then report no agents at all, failing each one.
+ */
+export function controlPlaneEffects(modules, context) {
+  const { master: m, daemon: d, reviewer: r, producer: pr } = modules;
+  const { root, current, run, snapshot, mutate, mergeExecutor } = context;
+  return {
+    snapshot, mutate,
+    agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
+    workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
+    producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
+    dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now),
+    launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
+    launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
+    // Every merge this process brokers is owned by this executor instance (GY-92), never by the
+    // coordinator principal alone: a `master run` loop, an interactive `master merge` and every
+    // other executor sharing this credential each hold their own. A foreign in-flight execution
+    // is then refused rather than resumed, so two brokers never drive one merge — see
+    // docs/master-agent.md, "Running executors beside the daemon".
+    merge: work => m.mergeExecutor(current(), snapshot, mutate, mergeExecutor, randomUUID(), run)(work),
+    observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
+    recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
+  };
+}
+
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const options = parseArguments(argv);
   const modules = await load();
   const { master: m, daemon: d, dispatch: a, executor: x, reviewer: r, producer: pr, actions: k, view: v, fleet: f } = modules;
-  const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+  // Bounded, captured and awaited, exactly as the daemon runs its own children: a launch that
+  // holds for its whole thirty-second timeout must not stop this process renewing the claim it
+  // is holding while the launch runs.
+  const run = m.childRunner({ timeoutMs: 90_000 });
+  const root = (await run('git', ['rev-parse', '--show-toplevel'])).trim();
   const config = await m.loadMasterConfig(root);
   const token = await m.readCredentialFile(config.credentialFile);
 
@@ -80,25 +114,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const live = m.liveMasterConfig(root, config), current = () => live.current;
   // Minted once per process, exactly as the daemon mints its own (src/executor.ts).
   const mergeExecutor = x.executorMergeExecutor(status.actor.id);
-  const run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 });
   const snapshot = () => request('work-snapshot', {}, { [v.coordinationViewHeader]: 'coordination' });
-  const handlers = x.controlPlaneHandlers(current, {
-    snapshot, mutate,
-    agents: () => { const runtime = m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
-    workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
-    producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
-    dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now),
-    launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
-    launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
-    // Every merge this process brokers is owned by this executor instance (GY-92), never by the
-    // coordinator principal alone: a `master run` loop, an interactive `master merge` and every
-    // other executor sharing this credential each hold their own. A foreign in-flight execution
-    // is then refused rather than resumed, so two brokers never drive one merge — see
-    // docs/master-agent.md, "Running executors beside the daemon".
-    merge: work => m.mergeExecutor(current(), snapshot, mutate, mergeExecutor, randomUUID(), run)(work),
-    observeDeployment: delivered => d.observeDeployment(current(), delivered, run),
-    recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-  });
+  const handlers = x.controlPlaneHandlers(current, controlPlaneEffects(modules, { root, current, run, snapshot, mutate, mergeExecutor }));
   // The rule, not the prose: a kind whose judgment happens in the step itself may never have a
   // handler here, so no way of configuring this process puts one inside the loop.
   const judgment = x.judgmentInExecutorLoop(handlers);

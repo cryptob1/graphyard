@@ -75,7 +75,7 @@ async function candidate(proofs = ['integration:claim-safety', 'unit:ci-proofs-e
   return engine.observe(work.id, work.revision, observation);
 }
 const binding = (jobId: number, runId = '900', runAttempt = 1) => ({ provider: 'github-actions', repository, runId, runAttempt, jobId });
-const evidence = (proof: string, jobId: number, overrides: Record<string, unknown> = {}) => ({ proof, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, ciRun: binding(jobId), ...overrides });
+const evidence = (proof: string, jobId: number, overrides: Record<string, unknown> = {}) => ({ proof, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, ciRun: binding(jobId), ...overrides });
 
 // ---------------------------------------------------------------------------
 // integration:ci-proofs-trust
@@ -223,7 +223,9 @@ test('integration:ci-proofs-workflow the plan, reporter and control plane agree 
   // The exercise job's report, as prepare-acceptance.mjs and run-acceptance.mjs would write it for this plan.
   const expected = { repository, harnessCommit: 'c'.repeat(40), runId: '900', runAttempt: '1', workId: plan.work.id, pr: String(plan.work.pr), policyRevision: String(plan.work.policyRevision) };
   const report = { repository, pr: plan.work.pr, workId: plan.work.id, sha: plan.work.head, baseSha: plan.work.base, policyRevision: plan.work.policyRevision, testedTree: 'd'.repeat(40), harnessCommit: expected.harnessCommit, runId: '900', runAttempt: '1',
-    schema: 1, proof: 'integration:claim-safety', result: 'pass', cases: contract('integration:claim-safety').requiredCases.map((id: string) => ({ id, result: 'pass' })), executed: 5, skipped: 0 };
+    schema: 1, proof: 'integration:claim-safety', result: 'pass', cases: contract('integration:claim-safety').requiredCases.map((id: string) => ({ id, result: 'pass' })), executed: 5, skipped: 0,
+    // GY-135: the job's run of the same contract against the tree with the behaviour removed.
+    exercise: { behaviour: 'the lease fencing in claim()', result: 'fail', executed: 5 } };
   const run = { id: 900, run_attempt: 1, repository: { full_name: repository }, head_sha: head, status: 'in_progress', conclusion: null, event: 'pull_request_target' };
   const job = { id: 50, name: 'integration:claim-safety', run_attempt: 1, head_sha: head, status: 'completed', conclusion: 'success', html_url: `https://github.com/${repository}/actions/runs/900/job/50` };
   const actions = async (input: string) => new Response(JSON.stringify(input.includes('/jobs') ? { jobs: [job] } : run));

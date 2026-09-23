@@ -153,16 +153,34 @@ The positional request follows the profile's `agentArgs` and the role harness on
 
 #### The start bound reads the pane
 
-The start bound is not a guess against a clock. The producers this was filed for died with Claude Code on screen — the request under its own `∙` spinner — while Herdr still reported the pane's runtime `unknown` at 30 seconds, and the launcher, which adopted a timed-out start only on Herdr's `working`, `idle` or `done`, closed a live session. After typing the command the launcher now reads the pane every half second — `herdr agent get` for the runtime Herdr sees occupying it and its state, `herdr pane read` for the terminal text — and distinguishes these cases. The runtime is **ready** once Herdr reports the expected kind `idle`, `done` or `working` (already at work on its request), or once Herdr reports the runtime under the pane in any state and the runtime's own screen is showing — its banner, its status line, or its spinner (`∙ ✻ ✶ ✳ ✢`) at the start of a line; the launch is reported started and Herdr's record of the pane takes the session's name (`started.detail` says which sighting it was, `the claude runtime is on screen while Herdr reports it unknown` for the case above). A runtime Graphyard has no request contract for, which is prompted after it starts, is ready only on Herdr's `idle` or `done`. It is **starting** when the launch command has been accepted and the runtime's process exists under the pane but nothing of it is drawn yet, or the runtime's banner is on screen before Herdr sees a process. It is **blocked** when Herdr reports it at a dialog before it was ever ready — the folder-trust question, an approval — which no launcher answers: refused at once, with the dialog as the pane's last line. It is **absent** when none of these holds: the command is still echoing, the shell is back at its prompt after an error, or the pane holds something else.
+The start bound is not a guess against a clock. The producers this was filed for died with Claude Code on screen — the request under its own `∙` spinner — while Herdr still reported the pane's runtime `unknown` at 30 seconds, and the launcher, which adopted a timed-out start only on Herdr's `working`, `idle` or `done`, closed a live session. After typing the command the launcher now reads the pane every half second — `herdr agent get` for the runtime Herdr sees occupying it and its state, `herdr pane read` for the terminal text — and distinguishes these cases. The runtime is **ready** once Herdr reports the expected kind `working` (already at work on its request), or `idle` or `done` with no [first-run consent prompt](#first-run-consent-prompts) on its screen, or once Herdr reports the runtime under the pane in any state and the runtime's own screen is showing — its banner, its status line, or its spinner (`∙ ✻ ✶ ✳ ✢`) at the start of a line; the launch is reported started and Herdr's record of the pane takes the session's name (`started.detail` says which sighting it was, `the claude runtime is on screen while Herdr reports it unknown` for the case above). A runtime Graphyard has no request contract for, which is prompted after it starts, is ready only on Herdr's `idle` or `done`. It is **starting** when the launch command has been accepted and the runtime's process exists under the pane but nothing of it is drawn yet, or the runtime's banner is on screen before Herdr sees a process. It is **awaiting consent** when its screen shows a [first-run consent prompt](#first-run-consent-prompts) — Claude Code's folder-trust question among them — whatever state Herdr reports, `blocked` included: the screen is read before Herdr's state is judged, and that section says which prompts are answered and what happens to the rest. It is **blocked** when Herdr reports it `blocked` before it was ever ready and its screen shows no consent prompt — a tool approval, or a dialog without a numbered choice — which no launcher answers: refused at once, with the dialog as the pane's last line. It is **absent** when none of these holds: the command is still echoing, the shell is back at its prompt after an error, or the pane holds something else.
 
 A runtime ready within **30 seconds** has started. One that is *starting* at 30 seconds is given more time, up to a ceiling of **120 seconds**, and the launch result says so (`started.extended`); one that is *absent* at 30 seconds, or still starting at the ceiling, is refused. The refusal names which case was seen and the pane's last non-empty line (bounded to 200 characters), never Herdr's own `agent_not_found`:
 
 - `the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing); the pane last showed: "… ❯ GY=…; claude --permission-mode …"` — the shell had not finished taking the command: the host is overloaded, or the pane was not at a prompt.
 - `the claude runtime never started within 30 s in pane w1V:pR6 (no runtime under the pane); the pane last showed: "claude: command not found"` — the runtime's own error, or the shell's: the last line is what to fix.
 - `the claude runtime was still starting after 120 s in pane w1V:pR6 (the claude runtime process exists under the pane, Herdr reports it unknown); the pane last showed: "…"` — the runtime's process exists but nothing of it ever reached the screen.
-- `the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Yes, I trust this folder"` — a dialog the runtime raised before taking its request; what it asks is the last line.
+- `the claude runtime is blocked before it is ready in pane w1V:pR6 (Herdr reports it blocked); the pane last showed: "Allow this command? (y/n)"` — a dialog the runtime raised before taking its request that is not a consent prompt; what it asks is the last line.
+- `the claude runtime is awaiting consent in pane w1V:pR6 on a folder prompt, and it is outside the launcher's consent allow-list: "Do you trust the files in this folder? / 1. Yes, proceed / 2. No, exit"` — a reviewer or producer launch stopped on a consent prompt the launcher does not answer, Herdr reporting it `idle` or `blocked` alike; a worker launch on the same screen is held rather than refused (see [first-run consent prompts](#first-run-consent-prompts)).
 
 A refused start is recorded with that reason wherever launches are recorded: the dispatcher's `failures` for a reviewer or producer request, the row's `attention` in `master status` (`Automatic producer launch for GY-N refused 1 time(s): the claude runtime never started …`), and a worker dispatch's error. The tab is closed and, for a reviewer or producer, the session checkout removed; the loop retries on its widening schedule. One case is not a refusal: a reviewer or producer runtime whose pane shows its provider's limit notice exited on it, and the automatic dispatcher fails the launch over to the next account instead, without waiting for the bound — see [a session that exits at launch](#the-dispatchers-own-state).
+
+#### First-run consent prompts
+
+A runtime may stop on a first-run consent prompt before it reads its request: Codex asks whether to trust hooks that are new or changed (`1 hook is new or changed. Hooks can run outside the sandbox after you trust them. 1. Review hooks / 2. Trust all and continue / 3. Continue without trusting (hooks won't run)`), Claude Code whether to trust the folder, other runtimes whether to send telemetry. Herdr reports such a pane `idle` — the same state as a session that started — or, for some dialogs such as Claude Code's folder-trust question, `blocked`, so the launcher reads the screen on every sighting that is not `working` — a pane read that fails rules nothing out, so an `idle` or `done` runtime whose screen could not be read is still **starting** and read again, never taken as ready — and a screen that *ends* on one dialog — a numbered menu with at most two lines (a key hint, a box border) below its last option, and one of these questions (trust, hooks, folder, telemetry, or a login or payment) within the five lines above its first option — is a consent prompt. A session printing the same words without a menu, as a worker quoting its item does, is output, not a prompt; so are the words above some unrelated numbered list, and a dialog already answered with the session's output drawn below it. A session stopped on one is never counted as started: it is reported **`awaiting consent`**, with the prompt's own text (the lines from its question through its last option, bounded to 400 characters).
+
+The launcher answers the prompts on its allow-list (`consentAnswers` in `src/consent-prompt.ts`) and no others, always with the least-privilege option, which it finds on the screen by its label rather than by a guessed number — never one that grants hook execution or a sandbox escape, and never one that trusts a folder's settings:
+
+| Rule | Prompt | Answer |
+|---|---|---|
+| `hooks-continue-untrusted` | hooks that are new or changed, which can run outside the sandbox once trusted | **Continue without trusting** (hooks do not run) — option 3 on Codex's dialog |
+| `telemetry-decline` | telemetry, usage statistics, crash reports, analytics | the `No` / `Don't` / `Decline` / `Opt out` option (nothing is sent) |
+
+The keystroke goes in with `herdr pane send-keys`, and the answer — rule, prompt text, option and keys — is recorded on the session: `consent` on the reviewer or producer record, `consent.answered` on a worker dispatch. The start bound keeps running while it answers, and a prompt still showing after two answers is treated as one the launcher cannot answer. Answers are counted per dialog (by its kind and text), not per rule, so a second dialog the same rule matches — a crash-report question after a usage-statistics one — gets its own two answers.
+
+Every other prompt is escalated, not answered: the folder-trust question, anything unrecognised, and above all a **credential** prompt (a login, an API key, a password) or a **payment** prompt (an upgrade, a purchase, billing), which are never answered by the launcher whatever else they say — those are a human's decision. A reviewer or producer launch on such a prompt is refused as `awaiting consent` with the prompt's text, its pane closed and its slot free at once, and the dispatcher retries on its schedule. A worker is held instead, so a human can answer: the dispatch reports `started: "awaiting consent"` with `consent.awaiting` (the prompt, the pane, the attach command and when the hold ends), and the launcher writes the hold beside the launch files as `.graphyard/launch/NAME.consent`. While that epoch still holds the lease, `master status` raises exactly one attention item for it naming the item, the pane, the prompt and the attach command — `GY-N epoch E: session NAME in pane P is awaiting consent and has not taken its request — "…". The launcher answers only its allow-list, and this KIND prompt is outside it; attach with herdr pane attach P --workspace W and answer it, or the watch supervisor releases the slot at RELEASE-AT` — the human's for a credential or payment prompt, the master's otherwise.
+
+A held slot is released on a bound of **15 minutes** (`consentHoldMs`). The watch supervisor reads its own pane on every check: once the prompt is off the screen — a human answered it — the hold file is removed and the session keeps its slot. A different dialog that replaces the held one — a sign-in that follows an answered folder-trust question — is a new prompt, not the old one still waiting (a cursor moved between the options is the same dialog): the supervisor rewrites the hold for it with its own kind and text and a fresh 15-minute bound from the moment it was seen, so the attention item quotes the prompt actually showing and goes to its owner — a credential or payment prompt to the human. One on the allow-list is answered once with its least-privilege option and the answer recorded on the hold (`answered`); if it is still showing, the attention item says `The launcher answered this KIND prompt from its allow-list and it is still showing` instead. A runtime Graphyard has no request contract for, whose request is pasted after it starts, was never sent it while the dialog was up: the launcher leaves the request in `.graphyard/launch/NAME.request`, the hold names it, and the supervisor delivers it with `herdr agent prompt` once the prompt clears, removing the hold only when the runtime visibly accepts it; a refused delivery is tried again on the next check. The launcher names a held session like any other (`herdr agent rename`); if Herdr does not take the name while the dialog is up, the hold records `named: false`, and the supervisor renames the session on every check and reads it back with `herdr agent get`. It clears the hold, and delivers any pending request, only once Herdr reports the session under its profile's agent name — the master finds a worker only by that name, so an unnamed one would leave the profile looking free and the held worker's supervisor looking orphaned — and past the bound an unnamed session gives its slot back (`… but Herdr did not take the session's name NAME by the hold bound …`). A pane read that fails decides nothing — the hold stays until a read shows the prompt either gone or still there, however late. If a read shows the prompt still up when the hold ends, or the request still undelivered, the supervisor stops renewing the lease, records the cause on the assignment and withdraws it (`Watch supervisor ended attempt E: its session never took its request: it waited on a … consent prompt …`), releases the lease and stops the session. The item is then dispatchable again and the profile free for another item, instead of a slot held all night by a session that never read its request.
 
 #### Confirmed prompt delivery
 
@@ -259,17 +277,21 @@ Each cycle:
 8. **invokes only the guarded merge** for a candidate whose gates are all green. With automatic
    merging off it merges exactly the candidate an approver agent approved, and step 6 is what asked
    for that approval;
-9. **verifies the deployed SHA** against what Graphyard recorded as delivered, and for a delivery
-   whose policy sets `deploySmoke` records that observation on the item, requests the trusted smoke
-   workflow once per deployed commit, and escalates a failed verdict with rollback guidance (see the
-   [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
+9. **verifies the deployed SHA** against what Graphyard recorded as delivered — containment is
+   derived from this checkout's own git history at a GitHub cost that does not grow with the
+   delivery history (see [what the deployment step costs](#what-the-deployment-step-costs)) — and
+   for a delivery whose policy sets `deploySmoke` records that observation on the item, requests
+   the trusted smoke workflow once per deployed commit, and escalates a failed verdict with
+   rollback guidance (see the [post-deployment smoke proof](github.md#post-deployment-smoke-proof));
 10. **records what it could act on, what it did, and how long each passage took** — stage p50/p90
     for every open stage, delivered lead time, creation-to-deployment latency, merge-to-smoke-verdict
     post-deploy time with the failure count, scope-request latency with the longest request still
     undecided, and the four delivery latencies of [liveness and silence](#liveness-and-silence).
 
-Every action lands in `master status` under `daemon`: the current cycle, its measurements, the
-deployment observation, per-profile health, recent actions, and anything still unresolved.
+Every action lands in `master status` under `daemon`: the current cycle, its measurements, where
+the last cycle's time went step by step (`daemon.cost`, see
+[where a cycle's time goes](#where-a-cycles-time-goes)), the deployment observation, per-profile
+health, recent actions, and anything still unresolved.
 
 The configured interval is the idle cadence, not a bound on how long ready work may sit: while
 anything is actionable the loop comes back within thirty seconds, whatever `run.intervalSeconds`
@@ -311,6 +333,17 @@ whose worker dies before pushing is recovered by settling its fence and dispatch
 decision. A lapsed fence the host could not verify withholds the decision: it is escalated
 with the probe's refusals (`decision-withheld` for a delivered item or a fence on another host; the
 step 4 containment escalation otherwise), it stays on the silence measure, and nothing is requested.
+
+Rework also waits for an observation that still describes the item. It throws away a current review
+and its proofs, and while GitHub is paused after a rate limit a worker may already have pushed and
+submitted a green head the control plane has not observed — the verdict or conflict on record is then
+about a head the branch has moved past. So the loop requests rework only from a GitHub observation
+taken within the last two minutes, and never while the control plane's observation jobs report
+`GitHub requests paused until …`. Until then it records one `wait:rework` line on the item naming the
+stale observation — its time and head — and the pause, requests nothing, and neither re-requests nor
+withdraws a rework request already standing; the next fresh observation decides. Every rework request
+opens with `[Decided from the GitHub observation taken at TIME of candidate SHA …]`, and the loop keeps
+the same pair on its approval watch, so the approver sees at once whether the item has moved since.
 
 It never approves what it requested: the approver session judges from its own identity, and the
 server refuses self-approval, an approver that held an assignment on the item, and one that
@@ -373,9 +406,13 @@ waiting on it?
 
 **The loop's own liveness** comes first on the attention list, because a coordinator that stopped is
 why nothing else on that list is moving. `master status` reports `daemon.liveness` as `running`,
-`stalled` (no completed cycle for more than two intervals) or `absent` (no lock, or a lock whose
-process is gone on this host), each with the command that restarts it — `master restart` — and a
-supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
+`slow` (no completed cycle for more than two intervals, but the last measured cycle was itself that
+long: the loop is inside a long cycle, and `daemon.cost` says whether that cycle was computing or
+waiting on a child process, and which step took the time — see
+[where a cycle's time goes](#where-a-cycles-time-goes) and
+[never blocked on a child process](#never-blocked-on-a-child-process)), `stalled` (no completed cycle for more than two intervals and nothing that explains it) or `absent`
+(no lock, or a lock whose process is gone on this host), each with the command that restarts it —
+`master restart` — and a supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
 limit, and the loop sends its supervisor a keep-alive after every cycle, completed or failed, so a
 cycle that hangs is restarted as surely as a process that exits. That restart is reserved for a hung
 process, which only the watchdog detects; a cycle that throws is not one (see
@@ -416,6 +453,87 @@ whether or not its first approver session could be launched:
 | approval → merge | p90 at or under 10 minutes over at least ten deliveries |
 | mergeable → merge | 5 minutes, per candidate |
 | standing verdict → rework requested | 5 minutes, per candidate |
+
+### Where a cycle's time goes
+
+A cycle is one pass through six phases, and a cycle that outgrows its interval has a step that
+outgrew it, so the loop says which. Every recorded cycle carries `steps`: for each of its six
+phases, in the order the cycle runs them, `{ ms, childWaitMs }` — the wall time it spent in that
+step and, of that, the time a child process was in flight (see
+[never blocked on a child process](#never-blocked-on-a-child-process) for how the wait is metered) —
+
+| Step | What it covers |
+| --- | --- |
+| `observe` | Reading the coordination snapshot and reconciling the actions an interrupted cycle left |
+| `close` | Closing finished sessions, failing over exhausted ones, reclaiming worktrees and settling quarantines |
+| `decisions` | Deciding scope requests and requesting, watching and adopting the routine decisions an approver applies |
+| `dispatch` | Dispatching claimable work and shepherding the review and proof requests |
+| `merge` | The guarded merges |
+| `deployment` | Observing the deployed release, recording it on deliveries and requesting the smoke workflow |
+
+The six add up to a little under `durationMs`; the remainder is the cursor writes and the
+measurement itself, which belong to no step. `master status` reads the last cycle's breakdown as
+`daemon.cost`: `durationMs`, `childWaitMs` and `workMs` (the duration net of child waits) against
+`intervalMs` and the two-interval `stalledAfterMs`, `withinInterval` and `withinLivenessBound`
+(both judged on `workMs`), the `steps`, the `slowest` step by its own work, the `longestWait` step
+by its child waits, and `breakdown`, the same figures as one sentence, longest step first
+(`80s of its own work and 0s waiting on child processes; deployment 80s, dispatch 3.1s, …`).
+`daemon.metrics` is that same last cycle's raw record as the cursor keeps it — `cycle`, `at`,
+`durationMs`, `childWaitMs`, `workMs`, `steps` and the counts the cycle logged — not the history:
+the cursor retains the last hundred cycles, and `master status` reads them only in summary, as
+`daemon.cycleBudget` (`measured`, the `p95Ms` duration, the `overruns` past the interval and the
+`lastOverrun`). An earlier cycle's own `steps` are in the cursor file beside the coordinator
+credential, not in the status output.
+
+A cycle whose own work did not fit its interval is an attention item whatever the liveness says,
+because the loop looks healthy the instant a long cycle ends and the cost is the only reading that
+names what took the time: `Cycle 412 spent 80s on its own work, longer than the 20s interval and
+past the two-interval liveness bound of 40s (80s in all, 0s of it waiting on child processes): …;
+deployment 80s, …. The deployment step is the slowest, at 80s of work`, with the next step being to
+shorten that step. While such a cycle is under way and the lag has passed the liveness bound,
+`daemon.liveness` is `slow` rather than `stalled` — the measured cycle explains the silence — until
+the lag outgrows even that cycle's own cost plus the bound, at which point nothing explains it any
+more and the loop is stalled. A slow cycle whose time went to child processes names the step that
+waited instead (`the time went to child processes in the deployment step (80s)`), since the remedy
+there is the provider, not the loop. A cycle inside its interval raises nothing.
+
+### What the deployment step costs
+
+The deployment step answers one question per delivered item: does the release production serves
+contain this delivery's merge commit? Until GY-118 it asked GitHub — one compare request per
+delivered item on every cycle — so the step grew with the delivery history until a cycle over
+ninety-one deliveries took ninety seconds against a twenty-second interval and `master status`
+reported a loop that was cycling as stalled.
+
+Containment is git ancestry, and the coordinator's checkout holds the history, so the step now
+derives it locally: one `git fetch` of the base branch, made lazily on the first delivery the cycle
+has to look at, then `git merge-base --is-ancestor MERGE RELEASE` for each delivery whose containment
+the loop has not already established. A merge git cannot place — a commit this checkout does not
+hold, a base branch it could not fetch — is unknown, and unknown containment is never read as
+deployed; the observation's `reason` says when the base branch could not be refreshed. Every
+caller names that checkout — the loop, `master verify-deployment` and the executor's
+`verify-deployment` action all pass the managed repository's root — because the launcher's own
+directory may be a checkout of another repository, where every merge would stay pending. The GitHub
+requests the step makes are only those that find the release: none with `--deployment-url`
+configured, and otherwise one listing of the base branch's deployments plus at most one status
+listing per deployment in it, so at most `1 + 20 = 21` requests (`maxDeploymentRequests` in
+`src/master-daemon.ts`) however many items have been delivered. The observation reports what it
+cost as `requests`, `derived` (deliveries whose containment was derived this pass) and `retained`
+(deliveries answered from the previous cycle), and `daemon.actions` records the request count in
+the deployment action's detail.
+
+What one cycle establishes, the next does not derive again. The observation keeps
+`containment`: the release it verified against and, per delivered item, the release its containment
+was first established against — the record of when the delivery started serving, never rewritten
+by a later release that merely still holds it. On the next cycle, a release equal to the retained
+one, or one that descends from it (one ancestry check), carries the whole retained set forward, and
+only deliveries the retained release did not serve are looked at again; a release that does not
+descend from it — a rollback, an unrelated commit — retains nothing and every delivery is derived
+again. A cycle whose deliveries are all retained and whose release has not moved fetches nothing
+and runs no ancestry at all. A failed observation keeps the containment already established: it is
+a record of releases that did serve those deliveries, and the failure makes nothing about that
+untrue. The retention is bounded at 1,000 deliveries; older ones are derived again if ever asked
+about.
 
 ### A cycle that fails
 
@@ -463,6 +581,74 @@ detached promise in the dispatcher, an approver watch, a Herdr read nobody await
 the process level, logged with its origin (`unhandledRejection caught at the process level during
 cycle 41 …`), counted under `daemon.failures.unhandled`, and survived. It is not a failed cycle:
 the cycle it landed during completes as usual. Only a stop signal ends the loop.
+
+### Never blocked on a child process
+
+The coordinator is one process doing several things at once: the cycle reads the control plane,
+the dispatcher beside it launches reviewer and producer sessions, the merge broker chains provider
+calls. Until GY-125 every child it ran — `herdr`, `gh`, `git`, `systemctl` — ran through
+`execFileSync`, which stops the event loop for as long as the child takes. A `herdr agent start …
+--timeout 30000` therefore blocked the whole process for up to thirty seconds per launch; while the
+dispatcher started six producer sessions back to back, the cycle's in-flight snapshot fetch could
+not be serviced, its abort timer fired the instant the loop came back, and six consecutive cycles
+failed with `The operation was aborted due to timeout` while `master status`, the same read from a
+separate process, answered in eight seconds throughout. The watchdog and the liveness bound both
+read a loop that was merely waiting as a loop that had stalled.
+
+**The rule.** The loop, the dispatcher and the merge broker never block on a child process. Every
+child the coordinator runs goes through one asynchronous runner (`src/child-runner.ts`), and a
+test (`unit:no-sync-child-processes`) refuses a synchronous child call — `execFileSync`,
+`spawnSync`, `execSync` or a blocking sleep — in `src/master.ts`, `src/master-daemon.ts`,
+`src/auto-dispatch.ts`, `src/producer.ts`, `src/reviewer.ts`, the helpers they reach for Herdr,
+gh, git and systemctl, and the [standalone executor](#running-executors-beside-the-daemon), which
+is a dispatcher running outside the daemon and must renew the claim it holds while a launch is in
+flight. The one synchronous child left is the CLI reading its own checkout's commit for the
+version-skew guard, once, when a `master` command starts and before the loop runs a cycle.
+
+**What the runner guarantees.** A child is spawned and awaited on the event loop, so a slow launch
+delays only the launcher that asked for it: the cycle's reads, the dispatcher's next tick and the
+merge broker's provider calls are all serviced while it runs. Every child is bounded — ninety
+seconds by default — and at the bound it is sent `SIGTERM`,
+then `SIGKILL` five seconds later, and the caller sees a rejection that says the command timed out
+rather than a process that hangs. Its output is captured, both streams, bounded at sixteen
+megabytes; the resolved value is the child's stdout, and a non-zero exit rejects with the fields
+the synchronous call's error carried (`stdout`, `stderr`, `status`, `signal`, and a message that
+begins `Command failed:`), so a Herdr refusal read from the command's own JSON, or git's exit
+status, reads exactly as before. The polling waits the coordinator used to spin through — the
+[start bound's](#the-start-bound-reads-the-pane) half-second reads of the pane, up to its
+120-second ceiling, for a closed pane to be gone, between prompt deliveries — are awaited timers
+now, not blocking sleeps, so a launch that takes the whole ceiling holds up only its launcher.
+
+**How `childWaitMs` reads in `master status`.** The runner the loop holds meters every child it
+runs, and the cycle drains that meter at each step boundary, so `daemon.metrics.steps` reports the
+six steps of the last cycle — `observe`, `close`, `decisions`, `dispatch`, `merge`, `deployment` —
+each as `{ ms, childWaitMs }`: the wall time the step took, and of that the time at least one child
+process was in flight. Concurrent children overlap rather than add, so a step's `childWaitMs`
+never exceeds its `ms`, and the difference is the step's own work. The cycle carries the same two
+figures whole: `daemon.metrics.durationMs`, `daemon.metrics.childWaitMs`, and
+`daemon.metrics.workMs`, which is the duration net of every child wait. A cycle that spent eighty
+seconds waiting on `gh` and one that computed for eighty seconds are therefore different readings:
+
+| Field | Meaning |
+| --- | --- |
+| `daemon.metrics.steps.<step>.ms` | Wall time the last cycle spent in that step |
+| `daemon.metrics.steps.<step>.childWaitMs` | Of that, the time a child process (Herdr, gh, git, systemctl) was in flight |
+| `daemon.metrics.childWaitMs`, `daemon.metrics.workMs` | The cycle's child waits and its own work; the two sum to `durationMs` |
+| `daemon.cost` | The last cycle against its interval: `workMs`, `childWaitMs`, `withinInterval` and `withinLivenessBound` (both judged on the work, never on the waits), `slowest` (the step with the most of its own work) and `longestWait` (the step that waited longest on children), and `breakdown`, the same as one operator sentence |
+| `daemon.cycleBudget.lastCycle` | The last cycle's `durationMs` beside its `childWaitMs` and `workMs`, and the same for `lastOverrun` |
+
+The liveness bound is compared against the cycle's own work, never against its waits. A lag past
+two intervals that the last measured cycle accounts for is `slow`, not `stalled`: the attention
+line says the loop is inside a slow cycle, and its next command depends on where the time went —
+a cycle whose work fits the bound and whose time went to child processes names the step that
+waited (`the time went to child processes in the dispatch step (79s), so look at what Herdr, gh or
+git is slow on rather than restarting a loop that is still cycling`), and a cycle that computed
+past the bound names the step to shorten. A cycle whose own work does not fit the interval is
+raised whatever the lag says, since the loop looks healthy the instant a long cycle ends; a cycle
+that merely waited is not, because since GY-125 that wait blocks nothing else in the process. The
+journal carries the reading per cycle: `cycle 41 complete in 86000ms (79200ms waiting on child
+processes); …`. A cursor written before the loop metered its waits still parses, with no steps and
+no `childWaitMs`, and `daemon.cost` then reports that no step breakdown was recorded.
 
 ### Restartability
 
@@ -768,6 +954,13 @@ claiming at the same instant are serialized by the coordination lock, and the lo
 row. An executor that dies mid-action renews nothing, its claim expires, another takes the row as
 a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
 handler that throws returns its row to the queue with the reason and a widening backoff.
+
+It runs its children through the same asynchronous runner the loop does, and for the same reason
+(see [never blocked on a child process](#never-blocked-on-a-child-process)): while a `dispatch`
+row's launch waits on the runtime, this process is what tells the control plane the claim is still
+held, and a blocked event loop would lose the row mid-flight and have a second executor run the
+action beside it. Every runtime read it makes is awaited too — an inventory read left unawaited
+reports no Herdr agents at all, and an executor that claimed a launch then fails it.
 
 ### A row that keeps failing for the same reason
 
@@ -1080,6 +1273,36 @@ doing; stop it there if it is stuck, and the record closes within the bound on i
 another session's handle finished to free a slot: the handle belongs to the session it names, its
 launcher or an admin, and the slot was never held by anything but a live session.
 
+### A reviewer or producer request always settles
+
+A reviewer or producer request stays `pending` in `.graphyard/reviews.json` or
+`.graphyard/producers.json` until reconciliation closes its session's pane, and a pending request
+refuses every later launch of that role for its item (`already pending on SHA; reconcile it with
+master status before launching another`). Two rules keep a request whose session is over from
+pending for good:
+
+- **A pane that is already gone counts as closed.** When Herdr answers the close with
+  `pane_not_found` — the pane was closed by hand, which is safe to do, or the runtime exited —
+  reconciliation treats the session as closed, settles the request in its terminal state, and
+  names that on its `resolution` (`pane … was already gone when the session was closed`), with no
+  close failure recorded. A close that fails for any other reason is still a failure: it is kept on
+  the request as `attention`, and the close is retried on the next pass.
+- **No request outlives its own token.** A request whose `tokenExpiresAt` (a producer's
+  `expiresAt`) has passed, and whose session Herdr no longer reports, is settled as `expired` on the
+  next reconcile pass whatever its pane's state; a close that failed stays on the record as
+  attention rather than holding it open. Reconciliation runs on every dispatch tick and every
+  `master status`, so the bound is 30 seconds after the expiry. A session Herdr still lists past
+  its expiry is closed, and settles once the close succeeds or its pane is gone.
+
+**Reading a request pending past its expiry.** `master status` reconciles first, so a request
+still pending there past its expiry, or holding a close failure, is genuinely stuck. It is counted
+under `dispatch.sessionReconcile.stuck` (with `sessionReconcile.stuckRequests` listing each item,
+request, since when and why) and in `counts.stuckRequests`, and raised as an attention item naming
+the item, the request, how long it has been stuck and the remedy: close its pane in Herdr
+(`herdr pane close PANE`) or stop the session it names — a pane that is already gone is fine —
+and the next `master status` settles the request, as expired within 30 seconds once Herdr no
+longer reports the session. The next launch for the item then proceeds on its own.
+
 ## Automatic dispatch at submit
 
 Review and proof collection start the moment a candidate is ready for them, not when someone
@@ -1201,6 +1424,30 @@ closed, and nothing revisits a settled record — so while a request for that ex
 a closed session carrying the approval the control plane is waiting for is re-read, and a dismissal
 reopens it unanswered the same way.
 
+**A session is answered only by a review it could have collected.** A review GitHub dismissed
+*before* a session was launched is never that session's verdict. GitHub keeps a dismissed review
+listed under the reviewer's own identity, on the same commit, with the moment it was originally
+submitted — a verdict withdrawn from an earlier session, a carried approval `master merge`
+re-posted through the same reviewer App, a dismissal by hand — so matching one recorded every new
+session unanswered the moment it started: the request burned all four attempts on a verdict GitHub
+had already taken back, and the commit could never be reviewed again. Nothing is weakened by
+refusing it, because a dismissal satisfies no gate: a session that finds no verdict of its own
+stays pending until its reviewer posts, or fails on its own terms as any session that stops without
+one. An `APPROVED` or `CHANGES_REQUESTED` review of the exact head answers the request whichever
+session collected it, and the one review a record already names as its verdict is re-read whatever
+its timestamp — that is how an approval GitHub withdraws after the session closed is still found.
+
+**An item that cannot obtain a review is not an ordinary review wait.** When every session of a
+commit settled on a review GitHub had dismissed, `master status` says so instead of showing the
+review gate's `approval is required` climbing past the hour: `GY-N cannot obtain a review of <sha>:
+3 reviewer sessions settled on review #11, which GitHub dismissed, so no verdict has ever been
+obtained on that commit in 1h15m over 3 attempts — …; this is not a review in progress`. Such items
+are counted in `counts.dispatchUnobtainableReview` and listed under `unobtainableReviews` with the
+commit, the dismissed review ids and the sessions that settled on them, apart from the requests
+whose review is genuinely running (`counts.dispatchRunning`). The recovery is the same
+`master review GY-N [PROFILE]`: it launches the open request's next attempt on the same commit, and
+the withdrawn verdict no longer settles it.
+
 **A request whose session settled without satisfying its gate is attention, not silence.** An
 `APPROVED` or `CHANGES_REQUESTED` verdict answers the request — the control plane resolves it on its
 next observation — but no attempt follows a settled session, so a request whose session ended with
@@ -1262,6 +1509,54 @@ A tick whose snapshot read fails or times out is retried promptly with a widenin
 each consecutive failure doubles the bound on the next read (8 s, 16 s, 32 s…), up to the
 dispatch interval or the 8 s base, whichever is longer. A server that has merely become slower than the bound is therefore read on a
 later attempt instead of timing out on every retry and leaving the dispatcher blind for good.
+
+### Proofs must exercise their criterion
+
+A proof that passes against an unchanged tree proves nothing, so a pass is trusted only when the
+producer shows the proof depends on the behaviour its criterion describes. Beside the outcome,
+the producer records `"exercise"` — the same proof run in a second detached worktree of the same
+head with that behaviour removed (the lines of the change that implement it reverted or stubbed):
+
+```json
+"exercise": { "criterion": "AC-1", "behaviour": "the lease expiry check in claim()", "result": "fail", "executed": 4 }
+```
+
+`criterion` is the criterion the proof is attached to (`KEY AC-n` for a bootstrap obligation the
+item inherited; it may be left out when the proof is attached to exactly one), `behaviour` names what was removed in words a worker can find in the diff, and
+`result`/`executed` are that run's true outcome. The control plane decides at submission
+(`exerciseRefusal` in `src/model/evidence.ts`): a passing record from a producer granted the proof
+is trusted only when the stripped run failed with at least one case executed, for a criterion
+the proof is attached to. Otherwise — no stripped run, no case run there, a criterion the proof is
+not attached to, or a proof that passed against both the changed and the stripped tree — the record
+is kept with its outcome but untrusted, and is **recorded as not exercising its criterion rather
+than as passing**:
+
+- the evidence record carries `unexercised`, the reason, which names the proof, the criterion and
+  the behaviour whose removal left the proof passing — for example `integration:claim does not
+  exercise AC-1: it passed against the tree with "the lease expiry check in claim()" removed as
+  well as against the change, so it is recorded as not exercising its criterion rather than as
+  passing`;
+- the item's history gains an `evidence.exercise.refused` entry with the proof, the attached
+  criteria, the behaviour and the same reason;
+- the producer ledger reports the proof's outcome as `unexercised` (not `pass`, and not merely
+  `untrusted`), and the session settles `completed` with that reason once no proof of its group is
+  still missing.
+
+The acceptance gate keeps asking for trusted passing evidence, so the finding goes back to the
+worker, who strengthens the proof until it fails without the behaviour. A failing outcome needs
+no stripped run, and a proof attached to no criterion (post-deployment smoke) has none to exercise.
+The rule has no lane of its own: an attested `manual:` proof carries `exercise` in the `attest`
+decision's input, and the CI reporter (`scripts/publish-acceptance.mjs`) forwards the report's
+`exercise`, so a CI job that ran no stripped run is recorded as not exercising like any other.
+The validation lane is held to it too: a collector's `result` report carries the same optional
+`exercise`, and a pass without a failing stripped run is minted untrusted with `unexercised`, the
+same history entry, and `unexercised` in the result it returns. Evidence reuse refuses to carry a
+pass onto a new head unless that pass would itself be trusted under this rule, naming the same
+reason in the refused decision.
+
+Evidence trusted before this rule existed carries no `exercise`. It keeps satisfying the gate on
+the head it was recorded for, so items already in flight are not re-proved, but evidence reuse
+never carries it onto another head; a proof submitted for any new head is decided under the rule.
 
 ### The dispatcher's own state
 
@@ -1591,7 +1886,7 @@ A harness allowlist is a prompt policy, not an authority boundary. The enforced 
 
 Claude Code loads `.claude/settings.local.json` for every session started anywhere under the repository, assigned worktrees included, so the master's rules would otherwise bind the sessions it launches: its `git push` deny would refuse a worker's push to its own branch, and its review-call deny would refuse the reviewer's verdict. Worker, reviewer and producer sessions therefore never inherit them. When the repository carries Claude project or local settings, each Claude session is launched with `--setting-sources user --settings .graphyard/harness/ROLE-PROFILE.json`: the operator's user settings plus its own role file, and never the repository's project or local settings where the master's rules live.
 
-- **worker** — the same rules dispatch writes into the assigned worktree's own `.claude/settings.local.json`: it may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands and open its pull request; it may not force-push, push the base branch, rebase, merge, post a review or submit evidence. The worktree file alone is not enough — Claude Code still loads the repository's settings above it, master denies included — which is why the session is launched with its role file instead.
+- **worker** — the same rules dispatch writes into the assigned worktree's own `.claude/settings.local.json`: it may `git push` its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), restore that branch through `graphyard restore-branch GY-N EPOCH` ([worker push rights](#worker-push-rights)), fetch, reset its worktree, run its item's Graphyard commands and open its pull request. Its harness denies the raw force, lease, deletion and base-branch pushes listed under [worker push rights](#worker-push-rights), and rebase, merge and review commands; it submits no evidence. Those rules name spellings, so a push spelled some other way is unmatched rather than denied. The worktree file alone is not enough — Claude Code still loads the repository's settings above it, master denies included — which is why the session is launched with its role file instead.
 - **reviewer** — may read the diff and post the one verdict it was launched for (`gh api --method POST repos/OWNER/REPO/pulls/N/reviews`); may not push, commit, claim, submit evidence, or edit files.
 - **producer** — may fetch, add and remove its detached worktree under the managed worktree root and submit evidence; may not push, commit, claim or post a review.
 
@@ -1656,7 +1951,19 @@ The real-base rule: every one of those checks reads the base branch's head from 
 
 Entries behind the head are re-based by Graphyard, not by the worker. Do not request rework, reassign, or ask an agent to rebase a queued candidate because its position or predicted tip changed; check `queue` and the entry's refusal reason first. An entry that fails its speculative validation is ejected with a recorded reason and must be repaired and re-queued — there is no command to reinsert or reorder it. The mechanism and its invariants are in [GitHub enforcement](github.md#merge-queue).
 
-A follower whose predecessor merges keeps its tip and bindings: the base branch advanced only by a commit tree-identical to the tip it was validated on, and the row's `binding.base.carriedTo` names that advance. When Graphyard replaces an approved head with its own authored tip, the approval and the scope-disjoint proofs carry to it under the rule in [binding carry](github.md#binding-carry-across-a-graphyard-authored-tip); a `required` binding in the row names exactly what the predecessor touched and what must be produced afresh. Launch a review or a proof only for a `required` binding, never because a tip's sha changed. GitHub dismisses reviews on Graphyard's own tip push; `master merge` re-posts a carried approval through the bound reviewer App before it acquires authority, and the result reports it under `carriedApproval`. A carried approval given by a human reviewer cannot be re-posted: the provider may then still require a fresh native approval, which the row and the merge result say.
+A follower whose predecessor merges keeps its tip and bindings: the base branch advanced only by a commit tree-identical to the tip it was validated on, and the row's `binding.base.carriedTo` names that advance. When Graphyard replaces an approved head with its own authored tip, the approval and the scope-disjoint proofs carry to it under the rule in [binding carry](github.md#binding-carry-across-a-graphyard-authored-tip); a `required` binding in the row names exactly what the predecessor touched and what must be produced afresh. Launch a review or a proof only for a `required` binding, never because a tip's sha changed. A tip is never republished onto a prediction whose tree it already lands: when the entry ahead republishes its own tip, or the base branch advances, to a commit carrying the tree the tip was validated on, the advance is recorded (`binding.base.carriedTo`, and the placement binds `tree-equivalent`) and nothing is pushed — a tip push would replace the head GitHub bound the approval to and dismiss it for content nobody changed. GitHub dismisses reviews on Graphyard's own tip push; `master merge` re-posts a carried approval through the bound reviewer App before it acquires authority, and the result reports it under `carriedApproval`. A carried approval given by a human reviewer cannot be re-posted: the provider may then still require a fresh native approval, which the row and the merge result say.
+
+### Speculative tips and branch protection
+
+A speculative tip is published on the pull-request branch itself — the item's own reviewed head merged onto its predicted base — because that is the only place the required checks, the review and every proof can bind one commit. Branch protection sees each publication as a push, and on `github` review policies it is armed exactly as `master protection` declares: stale-review dismissal and last-push approval. Three consequences follow, and the control plane answers each of them rather than the reviewer or the worker.
+
+**An approval must survive a tip publication.** The publication moves the branch head from the reviewed head to the tip, and GitHub dismisses the approval it carried. The record already answers for that: the approval carries onto the tip when the predecessor changed no reviewed file ([binding carry](github.md#binding-carry-across-a-graphyard-authored-tip)), the review gate passes on the carried binding, no review is requested for the tip, and `master merge` re-posts the carried approval through the reviewer App before it acquires authority. A publication never costs the candidate a review round; only a predecessor that touched a reviewed file does, and the row's `binding.approval` names the file. The same holds for a tip rebuilt where the reviewed head already contains its new predicted base — the entry ahead was ejected and the base branch did not move — which is the reviewed head itself, republished over the earlier tip with no commit produced (`queue.speculation.tip` equals `reviewedHead`, `merge` is null): its bindings carry by the same per-file rule, decided on the files that changed between the earlier tip's bound base and the predicted base (`queue.speculation.baseChanges`), and the reviewer App re-posts the approval on the very commit it was given on. None of this rests on how GitHub worded the dismissal: a push dismissal names the commit and no reason, and the record alone passes the gate. Between a tip's publication and its observation nothing is requested for the head it replaces, either: no review or proof request is opened for a queued entry whose published tip is not yet its observed head. What the carry does not cover is a branch restored after its own ejection: nothing carries across a restore, so an ejected entry's restored head is reviewed afresh on the proofs already bound to it.
+
+Two limits keep the carry honest. The reviewed files are the reviewed head's own — the pull request's files while that head was observed, or what the decision that carried its bindings recorded (`carry.reviewedFiles`) — never the replaced tip's: GitHub lists a tip's files against the base branch, so a tip built behind an unlanded entry lists that entry's files too, and a rebuild after the entry's ejection would otherwise be refused for files nobody reviewed. And an approval or a proof carries only from the head the tip is built from: given on that head, or carried onto it by a recorded decision (a base refresh, an earlier tip). One given on any other commit never saw the content the tip holds, and the tip is reviewed and proved afresh.
+
+**A merge-base dismissal is not a reviewer withdrawing a verdict.** When the base branch moves under a branch that carries a queued predecessor — the predecessor lands, or an entry ahead republishes — GitHub recomputes the pull request's merge base and dismisses the approval with `The merge-base changed after approval.`, though the head the reviewer approved is the head the branch still has. Every observation now records, on each dismissed review, GitHub's dismissal reason, the verdict the dismissed review carried, the head the approval was given on and who dismissed it (`observation.reviews[].dismissal`: `reason`, `mergeBase`, `verdict`, `commit`, `at`, `by`). `mergeBase` is true only for GitHub's exact message: a person dismissing a verdict with a message that merely mentions the merge base ("merge base moved, will re-review after rebase") withdrew it, and it is treated as withdrawn. `verdict` is read from the timeline's `dismissed_review.state` (`approved`, `changes_requested` or `commented`), because the review list shows a dismissed change request and a dismissed approval with the same `DISMISSED` state. An approval of exactly the current head, by an identity other than the author, dismissed with the merge-base reason — `mergeBase` true and `verdict` `approved` — is restored by the control plane as the binding approval — carried from the head to itself, with the reason on the record and a `review.restored` event on the ledger — so the review gate passes, no review request is opened, no reviewer session and no attempt is spent, and `master merge` re-posts the same approval through the reviewer App before the merge. A dismissal with any other message — a reviewer or an administrator withdrawing the verdict — restores nothing, and neither does a merge-base dismissal of a change request or of a review whose verdict the timeline does not name: a dismissed change request is the change request the reviewer gave, never an approval, so the gate refuses and the head is reviewed afresh, as before. `master status` names a restored approval on the row under `restoredApproval` and lists them all under `branches.restoredApprovals`; `counts.restoredApprovals` counts them. A dismissal that lands on a head whose refresh conflicted, or whose repair is requested and not yet run, restores nothing and leaves that record as it is: such a head is replaced before it could land, no review is asked for it meanwhile, and the conflict the worker owes and the pending repair stay named. Never ask the reviewer to approve the same commit again because GitHub shows its approval dismissed: read the row first.
+
+**A branch must never keep another item's unlanded commits.** Every tip is built from the item's own reviewed head (`queue.speculation.reviewedHead`): the last head a worker pushed or the control plane brought onto the base, never the tip it replaces. A branch whose head is a tip is moved back to that head before the new predicted base is merged onto it, so the tip's parents are exactly the reviewed head and its predicted base, and a tip rebuilt behind a different predecessor carries nothing of the one it was built behind before. When an entry is ejected, the branch it leaves behind still carries its predecessors: the control plane restores it on its own — reset to the reviewed head, then merged onto the base branch exactly as a base refresh would — and the entries behind it rebuild their tips from their own heads. The prediction on the record (`queueHistory[].predecessors`, `.from`) is what tells the ejection what it owes. The record of the restore is `baseRefresh.restore` (`contaminated`, `foreign`, `own`, `cause`, `requested`, `performedAt`, `outcome`), the ledger records `branch.restored`, `branch.restore-conflict` or `branch.unrepairable`, and the restored head is observed, checked, reviewed and proved as any new head is. A restore whose merge onto the base conflicts leaves the branch at the reviewed head with the conflict named on the build gate; it is the worker's, exactly as a base-refresh conflict is. How an already contaminated branch is found and repaired is under [a contaminated branch](#a-contaminated-branch).
 
 For the full correctness model, see [GitHub enforcement](github.md) and [architecture](architecture.md).
 
@@ -1846,11 +2153,66 @@ The record re-checked is the last snapshot that precedes the merge itself. GitHu
 
 An item merged this way while it held a merge queue entry cannot leave the queue on its own: its pull request is closed, so no speculative tip can be published for it, no validation failure ejects it, and every entry behind it waits for a tip that never comes (`Waiting for GY-N to publish its speculative tip`). `master status` names the condition on the row — `merged.queue` carries the entry's `sequence`, `position`, `size`, `unpublishable: true` and the keys waiting `behind` it — and the attention line says which entries wait and what resolves it. The exit is the same two-party merge decision, with no administrative bypass: a reconciliation the record accepts delivers the item, which drops the entry with it; a reconciliation the record refuses removes the entry as the refusal is recorded, delivering nothing — the item keeps its violations and its stage, `queueEjection` names the refused decision, the ledger records `queue.ejected` beside `merge.reconciliation.refused`, and the entries behind it are woken to predict against the real base branch. A standing refusal recorded before this rule shipped removes the entry on the next reconciliation tick the same way.
 
+#### A contaminated branch
+
+A branch that already carries another item's unlanded commits — a tip published before the rule above, a tip ejected while the loop was down — is detected on every observation of an open candidate: the landing check lists, under `observation.landing.foreign`, every other open candidate whose head, or whose own reviewed head under a tip of its own, is in this head's history (the entries a live queue tip is published behind are its predecessors, not contamination). The record answers as well: an ejected tip still at the branch head, built behind entries that have not landed. The ledger records `branch.contaminated` naming the head and the items, and `master status` names the branch on the row under `contamination` (`head`, `foreign`, `source`, and the `restore` owed, requested or ran), in one attention line with the remedy, and under `branches.contaminated`; `counts.contaminatedBranches` counts them. Kept, such a head is refused as an out-of-scope regression; landed, it would record the other item merged without its content. No head a worker may push can pass, and a worker makes no raw force push, so nobody is asked for one; a worker restores its own branch only through `restore-branch` ([worker push rights](#worker-push-rights)).
+
+The remedy is the control plane's. An ejected tip is restored on the next reconciliation without a request. Any other contaminated head is repaired on the coordinator's request:
+
+```sh
+node "$GRAPHYARD_CLI" master repair GY-42 The branch carries GY-40's ejected tip
+```
+
+`master repair` records the request on the item with the coordinator's identity (the `repair` command; refused for a live queue entry, a head that carries nothing foreign, a head whose repair is already requested, and a head a restore already found unrepairable). The reconciliation job then resets the branch to the item's own reviewed head — named by the record, or found by walking the branch's first parents through the item's own tip merges (a tip the queue history recorded, or a commit GitHub attributes to the control-plane App that carries the tip message; the message alone is something any worker can write, and a commit the walk stops at is kept) — and merges the base branch onto it: no worker force-push and no operator shell. The result is on the row and the ledger as for an ejection; `outcome: unrepairable` means the foreign commits sit under something the control plane cannot move (a worker's commit on top of a contaminated tip), and the way back is a rework decision for a fresh attempt. A head found unrepairable, or one whose repair is requested and not yet run, is not brought onto a moved base branch: a refresh would carry the foreign commits along and replace the record that names the remedy.
+
 #### A delivery an operator authorized outside the guarded path
 
 When the record at the cutoff refuses the reconciliation — a gate was open, a proof was missing, the last observation was stale — and the merge nevertheless happened because an operator authorized it administratively, the delivery is recorded as exactly that, never as a reconciliation. It takes a further merge decision whose `REASON` cites the refused decision's id, with the operator's own admin credential on one side: either the operator requests it through the API, or the master requests it (`master decide GY-N merge REASON`) and the operator approves it with `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve GY-N DECISION REASON`. The master's agent pair alone cannot record one — a pair of operator-agent identities citing the refusal is refused again, saying so — and a decision that cites no refusal is a plain reconciliation attempt. The row's `attentionOwner.next` carries the exact command once a refusal stands.
 
 On the next observation the item is delivered with `delivery.operatorAuthorization`: `execution: null` (the statement that no merge execution authorized this merge), the `operator`, the decision with requester, approver and both reasons, the `refusedDecision` it overrides, `unmet` (every reason the record refused), the cutoff, the snapshot revision and a judgement that says all of it in one sentence. `authorizationRevision` is the pre-merge snapshot's revision; there is no execution to cite. The ledger records `merge.operator-authorized` under the operator's identity, never `merge.reconciled`. `master status` lists both kinds apart under `deliveries.reconciled` and `deliveries.operatorAuthorized` (with `counts.reconciledDeliveries` and `counts.operatorAuthorizedDeliveries`); an operator-authorized row carries `authorization: 'operator'`, `execution: null`, the operator and `unmet`, a reconciled row carries `authorization: 'reconciled'` and the judgement that every gate had passed. Neither is a routine merge, and neither is mistaken for the other.
+
+### Worker push rights
+
+A worker may change one remote ref: its assigned branch, `graphyard/<key>-<epoch>`, or the already linked PR branch a rework attempt is given. It makes these git writes to that branch:
+
+| Write | Command | Why |
+| --- | --- | --- |
+| Publish or advance the branch | `git push origin BRANCH`, `git push -u origin BRANCH`, `git push origin HEAD:BRANCH` | A fast-forward of its own branch; Graphyard observes the new head as the candidate. |
+| Take the base | `git merge origin/BASE`, via `graphyard sync GY-N` | The base is merged, never rebased, so no file outside plannedFiles is re-resolved. |
+| Restore the branch | `git fetch origin`, `git reset --hard REVIEWED_HEAD`, then `graphyard restore-branch GY-N EPOCH` | Replaces an ejected or contaminated tip with the item's own history; see below. |
+
+The worker's harness denies these raw pushes, whichever ref they name: `--force`, and `-f` alone or first or last in a bundle of short flags (`-fu`, `-uf`), before or after the refs; every `--force-with-lease` push (bare, `=REF:SHA`, or with `--force-if-includes`) and every abbreviation starting `--f`; a `+` refspec; `--mirror`, `--all`, `--delete`, `--prune` and their abbreviations (`--m`, `--al`, `--de`, `--pru`); `-d` alone or first or last in a bundle (`-du`, `-ud`), before or after the refs; and an empty-source refspec with any name (`:foo`, `:graphyard/…`, `:refs/…`). It also denies every push that names the base branch: `origin BASE`, `…:BASE`, `refs/heads/BASE`, and the lease forms. Each of these is denied behind git's global options too (`git -C DIR push …`, `git -c KEY=VALUE push …`). `rebase`, `gh pr merge` and `gh pr review` stay denied too.
+
+These rules are a list of spellings, not a parser of git's command line. A spelling that matches none of them — a push run through `sh -c`, `env`, a git alias or a script, or `-f`/`-d` in the middle of a bundle (`-ufq`, `-udq`), which a glob cannot tell apart from a hyphen inside a branch name — is unmatched, and a Claude worker runs under `bypassPermissions`, so it would run. The same holds for a plain push to some other ref, such as `git push origin other-branch`. That one can only fast-forward the ref and cannot drop a commit, because the remote rejects a non-fast-forward push. Only the explicit allow rules above cover the worker's own branch. A harness rule is a prompt policy; branch protection, the lease and the merge gate remain the enforcement.
+
+**Why `--force-with-lease` and not `--force`.** Both replace the branch tip with one that does not descend from it; that is what a restoration is. `--force` replaces whatever the remote holds, including a head somebody pushed after the worker last looked. `--force-with-lease=refs/heads/BRANCH:TIP` is conditional: the remote refuses the push unless the branch still points at `TIP`, the tip just fetched. So the push can replace only the tip that was seen — the ejected one the rework authorizes replacing — and never a head pushed since.
+
+The lease limits *when* a push may replace a tip, not *which* ref it replaces. A permission glob cannot say "this ref and no other", and anything a glob leaves unmatched runs under `bypassPermissions`. So the worker gets no raw lease push at all. `restore-branch` makes the one lease push itself:
+
+1. The server confirms that the caller holds the live lease for `EPOCH` (a `heartbeat`).
+2. The worktree must be on the branch registered for that epoch, with no merge in progress and no uncommitted change.
+3. It fetches, then runs `git push --force-with-lease=refs/heads/BRANCH:TIP origin HEAD:refs/heads/BRANCH` and prints the tip it `replaced` and the new `head`.
+
+Rewriting the branch does not rewrite what Graphyard bound: the review and every proof are bound to a head sha, and a new head is a new candidate that the build gate, review and proofs judge afresh.
+
+**Restoring a contaminated branch.** A branch is contaminated when its tip carries content that is not the item's own: a queue tip that stacked another item's unlanded commit and was then ejected, or a merge that brought in another item's work. Two workarounds do not work:
+
+- `git merge -s ours` of that tip is not a restoration. It keeps the other item's commit in the ancestry, so that item's own later merge silently drops its change.
+- A new branch and pull request is refused (`A submitted task cannot switch pull requests`).
+
+The recovery is a two-party `rework` decision whose reason names the reviewed head. The attempt it dispatches runs these commands, with no human shell:
+
+```sh
+git fetch origin
+git reset --hard REVIEWED_HEAD                    # the head the approval and trusted proofs bind to
+node "$GRAPHYARD_CLI" sync GY-N                  # merge origin/BASE; every file outside plannedFiles must match it
+node "$GRAPHYARD_CLI" restore-branch GY-N EPOCH  # the lease push of this attempt's branch
+node "$GRAPHYARD_CLI" complete GY-N EPOCH PR
+```
+
+A plain push is refused here as non-fast-forward, which is why the restoration exists. If `restore-branch` reports `stale info`, the branch moved between its fetch and its push: read what the new tip holds before running it again. `branchRestoration` in `src/master.ts` renders exactly these commands, and a test drives them through a dispatched attempt against a real repository.
+
+**A remedy no session may run is a defect.** When a blocker names a command that every session Graphyard launches — the item's worker, reviewer, producer and master — is denied by its harness, `master status` reports it under `unrunnableRemedies` (with `counts.unrunnableRemedies`) and as an attention item owned by the master: the item, the command, the role that would need it (the worker that raised the blocker), the rule in that role's harness that denies it, and the rule each other role is denied by. It reads as a Graphyard defect, not as a wait on a human shell: the answer is a work item that lets the role run the command, or has the control plane perform it, never an operator typing it. Only Claude sessions load generated rules. So when a launched worker profile runs another runtime, which could run the command under its own approval configuration, nothing is reported.
 
 ### Dead worker or provider change
 
@@ -1915,7 +2277,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master executors` | Every executor registered on this host with the release it loaded beside the coordinator's own, and which of them stand down ([executors run the release they loaded](#executors-run-the-release-they-loaded)) |
 | `master executors restart [--timeout SECONDS]` | Stop and start every executor registered on this host through its supervisor and wait for each to register again on the current release; refused, naming the executor and the action, while any executor holds a claimed action |
 | `master start KIND` | Launch the visible master session with its harness rules |
-| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), `disk` (free space and what a reclaim would return), `executors` (each executor's release beside the coordinator's), and `administration` (recent browser actions, pending sudo code) |
+| `master status` | Work truth, session health, reviews, queue, `schedule` (dispatch order, overlap holds, high-conflict scopes), per-candidate `conflicts`, per-row `dispatch` (requested reviews and producers), per-row `merged` (an observed merge no execution authorized, with its recovery), per-row `contamination` and `restoredApproval` with `branches` ([speculative tips and branch protection](#speculative-tips-and-branch-protection)), `disk` (free space and what a reclaim would return), `executors` (each executor's release beside the coordinator's), and `administration` (recent browser actions, pending sudo code) |
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work; `--allow-overlap` dispatches over a planned-file overlap hold |
 | `master producer add FILE` | Add a proof-producer launch profile with its own producer credential |
 | `master producer replace FILE` | Replace the producer profile of the same name, verified like `add` |
@@ -1932,6 +2294,7 @@ The master clears blockers and adds requirements as its operator-agent identity;
 | `master autonomy [--admin-token-stdin --apply]` | Provision the master's operator-agent and approver identities and harness rules (once, at onboarding) |
 | `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | The master's own non-weakening intent, as its operator-agent identity |
 | `master scope GY-N [REASON]` | Apply a scope request the loop refused, while the attempt keeps its lease; requests the item already implies are decided by the loop ([scope requests the loop decides](#scope-requests-the-loop-decides)) |
+| `master repair GY-N REASON` | Ask the control plane to restore a branch found carrying another item's unlanded commits to the item's own reviewed head merged onto the base ([a contaminated branch](#a-contaminated-branch)) |
 | `master decide GY-N ACTION [JSON\|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON` | Request a two-party decision: `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`; a handler cites the precedent it followed and the context it judged from |
 | `master context GY-N [TRIGGER] [--budget N]` | The assembled [escalation context](#escalation-context), read by key alone and verified against its fingerprint |
 | `master escalation GY-N [TRIGGER] [--budget N] [precedent\|KIND]` | Spawn a fresh handler on that context alone: `precedent` follows the newest applied line in this process, an agent `KIND` launches a judging session |
