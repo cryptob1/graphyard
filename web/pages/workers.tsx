@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type WorkerRow } from '../../src/model/sessions';
+import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type WorkerRow } from '../workers-view';
 import type { Dashboard } from './dashboard';
 
 /**
@@ -10,7 +10,7 @@ import type { Dashboard } from './dashboard';
  * A row is a session handle the item carries (src/model/sessions.ts), not a Herdr listing: the
  * page draws what the control plane recorded and never asks a runtime. What the derivation is —
  * the stale threshold, the two attach forms, the order — lives in `workersView`, so a test
- * asserts it over a fixture without a browser.
+ * asserts it over a fixture without a browser (web/workers-view.ts).
  */
 
 /** Time spent to the second, so a running row is seen to tick: `1h 02m 09s`, `4m 30s`, `12s`. */

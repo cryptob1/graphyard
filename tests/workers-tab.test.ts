@@ -4,7 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
-import { remoteAttachCommand, sessionRoleKind, sessionStaleThresholdMs, staleSession, workersView, type SessionHandle } from '../src/model/sessions.js';
+import type { SessionHandle } from '../src/model/sessions.js';
+import { localAttachCommand, remoteAttachCommand, sessionRoleKind, sessionStaleThresholdMs, staleSession, workersView } from '../web/workers-view.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { views, visibleViews } from '../web/pages/index.js';
@@ -135,14 +136,20 @@ test('integration:workers-tab-lists-every-session — a top-level Workers tab li
   assert.ok(visibleWords(html).length > 0);
 });
 
-test('unit:attach-command-remote-form — every running row copies the local attach command and a remote form built from its host through herdr --machine, byte for byte; a finished row offers its transcript instead', async () => {
+test('unit:attach-command-remote-form — every running row copies a local attach command and a remote form built from its host through Herdr\'s remote machinery, byte for byte; a finished row offers its transcript instead', async () => {
   const running = { state: 'running' as const, host: 'vishrog', attach: 'herdr pane attach w1V:pJD --workspace w1V' };
-  assert.equal(remoteAttachCommand(running), 'herdr --machine vishrog pane attach w1V:pJD --workspace w1V');
-  // The installed herdr --help documents --machine as the way to run a subcommand against a saved SSH machine.
+  const remote = 'herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog';
+  // Herdr 0.9.1 has no `pane attach`: the recorded pane is attached with `agent attach`, which takes a workspace-qualified pane ID.
+  assert.equal(localAttachCommand(running), 'herdr agent attach w1V:pJD');
+  assert.equal(localAttachCommand({ ...running, attach: 'herdr pane attach w1V:pW2' }), 'herdr agent attach w1V:pW2');
+  assert.equal(localAttachCommand({ ...running, attach: 'tmux attach -t gy-14' }), 'tmux attach -t gy-14', 'a command that is not Herdr\'s is offered as recorded');
+  // --machine runs an API command (the focus) on the saved machine; --remote attaches that host's UI through SSH.
+  assert.equal(remoteAttachCommand(running), remote);
   const docs = await read('docs/dashboard.md');
   assert.match(docs, /herdr --machine <label-or-id> <command>/);
-  assert.match(docs, /`herdr --machine vishrog pane attach w1V:pJD --workspace w1V`/);
-  // No second form for a command that is not Herdr's or already names a machine, and none for a finished handle.
+  assert.match(docs, /herdr --remote <ssh-target>/);
+  assert.ok(docs.includes(`\`${remote}\``), 'the docs state the exact remote form');
+  // No second form for a command that is not Herdr's, one that already names a machine, a finished handle, or no command.
   assert.equal(remoteAttachCommand({ ...running, attach: 'tmux attach -t gy-14' }), null);
   assert.equal(remoteAttachCommand({ ...running, attach: 'herdr --machine other pane attach w1V:pJD' }), null);
   assert.equal(remoteAttachCommand({ ...running, state: 'finished' }), null);
@@ -150,10 +157,10 @@ test('unit:attach-command-remote-form — every running row copies the local att
 
   const html = render(fixture());
   // The worker's row: exactly the two commands, in that order, and nothing else to copy.
-  assert.deepEqual(copies(html, 'graphyard-codex-1:1'), ['herdr pane attach w1V:pJD --workspace w1V', 'herdr --machine vishrog pane attach w1V:pJD --workspace w1V']);
+  assert.deepEqual(copies(html, 'graphyard-codex-1:1'), ['herdr agent attach w1V:pJD', remote]);
   const row = rowOf(html, 'graphyard-codex-1:1');
-  assert.match(row, /data-copy="herdr --machine vishrog pane attach w1V:pJD --workspace w1V"/);
-  assert.equal(Buffer.compare(Buffer.from(copies(html, 'graphyard-codex-1:1')[1]), Buffer.from('herdr --machine vishrog pane attach w1V:pJD --workspace w1V')), 0, 'byte for byte');
+  assert.ok(row.includes('data-copy="herdr --machine vishrog agent focus w1V:pJD &amp;&amp; herdr --remote vishrog"'), 'the escaped attribute is the command');
+  assert.equal(Buffer.compare(Buffer.from(copies(html, 'graphyard-codex-1:1')[1]), Buffer.from(remote)), 0, 'byte for byte');
   assert.match(row, />Copy local<\/button>/); assert.match(row, />Copy remote<\/button>/);
   // The copy is one click on the text alone: the button writes its data-copy text and nothing more.
   const page = await read('web/pages/workers.tsx');
@@ -241,7 +248,9 @@ test('manual:workers-tab-docs-review — docs/dashboard.md documents the Workers
   assert.match(section, /recorded running, not seen since/);
   assert.match(section, /\*\*Copy local\*\*/); assert.match(section, /\*\*Copy remote\*\*/);
   assert.match(section, /`herdr --help` documents `herdr --machine <label-or-id> <command>`/);
-  assert.match(section, /`herdr --machine vishrog pane attach w1V:pJD --workspace w1V`/);
+  assert.ok(section.includes('`herdr agent attach w1V:pJD`'), 'the local form');
+  assert.ok(section.includes('`herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`'), 'the exact remote form');
+  assert.match(section, /interactive attachment is not forwarded/);
   assert.match(section, /GY-113's \[liveness reconciliation\]\(master-agent\.md#session-liveness-is-reconciled-not-trusted\).*is what ends a dead handle/);
   assert.match(section, /registered beside Shipped and Insights in `web\/pages\/index\.tsx`/);
   assert.match(docs, /\*\*Workers\*\*, every agent session across every item, as tabs/);
