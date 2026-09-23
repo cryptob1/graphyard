@@ -77,6 +77,9 @@ test('unit:approver-name-bounded-and-unique — an approver session name fits th
   }
   assert.equal(approverSessionName({ key: 'GY-101' }, decision), 'graphyard-approver-gy-101-4cb515');
   assert.equal(approverSessionName({ key: 'GY-10000' }, decision), 'gy-approver-gy-10000-4cb51514');
+  // The boundary docs/master-agent.md names: GY-999 is the last key that keeps the full role word.
+  assert.equal(approverSessionName({ key: 'GY-999' }, decision), 'graphyard-approver-gy-999-4cb515');
+  assert.equal(approverSessionName({ key: 'GY-1000' }, decision), 'gy-approver-gy-1000-4cb51514');
   assert.notEqual(approverSessionName({ key: 'GY-12345' }, decision), approverSessionName({ key: 'GY-12345' }, uuid('4cb5a000')), 'decisions sharing four leading characters are two sessions');
   assert.equal(sessionNameRefusal(approverSessionName({ key: 'GY-101' }, decision)), null);
   // Nothing Graphyard composes can leave the bounds, whatever it is composed from.

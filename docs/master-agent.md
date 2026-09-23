@@ -339,7 +339,7 @@ name is built inside the runtime's own limit — at most 32 characters, starting
 letter, made of lowercase letters, digits, `-` and `_` — and built so that what a human reads first
 survives it: the work key is kept whole and the decision id takes what the limit leaves, up to
 eight characters. A key long enough to leave the decision id fewer than six shortens the role word
-instead (`gy-approver-<key>-<decision>`, from `GY-10000` up), because a cut-short key says less than an
+instead (`gy-approver-<key>-<decision>`, from `GY-1000` up), because a cut-short key says less than an
 abbreviated role does and a cut-short decision id is how two decisions on one item become one session;
 only a key too long for even that carries a digest of the whole identity, so a shortened name still
 names one decision only. Every other session name Graphyard generates (worker, reviewer, producer,
