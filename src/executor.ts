@@ -8,6 +8,7 @@ import { independentProducerProfiles } from './producer.js';
 import { profileHealth, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { HerdrAgent, MasterConfig, MergeExecutor, ProducerProfile, WorkerProfile } from './master.js';
+import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 
 /**
  * What a stateless executor actually does when it claims a row.
@@ -93,7 +94,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const credentials = await effects.producerCredentials(independent);
     const usable = independent.filter(profile => credentials[profile.name]?.available !== false && !agents.some(agent => agent.name === profile.agentName));
     if (!usable.length) throw new Error(`every independent producer profile is busy or unavailable (${independent.map(profile => `${profile.name}: ${credentials[profile.name]?.available === false ? credentials[profile.name].reason : 'busy'}`).join('; ')})`);
-    const launched = await effects.launchProducer(work, request, usable[0], agents, observedAt);
+    const launched = await effects.launchProducer(work, request, usable[0], agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ producers: [usable[0]] }, agents)); });
     await record(work, launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, launched, usable[0].kind, config().herdrWorkspace, usable[0].principal));
     return `launched producer ${usable[0].name} for ${proofs.join(', ')} on ${request.sha.slice(0, 12)}`;
   };
@@ -132,8 +133,12 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       const { profile, reason } = selectReviewerProfile(config());
       if (!profile) throw new Error(reason!);
       const agents = herdr();
+      // A name every session of the profile could take is held: the namespace is at its bound,
+      // and the refusal names it rather than reading as a busy reviewer (GY-132).
+      assertNameAvailable('reviewer', profile, agents);
       if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
-      const launched = await effects.launchReview(work, request, agents, observedAt);
+      // A launch refused by a resource at its bound — the review ledger's cap — records that resource.
+      const launched = await effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); });
       await record(work, launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, launched, profile.kind, config().herdrWorkspace));
       return `launched reviewer ${profile.name} on ${request.sha.slice(0, 12)}`;
     },
