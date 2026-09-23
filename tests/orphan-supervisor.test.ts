@@ -192,25 +192,25 @@ test('integration:orphan-supervisor-reclaim a live session, an unreadable Herdr,
   }
 });
 
-test('integration:orphan-supervisor-reclaim the stop reaches the recorded scope and refuses a pid that no longer runs that assignment', () => {
+test('integration:orphan-supervisor-reclaim the stop reaches the recorded scope and refuses a pid that no longer runs that assignment', async () => {
   const orphan: OrphanSupervisor = { id: 'work-83', key: 'GY-83', epoch: 2, owner: 'worker-a', profile: worker.name, agentName: worker.agentName, scope, leaseExpiresAt: at(30_000) };
   const commands: string[][] = [], killed: [number, NodeJS.Signals][] = [];
   const run = (command: string, args: string[]) => { commands.push([command, ...args]); return ''; };
   const supervisorArgv = ['node', launcher, 'watch', 'GY-83', '2', '--', 'opencode'].join('\0');
 
-  const result = stopWatchSupervisor(orphan, 'SIGTERM', run, (pid, signal) => { killed.push([pid, signal]); }, () => supervisorArgv);
+  const result = await stopWatchSupervisor(orphan, 'SIGTERM', run, (pid, signal) => { killed.push([pid, signal]); }, () => supervisorArgv);
   assert.deepEqual(commands, [['systemctl', '--user', 'kill', '--kill-whom=all', '--signal=SIGTERM', scope.unit]]);
   assert.deepEqual(killed, [[scope.pid, 'SIGTERM']], 'the supervisor that outlived the scope is stopped too');
   assert.deepEqual(result.refusals, []);
 
   // A recycled pid keeps its scope stopped and is reported, never signalled.
   killed.length = 0;
-  const recycled = stopWatchSupervisor(orphan, 'SIGKILL', run, (pid, signal) => { killed.push([pid, signal]); }, () => ['node', launcher, 'watch', 'GY-42', '1', '--', 'opencode'].join('\0'));
+  const recycled = await stopWatchSupervisor(orphan, 'SIGKILL', run, (pid, signal) => { killed.push([pid, signal]); }, () => ['node', launcher, 'watch', 'GY-42', '1', '--', 'opencode'].join('\0'));
   assert.deepEqual(killed, []);
   assert.match(recycled.refusals[0], /no longer runs the watch supervisor for GY-83 epoch 2/);
 
-  assert.throws(() => stopWatchSupervisor({ ...orphan, scope: { ...scope, unit: 'user.slice' } }, 'SIGTERM', run), /not a Graphyard watch scope/);
-  assert.throws(() => stopWatchSupervisor(orphan, 'SIGTERM', () => { throw new Error('no user manager'); }, () => {}, () => { throw new Error('ESRCH'); }), /no user manager/);
+  await assert.rejects(stopWatchSupervisor({ ...orphan, scope: { ...scope, unit: 'user.slice' } }, 'SIGTERM', run), /not a Graphyard watch scope/);
+  await assert.rejects(stopWatchSupervisor(orphan, 'SIGTERM', () => { throw new Error('no user manager'); }, () => {}, () => { throw new Error('ESRCH'); }), /no user manager/);
 });
 
 const status = (work: Work, agents: HerdrAgent[] = []) => buildMasterStatus({ work: [work], now: observedAt }, [worker], agents);
