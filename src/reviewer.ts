@@ -34,6 +34,8 @@ export const reviewRecordSchema = z.object({
   requestId: z.string().min(1).max(64).optional(),
   /** Which launch for the request this is: a failed or expired session is relaunched as the next attempt. */
   attempt: z.number().int().min(1).max(50).optional(),
+  /** When the loop saw the control plane no longer request `requestId`; until then the record is pinned (boundSessionLedger). */
+  requestClosedAt: z.string().min(1).max(40).optional(),
   state: z.enum(['pending', 'completed', 'expired', 'cancelled', 'failed']),
   /** When Herdr first reported the session finished or blocked without a verdict. */
   idleSince: z.string().min(1).max(40).optional(),
@@ -66,12 +68,18 @@ export type ReviewLedger = z.infer<typeof reviewLedgerSchema>;
  * reconciles, not an archive, and both share this one bounded, reaped implementation.
  *
  * A record is live while its session is pending; completed, failed, cancelled and expired are
- * terminal. Every write keeps every live record and only the newest `sessionLedgerRetention`
- * terminal records (by when they settled) for diagnostics — the history `master status` shows and
- * a request's retry count read — so a session settling is reaped in the same write that resolves
- * it. A write that would pass `sessionLedgerBound` gives up retained terminal records first, and is
- * refused only when every record is live: that refusal names the ledger, its bound and the live
- * count, and is local state, never session capacity.
+ * terminal. A terminal record is pinned while something still reads it:
+ * - its request is open (`requestId` without `requestClosedAt`): the request's attempt count, retry
+ *   bound, settled state and agent names are read from its records (producer.ts sessionRetry), so
+ *   they are kept until the loop sees the control plane stop requesting it (releaseClosedRequests);
+ * - it carries a verdict and a pending session reviews the same key and sha: that session's
+ *   `answered` set (reconcileReviews) is read from it, so an old verdict is never adopted.
+ * Every write keeps every live and every pinned record, and only the newest
+ * `sessionLedgerRetention` of the other terminal records (by when they settled) for diagnostics,
+ * so a session whose record nothing reads is reaped in the write that resolves or releases it.
+ * A write that would pass `sessionLedgerBound` gives up retained records first, and is refused
+ * only when live and pinned records alone pass it: that refusal names the ledger, its bound and
+ * the live count, and is local state, never session capacity.
  *
  * The review ledger used to be an append-only array capped at 200 by its schema; nothing reaped
  * it, so on 2026-09-23 it filled with 200 finished records and refused every review launch.
@@ -81,40 +89,60 @@ export const sessionLedgerRetention = 50;
 export const terminalSessionStates = ['completed', 'failed', 'cancelled', 'expired'] as const;
 export interface SessionLedgerSpec { name: string; path: string; role: 'reviewer' | 'producer' }
 export const reviewLedgerSpec: SessionLedgerSpec = { name: 'review ledger', path: '.graphyard/reviews.json', role: 'reviewer' };
-type LedgerRecord = { state: string; requestedAt: string; closedAt?: string };
+type LedgerRecord = { state: string; requestedAt: string; closedAt?: string; requestId?: string; requestClosedAt?: string; key?: string; sha?: string; verdict?: unknown };
 const live = (record: LedgerRecord) => !(terminalSessionStates as readonly string[]).includes(record.state);
+/** The terminal records something still reads: those of an open request, and verdicts a pending session of the same head checks against. */
+export function pinnedSessionRecords<T extends LedgerRecord>(records: T[]): Set<T> {
+  const pendingHeads = new Set(records.filter(live).map(record => `${record.key}@${record.sha}`));
+  return new Set(records.filter(record => !live(record) && (!!record.requestId && !record.requestClosedAt || !!record.verdict && pendingHeads.has(`${record.key}@${record.sha}`))));
+}
 
-/** The refusal of a write that would hold more live sessions than the bound. */
+/** The refusal of a write that would hold more live and pinned records than the bound. */
 export class SessionLedgerFullError extends Error {
-  constructor(readonly spec: SessionLedgerSpec, readonly bound: number, readonly live: number, subject?: string) {
-    super(`The ${spec.name} (${spec.path}) refused the write: its bound is ${bound} records and ${live} are live sessions, none of them terminal to reap${subject ? `, so no session can be recorded for ${subject}` : ''}. This is local state, not ${spec.role} capacity: ${sessionLedgerRemedy(spec)}`);
+  constructor(readonly spec: SessionLedgerSpec, readonly bound: number, readonly live: number, subject?: string, readonly pinned = 0) {
+    super(`The ${spec.name} (${spec.path}) refused the write: its bound is ${bound} records and ${live} are live sessions, ${pinned ? `${pinned} more are terminal records an open request or a pending review still reads, and none is left to reap` : 'none of them terminal to reap'}${subject ? `, so no session can be recorded for ${subject}` : ''}. This is local state, not ${spec.role} capacity: ${sessionLedgerRemedy(spec)}`);
     this.name = 'SessionLedgerFullError';
   }
 }
-export const sessionLedgerRemedy = (spec: SessionLedgerSpec) => `settle the live sessions — graphyard master status reconciles every pending record against its session and GitHub, and a session gone from Herdr settles on that pass — and the next write reaps them; ${spec.path} is read-only diagnostics otherwise`;
+export const sessionLedgerRemedy = (spec: SessionLedgerSpec) => `settle the live sessions — graphyard master status reconciles every pending record against its session and GitHub, and a session gone from Herdr settles on that pass — and the next write reaps them, as it reaps a request's records once the control plane stops requesting it; ${spec.path} is read-only diagnostics otherwise`;
 /** Matches a ledger refusal wherever its text was recorded: an action row, a dispatch failure, a launch error. */
 export const sessionLedgerRefusal = /The (review|producer) ledger \((\S+)\) refused the write: its bound is (\d+) records and (\d+) are live/;
 
-/** The records one write keeps: every live one, then the newest terminal ones the bound and the retention allow. */
+/** The records one write keeps: every live and pinned one, then the newest other terminal ones the bound and the retention allow. */
 export function boundSessionLedger<T extends LedgerRecord>(records: T[], spec: SessionLedgerSpec, limits: { bound?: number; retention?: number } = {}): T[] {
   const bound = limits.bound ?? sessionLedgerBound, retention = limits.retention ?? sessionLedgerRetention;
-  const running = records.filter(live).length;
-  if (running > bound) throw new SessionLedgerFullError(spec, bound, running);
+  const running = records.filter(live).length, pinned = pinnedSessionRecords(records);
+  if (running + pinned.size > bound) throw new SessionLedgerFullError(spec, bound, running, undefined, pinned.size);
   const settledAt = (record: T) => Date.parse(record.closedAt ?? record.requestedAt) || 0;
-  const terminal = records.map((record, index) => ({ record, index })).filter(entry => !live(entry.record))
+  const terminal = records.map((record, index) => ({ record, index })).filter(entry => !live(entry.record) && !pinned.has(entry.record))
     .sort((a, b) => settledAt(b.record) - settledAt(a.record) || b.index - a.index);
-  const kept = new Set(terminal.slice(0, Math.max(0, Math.min(retention, bound - running))).map(entry => entry.record));
-  return records.filter(record => live(record) || kept.has(record));
+  const kept = new Set(terminal.slice(0, Math.max(0, Math.min(retention, bound - running - pinned.size))).map(entry => entry.record));
+  return records.filter(record => live(record) || pinned.has(record) || kept.has(record));
 }
-/** Refuses, before a session exists, a launch whose record the ledger could not hold. */
-export function assertSessionLedgerRoom(records: LedgerRecord[], spec: SessionLedgerSpec, subject: string, bound = sessionLedgerBound) {
-  const running = records.filter(live).length;
-  if (running + 1 > bound) throw new SessionLedgerFullError(spec, bound, running, subject);
+/** Refuses, before a session exists, a launch whose record (`next`) the ledger could not hold. */
+export function assertSessionLedgerRoom(records: LedgerRecord[], spec: SessionLedgerSpec, subject: string, next: LedgerRecord = { state: 'pending', requestedAt: '' }, bound = sessionLedgerBound) {
+  const after = [...records, next], running = after.filter(live).length, pinned = pinnedSessionRecords(after).size;
+  if (running + pinned > bound) throw new SessionLedgerFullError(spec, bound, running - 1, subject, pinned);
+}
+/**
+ * Marks the terminal records whose request the control plane no longer holds open — answered,
+ * withdrawn, superseded, or its item done or gone — so a later write may reap them. Only a work
+ * snapshot can say so; without one nothing is released and the records stay pinned.
+ */
+export function releaseClosedRequests(records: LedgerRecord[], work: Work[], now: Date) {
+  let released = 0;
+  for (const record of records) {
+    if (live(record) || !record.requestId || record.requestClosedAt) continue;
+    const item = work.find(candidate => candidate.key === record.key);
+    const open = !!item && item.stage !== 'done' && [item.autoDispatch?.review ?? null, ...(item.autoDispatch?.producers ?? [])].some(request => !!request && request.id === record.requestId && request.state === 'requested');
+    if (!open) { record.requestClosedAt = now.toISOString(); released++; }
+  }
+  return released;
 }
 /** What `master status` reports per ledger: where it lives, its bound and retention, and the room left for live sessions. */
 export function sessionLedgerHeadroom(records: LedgerRecord[], spec: SessionLedgerSpec) {
-  const running = records.filter(live).length;
-  return { ledger: spec.name, path: spec.path, bound: sessionLedgerBound, retention: sessionLedgerRetention, records: records.length, live: running, terminal: records.length - running, headroom: Math.max(0, sessionLedgerBound - running) };
+  const running = records.filter(live).length, pinned = pinnedSessionRecords(records).size;
+  return { ledger: spec.name, path: spec.path, bound: sessionLedgerBound, retention: sessionLedgerRetention, records: records.length, live: running, pinned, terminal: records.length - running, headroom: Math.max(0, sessionLedgerBound - running - pinned) };
 }
 
 const ledgerFile = (root: string) => resolve(root, reviewLedgerSpec.path);
@@ -342,7 +370,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Reviewer agent ${agentName} is already visible in Herdr`);
   // The ledger's room is local state, judged before any session exists: a launch whose record
   // could not be written must never leave a running pane behind that holds the agent's name.
-  assertSessionLedgerRoom(ledger.reviews, reviewLedgerSpec, `${binding.key} review of ${binding.sha.slice(0, 12)}`);
+  assertSessionLedgerRoom(ledger.reviews, reviewLedgerSpec, `${binding.key} review of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: now().toISOString(), key: binding.key, sha: binding.sha, requestId: dependencies.requestId });
   const sessions = profileSessions(profile, agents, ledger.reviews);
   if (!sessions.free) throw new Error(profileAtLimit('Reviewer', profile, sessions));
   // Before a token is minted: an exhausted or logged-out account is skipped for the profile's next.
@@ -580,6 +608,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     record.state = 'failed'; record.resolution = dismissalResolution(record, dependencies.work); record.closedAt = now.toISOString();
     changed++;
   }
+  // A request the control plane no longer holds open releases its records to the retention window.
+  if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
   if (changed) await saveReviewLedger(root, ledger);
   return { reviews: ledger.reviews, changed };
 }

@@ -6,10 +6,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildMasterStatus, setupMaster } from '../src/master.js';
+import { buildMasterStatus, loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { assertSessionLedgerRoom, bindReviewer, boundSessionLedger, launchReview, readReviewLedger, reviewLedgerSpec, saveReviewLedger, saveReviewerProfile, sessionLedgerBound, sessionLedgerHeadroom, sessionLedgerRetention, SessionLedgerFullError, type ReviewRecord } from '../src/reviewer.js';
-import { producerLedgerSpec, readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
+import { assertSessionLedgerRoom, bindReviewer, boundSessionLedger, launchReview, readReviewLedger, reconcileReviews, releaseClosedRequests, reviewLedgerSpec, saveReviewLedger, saveReviewerProfile, sessionLedgerBound, sessionLedgerHeadroom, sessionLedgerRetention, SessionLedgerFullError, type ReviewRecord } from '../src/reviewer.js';
+import { producerLedgerSpec, readProducerLedger, saveProducerLedger, sessionRetry, sessionRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { ledgerRefusalAttention } from '../src/cli/master-status.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -28,14 +28,14 @@ const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Da
 const terminal = ['completed', 'failed', 'cancelled', 'expired'] as const;
 const at = (minute: number) => new Date(Date.UTC(2026, 8, 23, 0, 0, 0) + minute * 60_000).toISOString();
 
-function review(index: number, state: ReviewRecord['state']): ReviewRecord {
+function review(index: number, state: ReviewRecord['state'], extra: Partial<ReviewRecord> = {}): ReviewRecord {
   return { id: randomUUID(), key: `GY-${1000 + index}`, pr: 1000 + index, sha: H, baseSha: B, policyRevision: 1, profile: 'claude-reviewer', agentName: `review-claude-1-${index}`,
-    pane: null, sessionDirectory: `/nonexistent/sessions/${index}`, requestedAt: at(index), tokenExpiresAt: at(index + 60), state, ...(state === 'pending' ? {} : { closedAt: at(index + 1) }) };
+    pane: null, sessionDirectory: `/nonexistent/sessions/${index}`, requestedAt: at(index), tokenExpiresAt: at(index + 60), state, ...(state === 'pending' ? {} : { closedAt: at(index + 1) }), ...extra };
 }
-function producer(index: number, state: ProducerRecord['state']): ProducerRecord {
+function producer(index: number, state: ProducerRecord['state'], extra: Partial<ProducerRecord> = {}): ProducerRecord {
   return { id: randomUUID(), requestId: `request-${index}`, attempt: 1, key: `GY-${1000 + index}`, pr: 1000 + index, sha: H, baseSha: B, policyRevision: 1, group: 'unit', proofs: ['unit:example'],
     profile: 'claude-producer', principal: 'graphyard-producer-1', agentName: `proof-claude-1-${index}`, pane: null, requestedAt: at(index), expiresAt: at(index + 60), state, outcome: {},
-    ...(state === 'pending' ? {} : { closedAt: at(index + 1) }) };
+    ...(state === 'pending' ? {} : { closedAt: at(index + 1), requestClosedAt: at(index + 1) }), ...extra };
 }
 
 async function ledgerRoot() {
@@ -110,6 +110,63 @@ test('unit:terminal-reviews-reaped — a review reaching a terminal state is rea
   } finally { await cleanup(); }
 });
 
+test('unit:terminal-reviews-reaped — a request exhausted at its retry limit stays exhausted however many unrelated sessions settle, until the control plane stops requesting it', async () => {
+  const { root, cleanup } = await ledgerRoot();
+  try {
+    // GY-131 review: the retry bound is read from the request's own records, so reaping them while
+    // the request stands would reset it to "launch" and relaunch it every time the window rolled past.
+    const requestId = 'request-exhausted', attempts = Array.from({ length: sessionRetryLimit }, (_, index) => producer(index, 'failed', { requestId, attempt: index + 1, key: 'GY-131', acknowledgedAt: at(index), requestClosedAt: undefined, resolution: 'the session finished without trusted evidence' }));
+    const openItem = work({ stage: 'acceptance', autoDispatch: { review: null, producers: [{ id: requestId, kind: 'producer', state: 'requested' }], history: [] } } as unknown as Partial<Work>);
+    let records: ProducerRecord[] = [...attempts];
+    const exhausted = (list: ProducerRecord[]) => sessionRetry(list, requestId, Date.parse(at(10_000)));
+    assert.equal(exhausted(records).exhausted, true, 'the request starts exhausted');
+    // Far more than the retention window of unrelated sessions settle, each on its own write.
+    for (let index = 0; index < 3 * sessionLedgerRetention; index++) {
+      const other = producer(100 + index, 'completed', { requestId: `request-other-${index}`, requestClosedAt: undefined, closedAt: at(5000 + index) });
+      records = [...records, other];
+      releaseClosedRequests(records, [openItem], new Date(at(5000 + index)));
+      await saveProducerLedger(root, { version: 1, producers: records });
+      records = (await readProducerLedger(root)).producers;
+    }
+    assert.equal(records.filter(record => record.requestId === requestId).length, sessionRetryLimit, 'every record of the open request is kept');
+    assert.equal(records.filter(record => record.requestId !== requestId).length, sessionLedgerRetention, 'the unrelated ones are reaped to the retention window');
+    const retry = exhausted(records);
+    assert.equal(retry.exhausted, true, 'the request still reports exhausted');
+    assert.equal(retry.launch, false, 'and is not relaunched');
+    assert.equal(retry.attempts, sessionRetryLimit);
+    // Once the control plane stops requesting it, its records join the window and are reaped like any other.
+    releaseClosedRequests(records, [{ ...openItem, autoDispatch: { review: null, producers: [], history: [] } } as unknown as Work], new Date(at(9000)));
+    await saveProducerLedger(root, { version: 1, producers: records });
+    assert.equal((await readProducerLedger(root)).producers.filter(record => record.requestId === requestId).length, 0, 'a closed request settled long ago is reaped');
+  } finally { await cleanup(); }
+});
+
+test('unit:terminal-reviews-reaped — a pending session never adopts the verdict of a session reaped out of the window on the same head', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    const config = await loadMasterConfig(root);
+    const reviewer = `${config.reviewer!.slug}[bot]`;
+    // A hand-launched review (no request) on GY-131 at H posted verdict 11 and settled first; a
+    // relaunch for the same head is pending; many unrelated reviews settle after it.
+    const answered = review(0, 'completed', { key: 'GY-131', verdict: { state: 'APPROVED', reviewer, reviewId: 11, submittedAt: at(1) } });
+    const pending = review(1, 'pending', { key: 'GY-131', tokenExpiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+    const others = Array.from({ length: 2 * sessionLedgerRetention }, (_, index) => review(10 + index, 'completed', { closedAt: at(100 + index) }));
+    await saveReviewLedger(root, { version: 1, reviews: [answered, pending, ...others] });
+    const kept = (await readReviewLedger(root)).reviews;
+    assert.ok(kept.some(record => record.id === answered.id), 'the verdict a pending session of the same head reads is pinned');
+    assert.equal(kept.filter(record => record.state !== 'pending' && record.id !== answered.id).length, sessionLedgerRetention);
+    // GitHub still holds review 11 on H: the pending session must see it as answered, not adopt it.
+    const seen: number[][] = [];
+    const observe = (_record: ReviewRecord, _identity: string, ids: Set<number>) => { seen.push([...ids]); return ids.has(11) ? null : { state: 'APPROVED', reviewer, reviewId: 11, submittedAt: at(1) }; };
+    const reconciled = (await reconcileReviews(root, config, { run: herdrRun([]), observe, work: [work()], agents: null })).reviews;
+    assert.deepEqual(seen, [[11]], 'the pending session is told verdict 11 is already answered');
+    assert.equal(reconciled.find(record => record.id === pending.id)!.state, 'pending', 'it does not adopt the old verdict');
+    // Once the pending session settles, nothing reads the old verdict and it is reaped like any other.
+    await saveReviewLedger(root, { version: 1, reviews: reconciled.map(record => record.id === pending.id ? { ...record, state: 'cancelled' as const, closedAt: at(1000) } : record) });
+    assert.equal((await readReviewLedger(root)).reviews.some(record => record.id === answered.id), false);
+  } finally { await cleanup(); }
+});
+
 test('integration:full-ledger-still-launches — a ledger full of terminal records launches a review, and one full of live records refuses naming the ledger and the live count', async () => {
   const { root, cleanup } = await boundMaster();
   try {
@@ -139,6 +196,10 @@ test('integration:full-ledger-still-launches — a ledger full of terminal recor
     const written = boundSessionLedger([...nearlyFull, review(501, 'pending')], reviewLedgerSpec);
     assert.equal(written.length, sessionLedgerBound);
     assert.equal(written.filter(record => record.state === 'pending').length, sessionLedgerBound, 'the terminal record gave way to the live one');
+    // Records an open request still reads are not reaped to make room; with them the bound is still refused, by name.
+    const openRequests = [...Array.from({ length: 150 }, (_, index) => review(index, 'pending')), ...Array.from({ length: 50 }, (_, index) => review(200 + index, 'failed', { requestId: `request-${index}` }))];
+    assert.throws(() => assertSessionLedgerRoom(openRequests, reviewLedgerSpec, 'GY-131'), /review ledger \(\.graphyard\/reviews\.json\) refused the write: its bound is 200 records and 150 are live sessions, 50 more are terminal records an open request/);
+    assert.equal(boundSessionLedger(openRequests, reviewLedgerSpec).length, sessionLedgerBound, 'at the bound, nothing an open request reads is dropped');
   } finally { await cleanup(); }
 });
 
@@ -146,8 +207,11 @@ test('unit:ledgers-share-one-bound — the review and producer ledgers enforce t
   const { root, cleanup } = await ledgerRoot();
   try {
     const states = (index: number) => index % 7 === 0 ? 'pending' as const : terminal[index % terminal.length];
-    const reviews = Array.from({ length: 450 }, (_, index) => review(index, states(index)));
-    const producers = Array.from({ length: 450 }, (_, index) => producer(index, states(index)));
+    // Every record answers a request; one in fifty requests is still open, so its terminal records are pinned in both.
+    const open = (index: number) => index % 50 === 1;
+    const request = (index: number) => ({ requestId: `request-${index}`, ...(open(index) || states(index) === 'pending' ? {} : { requestClosedAt: at(index + 1) }) });
+    const reviews = Array.from({ length: 450 }, (_, index) => review(index, states(index), request(index)));
+    const producers = Array.from({ length: 450 }, (_, index) => producer(index, states(index), open(index) ? { requestClosedAt: undefined } : {}));
     await saveReviewLedger(root, { version: 1, reviews });
     await saveProducerLedger(root, { version: 1, producers });
     const keptReviews = (await readReviewLedger(root)).reviews, keptProducers = (await readProducerLedger(root)).producers;
@@ -155,7 +219,11 @@ test('unit:ledgers-share-one-bound — the review and producer ledgers enforce t
     const shape = (records: { key: string; state: string }[]) => records.map(record => `${record.key}:${record.state}`);
     assert.deepEqual(shape(keptProducers), shape(keptReviews), 'both ledgers keep exactly the same records');
     assert.equal(keptReviews.filter(record => record.state === 'pending').length, reviews.filter(record => record.state === 'pending').length, 'every live record is kept');
-    assert.equal(keptReviews.filter(record => record.state !== 'pending').length, sessionLedgerRetention);
+    const pinned = reviews.filter((record, index) => record.state !== 'pending' && open(index)).length;
+    assert.ok(pinned > 0);
+    assert.equal(keptReviews.filter(record => record.state !== 'pending' && !record.requestClosedAt).length, pinned, 'every terminal record of an open request is pinned');
+    assert.equal(keptProducers.filter(record => record.state !== 'pending' && !record.requestClosedAt).length, pinned, 'the producer ledger pins the same records');
+    assert.equal(keptReviews.filter(record => record.state !== 'pending' && record.requestClosedAt).length, sessionLedgerRetention, 'the rest keep only the retention window');
     // The producer ledger no longer grows to its own cap by truncation: it is inside the same bound.
     assert.ok(keptProducers.length <= sessionLedgerBound);
     // Both refuse at the same bound, each naming itself.
@@ -169,7 +237,8 @@ test('unit:ledgers-share-one-bound — the review and producer ledgers enforce t
     const reviewRoom = sessionLedgerHeadroom(keptReviews, reviewLedgerSpec), producerRoom = sessionLedgerHeadroom(keptProducers, producerLedgerSpec);
     assert.deepEqual({ ...reviewRoom, ledger: null, path: null }, { ...producerRoom, ledger: null, path: null });
     assert.equal(reviewRoom.bound, sessionLedgerBound);
-    assert.equal(reviewRoom.headroom, sessionLedgerBound - reviewRoom.live);
+    assert.equal(reviewRoom.pinned, pinned);
+    assert.equal(reviewRoom.headroom, sessionLedgerBound - reviewRoom.live - reviewRoom.pinned);
     assert.equal(JSON.parse(await readFile(join(root, '.graphyard/producers.json'), 'utf8')).producers.length, keptProducers.length);
   } finally { await cleanup(); }
 });

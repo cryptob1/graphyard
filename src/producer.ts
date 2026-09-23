@@ -8,7 +8,7 @@ import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
-import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, type SessionLedgerSpec } from './reviewer.js';
+import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, type SessionLedgerSpec } from './reviewer.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -33,6 +33,8 @@ export const producerRecordSchema = z.object({
   requestId: z.string().min(1).max(64),
   /** Which launch for the request this is: a failed or expired session is relaunched as the next attempt. */
   attempt: z.number().int().min(1).max(50).default(1),
+  /** When the loop saw the control plane no longer request `requestId`; until then the record is pinned (reviewer.ts boundSessionLedger). */
+  requestClosedAt: z.string().min(1).max(40).optional(),
   key: z.string().min(1).max(40), pr: z.number().int().positive(),
   sha: sha40, baseSha: sha40, policyRevision: z.number().int().nonnegative(),
   group: z.string().min(1).max(40), proofs: z.array(z.string().min(1).max(200)).min(1).max(50),
@@ -185,7 +187,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const agentName = sessionAgentName(profile, { id, requestId: request.id, attempt: prior.length + 1 });
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Producer agent ${agentName} is already visible in Herdr`);
   // The ledger's room is local state, judged before any session exists (see launchReview).
-  assertSessionLedgerRoom(ledger.producers, producerLedgerSpec, `${binding.key} ${binding.group} proofs of ${binding.sha.slice(0, 12)}`);
+  assertSessionLedgerRoom(ledger.producers, producerLedgerSpec, `${binding.key} ${binding.group} proofs of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: new Date().toISOString(), key: binding.key, sha: binding.sha, requestId: request.id });
   const sessions = profileSessions(profile, agents, ledger.producers);
   if (!sessions.free) throw new Error(profileAtLimit('Producer', profile, sessions));
   await readProducerCredential(root, profile.credentialFile);
@@ -320,6 +322,8 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     }
     changed++;
   }
+  // A request the control plane no longer holds open releases its records to the retention window.
+  changed += releaseClosedRequests(ledger.producers, work, now);
   if (changed) await saveProducerLedger(root, ledger);
   return { producers: ledger.producers, changed };
 }

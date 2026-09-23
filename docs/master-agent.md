@@ -1260,28 +1260,40 @@ on a cap the other lacks.
 - **Live and terminal.** A record is live while its session is `pending`. `completed`, `failed`,
   `cancelled` and `expired` are terminal.
 - **Bound.** Each ledger holds at most **200** records (`sessionLedgerBound`).
-- **Reaping.** Every write keeps every live record and drops terminal records beyond the
-  retention window. A session that settles is therefore reaped in the same write that resolves
-  it; no ledger fills with finished records, and nobody prunes one by hand.
-- **Retention for diagnostics.** The newest **50** terminal records, by when they settled
-  (`sessionLedgerRetention`), are kept. They are what `master status` lists as recently
-  completed sessions and what a request's attempt and retry counts are read from. A session reaped
-  out of the window no longer counts toward its request's attempts.
+- **Pinned.** A terminal record something still reads is never reaped:
+  - a record of a request the control plane still holds open. A request's attempt count, its
+    retry limits (`exhausted`), whether it `settled`, and the agent names of its next attempt are
+    all read from its own records, so dropping them would reset the request and relaunch it. The
+    loop marks a record `requestClosedAt` when a reconcile pass sees its request answered,
+    withdrawn or superseded, or its item done or gone; only then may it be reaped.
+  - a record carrying a verdict while a pending session reviews the same item and head. That
+    session is told which GitHub reviews are already answered from those records, so it never
+    adopts an old verdict as its own.
+- **Reaping.** Every write keeps every live and every pinned record and drops the other terminal
+  records beyond the retention window. A session is therefore reaped in the write that resolves
+  it, or, if its request is still open, in the write that releases the request. No ledger fills
+  with finished records, and nobody prunes one by hand.
+- **Retention for diagnostics.** Of the unpinned terminal records, the newest **50**, by when they
+  settled (`sessionLedgerRetention`), are kept. They are what `master status` lists as recently
+  completed sessions.
 - **Full ledger.** A write that would pass the bound gives up retained terminal records first, even
-  inside the window. It is refused only when all 200 records are live. A launch checks this before
-  it creates a pane, so a refused launch never leaves a running session holding the agent's name.
-  The refusal names the ledger, its bound and the live count:
+  inside the window. It is refused only when live and pinned records alone reach the bound. A
+  launch checks this before it creates a pane, so a refused launch never leaves a running session
+  holding the agent's name.
+  The refusal names the ledger, its bound, the live count and any pinned count:
   `The review ledger (.graphyard/reviews.json) refused the write: its bound is 200 records and 200 are live sessions …`.
   This is local state, not reviewer or producer capacity. `master status` attributes it that way.
   The row's attention and a single attention item name the ledger, the bound, the live count and
   the remedy. The item is never reported as waiting on a busy reviewer agent. The remedy is to settle the
   live sessions: `master status` reconciles every pending record against its session and GitHub,
-  a session gone from Herdr settles on that pass, and the next write reaps it.
+  a session gone from Herdr settles on that pass, and the next write reaps it, as it reaps a
+  request's records once the control plane stops requesting it.
 - **Headroom.** `master status` reports both ledgers under `ledgers.reviews` and
-  `ledgers.producers`: `path`, `bound`, `retention`, `records`, `live`, `terminal` and
-  `headroom` (how many more live sessions the ledger can record, `bound − live`). A headroom
-  near zero means that many sessions are pending at once. Look at `reviews.pending` and
-  `producers.pending` for the ones that should have settled.
+  `ledgers.producers`: `path`, `bound`, `retention`, `records`, `live`, `pinned`, `terminal` and
+  `headroom` (how many more live sessions the ledger can record, `bound − live − pinned`). A
+  headroom near zero means that many sessions are pending, or that many open requests hold
+  settled sessions. Look at `reviews.pending` and `producers.pending` for the sessions that
+  should have settled, and at the rows whose `dispatch` shows a request retrying or exhausted.
 
 Until GY-131 the review ledger was an append-only array capped at 200 by its schema, and the
 producer ledger was capped at 400 by truncation. Nothing reaped either one. On 2026-09-23 the
