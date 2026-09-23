@@ -15,6 +15,14 @@ Autonomy is the default. The master acts without asking; the human operator sets
 
 Onboarding provides the identities once: `master autonomy --admin-token-stdin --apply` provisions the master's operator-agent identity and the approver identity and installs the master's harness rules; dispatch installs each worker's own rules in its worktree, so a worker pushes its assigned branch and opens its pull request without a keypress. Every attention item in `master status` carries `attentionOwner` — the resolving `role` (`master`, `reviewer`, `control plane`, or `human` only for the three human-only decisions), whether the approver agent must approve, and the `next` command — and `attentionItems` lists them all. Never ask a human to run a command an agent identity is permitted to run.
 
+## Sizing an item
+
+Write **two or three acceptance criteria per item, never more**. A criterion is not free: each one carries its own proofs, each proof group the control plane raises needs a producer session or a registered CI contract to answer it, and every extra criterion widens the surface a reviewer can request changes on. Breadth is what turns one delivery into many rounds — a five-criterion item pays that cost five times before it can merge once.
+
+Fewer criteria is not less rigour, because the remainder becomes its own item rather than disappearing. When an item wants a fourth criterion, split it: the second item names the first as its dependency and ships behind it. Two three-criterion items merge sooner than one six-criterion item, conflict with less of the tree while they wait, and fail in a place a reader can name.
+
+Do not spend a criterion on a standalone `docs/ states …` line. Documentation is part of the behaviour it describes, so say it inside the behavioural criterion that owns it; a separate documentation criterion almost always resolves to a `manual:` proof, which is the most expensive evidence in the system — it occupies a producer session that no CI contract can replace, and it is the first thing a head change cancels.
+
 ## Install
 
 Requires Node 24, Herdr 0.7.1 or newer, a Graphyard checkout, and GitHub CLI authenticated as an identity allowed to merge the protected base branch. Muse profiles require Herdr 0.9.1 or newer, which recognizes kind `muse` natively, and an installed, provider-authenticated `muse` executable on the coordinator host.
