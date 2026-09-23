@@ -7,7 +7,7 @@ import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal } from './merge-queue.js';
+import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, treeIdenticalPrediction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -585,6 +585,16 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     return { commentId: comment.id, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, body, createdAt: comment.created_at };
   }
   /**
+   * The published tip's own tree, or undefined when it could not be read. Read after the tip is
+   * published and never allowed to fail it: the tree is what lets the entry behind this one tell a
+   * prediction that moved only in sha from one that brings content (GY-100), and an entry that
+   * cannot be told either way is republished as it was before, which costs a review round rather
+   * than a delivery.
+   */
+  private async tipTree(tip: string): Promise<string | undefined> {
+    return this.commitTree(tip).catch(() => undefined);
+  }
+  /**
    * Why GitHub dismissed each dismissed review of a pull request, from the issue timeline's
    * `review_dismissed` events, keyed by review id. The verdict the dismissed review carried is
    * read from the event too (`dismissed_review.state`): the review list reports a dismissed
@@ -731,6 +741,16 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * head is a tip is first moved back to the reviewed head under it, and the predicted base is
    * merged onto that; the tip's parents are exactly the reviewed head and its predicted base, which
    * is also what lets the carry rule in model/carry.ts accept it.
+   *
+   * A published tip is never republished onto a predicted base whose tree it already lands
+   * (GY-100). A tip push replaces the head, so GitHub dismisses its approval and withdraws every
+   * verdict bound to it; when the predicted base moved only to a tree-identical commit — an entry
+   * ahead republishing its own tip, a queue merge on the base branch — the merge would produce
+   * the same tree under a new sha and cost a review round for content nobody changed. The advance
+   * is recorded on the speculation instead (`carriedBase`, as the control plane already records a
+   * tree-identical base-branch advance) and nothing is written: `predictQueue` binds the tip to
+   * that prediction, and the approval, the proofs and the checks stand on the commit they were
+   * given for.
    */
   async publishSpeculativeTip(work: Work, placement: QueuePlacement, beforeWrite: () => Promise<void> = async () => {}): Promise<QueueSpeculation> {
     demand(work.candidate && work.queue && placement.predictedBase, 'A queued candidate with a predicted base is required');
@@ -743,6 +763,12 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const branch = await this.baseBranch();
     requireCurrent(!!placement.base && (branch.tip === placement.base.sha || branch.tree === placement.base.tree), `Base branch ${this.config.base} moved before speculative prediction; retry`);
     const baseTree = await this.commitTree(placement.predictedBase!);
+    const ref = queueRef(work.key);
+    // Re-binding a published tip to a tree-identical prediction: recorded, never republished.
+    const rebound = treeIdenticalPrediction(work, placement.predictedBase!, baseTree);
+    // The re-bound record keeps its carry (see keptTipCarry) and names the entries now ahead of it.
+    if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), predecessors: placement.predecessors,
+      carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() } };
     const reviewedHead = await this.ownReviewedHead(work, pr.head.sha);
     await beforeWrite();
     // The branch is moved by a forced ref update after the head was read above, not compared and
@@ -753,7 +779,6 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
     const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
     const tip = merged ?? reviewedHead;
-    const ref = queueRef(work.key);
     await this.publishRef(ref, tip);
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
@@ -762,7 +787,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // an earlier tip with no commit produced: the carry is then decided on the files that changed
     // between the replaced tip's bound base and the predicted base, listed here from GitHub.
     const baseChanges = merged || tip === work.candidate!.sha ? undefined : await this.changedFiles(work.candidate!.baseSha, placement.predictedBase!);
-    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead,
+    return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead,
       ...(baseChanges !== undefined ? { baseChanges } : {}) };
   }
   /**
