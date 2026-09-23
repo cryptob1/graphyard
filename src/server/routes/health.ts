@@ -21,11 +21,20 @@ import { defineRoutes } from '../routes.js';
  * through. It fails (500) when the process cannot reach its database at all. `/healthz?strict`
  * answers 503 whenever the verdict is unhealthy, for a monitor that alerts on the status alone.
  */
+/** How long the health probe waits for its resource checks before answering alive without them. */
+export const healthCheckWaitMs = 3000;
 export const healthRoutes = defineRoutes('health', [
   { method: '*', path: '/healthz', handle: async ({ services, send, url }) => {
     const pool = services.engine.store.pool;
     await pool.query('SELECT 1');
-    const [writeError, database, github] = await Promise.all([probeWrites(pool), readDatabaseCapacity(pool), readGitHubBudget(services.github)]);
+    // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued
+    // behind them failed every deployment's health check (2026-09-23). The resource checks get a
+    // bounded wait; past it the plane answers alive and names the checks it could not finish.
+    const checks = Promise.all([probeWrites(pool), readDatabaseCapacity(pool), readGitHubBudget(services.github)]);
+    const settled = await Promise.race([checks, new Promise<null>(resolve => setTimeout(() => resolve(null), healthCheckWaitMs).unref())]);
+    if (!settled) return { ok: true, healthy: true, writable: null, causes: [`resource checks did not finish within ${healthCheckWaitMs} ms; the database pool is busy`], resources: null,
+      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
+    const [writeError, database, github] = settled;
     const verdict = planeVerdict(writeError, { database, github });
     const body = { ok: verdict.healthy, healthy: verdict.healthy, writable: verdict.writable, causes: verdict.causes, resources: { database, github },
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
