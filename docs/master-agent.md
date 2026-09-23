@@ -373,9 +373,12 @@ waiting on it?
 
 **The loop's own liveness** comes first on the attention list, because a coordinator that stopped is
 why nothing else on that list is moving. `master status` reports `daemon.liveness` as `running`,
-`stalled` (no completed cycle for more than two intervals) or `absent` (no lock, or a lock whose
-process is gone on this host), each with the command that restarts it — `master restart` — and a
-supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
+`slow` (no completed cycle for more than two intervals, but the last measured cycle was itself that
+long: the loop is inside a long cycle, and `daemon.cost` says whether that cycle was computing or
+waiting on a child process — see [never blocked on a child process](#never-blocked-on-a-child-process)),
+`stalled` (no completed cycle for more than two intervals and nothing that explains it) or `absent`
+(no lock, or a lock whose process is gone on this host), each with the command that restarts it —
+`master restart` — and a supervised deployment needs no command at all: the packaged unit sets `Restart=always` with no start
 limit, and the loop sends its supervisor a keep-alive after every cycle, completed or failed, so a
 cycle that hangs is restarted as surely as a process that exits. That restart is reserved for a hung
 process, which only the watchdog detects; a cycle that throws is not one (see
@@ -463,6 +466,74 @@ detached promise in the dispatcher, an approver watch, a Herdr read nobody await
 the process level, logged with its origin (`unhandledRejection caught at the process level during
 cycle 41 …`), counted under `daemon.failures.unhandled`, and survived. It is not a failed cycle:
 the cycle it landed during completes as usual. Only a stop signal ends the loop.
+
+### Never blocked on a child process
+
+The coordinator is one process doing several things at once: the cycle reads the control plane,
+the dispatcher beside it launches reviewer and producer sessions, the merge broker chains provider
+calls. Until GY-125 every child it ran — `herdr`, `gh`, `git`, `systemctl` — ran through
+`execFileSync`, which stops the event loop for as long as the child takes. A `herdr agent start …
+--timeout 30000` therefore blocked the whole process for up to thirty seconds per launch; while the
+dispatcher started six producer sessions back to back, the cycle's in-flight snapshot fetch could
+not be serviced, its abort timer fired the instant the loop came back, and six consecutive cycles
+failed with `The operation was aborted due to timeout` while `master status`, the same read from a
+separate process, answered in eight seconds throughout. The watchdog and the liveness bound both
+read a loop that was merely waiting as a loop that had stalled.
+
+**The rule.** The loop, the dispatcher and the merge broker never block on a child process. Every
+child the coordinator runs goes through one asynchronous runner (`src/child-runner.ts`), and a
+test (`unit:no-sync-child-processes`) refuses a synchronous child call — `execFileSync`,
+`spawnSync`, `execSync` or a blocking sleep — in `src/master.ts`, `src/master-daemon.ts`,
+`src/auto-dispatch.ts`, `src/producer.ts`, `src/reviewer.ts`, the helpers they reach for Herdr,
+gh, git and systemctl, and the [standalone executor](#running-executors-beside-the-daemon), which
+is a dispatcher running outside the daemon and must renew the claim it holds while a launch is in
+flight. The one synchronous child left is the CLI reading its own checkout's commit for the
+version-skew guard, once, when a `master` command starts and before the loop runs a cycle.
+
+**What the runner guarantees.** A child is spawned and awaited on the event loop, so a slow launch
+delays only the launcher that asked for it: the cycle's reads, the dispatcher's next tick and the
+merge broker's provider calls are all serviced while it runs. Every child is bounded — ninety
+seconds by default — and at the bound it is sent `SIGTERM`,
+then `SIGKILL` five seconds later, and the caller sees a rejection that says the command timed out
+rather than a process that hangs. Its output is captured, both streams, bounded at sixteen
+megabytes; the resolved value is the child's stdout, and a non-zero exit rejects with the fields
+the synchronous call's error carried (`stdout`, `stderr`, `status`, `signal`, and a message that
+begins `Command failed:`), so a Herdr refusal read from the command's own JSON, or git's exit
+status, reads exactly as before. The polling waits the coordinator used to spin through — the
+[start bound's](#the-start-bound-reads-the-pane) half-second reads of the pane, up to its
+120-second ceiling, for a closed pane to be gone, between prompt deliveries — are awaited timers
+now, not blocking sleeps, so a launch that takes the whole ceiling holds up only its launcher.
+
+**How `childWaitMs` reads in `master status`.** The runner the loop holds meters every child it
+runs, and the cycle drains that meter at each step boundary, so `daemon.metrics.steps` reports the
+six steps of the last cycle — `observe`, `close`, `decisions`, `dispatch`, `merge`, `deployment` —
+each as `{ ms, childWaitMs }`: the wall time the step took, and of that the time at least one child
+process was in flight. Concurrent children overlap rather than add, so a step's `childWaitMs`
+never exceeds its `ms`, and the difference is the step's own work. The cycle carries the same two
+figures whole: `daemon.metrics.durationMs`, `daemon.metrics.childWaitMs`, and
+`daemon.metrics.workMs`, which is the duration net of every child wait. A cycle that spent eighty
+seconds waiting on `gh` and one that computed for eighty seconds are therefore different readings:
+
+| Field | Meaning |
+| --- | --- |
+| `daemon.metrics.steps.<step>.ms` | Wall time the last cycle spent in that step |
+| `daemon.metrics.steps.<step>.childWaitMs` | Of that, the time a child process (Herdr, gh, git, systemctl) was in flight |
+| `daemon.metrics.childWaitMs`, `daemon.metrics.workMs` | The cycle's child waits and its own work; the two sum to `durationMs` |
+| `daemon.cost` | The last cycle against its interval: `workMs`, `childWaitMs`, `withinInterval` and `withinLivenessBound` (both judged on the work, never on the waits), `slowest` (the step with the most of its own work) and `longestWait` (the step that waited longest on children), and `breakdown`, the same as one operator sentence |
+| `daemon.cycleBudget.lastCycle` | The last cycle's `durationMs` beside its `childWaitMs` and `workMs`, and the same for `lastOverrun` |
+
+The liveness bound is compared against the cycle's own work, never against its waits. A lag past
+two intervals that the last measured cycle accounts for is `slow`, not `stalled`: the attention
+line says the loop is inside a slow cycle, and its next command depends on where the time went —
+a cycle whose work fits the bound and whose time went to child processes names the step that
+waited (`the time went to child processes in the dispatch step (79s), so look at what Herdr, gh or
+git is slow on rather than restarting a loop that is still cycling`), and a cycle that computed
+past the bound names the step to shorten. A cycle whose own work does not fit the interval is
+raised whatever the lag says, since the loop looks healthy the instant a long cycle ends; a cycle
+that merely waited is not, because since GY-125 that wait blocks nothing else in the process. The
+journal carries the reading per cycle: `cycle 41 complete in 86000ms (79200ms waiting on child
+processes); …`. A cursor written before the loop metered its waits still parses, with no steps and
+no `childWaitMs`, and `daemon.cost` then reports that no step breakdown was recorded.
 
 ### Restartability
 
@@ -802,6 +873,13 @@ claiming at the same instant are serialized by the coordination lock, and the lo
 row. An executor that dies mid-action renews nothing, its claim expires, another takes the row as
 a further attempt, and the dead one's late settlement is refused — so nothing is run twice. A
 handler that throws returns its row to the queue with the reason and a widening backoff.
+
+It runs its children through the same asynchronous runner the loop does, and for the same reason
+(see [never blocked on a child process](#never-blocked-on-a-child-process)): while a `dispatch`
+row's launch waits on the runtime, this process is what tells the control plane the claim is still
+held, and a blocked event loop would lose the row mid-flight and have a second executor run the
+action beside it. Every runtime read it makes is awaited too — an inventory read left unawaited
+reports no Herdr agents at all, and an executor that claimed a launch then fails it.
 
 ### A row that keeps failing for the same reason
 
