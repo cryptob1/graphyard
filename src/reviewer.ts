@@ -4,7 +4,8 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, prepareSessionHarness, privateFile, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type EnvironmentProbe, type HerdrAgent, type PromptDelivery, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import type { FleetProbe } from './fleet.js';
 import type { Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { liveReviewRequest } from './model/dispatch.js';
@@ -24,7 +25,8 @@ export const reviewRecordSchema = z.object({
   key: z.string().min(1).max(40),
   pr: z.number().int().positive(),
   sha: sha40, baseSha: sha40, policyRevision: z.number().int().nonnegative(),
-  profile: z.string().min(1).max(80), agentName: z.string().min(1).max(100),
+  /** The Herdr session name: the profile's fixed agent name, or one derived per request when the profile runs several sessions (GY-107, sessionAgentName). */
+  profile: z.string().min(1).max(80), agentName: z.string().min(1).max(120),
   pane: z.string().min(1).max(200).nullable(), sessionDirectory: z.string().min(1),
   requestedAt: z.string().min(1).max(40), tokenExpiresAt: z.string().min(1).max(40),
   // The control plane's review request this session answers (autoDispatch.review.id); a launch
@@ -244,14 +246,18 @@ export async function launchReview(root: string, work: Work, profileName: string
   /** The control-plane review request this launch answers; recorded so the request is never launched twice. */
   requestId?: string;
   /** How the profile's agent accounts are checked before the launch, and how its prompt is confirmed. */
-  probe?: EnvironmentProbe;
+  probe?: FleetProbe;
   prompt?: PromptDelivery;
+  /** The start bound: how long the pane is read for the runtime before the launch is refused (master.ts awaitRuntimeStart). */
+  start?: StartBounds;
   /** How the managed worktree root's volume is read; the kernel's own answer by default. */
   filesystem?: FilesystemProbe;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   const config = await loadMasterConfig(root);
   if (!config.reviewer) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
+  // The App is narrowed once, for the launch closure below as much as for this line.
+  const reviewerApp = config.reviewer;
   const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
   if (!profile) throw new Error(profileName ? `Unknown reviewer profile ${profileName}` : config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
   const binding = assertReviewCandidate(work, observedAt);
@@ -269,52 +275,62 @@ export async function launchReview(root: string, work: Work, profileName: string
   }
   for (const [pending, reason] of superseded) await closeReviewSession(root, pending, { run: dependencies.run, now }, { state: 'cancelled', resolution: reason, force: true });
   if (superseded.size) await saveReviewLedger(root, ledger);
-  if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`Reviewer agent ${profile.agentName} is already visible in Herdr`);
+  // The profile's room (GY-107): one session per name, and no more sessions than it declares.
+  // A name this session would take that Herdr already shows is the same launch twice.
+  const id = randomUUID();
+  const attempt = dependencies.requestId ? ledger.reviews.filter(entry => entry.requestId === dependencies.requestId).length + 1 : undefined;
+  const agentName = sessionAgentName(profile, { id, requestId: dependencies.requestId, attempt });
+  if (agents.some(agent => agent.name === agentName)) throw new Error(`Reviewer agent ${agentName} is already visible in Herdr`);
+  const sessions = profileSessions(profile, agents, ledger.reviews);
+  if (!sessions.free) throw new Error(profileAtLimit('Reviewer', profile, sessions));
   // Before a token is minted: an exhausted or logged-out account is skipped for the profile's next.
   const selected = await selectAccount(config, 'reviewer', profile, { ...dependencies.probe, work: work.key });
-  const credential = await readReviewerCredential(root, config.reviewer.credentialFile);
-  if (credential.appId !== config.reviewer.appId || credential.installationId !== config.reviewer.installationId || credential.slug !== config.reviewer.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
-  if (credential.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App');
-  const mint = dependencies.mint ?? ((value: ReviewerCredential, repository: string) => mintReviewerToken(value, repository));
-  const id = randomUUID();
-  // Before a token exists: the one place this session may check the head out, under the managed
-  // worktree root — durable storage with room left, outside every worktree.
-  const checkout = await allocateManagedCheckout(root, config, 'review', binding.key, binding.sha, id, dependencies.filesystem);
-  const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
-  let minted: { token: string; expiresAt: string };
-  const sessionDirectory = resolve(dirname(config.reviewer.credentialFile), 'sessions', id);
-  try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
-  catch (error) { await discard(); throw error; }
-  const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, sharedGitDirectory(root)].filter((path): path is string => !!path) });
-  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
-  try {
-    // The reviewer loads its own role rules, never the master's: it may post this one verdict.
-    // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
-    const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
-    const environment = { ...launch.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
-    const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
-      '--label', `${binding.key} review · ${profile.agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
-    pane = created.pane; tabId = created.tab;
-    // The request is the session's own first message, on the runtime's command line (GY-93).
-    ({ delivery } = startAgentSession(profile.agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, dependencies.prompt));
-  } catch (error) {
-    // A launch that never became a session leaves no checkout behind.
-    await discard();
-    const malformedTab = (error as any)?.herdrTab as string | undefined;
-    if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
-      catch { await rm(sessionDirectory, { recursive: true, force: true }); throw new Error(`${error instanceof Error ? error.message : 'Reviewer launch failed'}; Herdr could not confirm cleanup, so the reviewer credential directory was removed and the token will expire at ${minted.expiresAt}`); }
-    await rm(sessionDirectory, { recursive: true, force: true });
-    // A launch that failed for want of room says so, with the path and the reclaim command.
-    throw writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
-  }
-  const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
-    profile: profile.name, agentName: profile.agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, checkout: checkout.directory,
-    ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt: ledger.reviews.filter(entry => entry.requestId === dependencies.requestId).length + 1 } : {}) });
-  await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
-  return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName: profile.agentName,
-    pane: record.pane, checkout: checkout.directory, reviewer: `${config.reviewer.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery,
-    account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
-    recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
+  // Everything past the choice can fail; the session it chose is given back at once when it does.
+  return onSelectedSession(selected, `reviewer launch for ${work.key} failed`, async () => {
+    const credential = await readReviewerCredential(root, reviewerApp.credentialFile);
+    if (credential.appId !== reviewerApp.appId || credential.installationId !== reviewerApp.installationId || credential.slug !== reviewerApp.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
+    if (credential.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App');
+    const mint = dependencies.mint ?? ((value: ReviewerCredential, repository: string) => mintReviewerToken(value, repository));
+    // Before a token exists: the one place this session may check the head out, under the managed
+    // worktree root — durable storage with room left, outside every worktree.
+    const checkout = await allocateManagedCheckout(root, config, 'review', binding.key, binding.sha, id, dependencies.filesystem);
+    const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
+    let minted: { token: string; expiresAt: string };
+    const sessionDirectory = resolve(dirname(reviewerApp.credentialFile), 'sessions', id);
+    try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
+    catch (error) { await discard(); throw error; }
+    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
+    try {
+      // The reviewer loads its own role rules, never the master's: it may post this one verdict.
+      // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
+      const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
+      const environment = { ...launch.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
+      const created = createdHerdrTab(herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
+        '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
+      pane = created.pane; tabId = created.tab;
+      // The request is the session's own first message, on the runtime's command line (GY-93), read
+      // from the request file in the session's checkout so the typed line stays short (GY-121).
+      ({ delivery } = startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
+    } catch (error) {
+      // A launch that never became a session leaves no checkout behind.
+      await discard();
+      const malformedTab = (error as any)?.herdrTab as string | undefined;
+      if (pane || tabId || malformedTab) try { stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
+        catch { await rm(sessionDirectory, { recursive: true, force: true }); throw new Error(`${error instanceof Error ? error.message : 'Reviewer launch failed'}; Herdr could not confirm cleanup, so the reviewer credential directory was removed and the token will expire at ${minted.expiresAt}`); }
+      await rm(sessionDirectory, { recursive: true, force: true });
+      // A launch that failed for want of room says so, with the path and the reclaim command.
+      throw writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
+    }
+    const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
+      profile: profile.name, agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, checkout: checkout.directory,
+      ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
+    await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
+    return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
+      pane: record.pane, checkout: checkout.directory, reviewer: `${reviewerApp.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery,
+      account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
+      recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
+  });
 }
 
 /**
