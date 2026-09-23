@@ -9,9 +9,6 @@ For every reader and guide: one definition and one canonical usage per term.
 
 - **Who:** administers a Graphyard installation, usually also the GitHub repository.
 - **Credential:** `admin`, declaring `sessionKind: "human"`.
-- **Decides:** only three ([who decides](#who-decides)); every other is an agent's, approved by an [independent agent](operator-automation.md#two-party-decisions), though a declared human session may make any directly.
-- **Canonical usage:** *human operator*; bare *operator* means this person, *administrator* same person in a GitHub or deployment context.
-- **Never:** *operator* for the scoped operator agent, *user* for anyone, *ask the operator to approve* for a two-party decision an approver agent applies.
 
 ### 2. AI agent
 
@@ -22,31 +19,23 @@ Language-model program reading and writing through an agent runtime. "Agent" nam
 ### 3. Agent session (Herdr-managed session or runtime)
 
 - **Is:** one running agent instance inside a runtime, with transcript, process and lifetime.
-- **Is not:** a dashboard sign-in, which keeps a token in browser session storage, nor `sessionKind`, a credential's declaration of whether a human or AI holds it.
-- **Canonical usage:** *agent session* or *session*; *runtime* for software hosting sessions, *dashboard sign-in* for the browser.
 
 ### 4. Principal, role, and credential
 
 - ***Principal*:** identity Graphyard authenticates, the `id` in `GRAPHYARD_PRINCIPALS` or the operator-agent registry.
 - ***Role*:** its authority class: `admin`, `coordinator`, `slice-lead`, `worker`, `producer`, `reader`, `operator-agent`.
 - ***Credential*:** secret proving it.
-- **Attach to the principal, never runtime or display name:** ownership, evidence trust and every refusal.
 - **Canonical usage:** *principal*, *role*, *token* or *credential*. One principal per concurrent session.
 
 ### 5. Worker lease and worktree
 
 - ***Lease*:** time-limited ownership of one work item by one worker principal at one *epoch*.
 - **Lifecycle:** heartbeat renews it; `complete`, release or expiry ends it; every claim raises the epoch.
-- ***Assigned worktree*:** Git worktree registered as the assignment's workspace `(host ID, absolute path)` with a globally reserved branch.
-- **Canonical usage:** *lease*, *epoch*, *assigned worktree*; *workspace* for registered `(host, path)`, *worktree* for Git checkout there.
 
 ### 6. Independent reviewer and proof producer
 
-- ***Reviewer*:** GitHub identity approving the exact candidate head, neither the pull-request author nor the control-plane App, holding no Graphyard credential.
-- ***Proof producer*:** `producer` principal (usually a CI workflow or trusted runner) whose live grant authorizes exact proof names and whose evidence binds to the candidate head, base and policy revision.
 - ***Independent*:** both; never an implementer, slice lead or the worker's credential.
 - **Canonical usage:** *reviewer*, *proof producer*; *reviewer/proof producer* only when a sentence covers both.
-- **Never:** *the tester* or *QA*: evidence trust is a granted credential, not a job title.
 
 ### 7. Graphyard control plane
 
@@ -84,13 +73,13 @@ The master requests, an independent approver applies ([how](operator-automation.
 - **Approve a merge with automatic merging off:** approver that produced no evidence on the item
 - **Select a review provider:** the reviewer approves each candidate
 - **Merge (guarded merge):** the merge gate, rechecked on the exact candidate
-- **GitHub administration, rotating agent principals, restarting the loop:** API verification and audit ledger; a preview refusing to drop a live principal
+
+An item reaching one of those three records a typed *human-only request* (`graphyard park`), which ends its attempt's lease and parks it; the operator answers it (`graphyard answer`, or **Work → Needs you**) and the loop dispatches the item again. A *capacity escalation* is the other wait belonging to nobody's judgement: every account of a role is spent, the item names each account and its reset, and the loop resumes the role on its own ([human-only waits](master-loop.md#human-only-waits), [when a role has no account left](fleet.md#when-a-role-has-no-account-left)).
 
 Others decide:
 
 - **Approve a candidate:** reviewer, under branch protection and the merge gate
 - **Produce trusted evidence:** proof producer, under the acceptance gate
-- **Goals and priorities; spending money or opening third-party accounts; issuing credentials to people:** **Human operator**, alone
 
 ## Diagram legend
 

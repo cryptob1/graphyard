@@ -1,23 +1,26 @@
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { startGithubSetup } from '../github-setup.js';
 import { resourceConflicts } from '../coordination.js';
-import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, setupMaster, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
+import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { bindReviewer, removeReviewerProfile, reviewCommand, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
+import { reviewCommand } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../master-browser.js';
 import { defineCommands } from './registry.js';
-import { approveScopeRequest, cycleBudget, masterStatusReport, scopeRequestCommand } from './master-status.js';
+import { approveScopeRequest, cycleBudget, masterStatusReport } from './master-status.js';
+import { masterInit } from './master-init.js';
+import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
+import { executorHostHeader } from '../model/registry.js';
 import { readSecretFromStdin } from './context.js';
+import { reviewerCommand } from './master-reviewer.js';
+import { registryCommand, registryHelp } from './master-registry.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -27,8 +30,9 @@ export const masterCommands = defineCommands([
     help: [
       '  master init --token-stdin [--herdr-workspace ID] [--browser-profile PROFILE]',
       '              [--dispatch-interval SECONDS] [--reviewer-profile NAME] [--producer-timeout MINUTES]',
-      '                                Install the recommended master-agent operating mode; PROFILE is',
-      "                                the operator's Chrome profile the master administers GitHub",
+      '              [--replace-supervisor] Install the operating mode and, in the coordinator',
+      "                                checkout, the loop's systemd unit; --replace-supervisor replaces",
+      "                                another loop's. PROFILE: the operator's Chrome profile",
       '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
       '  master worker add FILE        Add an existing or launchable Herdr worker profile',
       '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App; NAME',
@@ -77,23 +81,14 @@ export const masterCommands = defineCommands([
       '  master restart                Restart this host\'s master loop detached',
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
+      ...registryHelp,
     ],
     async run(context) {
-      const { id, args, base, print } = context;
+      const { id, args, print } = context;
       const root = context.repositoryRoot();
       // The guide's first line is its docs-index entry, not guide body.
       if (id === 'guide') return console.log((await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
-      if (id === 'init') {
-        const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'dispatch-interval': { type: 'string' }, 'reviewer-profile': { type: 'string' }, 'producer-timeout': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' } }, allowPositionals: false });
-        if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
-        const masterToken = await readSecretFromStdin(10_000); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
-        const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
-        const run = { ...(values.interval ? { intervalSeconds: Number(values.interval) } : {}), ...(values['proof-workflow'] ? { proofWorkflow: values['proof-workflow'] } : {}), ...(values['deployment-url'] ? { deploymentUrl: values['deployment-url'] } : {}), ...(values['deployment-sha-field'] ? { deploymentShaField: values['deployment-sha-field'] } : {}), ...(values['smoke-workflow'] ? { smokeWorkflow: values['smoke-workflow'] } : {}),
-          ...(values['dispatch-interval'] ? { dispatchIntervalSeconds: Number(values['dispatch-interval']) } : {}), ...(values['reviewer-profile'] ? { reviewerProfile: values['reviewer-profile'] } : {}), ...(values['producer-timeout'] ? { producerTimeoutMinutes: Number(values['producer-timeout']) } : {}) };
-        if (values['browser-executable'] && !values['browser-profile']) throw new Error('--browser-executable requires --browser-profile');
-        const browser = values['browser-profile'] ? { profile: values['browser-profile'], ...(values['browser-executable'] ? { executable: values['browser-executable'] } : {}) } : undefined;
-        return print(await setupMaster(root, { url: values.url ?? base, token: masterToken, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), herdrWorkspace: values['herdr-workspace'], ...(values['no-auto-merge'] ? { autoMerge: false } : {}), ...(method ? { mergeMethod: method as 'merge' | 'squash' | 'rebase' } : {}), ...(Object.keys(run).length ? { run } : {}), ...(browser ? { browser } : {}) }));
-      }
+      if (id === 'init') return masterInit(context, root);
       const master = await loadMasterConfig(root);
       const masterToken = await readCredentialFile(master.credentialFile);
       const masterApi = async (path: string, credential = masterToken, timeoutMs = 30_000, headers: Record<string, string> = {}) => {
@@ -104,7 +99,8 @@ export const masterCommands = defineCommands([
         const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
         const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
       };
-      const coordinator = await masterApi('status'); assertMasterBinding(master, coordinator);
+      // The host is named so the control plane judges fleet placement for this executor.
+      const coordinator = await masterApi('status', masterToken, 30_000, { [executorHostHeader]: master.hostId }); assertMasterBinding(master, coordinator);
       // The CLI's own commit, for the version-skew guard.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
@@ -120,31 +116,8 @@ export const masterCommands = defineCommands([
       if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
       if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
       if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
-      if (id === 'reviewer') {
-        if (args[0] === 'add' && args[1]) return print(await saveReviewerProfile(root, JSON.parse(await readFile(args[1], 'utf8'))));
-        if (args[0] === 'remove' && args[1]) return print(await removeReviewerProfile(root, args[1]));
-        if (args[0] === 'bind' && args[1]) {
-          const { values, positionals } = parseArgs({ args: args.slice(1), options: { 'key-stdin': { type: 'boolean' } }, allowPositionals: true });
-          if (!values['key-stdin']) throw new Error('Use master reviewer bind FILE --key-stdin so the reviewer private key is not stored in shell history');
-          const input = await readSecretFromStdin(20_000, 'Reviewer key input is too large');
-          const identity = JSON.parse(await readFile(positionals[0], 'utf8'));
-          return print(await bindReviewer(root, { appId: Number(identity.appId), installationId: Number(identity.installationId), slug: String(identity.slug), privateKey: input }, verifyReviewerInstallation));
-        }
-        if (args[0] === 'setup') {
-          const { values } = parseArgs({ args: args.slice(1), options: { deployment: { type: 'string' }, port: { type: 'string' }, name: { type: 'string' } }, allowPositionals: false });
-          const deployment = values.deployment ?? master.url;
-          if (!deployment.startsWith('https://')) throw new Error('Reviewer App registration needs the deployed HTTPS origin; pass --deployment https://YOUR-GRAPHYARD-HOST');
-          const registrations = reviewerCredentialDirectory(master);
-          await mkdir(registrations, { recursive: true, mode: 0o700 });
-          const setup = await startGithubSetup(root, master.repository, deployment, Number(values.port ?? 4312), {
-            file: resolve(registrations, `${master.repository.replace('/', '-')}-registration.json`),
-            record: async app => { await bindReviewer(root, { appId: app.appId, installationId: app.installationId, slug: app.slug, privateKey: app.privateKey }, verifyReviewerInstallation); },
-          }, values.name ?? 'reviewer');
-          console.log(`Open ${setup.url} in your browser and register the reviewer App. It is a second App, separate from the Graphyard control-plane App, and it cannot write code. Credentials stay outside this repository with mode 0600. Press Ctrl+C when the page reports the installation is verified.`);
-          const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;
-        }
-        throw new Error('Use master reviewer setup, master reviewer bind FILE --key-stdin, or master reviewer add FILE');
-      }
+      if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
+      if (id === 'reviewer') return reviewerCommand(root, master, args, print);
       if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
@@ -257,13 +230,14 @@ export const masterCommands = defineCommands([
         const daemonRun = runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload }).finally(() => stopping.abort());
         const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatchEffects(root, current, { snapshot: () => coordinationSnapshot(dispatchReadTimeoutMs) }), { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });
         const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
-        return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null,
+        // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
+        return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, dispatchIntervalSeconds: master.run.dispatchIntervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null,
           dispatch: { ticks: dispatched.ticks.length, launched: dispatched.ticks.reduce((total, tick) => total + tick.launched.length, 0), refused: dispatched.ticks.reduce((total, tick) => total + tick.refused.length, 0), last: dispatched.ticks.at(-1) ?? null } });
       }
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
   },
-  scopeRequestCommand,
+  ...sessionCommands,
 ]);
 
 export { cycleBudget };

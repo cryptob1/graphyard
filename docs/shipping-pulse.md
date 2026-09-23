@@ -9,7 +9,6 @@ A repository view, not a worker scorecard, under the same [privacy boundary](flo
 
 Every value comes from the append-only `events` ledger.
 
-- **A delivery counts** only from the first `github.observed` event whose immutable payload carries an accepted `delivery`, exact pull request, exact merge commit and provider merge timestamp
 - **Never counted:** work snapshots, claims, submissions and lease activity
 - **Delivered once:** decided across the whole ledger before any window applies
 
@@ -25,7 +24,5 @@ Every window, bucket and interval uses the repository instant, older deliveries 
 **PR-to-production** runs from GitHub's observed pull-request `createdAt`, splits at the merge, and ends at the earliest successful production deployment independently recording containment of that exact merge SHA.
 
 - **`clockOffset`:** each deployment observation's measured bracket relative to the repository clock
-- **Ingestion refuses:** a bracket wider than twenty seconds, an inverted one, or one placing the clocks more than thirty days apart
-- **Post-merge:** a deployment counts when its latest bound reaches the merge instant, which clamps its lower bound, so a duration is never negative, published only to its endpoints' measurement precision
 
 `GET /api/shipping-pulse` is authenticated and not offered to operator agents: their scoped API serves no repository-wide aggregate, and their navigation hides the entry.

@@ -23,16 +23,12 @@ For an integration author: every mutation a principal may send, with its JSON bo
 - `scope` (`scope-request`): `{"epoch":1,"paths":[…],"reason":"…"}` records the worker's [scope request](../coordination.md#schedule-by-overlap-smallest-scope-first), empty `paths` withdrawing it; one carrying `remove` or `criteria` is refused and escalated
 - `autoscope`: `{"epoch":1}`; `coordinator` or `admin`; the control plane [decides the open request](../coordination.md#scope-requests-the-loop-decides)
 - `quarantine`, `launch`, `settle`: `{epoch, settlementHash, scope?}`, `{epoch, settlementHash}` and `{epoch, settlementToken}`: the supervisor's [containment fence](leases.md)
-- `submit`: `{"epoch":1,"pr":123}`; refused, naming the files, when the pull request reverts, deletes or rewrites anything outside `plannedFiles` ([guard](#submit-time-regression-guard))
 - `evidence`, `revoke`: See [evidence and proof authority](evidence.md)
 - `reviewpolicy`, `rereview`: See [review providers](github-webhook.md)
 - `deployment`: `{"sha":"<serving commit>","mergeSha":"<the item's merge commit>","source":"endpoint","observedAt":"…"}`; coordinator or admin, delivered work only, once per delivery
 
 ## Submit-time regression guard
 
-- **Observed before `submit` is recorded:** the pull request, through the control plane's App, outside the coordination transaction
-- **Classified:** every changed file against `plannedFiles` ([the rule](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope)), each out-of-scope file compared by blob identity with the commit the candidate is bound to: the base-branch tip, or a published speculative tip's predicted base
-- **Refusal:** `409` with `Submission refused for GY-N: DETAIL`, one entry per file; writes nothing, leaves no receipt: the same idempotency key may retry once the branch is fixed
 - **Branch:** the observed head branch must be the epoch's registered workspace branch
 - **Without GitHub configured:** no pre-check runs; the reconciliation job still evaluates the candidate
 
@@ -41,8 +37,6 @@ For an integration author: every mutation a principal may send, with its JSON bo
 `POST /api/deployments` records one deployment-provider observation, feeding [flow analytics](../flow-analytics.md) and moving no gate.
 
 - **Credential:** `producer` or `admin`, never a worker
-- **Body:** `provider`, `externalId`, `environment`, the full artifact `sha`, one to 200 verified `containedMergeShas`, `state` (`succeeded`, `failed` or `rolled_back`), `startedAt`/`finishedAt`
-- **Append-only, unique per provider, external ID and state:** a repeat replaying every immutable field returns `duplicate`; a differing one is refused
 
 ## Other mutations
 
@@ -64,6 +58,5 @@ Each `POST` but the webhook requires an [`Idempotency-Key`](roles.md#requests-an
 ## CLI environment
 
 - `GRAPHYARD_URL`, `GRAPHYARD_TOKEN` or the file `GRAPHYARD_TOKEN_FILE` names: override the saved connection
-- `GRAPHYARD_REQUEST_ID`: the command's `Idempotency-Key`, otherwise generated; set it only to retry the same command after a network failure. Heartbeats, automatic ones included, and new polling attempts always use fresh keys
 - `GRAPHYARD_HOST_ID`: for hostnames not globally unique; default the connection's `--host-id`, then the hostname
 - **Session markers, set by launchers only:** `GRAPHYARD_MASTER=1` (`master approve` refuses under it), `GRAPHYARD_APPROVER=1`, `GRAPHYARD_REVIEW` and `GRAPHYARD_PRODUCER` (the `GY-N@SHA` answered), `GRAPHYARD_HERDR_AGENT_KIND` (with `HERDR_ENV=1`, `watch` launches contained in the foreground); worker launches strip `GRAPHYARD_TOKEN`, `GRAPHYARD_MASTER_TOKEN` and `GRAPHYARD_REQUEST_ID`

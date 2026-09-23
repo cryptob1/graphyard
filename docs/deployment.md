@@ -5,8 +5,7 @@ For whoever runs the control plane: which variables, host and backup path to cho
 
 ## Versioned images
 
-- Every tagged release `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`, the tag equal to the `package.json` version; the build stamps it and the Git revision into the image as `GRAPHYARD_VERSION`, `GRAPHYARD_BUILD_REVISION` and matching OCI labels.
-- Published only after `scripts/verify-image-release.mjs` confirms the release contract against an isolated database: `/healthz` reports `{ok, version, revision, schema}`, `db status` shows the expected schema generation, `db backup`/`db restore` carry a live ledger into a fresh database that serves it unchanged.
+- Every tagged release `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`, the tag equal to the `package.json` version, stamped with `GRAPHYARD_VERSION`, `GRAPHYARD_BUILD_REVISION` and matching OCI labels — only after `scripts/verify-image-release.mjs` confirms the release contract against an isolated database: `/healthz` reports `{ok, version, revision, schema}`, `db status` the expected schema generation, and `db backup`/`db restore` carry a live ledger into a fresh database that serves it unchanged.
 - A deployment names its release at `/healthz` without a credential and under `release` in `/api/status`; pin a digest where immutability matters.
 
 ## Variables
@@ -41,11 +40,7 @@ For whoever runs the control plane: which variables, host and backup path to cho
 
 ### Changing the roster safely
 
-- `scripts/configure-integrations.mjs --apply` never rebuilds `GRAPHYARD_PRINCIPALS` from a local file: it merges `.graphyard/credentials.json` into the live roster by id, keeping every live principal the file omits.
-- **Preview:** each id, role, change and token state (`unchanged`, `rotated`, `new`, `removed`), never a token.
-- `--remove ID`: dropping or demoting the coordinator, an admin or another live principal is refused without it; `--rotate ID` rotates one.
-- `--deploy`, required by a changed producer token: variables staged, service redeployed, GitHub secret set only once the deployed server authenticates the new token. With no token change nothing is deployed.
-- **A token the deployment does not serve in time** is reported with its secret unchanged; the owed sync is recorded in the ignored `.graphyard/pending-secret-sync.json` until set.
+- `scripts/configure-integrations.mjs --apply` never rebuilds `GRAPHYARD_PRINCIPALS` from a local file: it merges `.graphyard/credentials.json` into the live roster by id, keeping every live principal the file omits. The preview shows each id, role, change and token state (`unchanged`, `rotated`, `new`, `removed`), never a token.
 
 ### Delegation capacity variables
 
@@ -55,20 +50,15 @@ For whoever runs the control plane: which variables, host and backup path to cho
 
 ### Generated-files variable
 
-- **Derived alike by every installer** (`generatedFilesAssignment` in `src/install/generated-files.ts`) from the managed repository's manifest, written beside `GRAPHYARD_PRINCIPALS`: `scripts/provision-railway.mjs` and `scripts/configure-integrations.mjs` set it on the Railway service, `.railway/railway.ts` preserves it, `graphyard init --scan --apply` reports the line under `generatedFiles`, `.env.example` declares it for Compose
-- **Source:** the manifest JSON (`node scripts/check-docs.mjs --manifest`) wins whenever it parses; a well-formed `--list` line serves a script predating it; a failing script, prose or an unparsable value is refused with a clear message, a repository without the script leaves the variable unset
-- **Drift:** the deployed value is reported under `delegationLimits.deployed`; `master status` compares it with the manifest and raises the fix as an attention item (`Set GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md on the deployment`)
+- **Derived alike by every installer** (`generatedFilesAssignment` in `src/install/generated-files.ts`) from the managed repository's manifest, written beside `GRAPHYARD_PRINCIPALS`: `scripts/provision-railway.mjs` and `scripts/configure-integrations.mjs` set it on the Railway service, `.railway/railway.ts` preserves it, `graphyard init --scan --apply` reports it under `generatedFiles`, `.env.example` declares it for Compose
+- **Drift:** the deployed value is under `delegationLimits.deployed`, and `master status` raises the fix as an attention item (`Set GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md on the deployment`)
 
 ## Hosts
 
-- **Railway:** a project with Postgres and an application service from this repository on `main` building the root `Dockerfile`; `railway config plan`, then `railway config apply`. `.railway/railway.ts` defines the application, Postgres, volume, health check and restart policy, declaring every hand-set variable with `preserve()`, which retains an existing value but never creates one. Then generate a domain, verify `/healthz` and point the App webhook at `/api/github/webhook`
 - **Docker Compose:** `cp .env.example .env`, replace every example secret, `docker compose --profile full up -d` (`--build` builds this checkout). `GRAPHYARD_IMAGE` pins a release or digest; `graphyard-data` holds durable state, `graphyard-backups` the logical backups. Both published ports bind loopback: put a TLS reverse proxy before 4310, never expose Postgres, and set a unique database password, the four capacity variables and `GRAPHYARD_BUILD_SHA=$(git rev-parse HEAD)` when you build
 - **Kubernetes:** `deploy/helm/graphyard`, `helm upgrade … --set image.tag=X.Y.Z`, then `helm test`: a stateless Deployment over one Postgres ledger, a Service, a TLS Ingress and a Secret, no worktree volume
-
-- **The chart's `pre-upgrade` hook Job** (also `pre-install` with an external database) runs `graphyard db migrate` from the image being rolled out and refuses when a newer release already migrated the database, so a rollback stops at the hook rather than replacing healthy pods.
-- `secrets.existingSecret`: a Secret carrying `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_PRIVATE_KEY` (a file, possibly empty) and `GITHUB_WEBHOOK_SECRET`; the chart refuses to render with nowhere to hold credentials, and `secrets.create=true` renders one for evaluation only.
-- `backup.enabled=true` adds a CronJob running `graphyard db backup` onto a claim, verifying each file and pruning after `backup.retainDays`, `backup.persistence.existingClaim` outliving the release; `postgresql.enabled=true` adds an evaluation StatefulSet, production pointing `DATABASE_URL` at managed Postgres.
-- `helm test` checks `/healthz` and the running version, keeping the pod for `--logs`; the Deployment rolls with `maxUnavailable: 0` over non-root, read-only pods without capabilities. `deploy/helm/exercise.sh IMAGE` exercises install, test, a leased assignment across an upgrade, a CronJob backup, uninstall, reinstall and restore on a kind cluster through `.github/workflows/helm.yml`.
+  - The chart's `pre-upgrade` hook Job (also `pre-install` with an external database) runs `graphyard db migrate` from the image being rolled out and refuses when a newer release already migrated the database, so a rollback stops at the hook rather than replacing healthy pods.
+  - `secrets.existingSecret` carries `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_PRIVATE_KEY` (a file, possibly empty) and `GITHUB_WEBHOOK_SECRET`; the chart refuses to render with nowhere to hold credentials, and `secrets.create=true` renders one for evaluation only. `backup.enabled=true` adds a CronJob running `graphyard db backup` onto a claim, verifying each file and pruning after `backup.retainDays`, `backup.persistence.existingClaim` outliving the release; `postgresql.enabled=true` adds an evaluation StatefulSet, production pointing `DATABASE_URL` at managed Postgres.
 
 ## Agent hosts: the managed worktree root
 
@@ -81,14 +71,11 @@ Every host running `graphyard master run` holds the assignment worktrees under `
 | `run.worktreeRootBudgetGb` | Size it may reach, 0.1–10000; default 10 |
 
 - **Preflight:** `master init` and every launch refuse a tmpfs or ramfs root or a volume below the minimum, judging one that does not exist yet by its nearest existing ancestor; the first launch creates it
-- **A service unit** must leave it visible and writable: no `PrivateTmp`-style private mount, no `ProtectHome` under the home directory, the path in `ReadWritePaths`
 - **`disk.worktreeRoot`** in `master status` reports free space, size, checkouts and how many no live session owns, raising `graphyard master run --once` as an attention item below the minimum, at four fifths of the budget (a user quota free space never shows) or on a tmpfs root
-- [What the loop creates there and removes](master-agent.md#session-checkouts)
+- [What the loop creates there and removes](fleet.md#session-checkouts)
 
 ## Replicas and availability
 
-- **API replicas** share Postgres: coordination locks and job leases in the database, no sticky sessions; startup migrations take the same lock and commit transactionally, over additive idempotent DDL.
-- `/healthz` checks database connectivity, not GitHub freshness, reports the running `commit`; monitor `/api/status` for integration job errors, `delegationLimits.attention` and `production.incidents`.
 - **One replica** initially; exercise the concurrency tests and load profile before scaling.
 
 ## Production deployment observation
@@ -102,10 +89,8 @@ Whether a merged commit reached production is observed separately, every minute,
 ## After the merge
 
 - A merged commit production never served is a **deployment incident**, recorded at once when the provider reports `FAILED` or `CRASHED`, after a five-minute grace when no deployment of the merge is observed. An append-only `delivery.deployment-incident` event shows in `production.incidents`, `doctor` (`next`) and `master status` as `main is N commits ahead of production (serving …): <reason>`, `/healthz` staying green on the previous release. Fix the deployment, not the ledger — a start-up refusal is printed verbatim and, for a capacity limit, names the variable and value to set — and revert the merge only if the change is wrong; `delivery.deployment-recovered` is appended once a deployment containing it serves.
-- A delivery whose trusted smoke proof failed stays Done, marked **delivered with failure** and listed under `delivered` with `rollback` guidance naming the serving commit, the merge commit and the base branch: roll the deployment back to the last release whose smoke proof passed, or revert the merge through a new item under the same gates. Never backfill a pass or delete the failure: a later run at the same deployed commit may supersede the verdict, and a release that moved on before the smoke ran leaves the item `awaiting-smoke`. Graphyard v0.1 executes neither rollback nor revert itself.
 
 ## Backup, upgrade, restore
 
-- **Physical or provider backups:** scheduled backups, managed snapshots or `pg_dump` with a matching client, restore-verified in a separate project.
 - **Logical backups:** `graphyard db backup FILE` on the control-plane host writes every ledger table from one consistent snapshot, the serial sequences ordering work, events, grant history and observations, the schema generation and a digest over it all; `graphyard db verify FILE` checks a file without touching a database, `graphyard db restore FILE` loads one into an empty database. The documented upgrade, Helm CronJob and release verification use that format.
 - A backup holds private validation artifacts, evidence and credential hashes: store it like the database.

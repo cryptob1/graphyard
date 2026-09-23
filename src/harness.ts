@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { chmod, lstat, readFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, resolve } from 'node:path';
+import { endedRuntimeStates, type RuntimeStates } from './model/sessions.js';
 
 export type ApprovalMode = 'auto' | 'prompt';
 export interface LaunchRecipe { args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string }
@@ -19,6 +20,25 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
   opencode: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, prompts: 'edit, bash, and webfetch permission prompts',
     tradeoff: 'opencode edits files, runs shell commands, and fetches URLs without asking.' },
 };
+
+/**
+ * What each runtime's own session listing calls a session that has ended.
+ *
+ * Liveness reconciliation (`model/sessions.ts`) asks one question of a runtime — is this session
+ * still holding its place — and the answer is the runtime's own vocabulary, so it belongs here with
+ * the rest of the per-runtime startup contracts rather than in the rule. A runtime with no entry
+ * gets the shared set: Herdr normalizes the coding runtimes onto the same states, and only a
+ * runtime with terminal states of its own needs naming — a coding session that exited is simply
+ * absent from `agent list`, which the `vanished` rule covers without any state at all. `idle`,
+ * `done` and `blocked` are deliberately not ended anywhere: each is a live session waiting at its
+ * prompt, and closing its handle would take away the attach command at the one moment somebody
+ * needs it.
+ */
+export const runtimeEndedSessionStates: Record<string, readonly string[]> = {
+  // Muse is the one runtime whose listing reports an exit rather than dropping the session.
+  muse: [...endedRuntimeStates, 'exited-error', 'terminated'],
+};
+export const runtimeEndedStates: RuntimeStates = runtime => runtimeEndedSessionStates[runtime] ?? endedRuntimeStates;
 
 export function launchPlan(kind: string | undefined, approvals: ApprovalMode = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
   const recipe = kind ? nonInteractiveLaunch[kind] : undefined;

@@ -5,13 +5,18 @@ import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type ContainmentScope, type Work } from './model.js';
+import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
-import { pendingBaseRefresh } from './merge-queue.js';
+import type { SessionHandleInput } from './model/sessions.js';
+import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
-import { assertDispatchable, assertOutsideWorktrees, closeHerdrPane, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, listHerdrAgents, mergedWithoutAuthorization, mergeExecutor, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type ConfigReload, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
-import { reclaimCheckouts } from './producer.js';
+import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
+import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
+import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
+import { launchReview, readReviewLedger, saveReviewLedger } from './reviewer.js';
+import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 
 /**
@@ -21,7 +26,7 @@ import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'scope'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
@@ -43,6 +48,12 @@ const noMeasurement = { count: 0, p50Ms: 0, p90Ms: 0 };
 export const cycleMetricsSchema = z.object({
   cycle: z.number().int().min(0), at: z.string(), durationMs: z.number().int().min(0),
   open: z.number().int().min(0), actions: z.number().int().min(0),
+  /**
+   * What the cycle could act on, and the longest any one of those has gone unacted (see
+   * `silenceReport`). Absent — never zero — on a cycle recorded before the loop measured it.
+   */
+  actionable: z.number().int().min(0).optional(),
+  idleMs: z.number().int().min(0).optional(),
   stages: z.record(z.string(), percentileSchema).default({}),
   lead: percentileSchema,
   // Delivery analytics behind the merge: creation to the observed deployment (PR-to-production
@@ -83,6 +94,41 @@ export const scopeMeasurementSchema = z.object({
 export type ScopeMeasurement = z.infer<typeof scopeMeasurementSchema>;
 
 /**
+ * What the loop itself observed about one item's passage, so latency is measured against what the
+ * loop acted on rather than reconstructed from a ledger afterwards. One entry per open item,
+ * dropped once its delivery has been sampled.
+ */
+export const itemClockSchema = z.object({
+  key: z.string().max(40), epoch: z.number().int().min(0),
+  /** First cycle that saw the item claimable — released, unclaimed, and not already submitted. */
+  readyAt: z.string().nullable().default(null),
+  claimedAt: z.string().nullable().default(null),
+  /** First candidate head of the current attempt: the worker's first push. */
+  pushedAt: z.string().nullable().default(null),
+  approvedAt: z.string().nullable().default(null),
+  /** First cycle that saw every gate green: when the candidate became mergeable. */
+  mergeableAt: z.string().nullable().default(null),
+}).strict();
+export type ItemClock = z.infer<typeof itemClockSchema>;
+
+/** One measured passage. A delivery fills the merge figures; a rework request fills its own. */
+export const latencySampleSchema = z.object({
+  work: z.string().max(40), at: z.string(),
+  readyToClaimMs: z.number().int().min(0).nullable().default(null),
+  readyToPushMs: z.number().int().min(0).nullable().default(null),
+  approvalToMergeMs: z.number().int().min(0).nullable().default(null),
+  mergeableToMergeMs: z.number().int().min(0).nullable().default(null),
+  verdictToReworkMs: z.number().int().min(0).nullable().default(null),
+}).strict();
+export type LatencySample = z.infer<typeof latencySampleSchema>;
+
+/** Everything the loop could act on but has not, keyed by kind and item; `since` resets on every action. */
+export const silenceSchema = z.object({
+  subjects: z.record(z.string(), z.object({ since: z.string(), work: z.string().max(40).nullable(), kind: z.string().max(40), detail: z.string().max(500) }).strict()).default({}),
+  lastActionAt: z.string().nullable().default(null),
+}).strict();
+
+/**
  * What the loop last saw of an assignment whose Herdr session is gone: enough for a later cycle
  * to tell a lease that is still being renewed from one that has simply not lapsed yet. Without
  * that second look, every session that ends a moment before its lease does would read as an
@@ -98,6 +144,60 @@ export const orphanObservationSchema = z.object({
 }).strict();
 export type OrphanObservation = z.infer<typeof orphanObservationSchema>;
 
+/**
+ * One decision this loop has put to an approver, kept until the item no longer needs it. Reviews
+ * and producers have a ledger because launched sessions die, drop their prompt and hit account
+ * limits; an approver is a launched session like any other, and a request whose approver is gone
+ * is a decision nobody will ever judge. This is what each cycle looks at again.
+ */
+export const approvalWatchSchema = z.object({
+  work: z.string().max(40), action: z.string().max(40), decision: z.string().max(100),
+  agentName: z.string().max(200).nullable().default(null), pane: z.string().max(200).nullable().default(null),
+  requestedAt: z.string(), launchedAt: z.string().nullable().default(null),
+  /** Approver sessions launched (or attempted) for this decision; bounded by `maxApproverLaunches`. */
+  launches: z.number().int().min(0).default(0),
+  /** Requests made for this binding, counting the ones the server settled without applying; bounded by `maxDecisionRequests`. */
+  requests: z.number().int().min(0).default(1),
+  /** How each earlier session ended without a judgement, oldest first. */
+  ended: z.array(z.string().max(300)).max(10).default([]),
+  /** Set once the decision is applied: the watch is kept so the same binding is not requested again. */
+  settledAt: z.string().nullable().default(null),
+  /** Set once every launch is spent on a decision still unjudged: the loop has escalated it. */
+  exhaustedAt: z.string().nullable().default(null),
+  closeAttempts: z.number().int().min(0).default(0),
+}).strict();
+export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
+
+/**
+ * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a
+ * runtime call that failed, a configuration reload that could not be read — is a failed cycle, not
+ * the end of the process: it is recorded here, the cycle counter advances, and the next cycle runs
+ * after a delay that grows with the consecutive count. An unhandled rejection or uncaught exception
+ * anywhere in the process — a detached promise in the dispatcher, an approver watch, a Herdr read —
+ * is caught at the process level and counted here too. The supervisor's restart is reserved for a
+ * process that hangs, which the watchdog detects; nothing here ends the process.
+ */
+export const cycleFailureSchema = z.object({
+  /** Failed cycles since the last one that completed; the backoff and the attention item read it. */
+  consecutive: z.number().int().min(0).default(0),
+  /** Every failed cycle this cursor has seen, so a loop that fails and recovers still says so. */
+  total: z.number().int().min(0).default(0),
+  last: z.object({
+    cycle: z.number().int().min(0), at: z.string(),
+    /** Where the rejection escaped from: the cycle itself, or the configuration reload before it. */
+    phase: z.enum(['cycle', 'reload']),
+    /** The effect that threw (`snapshot`, `credentials`, `merge`, ...), when one can be named; the reload is `reload`. */
+    call: z.string().max(100).nullable().default(null),
+    reason: z.string().max(1000),
+    /** The delay chosen before the next cycle, and when that cycle is due. */
+    delayMs: z.number().int().min(0), nextAt: z.string(),
+  }).strict().nullable().default(null),
+  /** Unhandled rejections and uncaught exceptions the process caught and survived. */
+  unhandled: z.number().int().min(0).default(0),
+  lastUnhandled: z.object({ at: z.string(), origin: z.enum(['unhandledRejection', 'uncaughtException']), reason: z.string().max(1000), cycle: z.number().int().min(0) }).strict().nullable().default(null),
+}).strict();
+export type CycleFailures = z.infer<typeof cycleFailureSchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -111,14 +211,24 @@ export const daemonStateSchema = z.object({
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** The last worktree reclamation: what it removed and how much room the host has. */
   reclaim: reclaimSummarySchema.nullable().default(null),
+  /** Per-item passage clocks and the samples they produced; the loop's own latency measurement. */
+  clocks: z.record(z.string(), itemClockSchema).default({}),
+  latency: z.array(latencySampleSchema).default([]),
+  /** What is actionable and how long it has gone without an action (see `silenceReport`). */
+  silence: silenceSchema.default({ subjects: {}, lastActionAt: null }),
   /** One entry per scope request this loop has decided, for the latency budget it must keep. */
   scope: z.array(scopeMeasurementSchema).default([]),
   /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
+  /** Per decision action key, the request this loop put to an approver and what became of it. */
+  approvals: z.record(z.string(), approvalWatchSchema).default({}),
+  /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
+  failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
+export const retainedSamples = 200, retainedClocks = 500;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
 const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
@@ -163,7 +273,15 @@ export function pruneDaemonState(state: DaemonState) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
+  if (state.latency.length > retainedSamples) state.latency = state.latency.slice(-retainedSamples);
+  // A clock is dropped when its delivery was sampled; this bound only catches items the loop
+  // stopped seeing (a removed item, a renamed repository) so the cursor cannot grow without end.
+  const clocks = Object.keys(state.clocks);
+  if (clocks.length > retainedClocks) for (const id of clocks.slice(0, clocks.length - retainedClocks)) delete state.clocks[id];
   if (state.scope.length > retainedScopeDecisions) state.scope = state.scope.slice(-retainedScopeDecisions);
+  // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
+  const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
+  if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
   return state;
 }
 
@@ -227,11 +345,25 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = pending ? 'failed' : 'done';
       next.detail = pending ? 'Resumed: the scope request is still undecided and will be decided again'
         : `Resumed: Graphyard holds the decision (${item?.scopeRequest?.decision?.state ?? 'the request was withdrawn or superseded'})`;
+    } else if (action.kind === 'failover') {
+      // A worker failover took effect exactly when the attempt's lease ended on the record. An
+      // interrupted one is tried again: the control plane writes an exhaustion once, and a
+      // reviewer or producer session already ended is no longer pending, so nothing repeats.
+      const ended = action.epoch !== null && !!item && (!item.lease || item.lease.epoch !== action.epoch);
+      next.state = ended ? 'done' : 'failed';
+      next.detail = ended ? `Resumed: Graphyard shows attempt ${action.epoch} ended, so the item is re-queued` : 'Resumed: the failover was interrupted; the session is read again on this cycle';
     } else if (action.kind === 'deployment' && action.work) {
       // Recording a deployment either landed on the delivery snapshot or it did not; a repeat of a
       // landed record is refused by Graphyard, so retrying is safe.
       next.state = item?.delivery?.deployment ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: Graphyard holds the deployment observation' : 'Resumed: no deployment observation was recorded; it may be recorded again';
+    } else if (action.kind === 'decision') {
+      // Both halves are safe to repeat: a request already standing on the item is adopted rather
+      // than made twice, and a session already listed under the decision's name is adopted rather
+      // than launched twice. Left indeterminate, the decision would never be looked at again.
+      next.state = state.approvals[key] ? 'done' : 'failed';
+      next.detail = next.state === 'done' ? 'Resumed: the decision was requested before the restart; its approver session is supervised from here'
+        : 'Resumed: no request was recorded before the restart; a standing one is adopted, otherwise it is requested again';
     } else {
       next.state = 'indeterminate';
       next.detail = `Resumed: the ${action.kind} request was interrupted and its effect is unknown`;
@@ -244,6 +376,8 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
 export const dispatchKey = (work: Work) => `dispatch:${work.id}:${work.epoch}`;
 export const candidateKey = (kind: DaemonActionKind, work: Work) => `${kind}:${work.id}:${work.candidate?.sha ?? 'none'}:${work.candidate?.baseSha ?? 'none'}:${work.policyRevision}`;
 export const closeKey = (profile: WorkerProfile, pane: string) => `close:${profile.name}:${pane}`;
+/** One routine decision per action, item, binding (the head, or the quarantined epoch) and policy revision. */
+export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>) => `decision:${decision.action}:${work.id}:${decision.binding}:${work.policyRevision}`;
 /** One decision per request: the instant the worker recorded it identifies the ask. */
 export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${request.epoch}:${request.at}`;
 
@@ -396,6 +530,481 @@ export function recordProfileFailure(state: DaemonState, profile: WorkerProfile,
 }
 export function clearProfileFailure(state: DaemonState, profile: WorkerProfile) { delete state.profiles[profile.name]; }
 
+// ---- Routine decisions ---------------------------------------------------------------------
+/*
+ * The pipeline used to stop here. A verdict landed, a base conflicted, a supervisor died — and
+ * nothing moved until a master session happened to look. Each of those is a routine decision with
+ * one correct answer, so the loop makes it: it requests the decision with the master's own
+ * operator-agent identity and launches the independent approver session for it. It never approves
+ * its own request, never weakens a requirement, and never touches a worker or producer credential;
+ * the separation the server enforces is unchanged, and only the waiting is gone.
+ */
+
+export interface StandingVerdict { reviewer: string; at: string; reason: string }
+/**
+ * The change request standing against the exact current candidate. Observations keep one review
+ * per reviewer, so a CHANGES_REQUESTED entry on the head is the reviewer's latest word on it; an
+ * agent or Codex provider records `verdict: 'changes-requested'` on the head instead. Either way
+ * the head cannot progress, and the item is waiting for a rework round nobody has asked for.
+ *
+ * `approved: false` alone is never a verdict. The observers report it for a review not yet
+ * dispatched, one still running, a retry, an unready pull request and exhausted profiles, and a
+ * submission ends the worker's lease — so reading it as a verdict would send a head nobody has
+ * reviewed back to a worker on the cycle after it was submitted, and skip its proofs.
+ */
+/**
+ * The binding `exactApproval` demands of an approval, demanded of a change request too: the verdict
+ * answers the request Graphyard recorded for this candidate, base and policy revision, under the
+ * provider the policy names. A verdict left over from an earlier request is not the head's.
+ */
+function agentVerdictBindsRequest(work: Work, agent: AgentReview): boolean {
+  const candidate = work.candidate!, request = work.reviewRequest;
+  return agent.provider === reviewProviderOf(work.policy) && !!request && request.commentId === agent.requestId
+    && request.sha === candidate.sha && request.baseSha === candidate.baseSha && request.policyRevision === work.policyRevision;
+}
+export function standingVerdict(work: Work): StandingVerdict | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!work.submission || work.reworkRequested || !candidate || !observation) return null;
+  if (observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
+  const review = observation.reviews.find(entry => entry.sha === candidate.sha && entry.state === 'CHANGES_REQUESTED');
+  if (review) return { reviewer: review.reviewer, at: review.submittedAt ?? observation.at, reason: `${review.reviewer} requested changes on ${review.sha.slice(0, 12)}` };
+  const agent = observation.agentReview;
+  if (agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && agentVerdictBindsRequest(work, agent))
+    return { reviewer: agent.profile ?? agent.provider, at: agent.completedAt ?? observation.at, reason: `${agent.profile ?? agent.provider} requested changes on ${agent.sha.slice(0, 12)}: ${agent.reason}` };
+  return null;
+}
+
+export const routineDecisionActions = ['rework', 'recover', 'merge'] as const;
+export type RoutineDecisionAction = typeof routineDecisionActions[number];
+export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string }
+/**
+ * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
+ * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
+ * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
+ * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
+ */
+export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
+  const needed = neededDecision(work, config);
+  if (!needed) return null;
+  if (needed.action === 'merge') return needed;
+  const stopped = workerStopped(work, now, assessment);
+  // The grounds travel with the request: the approver cannot verify this host, so it is told
+  // exactly what the requester verified and judges the attestation on that.
+  return stopped.stopped ? { ...needed, reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
+}
+/** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
+function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
+  if (work.stage === 'done') {
+    return work.containmentQuarantine
+      ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
+  }
+  // Like a verdict, a conflict keeps matching the head it was found on until a new one is pushed,
+  // and the engine's `rework` does not clear it: once the round is requested the item needs a
+  // worker, not a second decision, even when that round's worker dies before pushing.
+  const conflict = work.reworkRequested ? null : baseRefreshConflict(work);
+  if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: work.candidate!.sha };
+  const verdict = standingVerdict(work);
+  if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: work.candidate!.sha };
+  if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
+  return null;
+}
+/**
+ * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
+ * carry that attestation and the engine lowers the containment fence on it, so it rests only on
+ * what was verified: no lease is held, and either no fence stands — the worker's own supervisor
+ * settled it at exit, or this loop settled it after verifying the supervisor gone — or this host's
+ * probe verified the supervisor gone on the snapshot this cycle acts on. A fence in its grace
+ * window is waited out. A lapsed fence this host could not verify is `unverified`: the decision is
+ * withheld and escalated, never requested on an attestation nobody checked.
+ */
+export function workerStopped(work: Work, now: number, assessment?: ContainmentAssessment | null): { stopped: boolean; grounds: string; unverified: string | null } {
+  if (work.lease && Date.parse(work.lease.expiresAt) > now) return { stopped: false, grounds: '', unverified: null };
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return { stopped: true, grounds: `${work.key} holds no lease and no containment fence stands for it`, unverified: null };
+  if (containmentPhase(work, now)?.state !== 'lapsed') return { stopped: false, grounds: '', unverified: null };
+  if (assessment?.settleable && assessment.epoch === quarantine.epoch)
+    return { stopped: true, grounds: `its lease and launch authority have lapsed, and the master loop verified on ${assessment.host ?? 'the registered host'} that the supervisor of epoch ${quarantine.epoch} is gone`, unverified: null };
+  return { stopped: false, grounds: '', unverified: assessment?.refusals.length ? assessment.refusals.join('; ') : `no host verification of the epoch ${quarantine.epoch} supervisor was possible from this loop` };
+}
+/** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
+export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
+  const needed = neededDecision(work, config);
+  if (!needed || needed.action === 'merge') return null;
+  const unverified = workerStopped(work, now, assessment).unverified;
+  return unverified ? { action: needed.action, reason: `${work.key} needs a ${needed.action} decision, but it attests that the previous worker is stopped and that is not verified: ${unverified}` } : null;
+}
+
+// ---- The approver a decision is waiting on -------------------------------------------------
+/*
+ * A requested decision changes nothing until an approver judges it, and the approver is a launched
+ * session: it can die, drop its prompt, hit an account limit, decline, or hang. Each cycle therefore
+ * reads the decision back from the control plane and the session back from Herdr, and takes the one
+ * step that follows. Launches are bounded, so a decision no session will judge ends as an escalation
+ * and an actionable silence rather than as a relaunch every few minutes forever.
+ */
+export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxApproverLaunches = 3, maxApproverCloses = 3, maxDecisionRequests = 3;
+export type ApprovalStep =
+  | { step: 'wait'; detail: string }
+  | { step: 'settled'; detail: string }
+  | { step: 'rerequest'; detail: string }
+  | { step: 'relaunch'; detail: string }
+  | { step: 'exhausted'; detail: string };
+export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null } | null | undefined,
+  sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
+  const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
+  // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
+  if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
+  if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
+  if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
+  if (decision.state !== 'requested' && decision.state !== 'approved')
+    return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
+  if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
+  const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
+  const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
+  const ended = !session ? `approver session ${watch.agentName ?? '(never launched)'} is gone without judging it`
+    : ['idle', 'done', 'blocked'].includes(session.agent_status ?? '') && age >= approverSettleMs ? `approver session ${watch.agentName} ended ${session.agent_status} without approving it — declined, or its prompt was dropped`
+      : age > approverJudgeBoundMs ? `approver session ${watch.agentName} has not judged it for ${Math.round(age / 60_000)} minutes, past the ${Math.round(approverJudgeBoundMs / 60_000)}-minute bound`
+        : null;
+  if (!ended) return { step: 'wait', detail: `${label} is with approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})` };
+  return watch.launches < maxApproverLaunches ? { step: 'relaunch', detail: `${label}: ${ended}` } : { step: 'exhausted', detail: `${label}: ${ended}` };
+}
+/** Every gate green on a submitted candidate: what "mergeable" means to the cycle and its budget. */
+export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!work.candidate && !work.violations.length && work.gates.every(gate => gate.passed);
+
+// ---- What the loop could act on ------------------------------------------------------------
+/*
+ * A cycle that reports "0 actions" says nothing about whether it had anything to do. Every cycle
+ * therefore records both halves: the subjects it could act on, and the actions it took. A subject
+ * the cycle acts on has its clock reset; one that goes without any action accumulates, and the
+ * longest such wait is what `master status` reports and what the 20-minute bound is judged on.
+ */
+export const silenceBudgetMs = 1_200_000;
+export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
+export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
+  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals'] } = {}): ActionableSubject[] {
+  const subjects: ActionableSubject[] = [];
+  const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail });
+  for (const item of work) {
+    // A routine decision is the one subject a delivered item can still raise: containment recovery.
+    // It stays a subject until it is applied. A decision sitting with an approver is the pipeline
+    // waiting on its own agent, and counting that as nothing to act on is how a dead approver used
+    // to make an item disappear from the one measure built to notice it.
+    const decision = routineDecision(item, config, now, context.assessments?.[item.id]);
+    const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
+    if (decision && !watch?.settledAt) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
+      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} is unjudged after ${watch.launches} approver session(s)`
+        : `${item.key}'s ${decision.action} decision ${watch.decision} is requested and waiting for approver session ${watch.agentName ?? '(not launched)'} to judge it`);
+    const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
+    if (withheld) add('decision', item, withheld.reason.slice(0, 500));
+    if (item.stage === 'done') continue;
+    try { assertDispatchable(item, work, new Date(now).toISOString()); add('dispatch', item, `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
+    const request = item.scopeRequest;
+    if (request && !request.decision && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
+      add('scope', item, `${item.key}: ${request.requestedBy} is waiting for a decision on ${request.paths.join(', ')}`);
+    if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed') add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
+    if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
+    if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} is waiting for the control plane to bring its candidate onto the moved base`);
+    // The same heads step 5 shepherds: one a verdict stands against is going back to a worker,
+    // so nothing asks for its proofs and nothing is waiting on them.
+    if (item.submission && item.candidate && !item.reworkRequested && !standingVerdict(item) && config.run.proofWorkflow) {
+      const outstanding = missingProofs(item, new Date(now)).filter(proof => !proof.startsWith('manual:'));
+      if (outstanding.length) add('proof', item, `${item.key} is missing trusted evidence for ${outstanding.join(', ')}`);
+    }
+  }
+  for (const item of work.filter(entry => entry.stage === 'done' && entry.delivery && deploySmokeRequired(entry.policy))) {
+    const outcome = deliveryState(item);
+    if (!item.delivery!.deployment) add('deployment', item, `${item.key} is merged and waiting for the deployment that serves it to be observed`);
+    else if (outcome === 'awaiting-smoke') add('smoke', item, `${item.key} is deployed at ${item.delivery!.deployment.sha.slice(0, 12)} and waiting for its smoke proof`);
+  }
+  return subjects;
+}
+
+export interface SilenceEntry { key: string; kind: string; work: string | null; detail: string; since: string; idleMs: number }
+export interface SilenceReport { actionable: number; longestIdleMs: number; longest: SilenceEntry | null; budgetMs: number; breached: boolean; lastActionAt: string | null; subjects: SilenceEntry[] }
+/** Fold this cycle's actionable inventory and its actions into the silence record. */
+export function trackSilence(state: DaemonState, subjects: ActionableSubject[], performed: DaemonAction[], now: number): SilenceReport {
+  const record = state.silence, at = new Date(now).toISOString();
+  // Only an action that succeeded is the loop acting on a subject. A request refused every time it
+  // is retried — a revoked credential, a standing 409 — moves nothing, and a wait that restarted
+  // on each refusal would never reach the bound that puts it in front of someone.
+  const acted = new Set(performed.filter(action => action.state === 'done').map(action => `${action.kind}:${action.work ?? 'pipeline'}`));
+  const live = new Map(subjects.map(subject => [subject.key, subject]));
+  for (const key of Object.keys(record.subjects)) if (!live.has(key)) delete record.subjects[key];
+  for (const [key, subject] of live) {
+    const previous = record.subjects[key];
+    // First sight, or an action for this exact subject: the wait starts again from now.
+    if (!previous || acted.has(key)) record.subjects[key] = { since: at, work: subject.work, kind: subject.kind, detail: subject.detail };
+    else record.subjects[key] = { ...previous, detail: subject.detail };
+  }
+  if (performed.length) record.lastActionAt = at;
+  return silenceReport(record, now);
+}
+export function silenceReport(record: DaemonState['silence'], now: number): SilenceReport {
+  const subjects: SilenceEntry[] = Object.entries(record.subjects)
+    .map(([key, entry]) => ({ key, kind: entry.kind, work: entry.work, detail: entry.detail, since: entry.since, idleMs: Math.max(0, now - Date.parse(entry.since)) }))
+    .sort((a, b) => b.idleMs - a.idleMs);
+  const longestIdleMs = subjects[0]?.idleMs ?? 0;
+  return { actionable: subjects.length, longestIdleMs, longest: subjects[0] ?? null, budgetMs: silenceBudgetMs, breached: longestIdleMs > silenceBudgetMs, lastActionAt: record.lastActionAt, subjects: subjects.slice(0, 20) };
+}
+
+// ---- Latency the loop is judged on ---------------------------------------------------------
+/*
+ * Four budgets, all measured from what the loop itself observed cycle by cycle, so no figure can
+ * disagree with the state the loop acted on: ready work reaching a worker, a first push arriving,
+ * a mergeable candidate merging, and a standing verdict reaching a rework request.
+ */
+export const latencyTargets = {
+  readyToClaimP90Ms: 120_000, readyToFirstPushP90Ms: 900_000,
+  approvalToMergeP90Ms: 600_000, mergeableToMergeMs: 300_000, verdictToReworkMs: 300_000,
+  minimumDeliveries: 10,
+} as const;
+
+/** Bring one item's clock in line with the snapshot, and return the delivery sample it completed. */
+export function observeItemClock(state: DaemonState, work: Work, now: number): LatencySample | null {
+  const at = new Date(now).toISOString();
+  const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? parsed : null; };
+  // A delivery is sampled once, from the clock the loop held while the item was open, and sampling
+  // drops that clock. A delivered item with no clock is therefore history — delivered before this
+  // loop watched it, or already sampled — and measuring it again would start its clocks at this
+  // cycle and bury every real passage under a zero per delivered item per cycle.
+  if (work.stage === 'done' && !state.clocks[work.id]) return null;
+  const clock: ItemClock = state.clocks[work.id] ?? itemClockSchema.parse({ key: work.key, epoch: work.epoch });
+  state.clocks[work.id] = clock;
+  clock.key = work.key;
+  const claimable = (() => { try { assertDispatchable(work, [work], at); return true; } catch { return !work.lease && work.ready && !work.blocker && (!work.submission || work.reworkRequested); } })();
+  // A rework round is a fresh wait for a worker, so the claim, push and approval clocks start over
+  // the moment the item becomes claimable again — and that moment is this cycle, not whenever the
+  // stage last changed: a verdict or a conflict lands before the round it needs is approved, and
+  // charging the worker for the decision in between would measure the wrong thing.
+  if (claimable && (clock.claimedAt || clock.pushedAt || clock.epoch !== work.epoch)) Object.assign(clock, { readyAt: at, claimedAt: null, pushedAt: null, approvedAt: null, mergeableAt: null });
+  clock.epoch = work.epoch;
+  // The first attempt's wait starts when the item was released, which may predate this loop.
+  if (!clock.readyAt && claimable) clock.readyAt = new Date(time(work.stageEnteredAt) ?? now).toISOString();
+  // Graphyard's own claim time, which outlives the lease: an attempt that claimed, pushed and
+  // submitted between two cycles still measured its wait, because the assignment recorded it.
+  const assignment = work.lastAssignment?.epoch === work.epoch ? work.lastAssignment : work.lease ? { claimedAt: undefined } : null;
+  if (!clock.claimedAt && assignment) clock.claimedAt = new Date(time(assignment.claimedAt) ?? now).toISOString();
+  const readyMs = time(clock.readyAt);
+  if (!clock.pushedAt && work.candidate) {
+    // The provider's own creation time when it belongs to this attempt; otherwise the first cycle
+    // that saw the head, which is the earliest this loop can honestly claim to have observed it.
+    const observed = [work.candidate.createdAt, work.observation?.at].map(time).find(value => value !== null && (readyMs === null || value >= readyMs));
+    clock.pushedAt = new Date(observed ?? now).toISOString();
+  }
+  // An approval is a review gate that passed. An item with no review gate was never approved, so
+  // it measures no approval→merge passage rather than one that starts at its first push.
+  if (!clock.approvedAt && work.submission && !work.reworkRequested && work.gates.find(gate => gate.name === 'review')?.passed === true && work.gates.find(gate => gate.name === 'build')?.passed) clock.approvedAt = at;
+  if (!clock.mergeableAt && mergeableCandidate(work)) clock.mergeableAt = at;
+  if (work.stage !== 'done') return null;
+  const mergedAt = time(work.delivery?.mergedAtRepository ?? work.delivery?.mergedAt) ?? now;
+  const since = (value: string | null) => { const start = time(value); return start === null ? null : Math.max(0, Math.round(mergedAt - start)); };
+  delete state.clocks[work.id];
+  return latencySampleSchema.parse({ work: work.key, at: new Date(mergedAt).toISOString(),
+    readyToClaimMs: clock.readyAt && clock.claimedAt ? Math.max(0, Math.round(Date.parse(clock.claimedAt) - Date.parse(clock.readyAt))) : null,
+    readyToPushMs: clock.readyAt && clock.pushedAt ? Math.max(0, Math.round(Date.parse(clock.pushedAt) - Date.parse(clock.readyAt))) : null,
+    approvalToMergeMs: since(clock.approvedAt), mergeableToMergeMs: since(clock.mergeableAt) });
+}
+
+export interface LatencyBudget {
+  target: typeof latencyTargets; deliveries: number;
+  readyToClaim: ReturnType<typeof percentiles>; readyToFirstPush: ReturnType<typeof percentiles>; approvalToMerge: ReturnType<typeof percentiles>;
+  mergeDwell: { count: number; worstMs: number; breaches: { work: string; ms: number }[] };
+  reworkRequest: { count: number; worstMs: number; breaches: { work: string; ms: number }[] };
+  met: boolean | null; reasons: string[];
+}
+/**
+ * The four budgets over the samples the cursor holds. `met` is null while fewer than ten
+ * deliveries are measured — the population the p90 targets are stated for — and the per-candidate
+ * bounds (mergeable→merge, verdict→rework) are judged on every sample, however few.
+ */
+export function latencyBudget(samples: LatencySample[]): LatencyBudget {
+  const value = (key: keyof LatencySample) => samples.map(sample => sample[key]).filter((entry): entry is number => typeof entry === 'number');
+  const deliveries = samples.filter(sample => sample.mergeableToMergeMs !== null || sample.approvalToMergeMs !== null).length;
+  const bound = (key: 'mergeableToMergeMs' | 'verdictToReworkMs', limit: number) => {
+    const measured = samples.filter(sample => typeof sample[key] === 'number');
+    return { count: measured.length, worstMs: measured.reduce((worst, sample) => Math.max(worst, sample[key] as number), 0),
+      breaches: measured.filter(sample => (sample[key] as number) > limit).map(sample => ({ work: sample.work, ms: sample[key] as number })) };
+  };
+  const readyToClaim = percentiles(value('readyToClaimMs')), readyToFirstPush = percentiles(value('readyToPushMs')), approvalToMerge = percentiles(value('approvalToMergeMs'));
+  const mergeDwell = bound('mergeableToMergeMs', latencyTargets.mergeableToMergeMs), reworkRequest = bound('verdictToReworkMs', latencyTargets.verdictToReworkMs);
+  const minutes = (ms: number) => `${Math.round(ms / 6000) / 10} min`;
+  const reasons = [
+    ...(readyToClaim.count && readyToClaim.p90Ms > latencyTargets.readyToClaimP90Ms ? [`ready→claim p90 ${minutes(readyToClaim.p90Ms)} exceeds ${minutes(latencyTargets.readyToClaimP90Ms)}`] : []),
+    ...(readyToFirstPush.count && readyToFirstPush.p90Ms > latencyTargets.readyToFirstPushP90Ms ? [`ready→first push p90 ${minutes(readyToFirstPush.p90Ms)} exceeds ${minutes(latencyTargets.readyToFirstPushP90Ms)}`] : []),
+    ...(approvalToMerge.count && approvalToMerge.p90Ms > latencyTargets.approvalToMergeP90Ms ? [`approval→merge p90 ${minutes(approvalToMerge.p90Ms)} exceeds ${minutes(latencyTargets.approvalToMergeP90Ms)}`] : []),
+    ...mergeDwell.breaches.map(breach => `${breach.work} stayed mergeable for ${minutes(breach.ms)}, past the ${minutes(latencyTargets.mergeableToMergeMs)} bound`),
+    ...reworkRequest.breaches.map(breach => `${breach.work} carried a standing verdict for ${minutes(breach.ms)} before rework was requested, past the ${minutes(latencyTargets.verdictToReworkMs)} bound`),
+  ];
+  const enough = deliveries >= latencyTargets.minimumDeliveries;
+  return { target: latencyTargets, deliveries, readyToClaim, readyToFirstPush, approvalToMerge, mergeDwell, reworkRequest,
+    met: reasons.length ? false : enough ? true : null,
+    reasons: reasons.length ? reasons : enough ? [] : [`${deliveries} deliver${deliveries === 1 ? 'y' : 'ies'} measured; the p90 targets are judged over at least ${latencyTargets.minimumDeliveries}`] };
+}
+
+// ---- The loop's own liveness ---------------------------------------------------------------
+export type LoopState = 'running' | 'stalled' | 'absent';
+export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledAfterMs: number; cycle: number; lock: DaemonState['lock']; detail: string; restart: string }
+/**
+ * Whether the loop is cycling, from its own cursor. Nothing else in the installation notices a
+ * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
+ * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence.
+ */
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures'>>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
+  const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
+  const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
+  // A loop backing off from failed cycles is waiting on purpose, not hung: its bound is two
+  // intervals past the retry it announced, so the backoff never reads as a stall to restart.
+  const backoff = backingOff(state.failures, now);
+  const stalledAfterMs = 2 * intervalMs + (backoff ? Math.max(0, backoff.dueAt - lastCycleAt) : 0);
+  const restart = 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)';
+  const lock = state.lock;
+  const gone = !!lock && !!hostId && lock.host === hostId && !liveProcess(lock.pid);
+  if (!lock || gone) {
+    return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+      detail: gone ? `No master loop is running: the cursor's lock (pid ${lock!.pid} on ${lock!.host}) names a process that is gone, last cycle ${state.lastCycleAt ?? 'never'}. Nothing is dispatching, deciding or merging until it is restarted.`
+        : `No master loop holds this repository${state.lastCycleAt ? `; the last cycle was at ${state.lastCycleAt}` : ' and none has ever cycled'}. Nothing is dispatching, deciding or merging until it is started.` };
+  }
+  if (lagMs === null || lagMs > stalledAfterMs) {
+    return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled.` };
+  }
+  if (backoff) {
+    return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
+      detail: `Cycle ${backoff.last.cycle} failed ${Math.round(lagMs / 1000)}s ago in ${describeFailingCall(backoff.last)} (${backoff.last.reason}); ${backoff.consecutive} consecutive failure(s), the next cycle is due at ${backoff.last.nextAt}` };
+  }
+  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago` };
+}
+
+// ---- A cycle that fails (GY-119) -----------------------------------------------------------
+/** Consecutive failed cycles after which `master status` raises an attention item naming the failing call. */
+export const cycleFailureAttentionAfter = 3;
+/** The backoff ceiling: the delay before the next cycle doubles from the interval up to five minutes. */
+export const cycleFailureCeilingMs = 300_000;
+/**
+ * How long to wait after a failed cycle. The first failure waits the normal interval — one timed-out
+ * read is not a fault — and each consecutive failure doubles it, to the ceiling or the interval
+ * itself when that is longer. Under a supervisor with a watchdog the ceiling is halved against the
+ * window (`cycleFailureCeiling`), so a loop backing off is never mistaken for one that hung.
+ */
+export const cycleFailureDelay = (consecutive: number, intervalMs: number, ceilingMs = cycleFailureCeilingMs) =>
+  Math.min(intervalMs * 2 ** Math.max(0, consecutive - 1), Math.max(intervalMs, ceilingMs));
+export const cycleFailureCeiling = (watchdogWindowMs: number | null) => watchdogWindowMs ? Math.min(cycleFailureCeilingMs, Math.floor(watchdogWindowMs / 2)) : cycleFailureCeilingMs;
+export const describeFailingCall = (failure: Pick<NonNullable<CycleFailures['last']>, 'phase' | 'call'>) =>
+  failure.phase === 'reload' ? 'the configuration reload' : failure.call ? `the ${failure.call} call` : 'the cycle itself';
+/** The failed-cycle wait the loop is in, if any: the last failure with its retry still ahead (allowing one interval of slack). */
+function backingOff(failures: CycleFailures | undefined, now: number) {
+  const last = failures?.last;
+  if (!failures || !last || failures.consecutive === 0) return null;
+  const dueAt = Date.parse(last.nextAt);
+  return Number.isFinite(dueAt) ? { last, consecutive: failures.consecutive, dueAt } : null;
+}
+
+/**
+ * Records a rejection that escaped the cycle (or the configuration reload before it) as a failed
+ * cycle: the counter advances, the failure and its cause are kept on the cursor, and the delay
+ * before the next cycle is chosen from the consecutive count. The loop itself keeps cycling.
+ */
+export async function noteCycleFailure(state: DaemonState, error: unknown, phase: 'cycle' | 'reload', options: { now: number; intervalMs: number; ceilingMs?: number; persist: DaemonEffects['persist'] }) {
+  const call = phase === 'reload' ? 'reload' : failingCall(error);
+  const consecutive = state.failures.consecutive + 1;
+  const delayMs = cycleFailureDelay(consecutive, options.intervalMs, options.ceilingMs);
+  const at = new Date(options.now).toISOString();
+  const last = { cycle: state.cycle, at, phase, call, reason: message(error).slice(0, 1000), delayMs, nextAt: new Date(options.now + delayMs).toISOString() };
+  state.failures = { ...state.failures, consecutive, total: state.failures.total + 1, last };
+  // The cycle ended, failed, and the loop is alive: the counter and the heartbeat both say so.
+  state.cycle += 1;
+  state.lastCycleAt = at;
+  if (state.lock) state.lock = { ...state.lock, heartbeatAt: at };
+  try { await options.persist(state); } catch { /* a cursor that cannot be written is the next cycle's failure, not this one's */ }
+  return last;
+}
+/** A completed cycle ends the run of failures; the total stays. */
+export function noteCycleSuccess(state: DaemonState) {
+  const recovered = state.failures.consecutive;
+  if (recovered) state.failures = { ...state.failures, consecutive: 0 };
+  return recovered;
+}
+/** Records an unhandled rejection or uncaught exception the process caught and survived. */
+export function noteUnhandled(state: DaemonState, error: unknown, origin: 'unhandledRejection' | 'uncaughtException', now: number) {
+  const entry = { at: new Date(now).toISOString(), origin, reason: message(error).slice(0, 1000), cycle: state.cycle };
+  state.failures = { ...state.failures, unhandled: state.failures.unhandled + 1, lastUnhandled: entry };
+  return entry;
+}
+const callTag = Symbol.for('graphyard.daemonCall');
+const failingCall = (error: unknown) => { const call = (error as { [callTag]?: unknown } | null)?.[callTag]; return typeof call === 'string' ? call : null; };
+/**
+ * The same effects, with every rejection or throw tagged with the name of the effect it escaped
+ * from, so a failed cycle can say which call failed — `snapshot`, `credentials`, `merge` — rather
+ * than only what the runtime said about it. The tag is a symbol on the error; nothing else changes.
+ */
+export function namedEffects(effects: DaemonEffects): DaemonEffects {
+  const tag = (error: unknown, name: string) => { if (error && typeof error === 'object' && !(callTag in error)) Object.defineProperty(error, callTag, { value: name, enumerable: false }); return error; };
+  return new Proxy(effects, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== 'function' || typeof property !== 'string') return value;
+      return (...args: unknown[]) => {
+        let result: unknown;
+        try { result = value.apply(target, args); } catch (error) { throw tag(error, property); }
+        return result instanceof Promise ? result.catch(error => { throw tag(error, property); }) : result;
+      };
+    },
+  });
+}
+
+/**
+ * The loop's own attention, ahead of every work item: a coordinator that is not cycling is why
+ * nothing else on the list is moving. A breached silence bound or latency budget follows it.
+ */
+export function loopAttention(report: { liveness: LoopLiveness; silence?: SilenceReport | null; budget?: LatencyBudget | null; failures?: CycleFailures | null }): AttentionItem[] {
+  const items: AttentionItem[] = [];
+  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.restart) });
+  // A cycle that keeps failing is retried in-process with backoff; past the bound it names the
+  // failing call, because a restart would not clear a read that times out every time.
+  const failures = report.failures;
+  if (failures?.last && failures.consecutive >= cycleFailureAttentionAfter) items.push({ subject: 'loop',
+    text: `The master loop has failed ${failures.consecutive} consecutive cycles, the last (cycle ${failures.last.cycle} at ${failures.last.at}) in ${describeFailingCall(failures.last)}: ${failures.last.reason}. It keeps cycling in-process, waiting ${Math.round(failures.last.delayMs / 1000)}s before the next attempt (due ${failures.last.nextAt}); a restart does not clear this`,
+    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
+  const silence = report.silence;
+  if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
+    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.restart}`) });
+  if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
+    ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step') });
+  return items;
+}
+
+/**
+ * The supervisor's watchdog, when the loop runs under one. A cycle that hangs leaves the process
+ * alive and the pipeline silent, which no `Restart=` setting notices; a keep-alive per cycle turns
+ * a stalled cycle into a supervised restart. A window shorter than two intervals would restart a
+ * healthy loop instead, so that is refused by name rather than obeyed.
+ */
+export function watchdogPlan(environment: Record<string, string | undefined>, intervalMs: number) {
+  if (!environment.NOTIFY_SOCKET) return { supervised: false, windowMs: null as number | null, refusal: null as string | null };
+  const microseconds = Number(environment.WATCHDOG_USEC);
+  const windowMs = Number.isFinite(microseconds) && microseconds > 0 ? Math.round(microseconds / 1000) : null;
+  const seconds = (ms: number) => `${Math.round(ms / 1000)}s`;
+  return { supervised: true, windowMs,
+    refusal: windowMs !== null && windowMs <= 2 * intervalMs
+      ? `The supervisor's watchdog window (${seconds(windowMs)}) is not longer than two cycle intervals (${seconds(2 * intervalMs)}); raise WatchdogSec or shorten run.intervalSeconds, or the supervisor will restart a healthy loop mid-cycle`
+      : null };
+}
+
+/**
+ * How long to wait before the next cycle. A configured interval is the idle cadence, not a bound
+ * on how long claimable work may sit: while anything is actionable the loop comes back inside the
+ * responsive window, so a long interval cannot push ready work past its dispatch budget.
+ */
+export const actionableIntervalMs = 30_000;
+export const cycleDelay = (intervalMs: number, report: Pick<SilenceReport, 'actionable'> | null) =>
+  report && report.actionable > 0 ? Math.min(intervalMs, actionableIntervalMs) : intervalMs;
+/** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
+export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
+/** A session only says its account is spent once it has stopped; while it works, its output is its own prose. */
+export const stoppedStates = ['idle', 'done', 'blocked'];
+export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
+export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
+
 export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
@@ -419,6 +1028,58 @@ export interface DaemonEffects {
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
   reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
+  /**
+   * Requests one routine decision with the master's own operator-agent identity and returns it.
+   * A loop configured without these three keeps cycling: each routine decision is then recorded as
+   * an escalation naming the command a master session runs, exactly as before.
+   */
+  decide?: (work: Work, action: RoutineDecisionAction, reason: string) => Promise<{ id: string }>;
+  /**
+   * Launches the independent approver session for one requested decision, under the name
+   * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
+   * Never the requester.
+   */
+  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null }>;
+  /**
+   * One item's decision history: the approved merge decision automatic merging asks for, and what
+   * became of every decision this loop requested.
+   */
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null; outcome?: string | null }[] }>;
+  /**
+   * Takes back one of the loop's own requests, as its requester. Only for a request the item has
+   * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
+   * which would otherwise stand forever, refuse the request for the current one, or be adopted
+   * for a later round on a reason that describes an older head.
+   */
+  withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
+  /** Verifies on this host which quarantined supervisors are demonstrably gone. */
+  containment?: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number } }) => Record<string, ContainmentAssessment>;
+  /** Settles one quarantine this host verified dead, so the item can be claimed again. */
+  settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
+  /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
+  notify?: (state: 'ready' | 'alive') => void;
+  /**
+   * Mid-session capacity (GY-89). `sessionOutput` reads the tail of a stopped session's own
+   * terminal, which is where a runtime says its provider account is spent; `reportCapacity`
+   * records what the loop observed on the item. A loop wired without the two never fails a
+   * session over and never escalates capacity: it cycles exactly as it did before.
+   */
+  sessionOutput?: (agent: HerdrAgent) => string | null;
+  reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
+  /** The reviewer and producer sessions the launch ledgers hold as pending. */
+  launchedSessions?: () => Promise<LaunchedSession[]>;
+  /** The account the profile's current session was launched on, as its launcher recorded it. */
+  selectedAccount?: (role: CapacityRole, profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
+  /** Commits (or cleanly discards) what the interrupted attempt left uncommitted in its worktree. */
+  preserveWork?: (work: Work, epoch: number) => Promise<PartialWork>;
+  /** Keeps every launcher off the spent account until it resets. */
+  holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<unknown>;
+  /** Ends an exhausted reviewer or producer session on its ledger, so its request may launch again. */
+  endSession?: (session: LaunchedSession, resolution: string) => Promise<void>;
+  /** Launches the session's request again on another account or runtime; throws `accountsExhausted` when none is left. */
+  relaunch?: (session: LaunchedSession, work: Work, snapshot: { work: Work[]; now: string }) => Promise<{ profile: string }>;
+  /** Account health of the reviewer and producer profiles, as the worker profiles' arrives in `credentials`. */
+  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
   agents: () => HerdrAgent[];
   /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
@@ -428,7 +1089,14 @@ export interface DaemonEffects {
   herdr?: () => { agents: HerdrAgent[]; available: boolean };
   /** Stops an orphaned watch supervisor through the containment scope it recorded at launch. */
   stopSupervisor?: (orphan: OrphanSupervisor, signal: NodeJS.Signals) => void | Promise<void>;
-  credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
+  /**
+   * Records a launched session's durable handle on the item: the runtime, host, Herdr coordinates
+   * and transcript a human or an executor attaches to it with. A loop configured without it keeps
+   * cycling; the sessions it launches are then only visible in this host's own local ledgers,
+   * which is the relaying the handle exists to end.
+   */
+  recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
+  credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>>;
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   persist: (state: DaemonState) => Promise<void>;
 }
@@ -448,7 +1116,11 @@ async function record(state: DaemonState, key: string, action: Omit<DaemonAction
 export async function runCycle(config: MasterConfig, state: DaemonState, effects: DaemonEffects, now: () => number = Date.now) {
   const startedAt = now();
   const snapshot = await effects.snapshot();
+  const readAt = now();
   const observedAt = Date.parse(snapshot.now), clock = Number.isFinite(observedAt) ? observedAt : startedAt;
+  // The same bound `master status` uses, from the read that produced this snapshot: containment
+  // settlement may only be proposed while the local clock can be compared with the control plane.
+  const clockOffset = { min: Math.round(startedAt - clock), max: Math.round(readAt - clock) };
   const performed: DaemonAction[] = [];
   const resumed = reconcilePendingActions(state, snapshot.work, clock);
   if (resumed.length) { performed.push(...resumed); await effects.persist(state); }
@@ -475,15 +1147,101 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  // 1a. Mid-session exhaustion. A session that ran out of provider quota does not fail: it stops
+  //     on its runtime's limit notice and waits for a person. The loop reads that notice from the
+  //     session's own output, keeps what the attempt had not committed, holds the account until
+  //     it resets, records the exhaustion — account, notice, reset time, partial work — on the
+  //     item, and gets the action onto another account: a worker's lease ends in that same
+  //     record, so the dispatch step re-queues the item on the next cycle, and a reviewer or
+  //     producer request is launched again at once. Nobody repoints a profile by hand.
+  const failedOver = new Set<string>();
+  if (effects.sessionOutput && effects.reportCapacity) {
+    const stopped = (name: string) => { const agent = agents.find(candidate => candidate.name === name); return agent && stoppedStates.includes(agent.agent_status ?? '') ? agent : null; };
+    const notice = (agent: HerdrAgent) => { try { const output = effects.sessionOutput!(agent); return output ? detectExhaustion(output, clock) : null; } catch { return null; } };
+    const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
+      const selected = await effects.selectedAccount?.(role, profile) ?? null;
+      const account = selected?.environment ?? null;
+      await effects.holdAccount?.(account ?? profileAccount(profile), { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role, profile, work: item.key });
+      return { account, runtime: selected?.kind ?? null };
+    };
+    for (const profile of config.workers.filter(worker => worker.mode === 'launch')) {
+      const agent = stopped(profile.agentName);
+      const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
+      if (!agent || !item || item.submission?.epoch === item.lease!.epoch) continue;
+      const key = failoverKey('worker', item, item.lease!.epoch), previous = state.actions[key];
+      if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) { if (previous) failedOver.add(item.id); continue; }
+      const signal = notice(agent);
+      if (!signal) continue;
+      failedOver.add(item.id);
+      const epoch = item.lease!.epoch, attempts = (previous?.attempts ?? 0) + 1;
+      const resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
+      await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        const partialWork = await effects.preserveWork?.(item, epoch) ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
+        const { account, runtime } = await held('worker', profile.name, item, signal);
+        await effects.reportCapacity(item, { event: 'exhausted', role: 'worker', epoch, profile: profile.name, account, runtime: runtime ?? profile.kind ?? null, reason: signal.reason, resetsAt: signal.resetsAt, partialWork });
+        // The lease is over on the record; the supervisor is stopped through the containment scope
+        // it recorded, which is the path that settles its quarantine, so the item is claimable again.
+        const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
+        let stop = 'its supervisor stops on the ended lease';
+        try {
+          if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
+        } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+        clearProfileFailure(state, profile);
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'done',
+          detail: `${item.key} epoch ${epoch} exhausted ${account ?? `${profile.name}'s own account`} mid-session (${signal.reason}; ${resets}). Partial work ${partialWork.state}${partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}` : ''}; the attempt ended as released, ${stop}, and ${item.key} is re-queued for another account`,
+          attempts, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+    for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) {
+      const agent = stopped(session.agentName), item = open.find(candidate => candidate.key === session.work);
+      if (!agent || !item) continue;
+      const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
+      if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
+      const signal = notice(agent);
+      if (!signal) continue;
+      const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
+      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        const { account, runtime } = await held(session.role, session.profile, item, signal);
+        await effects.reportCapacity(item, { event: 'exhausted', role: session.role, ...(session.requestId ? { requestId: session.requestId } : {}), profile: session.profile, account, runtime, reason: signal.reason, resetsAt: signal.resetsAt,
+          partialWork: { state: 'not-applicable', detail: `a ${session.role} session edits nothing: it reads the exact head and leaves no work to keep` } });
+        await effects.endSession?.(session, `provider quota exhausted on ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); launched again on another account`);
+        let next = 'its request launches again on the next dispatch tick';
+        if (session.requestId && effects.relaunch) {
+          try { next = `relaunched on profile ${(await effects.relaunch(session, item, snapshot)).profile}`; }
+          catch (error) {
+            next = (error as { capacityExhausted?: boolean })?.capacityExhausted ? `no other account is left for the role (${message(error)}), so it waits for capacity`
+              : `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`;
+          }
+        }
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done',
+          detail: `${session.role} session ${session.agentName} for ${item.key} exhausted ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `${session.role} session ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+  }
+
   // 1b. A worker session that stops on a prompt while it holds its assignment is waiting on input
   //     no one will give; it is recorded as failed with that reason, once per pane, for the master.
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
-    if (!agent?.pane_id || !item || agent.agent_status !== 'blocked') continue;
+    if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || failedOver.has(item.id)) continue;
     const key = `session:blocked:${profile.name}:${agent.pane_id}:${item.epoch}`;
     if (state.actions[key]) continue;
-    performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it, and have it record a blocker naming the blocked command rather than asking`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it. A session that needs something records a typed request and exits — POST /api/work/${item.key}/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item, rather than holding the lease at a prompt`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    // The session is blocked, not gone: it still holds its pane, and the one moment somebody
+    // needs the attach command is this one. The handle stays running, carrying why it stalled;
+    // step 1 records it finished once the agent is actually closed.
+    await effects.recordSession?.(item, { id: `${profile.principal}:${item.epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
+      ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+      ...(agent.pane_id ? { pane: agent.pane_id, attach: `herdr pane attach ${agent.pane_id}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
+      subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+      outcome: 'waiting on input instead of recording a typed request; answer or stop it, and the attempt is recorded as failed with that reason' }).catch(() => {});
   }
 
   // 1c. A lease that keeps advancing while Herdr no longer reports the session renewing it is an
@@ -613,6 +1371,36 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  // 3b. Reclaim the items whose sessions died. A supervised launch fences its worker in a scope
+  //     unit; when that session dies the fence outlives it and the item cannot be claimed again
+  //     until somebody settles the quarantine. This host is the only one that can verify the
+  //     supervisor is gone, so it does: the probe is the same one `master settle-containment`
+  //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
+  //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
+  const assessments = effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
+  for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) {
+    const epoch = item.containmentQuarantine!.epoch;
+    const assessment = assessments[item.id];
+    const key = `settle:${item.id}:${epoch}`;
+    if (!assessment) continue;
+    if (!assessment.settleable) {
+      const escalationKey = `escalation:containment:${item.id}:${epoch}`;
+      const detail = `${item.key}: containment quarantine from epoch ${epoch} cannot be settled automatically: ${assessment.refusals.join('; ')}`;
+      if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
+      continue;
+    }
+    if (!effects.settleContainment) continue;
+    const previous = state.actions[key];
+    if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) continue;
+    await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'started', detail: `Settling the verified-dead containment quarantine of ${item.key} epoch ${epoch}`, attempts: (previous?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist);
+    try {
+      await effects.settleContainment(item, assessment);
+      performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'done', detail: `Settled the containment quarantine of ${item.key} epoch ${epoch}: its supervisor is verified gone on ${assessment.host ?? 'this host'}, so the item can be claimed again`, attempts: state.actions[key].attempts, epoch, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Containment settlement refused for ${item.key} epoch ${epoch}: ${message(error)}`, attempts: state.actions[key].attempts, epoch, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
+
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
   //    An item whose planned files overlap a claimed or unmerged item is not claimable (the
@@ -621,8 +1409,60 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const claimable = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }).sort(dispatchOrder);
+
+  // 4a. Capacity. A role whose every configured account is spent is not a launch to keep
+  //     retrying and not a failure to keep reporting: each item that needs the role records one
+  //     capacity escalation naming every account and its reset time, the loop stops launching
+  //     that role until the first of them resets, and the cycle says so in one line. Everything
+  //     that needs a different role — a review, a proof, a merge, a deployment — runs below
+  //     exactly as it would have, and the escalation is withdrawn the cycle an account returns.
+  const capacities: RoleCapacity[] = [roleCapacity('worker', config.workers.filter(worker => worker.mode === 'launch'), credentials)];
+  if (effects.reportCapacity) {
+    const others = await effects.roleHealth?.().catch(() => null) ?? {};
+    for (const role of ['reviewer', 'producer'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
+    const needs: Record<CapacityRole, Work[]> = {
+      worker: claimable,
+      reviewer: open.filter(item => item.autoDispatch?.review?.state === 'requested'),
+      producer: open.filter(item => item.autoDispatch?.producers.some(request => request.state === 'requested')),
+    };
+    for (const capacity of capacities) {
+      const key = capacityKey(capacity.role), previous = state.actions[key];
+      if (capacity.exhausted) {
+        const waiting = needs[capacity.role];
+        const signature = capacitySignature(capacity.role, capacity.accounts);
+        for (const item of waiting) {
+          const standing = standingCapacity(item, capacity.role)[0];
+          if (standing && capacitySignature(standing.role, standing.accounts) === signature) continue;
+          try { await effects.reportCapacity(item, { event: 'escalated', role: capacity.role, accounts: capacity.accounts }); }
+          catch (error) { performed.push(await record(state, `${key}:${item.id}`, { kind: 'capacity', work: item.key, principal: null, state: 'failed', detail: `Could not record the ${capacity.role} capacity escalation on ${item.key}: ${message(error)}`, attempts: (state.actions[`${key}:${item.id}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); }
+        }
+        const detail = `${describeCapacity(capacity.role, capacity.accounts)}${waiting.length ? `; waiting: ${waiting.map(item => item.key).join(', ')}` : ''}`;
+        if (previous?.detail !== detail) performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        continue;
+      }
+      const restored = open.filter(item => standingCapacity(item, capacity.role).length);
+      for (const item of restored) await effects.reportCapacity(item, { event: 'restored', role: capacity.role, reason: `An account for the ${capacity.role} role reports quota again` }).catch(() => {});
+      if (restored.length || previous && !previous.detail.startsWith('Restored')) {
+        performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail: `Restored: a ${capacity.role} account reports quota again; ${capacity.role} launches resume${restored.length ? ` for ${restored.map(item => item.key).join(', ')}` : ''}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+  }
+  const workersSpent = !!effects.reportCapacity && capacities[0].exhausted;
+
+  // 4b-human. An item parked on a decision only a human may make holds no lease and is not
+  //     claimable, so there is nothing to dispatch and nothing to escalate to an agent: the loop
+  //     names it once, with how to answer. The answer itself makes the item claimable, and the
+  //     dispatch below picks it up on the next cycle — no master session is part of that.
+  for (const item of open.filter(parkedOnHuman)) {
+    const request = item.humanRequest!, key = `human:${item.id}:${request.id}`;
+    if (state.actions[key]) continue;
+    performed.push(await record(state, key, { kind: 'human', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
+      detail: `${item.key} is parked on a human-only decision (${humanDecisionLabel[request.kind]}): ${request.needed} — ${request.reason}. Its attempt ended without a lease and nothing else waits on it; the human answers with ${answerCommand(item.key, request)} and the loop dispatches it again`,
+      attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  }
+
   const taken = new Set<string>();
-  for (const item of claimable) {
+  for (const item of workersSpent ? [] : claimable) {
     const key = dispatchKey(item);
     if (state.actions[key] && state.actions[key].state !== 'failed') continue;
     const free = effects.agents();
@@ -641,8 +1481,16 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     taken.add(choice.profile.name);
     await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
-      await effects.dispatch(item, choice.profile, free, snapshot);
+      const dispatched = await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined;
       clearProfileFailure(state, choice.profile);
+      // The session is now running somewhere. Put the handle where every Graphyard reader looks,
+      // so watching this specific agent never means asking this loop to relay its pane id.
+      await effects.recordSession?.(item, {
+        id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal, runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
+        ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+        ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
+        subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+      }).catch(() => { /* the dispatch landed; a handle that could not be written is not a failed dispatch */ });
       performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       recordProfileFailure(state, choice.profile, message(error), now());
@@ -680,10 +1528,187 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
+  // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
+  //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
+  //     used to wait for a master session to notice. The loop requests the decision with the
+  //     master's own operator-agent identity and launches the independent approver session for it;
+  //     it never approves its own request, so the separation the server enforces is unchanged.
+  //     Automatic merging turned off is the fourth: the merge itself then waits for that approval.
+  //     A request is not the end of it. The approver is a launched session like any other, so every
+  //     cycle reads the decision back and looks at its session again (see `approvalStep`): a
+  //     finished session is closed, a dead, declining or hung one is replaced within a bound, a
+  //     decision the server settled some other way is requested again, and one no session will
+  //     judge is escalated and left standing on the silence measure.
+  const stamp = new Date(clock).toISOString();
+  // One Herdr read serves the step, and is taken again after anything that changes the inventory.
+  let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
+  const sessions = () => inventory ??= effects.herdr?.() ?? { agents: effects.agents(), available: true };
+  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
+    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+  /** Close the approver session a watch names, if Herdr still lists it. False only when it could not be closed. */
+  const closeApprover = async (item: Work, watch: ApprovalWatch, why: string) => {
+    const session = watch.agentName ? sessions().agents.find(agent => agent.name === watch.agentName) : undefined;
+    if (!session?.pane_id) return true;
+    const key = `close:approver:${watch.decision}:${session.pane_id}`;
+    try { await effects.closeSession(session.pane_id); inventory = null; await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true; }
+    catch (error) { inventory = null; watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
+  };
+  /** Put a watched decision to an approver session. The launch is counted before it is made. */
+  const launch = async (item: Work, watch: ApprovalWatch, adopt: boolean) => {
+    const name = approverSessionName(item, watch.decision), seen = sessions();
+    // A session a master started for the same decision (`master approver`) is the approver it has.
+    const listed = adopt && seen.available ? seen.agents.find(agent => agent.name === name) : undefined;
+    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp });
+    await effects.persist(state);
+    if (listed) return `adopted approver session ${name}, already judging it`;
+    inventory = null;
+    const launched = await effects.approver!(item, watch.decision);
+    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null });
+    return `launched independent approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})`;
+  };
+  const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
+    watch.exhaustedAt = stamp;
+    await note(`escalation:decision-unjudged:${watch.decision}`, item, 'escalation', 'failed', `${detail}. ${watch.launches} approver session(s) and ${watch.requests} request(s) have not produced a judgement${watch.ended.length ? ` (${watch.ended.join('; ')})` : ''}, so the loop has stopped spending sessions on it: read it with graphyard master decisions ${item.key}, then put it to a fresh approver with graphyard master approver ${item.key} ${watch.decision}, or take the request back and decide what the item needs instead`);
+  };
+  /** Request the decision (or adopt the one already standing) and put it to an approver. */
+  const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
+    const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
+    const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+    await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
+    try {
+      const history = effects.decisions ? (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions : [];
+      const applied = decision.action === 'merge' ? approvedMerge(item, history) : null;
+      if (applied) {
+        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: applied.id, requestedAt: stamp, settledAt: stamp });
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key} already holds an applied merge decision for candidate ${decision.binding.slice(0, 12)}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
+      // A request whose response was lost is already standing on the item, and the server refuses a
+      // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
+      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
+      // Only a merge decision names what it binds. One standing for an earlier candidate can never
+      // apply to this one, and it refuses the request that could: the requester takes it back.
+      if (standing && decision.action === 'merge' && !(standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision)) {
+        const stale = `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${decision.binding.slice(0, 12)}`;
+        if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}, and ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${item.key}`);
+        await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
+        standing = undefined;
+      }
+      const requested = standing ?? await effects.decide!(item, decision.action, decision.reason);
+      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [] });
+      // A verdict measured from when the reviewer landed it to when the loop asked for the round it
+      // needs. A base conflict has no verdict behind it, so it is not part of that measurement. It
+      // is sampled with the request, before the launch: a request whose first launch throws is
+      // supervised from the watch and never comes back through here.
+      const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
+      if (Number.isFinite(verdictAt)) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
+      await effects.persist(state);
+      // The request alone changes nothing; the approver session is what applies it. A launch that
+      // fails leaves the watch behind, so the next cycle sees a decision with no session and
+      // launches again, inside the same bound.
+      const how = await launch(item, watch, true);
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${decision.reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    }
+  };
+  /** Look again at a decision already requested: its state on the control plane, and its session. */
+  const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
+    const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
+    const step = approvalStep(watch, history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null, sessions(), clock);
+    if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
+    const base = `approver:${watch.decision}`;
+    if (step.step === 'settled') {
+      await closeApprover(item, watch, 'its decision is applied');
+      watch.settledAt = stamp;
+      await note(`${base}:settled`, item, 'decision', 'done', step.detail);
+      return;
+    }
+    // Every other step replaces the session, so the one that ended goes first. While it cannot be
+    // closed its name is still taken, and the step is taken again next cycle.
+    if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
+    if (watch.ended.at(-1) !== step.detail.slice(0, 300)) watch.ended = [...watch.ended, step.detail.slice(0, 300)].slice(-10);
+    if (step.step === 'rerequest') {
+      // The server settled it some other way — failed on a precondition, stale, withdrawn — and
+      // the item still needs the decision, so it is asked again: a bounded number of times, and on
+      // the same widening interval as any refused action. The watch stays until a new request
+      // replaces it, so the bound survives a request that is itself refused.
+      if (watch.requests >= maxDecisionRequests) { if (!watch.exhaustedAt) await escalateUnjudged(item, watch, step.detail); return; }
+      if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
+      if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
+      await request(item, decision, key, watch);
+      return;
+    }
+    if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return; }
+    try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
+    catch (error) { await note(`${base}:launch:${watch.launches}`, item, 'decision', 'failed', `${step.detail}; a replacement approver session could not be launched: ${message(error)}`); }
+  };
+
+  const needed = new Set<string>(), unattestable = new Set<string>();
+  for (const item of snapshot.work) {
+    const assessment = assessments[item.id];
+    const decision = routineDecision(item, config, clock, assessment);
+    if (!decision) {
+      // Still called for, only not attestable this cycle: its request is not one the item moved past.
+      const called = neededDecision(item, config);
+      if (called) unattestable.add(decisionKey(item, called));
+      // The item needs the decision and the loop will not attest what it could not verify. Step 3b
+      // has already escalated an open item whose fence this host assessed and could not settle.
+      const withheld = withheldDecision(item, config, clock, assessment);
+      const escalationKey = `escalation:decision-withheld:${item.id}:${item.containmentQuarantine?.epoch ?? item.epoch}`;
+      const detail = withheld ? `${withheld.reason}. Stop the supervisor on its registered host and settle the fence there (graphyard master settle-containment ${item.key}), or request the decision yourself on an attestation you verified`.slice(0, 2000) : '';
+      if (withheld && !(item.stage !== 'done' && assessment) && state.actions[escalationKey]?.detail !== detail) await note(escalationKey, item, 'escalation', 'done', detail);
+      continue;
+    }
+    const key = decisionKey(item, decision);
+    needed.add(key);
+    const watch = state.approvals[key];
+    if (watch) { if (!watch.settledAt) await supervise(item, decision, key, watch); continue; }
+    const previous = state.actions[key];
+    // A `done` entry with no watch is a cursor written before requests were supervised; the
+    // request path adopts the decision it left standing and launches an approver for it.
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) continue;
+    if (!effects.decide || !effects.approver) {
+      const escalationKey = `escalation:decision:${item.id}:${decision.binding}`;
+      const detail = `${item.key} needs a ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action} REASON, then graphyard master approver ${item.key} DECISION`;
+      if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      continue;
+    }
+    await request(item, decision, key, null);
+  }
+  // A watch whose item no longer needs its decision — applied and moved on, or overtaken by a new
+  // head — has nothing left to judge. Its session is closed rather than left holding a provider
+  // seat, and the watch goes with it; one Herdr cannot be read for stays until it can.
+  for (const [key, watch] of Object.entries(state.approvals)) {
+    if (needed.has(key)) continue;
+    if (!sessions().available) continue;
+    const item = snapshot.work.find(candidate => candidate.key === watch.work);
+    // A request the item moved past is taken back by the identity that made it, whatever its
+    // action: left `requested`, it would be adopted for some later round on a reason that describes
+    // an older head. One the item still calls for stays, and is adopted when it can be attested.
+    let withdrawn = true;
+    if (item && !watch.settledAt && !unattestable.has(key) && effects.withdraw && effects.decisions) {
+      try {
+        const standing = (await effects.decisions(item)).decisions.find(entry => entry.id === watch.decision);
+        if (standing?.state === 'requested') {
+          await effects.withdraw(item, watch.decision, `${watch.work} moved past the ${watch.action} this decision asked for before any approver judged it, so its reason no longer describes the item`);
+          await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'done', `Withdrew ${watch.action} decision ${watch.decision}: ${watch.work} no longer needs it and no approver had judged it`);
+        }
+      } catch (error) {
+        withdrawn = false; watch.closeAttempts += 1;
+        await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'failed', `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`);
+      }
+    }
+    const closed = !item || await closeApprover(item, watch, `${watch.work} no longer needs ${watch.action} decision ${watch.decision}`);
+    // A tab that will not close, or a request that cannot be taken back, is left to the operator
+    // after a few tries; the session name is this decision's alone, so it can refuse no other launch.
+    if ((closed && withdrawn) || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];
+  }
+
   // 5. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
   //    and trusted producers publish evidence; the daemon records exactly one request per candidate
   //    and escalates what only a human or a producer may resolve.
-  for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested)) {
+  for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested && !standingVerdict(candidate))) {
     const reviewGate = item.gates.find(gate => gate.name === 'review');
     if (reviewGate && !reviewGate.passed) {
       const key = candidateKey('review', item);
@@ -736,25 +1761,38 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) without a valid merge execution: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }
   const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !mergedWithoutAuthorization(candidate));
-  if (config.autoMerge) {
-    for (const item of mergeCandidates) {
-      const key = candidateKey('merge', item);
-      const previous = state.actions[key];
-      if (!readyToRetry(previous, state.cycle)) continue;
-      await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-      try {
-        const result = await effects.merge(item);
-        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${(result as { result?: string })?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-      } catch (error) {
-        // A refusal is the gate working, not a daemon fault: record it and keep cycling.
-        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+  for (const item of mergeCandidates) {
+    const key = candidateKey('merge', item);
+    const previous = state.actions[key];
+    if (!readyToRetry(previous, state.cycle)) continue;
+    // With automatic merging off the guarded merge runs for exactly the candidate an approver
+    // agent approved (step 4c requested it). Until that approval is applied, the loop waits on the
+    // approver rather than on a person, and says which decision it is waiting for.
+    if (!config.autoMerge) {
+      const approval = effects.decisions ? approvedMerge(item, (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions as Parameters<typeof approvedMerge>[1]) : null;
+      if (!approval) {
+        const waitKey = candidateKey('escalation', item);
+        const watch = state.approvals[decisionKey(item, { action: 'merge', binding: item.candidate!.sha })];
+        // A loop that can request the decision says so and waits for the approver agent; one
+        // without the master's operator-agent identity is genuinely waiting on the master session,
+        // and names the two commands that put the same decision to the same approver. The wait
+        // names the decision and the session it is with, so it is raised again whenever that
+        // changes — a replaced session, or a decision no session judged — not once and never again.
+        const detail = watch?.exhaustedAt ? `Automatic merging is disabled and merge decision ${watch.decision} for ${item.key} is still unjudged after ${watch.launches} approver session(s); put it to a fresh one with graphyard master approver ${item.key} ${watch.decision}`
+          : watch ? `Automatic merging is disabled; ${item.key} merges as soon as approver session ${watch.agentName ?? '(not launched yet)'} (launch ${watch.launches} of ${maxApproverLaunches}) applies merge decision ${watch.decision}, which this loop requested`
+          : effects.decide ? `Automatic merging is disabled; ${item.key} merges once an approver agent applies a merge decision for candidate ${item.candidate!.sha.slice(0, 12)}`
+            : `Automatic merging is disabled; ${item.key} awaits explicit operator approval before the guarded merge runs: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION`;
+        if (state.actions[waitKey]?.detail !== detail) performed.push(await record(state, waitKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        continue;
       }
     }
-  } else {
-    for (const item of mergeCandidates) {
-      const key = candidateKey('escalation', item);
-      if (state.actions[key]?.state === 'done') continue;
-      performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `Automatic merging is disabled; ${item.key} awaits explicit operator approval before the guarded merge runs`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+    try {
+      const result = await effects.merge(item);
+      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${(result as { result?: string })?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      // A refusal is the gate working, not a daemon fault: record it and keep cycling.
+      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
 
@@ -819,9 +1857,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
-  // 8. Measure. Every cycle records stage p50/p90 whether or not it acted.
+  // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have
+  //    acted on and how long the longest of those has waited, and the passage of every item it
+  //    watches: ready→claim, ready→first push, approval→merge and how long a mergeable candidate
+  //    stayed mergeable. All of it from the snapshot this cycle acted on, so no figure can
+  //    disagree with the state that produced it.
+  for (const item of snapshot.work) {
+    const sample = observeItemClock(state, item, clock);
+    if (sample) state.latency.push(sample);
+  }
+  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals });
+  const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
-  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length, stages, lead, production, postDeploy, postDeployFailures,
+  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs: Math.max(0, Math.round(now() - startedAt)), open: open.length, actions: performed.length,
+    actionable: silence.actionable, idleMs: silence.longestIdleMs, stages, lead, production, postDeploy, postDeployFailures,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
   state.cycle += 1;
@@ -829,7 +1878,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   if (state.lock) state.lock = { ...state.lock, heartbeatAt: state.lastCycleAt };
   pruneDaemonState(state);
   await effects.persist(state);
-  return { actions: performed, metrics, deployment: state.deployment, health, scope: budget };
+  return { actions: performed, metrics, deployment: state.deployment, health, silence, budget: latencyBudget(state.latency), scope: budget };
 }
 
 /**
@@ -893,12 +1942,21 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
 }
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
-export function daemonSummary(state: DaemonState, now: number, intervalMs: number) {
+export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? now - lastCycleAt : null;
   const recent = Object.entries(state.actions).map(([key, action]) => ({ key, ...action })).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  const liveness = loopLiveness(state, now, intervalMs, hostId);
   return {
-    running: !!state.lock && lagMs !== null && lagMs < Math.max(3 * intervalMs, 120_000),
+    // A loop inside a failed-cycle backoff is running: it announced when its next cycle is due.
+    running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running'),
+    // Whether the loop is cycling at all, on the two-interval bound, with the restart command.
+    liveness,
+    // Failed cycles and the process-level events the loop survived (GY-119).
+    failures: state.failures,
+    // What it could act on and the longest any of those has waited, and the latency budgets.
+    silence: silenceReport(state.silence, now),
+    budget: latencyBudget(state.latency),
     lock: state.lock, cycle: state.cycle, lastCycleAt: state.lastCycleAt, lagMs,
     unresolved: recent.filter(action => action.state === 'started' || action.state === 'indeterminate'),
     escalations: recent.filter(action => action.kind === 'escalation').slice(0, 20),
@@ -908,6 +1966,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     profiles: state.profiles,
     config: state.config,
     reclaim: state.reclaim,
+    // Every decision the loop has put to an approver and not yet seen applied and retired.
+    approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
   };
 }
 
@@ -932,43 +1992,104 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
   return noted;
 }
 
+/** A watchdog window too short for the configured interval is recorded once, not obeyed silently. */
+export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof watchdogPlan>, at: string, persist: DaemonEffects['persist']) {
+  if (!plan.refusal) return [];
+  const key = `escalation:watchdog:${plan.windowMs}`;
+  if (state.actions[key]) return [];
+  const entry = daemonActionSchema.parse({ kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, cycle: state.cycle, at });
+  state.actions[key] = entry; await persist(state);
+  return [entry];
+}
+
 /**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe: it reconciles the cursor against Graphyard and keeps cycling.
+ *
+ * A cycle that throws does not end the process (GY-119). The rejection — a control-plane read that
+ * timed out, a runtime call that failed, a reload that could not be parsed — fails that cycle: it is
+ * recorded on the cursor with the cycle number and the call it escaped from, logged, and the next
+ * cycle runs after a delay that grows with the consecutive count. An unhandled rejection or uncaught
+ * exception anywhere in the process is caught here, logged with its origin, counted on the cursor,
+ * and survived. Only a stop signal ends the loop; the supervisor's restart is reserved for a process
+ * that hangs, which its watchdog detects.
  */
-export async function runDaemon(config: MasterConfig, state: DaemonState, effects: DaemonEffects, options: { once?: boolean; intervalMs: number | (() => number); identity: { pid: number; host: string }; signals?: NodeJS.Signals[]; now?: () => number; log?: (line: string) => void;
+export async function runDaemon(config: MasterConfig, state: DaemonState, raw: DaemonEffects, options: { once?: boolean; intervalMs: number | (() => number); identity: { pid: number; host: string }; signals?: NodeJS.Signals[]; now?: () => number; log?: (line: string) => void;
+  /** The process supervisor's environment, for the watchdog keep-alive; defaults to this process's. */
+  environment?: Record<string, string | undefined>;
   /** Re-reads .graphyard/master.json before each cycle, so profiles, workspace, run settings and autoMerge apply without a restart. */
-  reload?: () => Promise<ConfigReload> } ) {
+  reload?: () => Promise<ConfigReload>;
+  /** The process whose unhandled rejections and uncaught exceptions the loop catches; defaults to this one. */
+  process?: Pick<NodeJS.Process, 'on' | 'off'> } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
+  const effects = namedEffects(raw), host = options.process ?? process;
   acquireDaemonLock(state, options.identity, now(), interval());
   await effects.persist(state);
+  // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
+  // silent pipeline; a window that would restart a healthy loop is recorded and left to the
+  // supervisor's configuration rather than worked around.
+  const watchdog = watchdogPlan(options.environment ?? process.env, interval());
+  for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+  if (watchdog.supervised) { try { effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
   let stopping = false;
   // A supervisor's SIGTERM must land during the wait, not one whole interval later.
   const waking = new AbortController();
   const stop = () => { stopping = true; waking.abort(); };
   const signals = options.signals ?? ['SIGTERM', 'SIGINT'];
-  for (const signal of signals) process.on(signal, stop);
-  const cycles: { cycle: number; actions: number; durationMs: number }[] = [];
+  for (const signal of signals) host.on(signal, stop);
+  // A detached promise that rejects — in the dispatcher beside this loop, an approver watch, a
+  // Herdr read nobody awaited — would otherwise end the process. It is counted and survived; the
+  // cursor write is best-effort, since the handler runs outside any cycle's own persistence.
+  const unhandled = (origin: 'unhandledRejection' | 'uncaughtException') => (error: unknown) => {
+    const entry = noteUnhandled(state, error, origin, now());
+    log(`[graphyard-master] ${origin} caught at the process level during cycle ${entry.cycle} (${state.failures.unhandled} so far); the loop keeps running: ${entry.reason}`);
+    effects.persist(state).catch(() => {});
+  };
+  const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
+  host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
+  const cycles: { cycle: number; actions: number; durationMs: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
   try {
     do {
-      if (options.reload) {
-        for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+      let phase: 'reload' | 'cycle' = 'reload', wait: number;
+      try {
+        if (options.reload) {
+          for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+        }
+        phase = 'cycle';
+        const result = await runCycle(config, state, effects, now);
+        // The end of a run of failures is written at once, so `master status` stops naming it.
+        const recovered = noteCycleSuccess(state);
+        if (recovered) await effects.persist(state);
+        cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs });
+        for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
+        // Both halves of every cycle: what it could act on, and what it did about it.
+        log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms; ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
+        // The configured interval is the idle cadence; while anything is actionable the loop comes
+        // back inside the responsive window so ready work cannot sit out a long interval.
+        wait = cycleDelay(interval(), result.silence);
+      } catch (error) {
+        // The cycle failed; the loop did not. The counter advances, the cause is on the cursor, and
+        // the next cycle waits longer for each consecutive failure so a fault is not hammered.
+        const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });
+        failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
+        log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
+        wait = failure.delayMs;
       }
-      const result = await runCycle(config, state, effects, now);
-      cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs });
-      for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
-      log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms; ${result.metrics.open} open, ${result.actions.length} action(s)`);
+      // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
+      // is for a cycle that hangs, and a thrown one has just proved it did not.
+      if (watchdog.supervised) { try { effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
       if (options.once || stopping) break;
-      try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
+      try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
     } while (!stopping);
   } finally {
-    for (const signal of signals) process.off(signal, stop);
+    for (const signal of signals) host.off(signal, stop);
+    host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
     state.lock = null;
     await effects.persist(state).catch(() => {});
   }
-  return { cycles, stopped: stopping };
+  return { cycles, failed, stopped: stopping };
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
@@ -982,17 +2103,87 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
    */
   executor: MergeExecutor;
   run?: (command: string, args: string[]) => string;
+  fetcher?: typeof fetch;
 }): DaemonEffects {
   const run = deps.run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 }));
   const current = typeof source === 'function' ? source : () => source;
+  const fetcher = deps.fetcher ?? fetch;
+  /**
+   * One call as the master's own operator-agent identity — the identity that requests decisions.
+   * The coordinator credential cannot, and the approver's
+   * credential is never read here: an agent that requested a decision may not approve it.
+   */
+  const asOperatorAgent = async (method: 'GET' | 'POST', path: string, body?: unknown) => {
+    const config = current();
+    if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can request routine decisions');
+    const token = await agentToken(root, config, 'operatorAgent');
+    const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    return result;
+  };
+  const decide: DaemonEffects['decide'] = async (work, action, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, {}), reason });
+  // The approver's runtime and account come from the registry's approver role; naming a kind here
+  // would be a runtime read out of code, and the role would decide nothing.
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
+  // The same route, as the same requester: only the identity that asked may take a request back.
+  const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
+  const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   return {
     agents: () => { try { return listHerdrAgents(run); } catch { return []; } },
+    // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
+    sessionOutput: agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
+    reportCapacity: (work, event) => deps.mutate(`work/${work.id}/capacity`, event),
+    launchedSessions: async () => [
+      ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending').map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
+      ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
+    ],
+    selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
+    preserveWork: async (work, epoch) => {
+      const workspace = work.workspaces.find(entry => entry.epoch === epoch);
+      if (!workspace || workspace.host !== current().hostId) return { state: 'not-applicable', detail: workspace ? `the attempt worktree is on ${workspace.host}, not this host; its commits stay on ${workspace.branch}` : 'the attempt registered no workspace' };
+      return preservePartialWork(workspace.path, `${work.key} attempt ${epoch} interrupted by provider quota exhaustion`, run);
+    },
+    holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed),
+    endSession: async (session, resolution) => {
+      if (session.pane) closeHerdrPane(session.pane, run);
+      const closedAt = new Date().toISOString(), ended = { state: 'failed' as const, resolution: resolution.slice(0, 500), closedAt };
+      if (session.role === 'reviewer') { const ledger = await readReviewLedger(root); await saveReviewLedger(root, { ...ledger, reviews: ledger.reviews.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
+      else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
+    },
+    relaunch: async (session, work, snapshot) => {
+      const config = current(), agents = listHerdrAgents(run);
+      const request = session.role === 'reviewer' ? work.autoDispatch?.review : work.autoDispatch?.producers.find(entry => entry.id === session.requestId);
+      if (!request || request.id !== session.requestId || request.state !== 'requested') throw new Error(`${work.key} no longer requests this ${session.role} session`);
+      // The profile that just ran out goes last: its other accounts are still its own failover.
+      const order = <P extends { name: string; agentName: string }>(profiles: P[]) => [...profiles.filter(profile => profile.name !== session.profile), ...profiles.filter(profile => profile.name === session.profile)].filter(profile => !agents.some(agent => agent.name === profile.agentName));
+      const skipped: string[] = [];
+      // As in the dispatcher: only skips that were all spent quota make this a wait for capacity.
+      let capacity = true;
+      for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
+        try {
+          if (session.role === 'reviewer') await launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id });
+          else await launchProducer(root, work, request, profile as MasterConfig['producers'][number], agents, snapshot.now, { run });
+          return { profile: profile.name };
+        } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
+      }
+      if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
+      throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
+    },
+    roleHealth: async () => {
+      const config = current();
+      return {
+        ...(config.reviewers.length ? { reviewer: { profiles: config.reviewers, health: await inspectProfileAccounts(config, 'reviewer', config.reviewers, Object.fromEntries(config.reviewers.map(profile => [profile.name, { available: true, reason: null as string | null }]))) } } : {}),
+        ...(config.producers.length ? { producer: { profiles: config.producers, health: await inspectProducerCredentials(root, config.producers) } } : {}),
+      };
+    },
     herdr: () => { const runtime = observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
     stopSupervisor: (orphan, signal) => { stopWatchSupervisor(orphan, signal, run); },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     snapshot: deps.snapshot,
     closeSession: pane => closeHerdrPane(pane, run),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
+    recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
     decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
     requestProof: work => {
       const config = current();
@@ -1015,6 +2206,26 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       try { return { ...report, checkouts: await reclaimCheckouts(root, current()) }; }
       catch (error) { return { ...report, errors: [...report.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
     },
+    // The decision effects exist only while the live configuration names the master's
+    // operator-agent identity. Without one the loop has no way to request anything, so the cycle
+    // sees them absent and records each routine decision as the escalation naming the two commands,
+    // instead of a request that fails on every retry; provisioning the identity brings them back
+    // on the next reload, with no restart.
+    get decide() { return current().operatorAgent ? decide : undefined; },
+    get approver() { return current().operatorAgent ? approver : undefined; },
+    get withdraw() { return current().operatorAgent ? withdraw : undefined; },
+    get decisions() { return current().operatorAgent ? decisions : undefined; },
+    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset }),
+    settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
+      reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
+    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
+    // wherever NOTIFY_SOCKET is, and the loop only speaks to it when the supervisor set one.
+    // Node has no unix datagram socket, so the message goes through that short-lived child, which
+    // the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until
+    // the manager has processed the message, so it cannot exit before it is attributed; on an
+    // older systemd a keep-alive can be lost to that race, which is why the packaged window is
+    // 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row.
+    notify: state => { run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     persist: state => writeDaemonState(current(), state),
   };
 }

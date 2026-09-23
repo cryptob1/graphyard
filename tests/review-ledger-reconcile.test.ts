@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, sessionHarnessPlan, setupMaster, type MasterConfig } from '../src/master.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import type { Observation, Work } from '../src/model.js';
@@ -56,7 +57,7 @@ const moved = () => {
 const herdrRun = (calls: string[][], failClose = false) => (_command: string, args: string[]) => {
   calls.push(args);
   if (failClose && args[0] === 'pane' && args[1] === 'close') throw new Error('pane close refused');
-  return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+  return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 };
 
 test('integration:review-ledger-reconcile — a verdict GitHub shows on the exact head completes the record however the post happened, even when Herdr cannot close the pane, and stops blocking the next launch', async () => {

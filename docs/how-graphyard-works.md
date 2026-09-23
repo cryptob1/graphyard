@@ -18,9 +18,6 @@ Only an independently observed authorized merge marks the item **Done**; history
 
 ## Two phases, one clear handoff
 
-1. **Phase 1 · Bootstrap.** The human operator connects the repository and activates its gates while supervising a single worker-scoped agent, which never receives the operator or GitHub credentials used for setup.
-2. **Phase 2 · Normal operation.** The operator supplies goals and the three human-only decisions, an operator agent may send bounded intent, and the master loop (`coordinator`), optional slice leads (`slice-lead`) and the independent reviewer and proof producers (`producer`) read ready work and gate state while the master dispatches — an invitation, not ownership — to many worker sessions.
-
 **Both phases:** identical gates and credential boundaries, Herdr hosting the sessions and reporting their health.
 
 ![Bootstrap single-agent operation beside normal multi-agent operation, under the same gates and credential boundaries.](diagrams/bootstrap-vs-normal.svg)
@@ -42,7 +39,6 @@ Both diagrams use the [diagram legend](glossary.md#diagram-legend).
 - **Graphyard is the source of ownership and progression truth.** Runtime health is not ownership.
 - **Workers stay untrusted.** They never receive operator, scoped operator-agent, coordinator or trusted evidence-producer credentials.
 - **There is no shortcut.** No client-controlled lifecycle-state endpoint and no administrative merge bypass.
-- **Graphyard and Herdr answer different questions** — who owns the work at which epoch, what it requires, which commit is the candidate and whether the gates passed, against whether the session is alive, where it runs and whether it needs attention — and neither answers the other's ([the eight distinctions](glossary.md#the-eight-distinctions)).
 
 ## When a gate says no
 

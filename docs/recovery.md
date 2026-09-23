@@ -3,21 +3,19 @@
 
 For an operator running the validation path: why a request waits, and when a rollback is complete.
 
+A session that stops on its provider's usage-limit notice needs no recovery by hand: the loop keeps its partial work, holds the account and relaunches within two minutes ([exhaustion in the middle of a session](fleet.md#exhaustion-in-the-middle-of-a-session)).
+
 ## Runner capacity and request diagnostics
 
 `graphyard validation capacity` (`GET /api/validation/capacity`) reports:
 
-- **Per runner registration:** last dispatch poll, whether executing, requests queued and for how long, queue limit
 - **Backpressure:** a registration may set `queueLimit` (1–100, default 20); a request for a runner already holding that many queued refuses with HTTP 429 and the count: wait for dwell to drain, cancel stale requests or register another runner
 - **Every reserved protected resource:** request and attempt holding it, whether that lease is live
 - Retained-artifact usage
 - One diagnosed condition per live request:
-  - `queued-starved`: no dispatch poll since creation — start or repair the runner, enable a current registration revision, or re-request on a polling runner
-  - `queued-waiting-for-slot`: a needed resource held under a live lease — wait, or add a registration if dwell grows
   - `queued-resource-held`: a needed resource reserved by an attempt whose settlement was never verified — verify execution stopped, then `validation settle` with evidence; never release on a timer
   - `unacknowledged`: dispatched, not acknowledged inside the ACK window — nothing was authorized, an expired window settles itself, `validation retry` queues another
   - `heartbeat-missing`: acknowledged, not renewed within the 20-second interval while the lease is live — the runner may still be executing, so leave its reservations until the collector observes settlement or an operator settles it with evidence
-  - `collection-stalled`: the collector holds authority but stopped renewing — check its process; an expired collection keeps the barrier closed
   - `awaiting-settlement`: terminal, reservations held by an unsettled attempt — verify termination and its external operations, then `validation settle` with evidence
   - `retryable`: settled, attempts and deadline remaining — `validation retry`
   - `running`, `collecting`, `settled`: healthy or finished
@@ -28,9 +26,7 @@ Private artifacts keep their authorization, digest, retention and request bindin
 
 - **postgres** (default): bytes in the row
 - **s3:** S3-compatible store reached with path-style SigV4: `GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `GRAPHYARD_ARTIFACT_S3_BUCKET`, `GRAPHYARD_ARTIFACT_S3_REGION` (default `us-east-1`), `GRAPHYARD_ARTIFACT_S3_ACCESS_KEY_ID`, `GRAPHYARD_ARTIFACT_S3_SECRET_ACCESS_KEY`, optional `GRAPHYARD_ARTIFACT_S3_PREFIX`. Only the server holds that credential; collectors upload through the same call with their scoped Graphyard credential
-- Provider I/O stays outside coordination transactions: an upload is reserved under the lock as `pending`, bytes move with the lock released, the row becomes `stored` only after the same authority is rechecked. Every read verifies the SHA-256 recorded at upload; a substituted object refuses with an integrity error.
 - A row is `pending`, `stored`, `upload-failed` or `expired`; the last two refuse with their own reason, beside `missing`. A failed upload refuses the collector with 503 and resumes on retry with the same idempotency key and bytes; an upload exceeding `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` refuses with 507, storing nothing.
-- Expiry recorded first, under the lock: reads refuse from that instant; the sweep then deletes the object, confirms with `HEAD`, then records the deletion; a refused deletion is retried, never assumed.
 - `graphyard validation artifact-migrate s3|postgres [LIMIT]` copies each artifact's bytes, reads them back, compares with the recorded digest before the row names the new backend, listing a failed copy under `refused`; retention, bindings and access rules do not move. Run it until `remaining` is zero, then switch the backend variable on every replica.
 
 ## Rollback
@@ -53,7 +49,6 @@ A rollback is four records plus a repair-work link, the executor registered as a
 }
 ```
 
-- **`provider`:** the write is conditioned provider-side on the deployment that should still be running (`precondition.expectedRunning`) and this operation's `generation` and `token`. May be automatic; a newer selection may supersede the target, the delayed write failing at the provider, its late report recorded as non-authoritative
 - **`serialized`:** the adapter observes its own operation settle but cannot fence the write. May be automatic; no selection, rollback or other environment mutation is authorized until the operation is settled or resolved, and lease expiry alone releases nothing
 - **`none`:** neither, and **never automatic**: the definition refuses `automatic: true`, claiming an automatic rollback refuses, and the same serialized barrier holds
 
@@ -95,7 +90,6 @@ The executor claims it and reports the operation; with its host lost, an operato
 
 1. Selects the most recent release that verified here
 2. Requires its approval to still bind where the policy asks
-3. Checks an enabled `rollback` registration with `provider` or `serialized` fencing and `automatic: true` covers the environment
 4. Opens the rollback with incident IDs
 
 - **Anything missing:** refusal shown once as `automaticRollbackRefusal`

@@ -14,21 +14,27 @@ Text equivalent: agent sessions, the dashboard and a proof producer reach the **
 ## Storage
 
 - **`work_items.document`:** the current aggregate; each mutation updates it, appending an event carrying the new snapshot in the same transaction, ordered by `events.seq`.
-- **`receipts`:** each successful command under `(principal, idempotency key)` with a fingerprint: a retry returns the original result, a key reused for different input refuses, and a replay never renews a lease.
 - **Release, delivery, attribution and validation tables:** those protocols' immutable records.
-- **`jobs`:** durable queue processed with `FOR UPDATE SKIP LOCKED`, acknowledged with the exact owner token.
 - **`flow_facts` and `deployment_observations`:** the append-only projection [flow analytics](flow-analytics.md) reads, never part of gate evaluation.
 
 ## Transactions, assignments and evidence
 
-- **One Postgres advisory lock:** taken by every short domain mutation, serializing cross-item decisions (dependency readiness and workspace reservations included) across replicas; remote calls never hold it.
 - **Requirements and dependency edges:** revisable by [audited revision](coordination.md#revise-requirements-explicitly), refusing active ownership and cycles.
+
+## Inverted coordination: typed actions and stateless executors
+
+The control plane names what each item needs next and keeps a durable leased row for it; stateless executors claim those rows and run them ([operating them](executors.md)). `nextAction` (`src/model/next-action.ts`) is pure over the item, its graph and the clock, so two readers always agree without talking to each other.
+
+- **Every gate refusal maps to exactly one of the nine kinds** through `refusalAction`, whose last rule matches everything, so an unmapped refusal escalates rather than going silent. An unfinished dependency and a queue position name no action of their own: they are the other item's `dispatch` and the predecessor's `merge`. Naming an action nobody can complete is the failure this prevents.
+- **A refusal is classified from the item, not its text:** `reviewNeed` and `reviewStandstill` decide what a review refusal needs — a standing change request `request-rework`; a head not containing the base tip, or a provider that dispatches its own review (`codex`, `agent`), `resync`; a base that would not merge `request-rework`; an exhausted reviewer roster, or an unsettled fence with no live lease, `escalate`; a genuinely missing `github` approval `request-review`. `reclaim` clears a lapsed lease but never lowers a fence, so its handler refuses rather than reporting a fenced item free.
+- **Rows are durable** (`src/model/actions.ts`), written in the same advisory-locked transaction as every other decision; a row's id hashes what it binds, never when it was made, so a restart recognises the row it has. Executors are stateless — a credential, a host name, one handler per kind — and `actionJudgment` classifies each kind (`none` mechanical, `in-session` launches a session the model works inside, `in-step` *is* the judgment), the two `in-step` kinds never having a handler, so a ready-to-delivered cycle runs with no judgment in the loop; `llmRole` names the judgment inside what an action starts.
+- **A claim is a bounded lease, not a bounded handler:** an executor still working renews it, and a renewal is accepted only from the live claim's own executor name *and* credential, since several executors may share one coordinator credential. One that dies renews nothing, its claim expires, the next takes the row as a further attempt, and the dead one's late settlement is refused. A row whose claim is live is never retired even when the situation moved on.
+
+None of this authorizes progression: an action is a fact about what is missing, and the gates still decide from evidence and verdicts alone.
 
 ## Reconciliation
 
-- **Tick:** non-overlapping, every two seconds: expires leases, re-evaluates affected state, then processes up to four GitHub jobs concurrently.
 - **Job eligibility:** a successful job again after 20 seconds, a failed one after 45.
-- **Applying an observation:** compares the work revision read before external I/O with the current one, requiring the job's unexpired owner token.
 - **Check publication:** rechecks that token, the revision and observation freshness immediately before writing.
 - **Adapter:** rereads the pull request after collecting evidence, refusing a changed head, base, draft or state.
 - **Observations older than two minutes:** refuse the merge gate.
@@ -42,4 +48,3 @@ Text equivalent: agent sessions, the dashboard and a proof producer reach the **
 ## Display state and replicas
 
 - **Delivered work:** stays delivered in history; a merge observed with unsatisfied gates is a permanent visible violation.
-- **One formatter renders every elapsed duration:** `Xm`, `Xh Ym` under 48 hours, `Xd Yh` above; missing input `—`, negatives clamped.

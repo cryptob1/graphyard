@@ -7,7 +7,6 @@ For an operator weighing a re-run: when an earlier pass may stand for a new head
 
 Every dispatch takes a durable sequence number under the coordination lock, reported as `sequence`.
 
-- **"The newest attempt"** for a proof is the highest sequence, decided when execution authority was granted
 - An older attempt's result arriving after a newer dispatch is rejected
 - Attempts predating this generation carry no sequence and are never reused
 
@@ -54,7 +53,6 @@ Once the head moves and a build producer attests the new build, the operator ask
 
 - Live request for the proof
 - Newest attempt not a settled, accepted pass; nothing falls back to an older one
-- Executed pass older than the policy freshness, with expired artifacts, or whose collector has since held an assignment
 - Differing requirement or proof policy revision, scenario pin, environment, bundle revision or base SHA
 - Differing declared build inputs or, under `artifacts: identical`, artifact manifest
 - Changed path that is relevant or unknown
@@ -64,7 +62,6 @@ That comparison is Graphyard's own: each candidate snapshots the changed-file li
 
 A **granted** decision:
 
-- **Selects** a derived candidate for the new head, bound to the executed request and attempt
 - **Records trusted evidence** the acceptance gate treats as current: the original collector as producer, the original counts and artifacts, an `expiresAt` at the freshness bound, a `reuse` block naming the decision, the original evidence, the executed head and the sequence
 
 Afterwards:
@@ -72,7 +69,6 @@ Afterwards:
 - **A live request:** supersedes the reused selection at once
 - **Retrying the executed request:** refused, its candidate no longer matching the head
 - **Reconciliation:** revalidates the derived candidate's build, bundle, environment and registration authority on every configuration change
-- **An observation undermining the executed attempt's window:** re-anchors the binding, and the reused entry stops authorizing
 
 ## Replay
 
@@ -82,11 +78,7 @@ Operator and read-only audit credentials may; runner and collector credentials r
 
 Coverage is per dimension:
 
-- **`inventory`, `behavior`:** `covered` when both files were retained, unexpired, intact and parsed, otherwise `unmeasured` with the missing instrumentation named
 - **`artifactIntegrity`:** `covered` when every artifact read matches its recorded digest
-- **`bundleIdentity`, `targetAttribution`, `settlement`, `deploymentHealth`:** always `not-covered`: measurements at the execution boundary and on the target no stored file can repeat
-- **`outcome`:** `consistent` or `inconsistent` against the collector's submitted summary, `uncompared` when the attempt predates those summaries, `unmeasured` when the artifacts cannot be replayed
-- **The record:** carries the measured cost and states `authorizes: nothing` and `liveVerification: not-established`; a replay changes no evidence, selection or gate
 
 ## Execution analytics
 

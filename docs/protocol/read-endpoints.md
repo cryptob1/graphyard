@@ -29,14 +29,10 @@ For a client reading Graphyard, and what bounds each read.
 - `cursor`: The `seq` of the previous page's last row; paging never revisits a row
 - `routine`: `exclude` (default) or `include`
 - `payload`: `full` (default), `details` (without the embedded work snapshot) or `none`
-- `view`: `rows` (default, the event array), `history` (adds `page` and `routine`) or `page` (`history` without the routine summary)
 
-- **`view=history`:** answers `filters`, `events`, `page` (paging state with the first and last `seq` and instant) and `routine`: each excluded kind's count with first and last instant, the total, a `statement`, and `truncated` when the summary's bounded scan filled
 - **`graphyard events GY-N`:** `--kind`, `--since`, `--until`, `--order`, `--limit`, `--cursor` and `--payload` (default `details`) are these parameters; `--routine` includes the routine rows; `--all` follows `nextCursor` forwards (`order=asc` unless given) for at most 200 pages, `page.complete` saying whether the range ended. Without an item, `graphyard events` reads the latest ledger rows and takes no flags
 
 ## Bounds
 
-- **Attribution endpoints:** reads only: validation and observation ingest write the ledger inside their transactions, so no credential moves a request, attempt, result or evidence record through them, and a `POST` to one is not found
-- **Flow analytics:** bounded in window, work items, records scanned, buckets, drill-down rows and payload size; reports when a bound was reached; not offered to operator agents
 - **Paged reads:** `GET /api/validation[/definitions|/reuse|/replays]?cursor=C` and `GET /api/delivery/observations?cursor=C` take the previous response's `nextCursor`, null when finished
 - **`GET /api/work`:** unpaginated and not an analytics export

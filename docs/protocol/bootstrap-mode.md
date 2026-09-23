@@ -28,7 +28,6 @@ The acceptance gate stops demanding the deferred criterion's proofs for this can
 
 - **Inherited by:** later items whose `plannedFiles` overlap those paths, as a required criterion.
 - **Acceptance gate:** `Bootstrap obligation inherited from GY-N AC-M`.
-- **No second deferral:** a `bootstrap` declaration over an inherited proof is refused, the inherited requirement evaluated whatever the item declares.
 
 ## Inspecting obligations
 

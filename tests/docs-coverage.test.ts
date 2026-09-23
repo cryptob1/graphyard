@@ -44,7 +44,7 @@ test('integration:docs-coverage HTTP routes are extracted from the route modules
   for (const route of ['GET /healthz', 'POST /api/intake', 'POST /api/work/*/lead-ruling', 'POST /api/work/*/*', 'POST /api/delivery/rollback-settle', 'GET /api/analytics/flow', 'GET /api/analytics/flow/export', 'POST /api/proof-grants/*/revoke', 'GET /api/attribution/manifest/*/*'])
     assert.ok(routes.includes(route), `the server registers ${route}`);
   assert.ok(routes.length >= 70, 'the extracted routes are the real ones, not an empty list');
-  assert.ok(routes.every((route: string) => /^(GET|POST) \/[a-z*/-]+$/.test(route)), 'every route expanded to one concrete path');
+  assert.ok(routes.every((route: string) => /^(GET|POST) \/[a-z0-9*/-]+$/.test(route)), 'every route expanded to one concrete path');
 
   // The guides' compact notation covers exactly what it spells, under the method it names.
   assert.deepEqual(expandPath('/api/validation[/capacity|/attempt/REQUEST_ID]'), ['/api/validation/capacity', '/api/validation/attempt/*', '/api/validation']);

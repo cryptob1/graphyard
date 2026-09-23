@@ -25,9 +25,6 @@ Documents created before the timeline existed gain one at their next lifecycle c
 
 Every lifecycle command wrote its work document into the append-only ledger, so the bounded catch-up behind `GET /api/work-snapshot` replays it (`src/pipeline-backfill.ts`) for each item, delivered ones included, whose timeline was never reconstructed.
 
-- **Reads** project only the snapshot's `updatedAt`, `lease` and `submission` and four `details` fields in SQL, 400 rows a page, never holding the coordination lock; each write is one short coordination transaction that re-reads the document, writes only `pipeline`, refuses if anything else would change and appends a `pipeline.backfilled` event
-- **Bounds:** 20,000 ledger rows over 25 items a run, one catch-up per process. A longer ledger is continued — `resume` with `truncated: true`, the next run resuming after `toEvent`, the item `awaiting-backfill` until the ledger is read to its end. A failure belongs to its item: recorded, set aside for the five-minute settle window, then retried while the run moves on
-- **The union:** the replay runs the engine's own functions at the recorded instants (`updatedAt`, or a raw ledger entry's `at`), then unites with the live timeline — attempts by epoch, the live record winning, `submittedAt` the earliest and `resubmittedAt` the latest, a replayed count raising a recorded one but never lowering it
 - **The `backfill` marker** carries `at`, `source`, `events`, `fromEvent`, `toEvent`, `passes` and `retained`, false once the item's `create` row has left the ledger, so the timeline starts mid-life. `pipelineBackfill` on `/api/status` reports the last run, the rows it read, the items set aside as `failed` with their errors, and a failure of the run itself; none fails the read
 
 ## Derived figures

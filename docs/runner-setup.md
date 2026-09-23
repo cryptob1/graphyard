@@ -7,16 +7,13 @@ For the operator connecting a Playwright suite: three identities, and which refu
 
 - `runner inspect [DIRECTORY]`: Linux-only; proposes conventional test and configuration paths from package metadata, bounded to 10,000 entries and 20 directory levels, excluding symlinks, generated output and credential files. Imports no config, installs nothing, runs nothing
 - `runner snapshot selected-files.json`: Exact base64 source bytes, per-file hashes and manifest digest for an explicit list; symlinks, traversal and credential filenames refuse. Not a bundle, not approval
-- `runner bundle-digest ./oracle`: Content-addresses every regular file under the bundle; symlinks, non-regular files, `node_modules` and credential filenames **refuse**, never skipped, so a bundle cannot smuggle bytes past approval or carry its own module path
+- `runner bundle-digest DIR`: The content identity of an executable oracle bundle, which is what an approval names.
 - `runner account-digest FILE`: Measures a private env file's `TEST_ACCOUNT_*` entries, so comments and key order may change without new revision. Digest is approved; a pathname never is
 - `runner adapters`, `runner verify-report FORMAT INVENTORY REPORT`: Print each [report adapter](report-adapters.md) contract, or preview its verdict over two local files; no authority read, no evidence produced
 
 ## The three identities
 
-- **Runner** (`worker` registration): holds dispatch authority — polls, acknowledges, heartbeats. Never executes anything, reads the attempt boundary or holds a proof scope; the CLI refuses to start if its credential carries one
 - **Host attestor** (own OS identity, `reader` credential): holds the signing key, approved bundle and every attempt boundary, and runs both containers. Never acknowledges, heartbeats, uploads or publishes
-- **Collector** (`producer` registration scoped to the proof): verifies and publishes. Never executes, or reaches the bundle or the key
-- **Container user** (`runAsUser`, never root): writes the report through the boundary group, and nothing else; refused when it is the account that asked for supervision
 
 ## Execute one dispatched attempt
 
@@ -66,9 +63,7 @@ Records which directory the pathname resolved to, rechecks it before measuring, 
 
 ### The acknowledgement is retried, never repeated
 
-- **One acknowledgement, however many sends.** Every send carries the request key `ATTEMPT_ID-ack` and an identical body; idempotency receipt makes them one commit; that key with a different body is refused.
 - **Confirmation is read from the answer, not the status code.** Success means the returned request is `running` with this attempt acknowledged, so an already-acknowledged answer is success; a 2xx showing anything else is refused without retry.
-- **A confirmed refusal is a decision.** An expired, cancelled or superseded lease, or wrong runner principal, surfaces at once; only transport failures, timeouts, 408, 429 and 5xx are retried.
 - **The bound.** At most **5 sends**, paused 1, 2, 4 and 8 seconds apart; no send starts more than **60 seconds** after the first. Once exhausted the command fails naming last ambiguous answer; `validation capacity` says whether the attempt expired unacknowledged or is `running` for an operator to settle.
 - **Nothing starts before confirmation.** No heartbeat is sent and the attestor is not told to proceed until the acknowledgement is confirmed.
 
@@ -128,18 +123,13 @@ graphyard runner collect collector.json
 }
 ```
 
-- Collector re-reads the dispatch authority, compares it with the execution record **and the directory it is about to read**, verifies the attestation against that authority's public key, refusing any mismatch.
 - Then reads the boundary, verifies the attestation against those bytes **before uploading anything**, judges enumerated inventory against actual execution.
 - `requiredArtifacts` decides what is *uploaded*, not what is verified ([trusted results](validation.md#trusted-results)).
 - **Collection revokes execution authority.** The first call, `collection-authority`, moves the request to `collecting`, refuses every further ACK and heartbeat, so a live runner aborts rather than starting a container after settlement was observed; the collector checks its own configuration first, renews the attempt while it verifies and uploads.
-- **Settlement is observed, not reported.** `executionSettled` is the collector's own observation: derives both container names from the grant (`graphyard-enumerate-ATTEMPT`, `graphyard-execute-ATTEMPT`), inspects each read-only on the pinned `executionHost`, removing nothing. Only `absent` for exactly those containers settles the attempt; transport, daemon and authentication failures are `unknown`.
-- Artifacts go to private storage first; a kind with unimplemented redaction is refused, not uploaded unprotected.
 
 ## Other report formats and artifacts
 
 The collector verifies both files through the [report adapter](report-adapters.md) pinned in the bundle's `reportFormat`.
 
-- **Formats:** `graphyard-playwright-v1` by default, `junit-xml-v1` for unit and integration suites. Format is authority: bytes in any other shape are refused
-- **Storage:** candidate may select `artifactStorage: "postgres"`; default `external` preserves custom collectors; packaged collector requires private storage, not arbitrary report URLs
 - **Uploads:** only the current registered collector, holding the proof scope and live acknowledged attempt epoch, may upload a required name; names immutable within an attempt
 - **Retention:** seven days ([artifact backends](recovery.md#artifact-backends-capacity-and-migration), [limits](runner-attestor.md#limits-of-this-path)).

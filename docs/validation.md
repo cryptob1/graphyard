@@ -30,7 +30,6 @@ Define an [E2E scenario](test-cases.md) first, then create work requiring its `e
 - **HTTPS targets:** no credentials, query strings or fragments
 - **Resource names:** identify shared external accounts globally
 - **`immutable: true`:** an authorized target *declaration*, not observed proof
-- **`immutable: false`:** declares shared staging, granted only once an observer measured the candidate manifest running, passing only with whole-window observed identity
 
 ## Requests and attempts
 
@@ -50,7 +49,6 @@ Only the pinned collector may call `result`, publishing `{requestId, attemptId, 
 - `execution`: `completed`, `cancelled` or `timed_out`
 - `behavior`: `passed`, `failed`, `blocked` or `unmeasured`
 - `executed`, `skipped`, `inventoryComplete`: Actual inventory, compared against the offline enumeration
-- `target`: `{instance, artifacts, measurement, coversEntireRun, attribution}`; `measurement` is `provider`, `host-attestation` or `unknown`; a self-report is never trusted measurement
 - `bundleDigest`, `runnerImageDigest`: What executed
 - `artifacts`, `artifactState`: Verified artifacts covering the required names; `verified`, `missing`, `upload-failed` or `expired`
 - `executionSettled`: The collector's **own** observation that execution finished
@@ -59,9 +57,6 @@ Only the pinned collector may call `result`, publishing `{requestId, attemptId, 
 
 Operator commands take `{requestId, epoch, reason}`:
 
-- `cancel`: stops authorization, never claiming a process stopped, so running reservations remain; never-acknowledged dispatches settle safely
-- `settle`: also requires `settlementEvidence`, a URL referencing independent termination proof; a manual attestation, only once the process and its external operations are confirmed stopped or fenced
-- `retry`: needs a settled prior attempt, unexpired deadline, remaining budget and current authority; invalidates any earlier pass
 - Revoked definitions need newly authorized configuration and a new request
 
 A protected resource is never reassigned on a timer's expiry ([why](recovery.md#runner-capacity-and-request-diagnostics)). Every attempt carries a durable `sequence` ([replay and scoped reuse](evidence-reuse.md)).

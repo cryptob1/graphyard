@@ -9,8 +9,6 @@ Every observation reads the managed branch from `refs/heads/<base>`, recording:
 
 - `observation.baseTip`: Branch head sha. Never the pull request's cached `base.sha`.
 - `observation.baseTree`: That commit's tree.
-- `observation.baseTipContained`: Head contains `baseTip`: by ancestry, or as a published queue tip whose bound base is tree-identical to it or which sits behind other queue entries.
-- `candidate.baseSha`: Bound base: predicted base of a published speculative tip for this head under this policy revision; otherwise the base the head was bound to while behind `baseTip` and the branch still contains that commit ([base refresh](#base-refresh)); otherwise `baseTip`.
 
 Review is requested only while `baseTipContained` is not `false`:
 
@@ -22,16 +20,12 @@ Review is requested only while `baseTipContained` is not `false`:
 
 The control plane, not a rework round, brings a candidate outside the queue whose head no longer contains `baseTip` onto it.
 
-- **Reconciliation job:** merges the base branch into the pull-request branch with the same conflict-free provider merge (Contents: write, no ref of its own), once per head, base tip and policy revision, leaving a queued entry to its own speculative tip.
-- **Bound base:** held while that is pending, so bindings made on the unchanged tree stand; the hold ends when the head contains the tip, a rewound branch no longer contains the held commit, or on conflict.
-
 The record gains `baseRefresh`:
 
 - `from`: Head the refresh acted on; base it was bound to.
 - `base`, `baseTree`: Base-branch tip it was brought onto; that commit's tree.
 - `head`: Republished head, or `null` when the merge conflicted.
 - `conflict`: Why the merge failed, named for the worker; `null` on success.
-- `merge`: GitHub's account of the commit, as `queue.speculation.merge` below. `carry`: carry decision, by the rule below, base branch as predecessor.
 
 Required CI checks never carry anywhere: they run on the republished head, a different tree.
 
@@ -70,7 +64,6 @@ Binding the tip decides once and records `queue.speculation.carry`:
 - `from`, `to`: Replaced head and its bound base; tip and its predicted base.
 - `predecessor`: Entry whose tip is the predicted base, or `base branch`.
 - `changedFiles`: `merge.baseChanges`. `reviewedFiles`: what the review read, the files the replaced head changed.
-- `approval`: `carried: true` with `provider`, `reviewer`, `reviewId`, `reviewerApp`, `originalSha` and the reason, or `carried: false` with the reason.
 - `evidence[]`: Per required proof: `carried`, the `evidenceId` and `producer` it names, the reason.
 
 Nothing carries unless the tip is a two-parent merge of exactly `from.sha` and `to.baseSha`, authored by the control-plane App through the conflict-free merge, over a predecessor whose gates all pass on that tip, with a complete change list. Within that:
@@ -79,7 +72,6 @@ Nothing carries unless the tip is a two-parent merge of exactly `from.sha` and `
 - **Proof:** carries when its declared scope is disjoint from the change.
 - **Every other case:** `carried: false` naming what was touched.
 - **Carried record:** named by its `evidenceId`, so one carried twice stays the latest decision's record.
-- **Carried binding:** holds only while the candidate is exactly `to` under the same policy revision (and, for agent review, the same reviewer App); revoking the original evidence withdraws it and ejects the tip.
 - **Ledger:** one `queue.carry` event per decision, a `carried`/`required` summary on `queue.predicted`.
 
 GitHub dismisses stale reviews on Graphyard's tip push, so before acquiring merge authority `master merge` re-posts a carried approval bound to the tip through the reviewer App that gave it (never the control-plane App, never a human reviewer's approval, never over a reviewer that has since requested changes), reported as `carriedApproval`.

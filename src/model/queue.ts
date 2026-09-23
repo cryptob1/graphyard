@@ -20,7 +20,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
   };
   const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
-  const reason = queue ? ejectionReason(probe, ciAppIds) : null;
+  const reason = queue ? ejectionReason(probe, ciAppIds, all) : null;
   if (queue && reason) {
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);

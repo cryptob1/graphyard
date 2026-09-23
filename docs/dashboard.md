@@ -5,6 +5,12 @@ For anyone looking at the control plane: what is being worked on, and what is st
 
 **Work** holds open items grouped by what needs attention and **Shipped** every delivered item, newest first, with its pull request and whether the deployment serves it; **Insights** tabs Shipping pulse, Flow analytics, Validation and Releases, **Settings** tabs Test cases, Proof authority and Operator automation.
 
+The **Agent fleet** page is opened from the fleet line under the Work heading or from Operator automation, not as a tab: it shows the [agent registry](fleet.md#the-agent-registry) — each role's preference order, sessions running against its concurrency limit and the account its next action would run on; each account's runtime, model, cost and capability, roles, live sessions, login, quota, reset and the reason it cannot take a session; each runtime's launch contract; and the recent selections with their reasons. Admin and coordinator sessions also get the forms that configure it, each with an audit reason ([onboarding](onboarding.md#configure-the-fleet)). It names hosts and login homes, so worker, producer and operator-agent sessions do not see it.
+
+## Needs you
+
+**Work → Needs you** lists every open [human-only request](master-loop.md#human-only-waits), longest wait first: the item, the exact thing needed, which of the three decisions it is, who asked and why, how long it has waited, and `graphyard answer GY-N REQUEST ANSWER`. An item listed here holds no worker and delays nothing else, and on the home page reads `Stuck: Waiting on a human-only decision (…): NEEDED`. A declared human `admin` session gets an answer box: **Answer and resume** posts `work/GY-N/answer` and the loop dispatches the item on its next cycle with the answer in the new worker's prompt, **Decline** keeps it parked with your words as its blocker. Agent sessions see the requests but never the form, and the server refuses their answers. Recently answered requests stay listed underneath with the answer and how long it waited.
+
 ## The status sentence
 
 Every card, and the top of every item view, carries one sentence from the item's first refusing gate — *Waiting for review of PR #42*, *Stuck: needs a second Postgres instance*. An unrecognised reason reads as its step, never raw internal text.
@@ -20,9 +26,6 @@ Every card, and the top of every item view, carries one sentence from the item's
 
 ## Home page and item view
 
-- **Heading** carries the open total (*Work 7*): the count row's sum, shown nowhere else; the sidebar's *Work* entry is a name, not a count
-- **Count row** is the one row of counts, stages in work order; an empty stage is not drawn, the row absent when nothing is open; a lapsed claim sits under *Needs a worker* whatever the stored stage says; clicking a stage filters the lists, again clears; *Show times* adds the oldest item and the p50/p95 per drawn stage; delivered work never appears
-- **Lists** show *Stuck* first, then *In progress* and *Needs a worker*, oldest first, *Not started* collapsed; only *Stuck* carries a count: items, not gate reasons; *Shipped this week* the last seven days
 - **Board view** draws a column for every open stage, empty ones included
 - **One source:** `homeNumbers` in `web/home-numbers.ts` returns one field per number drawn, and `unit:home-numbers-reconcile`, `unit:work-page-single-count-row`, `unit:work-page-no-derived-totals` and `integration:work-page-density` hold the page to it
 - **Item view** opens with the status sentence, owner, pull request and the one blocker
@@ -32,10 +35,7 @@ Every card, and the top of every item view, carries one sentence from the item's
 
 ## Candidate links and definitions
 
-- **Work cards and the Ownership section** show `PR #N` and the whole 40-character candidate SHA, readable and copyable
-- **With GitHub configured:** both become links built only from the configured repository identity, the observed pull-request number and hexadecimal SHA, so candidate-authored values never select a URL
 - **Unconfigured or failing validation:** renders as selectable plain text
-- **A technical word** carries a hover definition from one interface glossary; a test reads each default view as a newcomer, failing on any abbreviation, proof name or commit shown without its definition
 
 ## Connection
 

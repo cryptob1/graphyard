@@ -16,7 +16,6 @@ What each identity may establish:
 - **Operator (`admin`) or promoter:** Release identity and membership
 - **Observer registration with a current lease:** What its services run, per instance, with a `measurement` of `provider` or `host-attestation`
 - **Collector registration:** An attempt's result, rechecked against the pinned candidate and the observers' record
-- **Implementation worker, runner, validation client, application self-report, client-supplied SHA:** Nothing. A worker or runner credential is refused; a `self-report` or `unknown` measurement stays `unknown` even when the claimed digest agrees; a `sha`, `sourceSha` or `commitSha` on a result is refused before parsing, the refusal ledgered
 
 ## Exact-target validation
 
@@ -28,9 +27,6 @@ A request record is bound once to:
 
 Enforcement:
 
-- **Before paid execution:** a target measured running another manifest refuses the request, ledgering the mismatch and the avoided run
-- **At dispatch:** the grant is rechecked; a known mismatch withholds it and re-anchors the request
-- **`shared-staging` (stricter):** granted only once observers measure the candidate manifest running; passes only if the observed identity stayed `matched` across the window
 - **`immutable-preview`:** may execute while unobserved; any measured observation contradicting the candidate manifest during the window fails the result
 
 ### Whole-run coverage
@@ -47,21 +43,17 @@ Coverage requires measurements bracketing the whole execution interval with no g
 A candidate's **compatibility signature** content-addresses everything a pass depends on:
 
 - **Components, each hashed on its own:** `manifest`, `build-inputs` (the builder's `buildInputsDigest`), `test-bundle`, `configuration`, `source`, `policy`, `artifacts`
-- **A later candidate whose signature differs:** writes a `signature-regenerated` record naming the moved components and supersedes the earlier candidate's requests; no cross-signature compatibility is inferred.
 
 ## Re-anchoring
 
 A target *moves* when the latest authoritative observation measures a manifest other than the candidate's.
 
-1. The existing request is superseded in place: state `superseded`, attempt history intact, attribution untouched, a run it would have started recorded avoided.
 2. Graphyard decides whether the observed target **contains the intended change**, from trusted records only: a builder's attestation for this item and environment, or a release of this environment, whose manifest is the observed one and whose source is the current candidate.
-3. If so, one transaction creates a fresh candidate and request, each carrying `reanchoredFrom` and keeping the runner, collector, deadline and budget; fresh execution is required.
 4. Otherwise the binding stays visibly **blocked** with its reasons, retried on the next observation, per reason:
    - **Observations disagree:** wait for the observers to converge, or correct the wrong one
    - **Service unobserved, incomplete or only self-reported:** fix the observer
    - **Observed target matches no trusted attestation or release manifest:** attest the build or define the release it runs
    - **Release names the change but no attestation covers its manifest:** attest the producing build
-   - **Target lacks the intended change:** deploy one containing it; the ledger names the excluding record
    - **Superseded request's deadline passed:** request validation again
 
 ## Cost and metrics

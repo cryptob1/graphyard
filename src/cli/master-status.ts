@@ -1,15 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, herdrWorkspaceHealth, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
+import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
-import { daemonSummary, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
-import { readReviewLedger, reconcileReviews, reviewerBindingHealth, summarizeReviews } from '../reviewer.js';
+import { elapsed } from '../model/sessions.js';
+import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
+import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
-import { dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { unansweredRequests, type RequestProgress, type UnansweredRequest } from '../model/dispatch.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
-import { workMutation, type CliCommand } from './registry.js';
+import { stalledActionAttention } from './stalled-actions.js';
+import { overlongSessionAttention } from './overlong-sessions.js';
+import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
+import { setupHealth } from './master-setup.js';
+import type { LoopSupervisorHost } from '../supervisor.js';
+
+export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+export { stalledActionAttention } from './stalled-actions.js';
+export { overlongSessionAttention } from './overlong-sessions.js';
 
 /**
  * One attention item per open worker scope request whose epoch still holds the lease: addressed
@@ -24,10 +34,33 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
   });
 }
 
-type MasterStatus = ReturnType<typeof buildMasterStatus>;
+/**
+ * One attention item per requested decision whose approver could not be launched (GY-101). A
+ * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
+ * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
+ * standing with a session that never started. `master status` used to show that as a decision
+ * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
+ * named here as what it is, with the loop's own refusal and the command that launches it again.
+ */
+export function approverLaunchAttention(daemon: {
+  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
+  actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
+}): AttentionItem[] {
+  const actions = daemon.actions ?? [];
+  return (daemon.approvals ?? []).flatMap(watch => {
+    if (watch.settledAt) return [];
+    // The loop records a refused launch under the decision it was requested for (the request that
+    // could not reach an approver) or under that launch's own key (a replacement that could not).
+    const since = Date.parse(watch.launchedAt ?? watch.requestedAt);
+    const refusal = actions.find(action => action.state === 'failed' && action.kind === 'decision'
+      && (action.key === watch.key || action.key.startsWith(`approver:${watch.decision}:launch:`))
+      && (!Number.isFinite(since) || Date.parse(action.at) >= since));
+    return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
+      ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
+  });
+}
 
-/** Long waits read in the unit the reader thinks in; a request measured in seconds is still young. */
-const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
+type MasterStatus = ReturnType<typeof buildMasterStatus>;
 
 /** Who answers a request whose session settled unanswered, and with which command. */
 export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
@@ -133,7 +166,7 @@ async function terminalDecisions(masterApi: (path: string) => Promise<any>, work
  * review, producer, dispatch, daemon and administration ledgers, the dispatch schedule with its
  * overlap holds, and the conflict set of every open candidate probed over the fetched PR heads.
  */
-export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }) {
+export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost } = {}) {
   const runtime = observeHerdrAgents();
   const credentials = await inspectWorkerCredentials(root, master.workers);
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
@@ -147,13 +180,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const reviews = summarizeReviews(reviewRecords), producers = summarizeProducers(producerRecords);
   // Every request whose last session failed or expired, with its attempts and the next relaunch.
   const retries = [...sessionRetries(reviewRecords, Date.now()), ...sessionRetries(producerRecords, Date.now())];
-  // Setup that silently stops every launch: an App registered but never bound, a bound App whose
-  // credential is gone, a Herdr workspace that no longer exists.
-  const reviewerBinding = await reviewerBindingHealth(master);
-  const workspace = herdrWorkspaceHealth(master);
-  const setup = { reviewer: reviewerBinding, herdrWorkspace: workspace, attention: [...reviewerBinding.attention, ...(workspace.exists === false ? [workspace.reason!] : [])] };
-  const dispatchCursor = await readDispatchCursor(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
+  // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
+  const { setup, attention: setupItems } = await setupHealth(root, master, dependencies.supervisorHost);
+  // Status reads the cursor as the loop would, repairing an over-long string in memory; the loop
+  // is what logs and persists that repair, so status reports the cursor rather than announcing it.
+  const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000);
+  // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
+  const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
   // filling is exactly the condition that stops it. The plan behind the number is the same one the
@@ -166,26 +200,43 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const managedRoot = await managedRootStatus(root, master, [...reviewRecords, ...producerRecords]);
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
-  const daemon = 'error' in daemonState ? { running: false, error: daemonState.error } : daemonSummary(daemonState, Date.now(), master.run.intervalSeconds * 1000);
+  const intervalMs = master.run.intervalSeconds * 1000;
+  const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
+  const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
+  // The loop's own health comes before every work item: a coordinator that is absent or stalled is
+  // why nothing else on this list is moving, and no other attention item would say so.
+  const loopItems: AttentionItem[] = cycling
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures }), ...approverLaunchAttention(cycling)]
+    : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration is reported beside the work it unblocks: a pending sudo code is
   // the one thing the operator must act on, and the recent ledger entries say who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
-  const status = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work)),
+  // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
+  // role, the sessions running against the declared limit and the longest wait for a slot.
+  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
+  // A required check that failed on the clock says so, with the measurement against its budget.
+  const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = scopeRequestAttention(snapshot);
+  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
+  // A session past its role's maximum: running but making no progress is as visible as one that died.
+  const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
   const unanswered = unansweredRequestAttention(status.work);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
+  // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
+  // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
+  const stalled = stalledActionAttention(snapshot);
+  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...stalled, ...overlong, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
-  // Setup that stops every launch is the master's to repair.
-  for (const text of reviewerBinding.attention) attentionItems.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
-  if (workspace.exists === false) attentionItems.push({ subject: 'setup', text: workspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
+  // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's.
+  attentionItems.unshift(...loopItems, ...dispatchItems);
+  // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
+  attentionItems.push(...setupItems);
   // The generated-files variable the installers set beside GRAPHYARD_PRINCIPALS, compared with
   // the managed repository's manifest: a deployment that does not exempt the manifest's paths
   // sends every docs-touching item into the out-of-scope refusal, so the drift is raised here
@@ -202,14 +253,19 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, stalledActions: stalled.length, overlongSessions: overlong.length,
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + scopeRequests.filter(item => !(status.work as { key: string; attention: string | null }[]).find(row => row.key === item.subject)?.attention).length },
     terminalDecisions: decisions.listed,
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
-    reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null) } : null,
-    producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName })),
+    reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),
+      concurrency: master.reviewers.map(profile => ({ name: profile.name, agentName: profile.agentName, concurrency: profileConcurrency(profile) })) } : null,
+    producerProfiles: master.producers.map(profile => ({ name: profile.name, principal: profile.principal, kind: profile.kind, agentName: profile.agentName, concurrency: profileConcurrency(profile) })),
     setup, administration, daemon, dispatch,
+    // The inverted loop: what the control plane says each item needs, who is running it, and
+    // every session it can be watched through.
+    actions: actionReport(snapshot), sessions: sessionReport(snapshot),
+    requests: agentRequestReport(snapshot),
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
     disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
     runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } };
@@ -232,32 +288,6 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
     lastOverrun: overruns.length ? { cycle: overruns.at(-1)!.cycle, at: overruns.at(-1)!.at, durationMs: overruns.at(-1)!.durationMs } : null,
   };
 }
-
-/** The worker half of live scope negotiation: ask, or withdraw, without leaving the lease. */
-export const scopeRequestCommand: CliCommand = {
-  name: 'scope-request',
-  scope: 'work',
-  help: [
-    '  scope-request GY-N EPOCH PATH... -- REASON',
-    '                                Ask the master to widen plannedFiles with PATH... for a',
-    "                                reason; `scope-request GY-N EPOCH -` withdraws the open",
-    '                                request. The master approves it with one command:',
-    '                                `graphyard master scope GY-N`, and the attempt keeps its',
-    '                                lease — a free-text blocker that waits on a human is never',
-    '                                needed for scope',
-  ],
-  async run(context, work) {
-    const { args, print } = context;
-    const epoch = Number(args[0]);
-    if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use scope-request GY-N EPOCH PATH... -- REASON, or scope-request GY-N EPOCH - to withdraw');
-    if (args[1] === '-') return print(await workMutation(context, work)('scope', { epoch, paths: [], reason: 'Withdrawn by the worker' }));
-    const separator = args.indexOf('--');
-    const paths = args.slice(1, separator < 0 ? args.length : separator);
-    const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-    if (!paths.length || !reason) throw new Error('Name at least one PATH outside plannedFiles and give a REASON after --');
-    return print(await workMutation(context, work)('scope', { epoch, paths, reason }));
-  },
-};
 
 /**
  * The one-command approval behind `master scope GY-N [REASON]`: read the item's open scope

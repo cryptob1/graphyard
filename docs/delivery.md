@@ -7,12 +7,8 @@ For an integrator recording what production runs: which identity may write each 
 
 Record (written by): meaning.
 
-- **Environment `delivery` policy** (`admin`, as an environment definition revision): Freshness bound for a verified interval; whether selection needs approval
-- **Release build** (`producer` with a `builder` registration): Source → artifact manifest for one environment, independently established
-- **Release revision** (`admin`, or a `promoter` with a current lease): Immutable manifest, source and explicit membership
 - **Approval** (`admin`): Binds one release revision, manifest hash, build and policy revision
 - **Expected release selection** (`admin` or promoter): Advances the environment's generation; fenced by `expectedGeneration`
-- **Deployment observation** (`producer` with an `observer` registration and a current lease): Append-only runtime facts for its services
 - **Rollback request, operation, resolution** (`admin` or promoter; a `rollback` registration; `admin`): The [rollback workflow](recovery.md#rollback)
 - **Notification** (any authenticated non-worker credential): A provider webhook relayed as a hint, never authoritative
 - **Verification, incidents, attribution** (Graphyard's bounded sweep): Derived from observations, never asserted by a client
@@ -114,15 +110,12 @@ An observer reads its provider outside any Graphyard transaction, submitting mea
 
 ## Verification
 
-- **Sweep:** every two seconds the server folds at most fifty new observations into each environment's coverage and re-evaluates; an interrupted sweep resumes from its stored cursor
 - **`graphyard delivery sweep`:** drains a backlog sooner
-- **Coverage, per service:** merged intervals where every listed instance matched the expected digest under measured identity, plus the latest observed state
 
 States:
 
 - `unselected`: No expected release
 - `unobserved`: A required service lacks an authoritative observation for this generation
-- `mismatched`, `unknown`, `unhealthy`, `incomplete`: Some service's latest observation is in that state; a mixed-version rollout is `mismatched` until it converges
 - `no-common-interval`: Every service matched at some point, never at a common instant
 - `stale`: A common interval ended longer ago than the freshness bound
 - `verified`: The latest common interval covers the whole manifest within the bound

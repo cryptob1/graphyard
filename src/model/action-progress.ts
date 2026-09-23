@@ -1,0 +1,219 @@
+import type { Work } from './work.js';
+import type { NextActionKind } from './next-action.js';
+import type { ActionRecord, ActionRow } from './actions.js';
+
+/**
+ * What the rows say about themselves.
+ *
+ * `actions.ts` holds the durable rows and the transitions that move them; this is the reading of
+ * one: which state it is in, how long a failed attempt waits, whether its attempts are making any
+ * progress at all, and what the whole queue holds for a reader. Everything here is pure over a row
+ * and the clock, and nothing here writes one — `settleAction` asks it what the failure it just
+ * recorded means, and `master status`, the executor API and the dashboard ask it what to show.
+ *
+ * It is a module of its own because the judgment is the part that grew: a failed row used to back
+ * off on its attempt count and nothing else, and saying whether a row is retrying or stalled —
+ * which decides both the backoff and every count a reader sees — is a concern beside the rows
+ * rather than a detail of writing one. Its only dependency on `actions.ts` is the shape of a row.
+ */
+
+/**
+ * How long a completed action holds its situation before the row is offered again. An action's
+ * effect is not instant — a launched session has to claim, a provider call has to be observed —
+ * and re-running it inside that window would double the effect. After it, a situation that still
+ * stands is a situation the action did not fix, and another attempt is owed.
+ */
+export const actionSettleMs = 10 * 60_000;
+/** A failed attempt backs off on a widening interval, never below the first step or above the last. */
+export const actionRetryMinMs = 30_000, actionRetryMaxMs = 10 * 60_000;
+/** A row nobody has claimed for longer than this is idle while it is actionable; see `idleActionable`. */
+export const actionIdleMs = 5 * 60_000;
+/**
+ * How many consecutive failures with an unchanged reason make a row a stall rather than a retry.
+ *
+ * One value decides all of it: the classification on the row, what the queue snapshot counts, what
+ * `master status` names and what the dashboard puts on the item's card. Two failures are a fault
+ * that may be transient; a third identical one is a condition that is not going to change by being
+ * asked again, whatever produced it.
+ */
+export const actionStallThreshold = 3;
+/**
+ * How long a stalled row waits between attempts, whatever its attempt count.
+ *
+ * A widening backoff is the right answer to a fault that may be load: each attempt costs something
+ * and the next one may succeed. It is the wrong answer to a row that keeps failing for the same
+ * reason — those attempts are not evidence that the next one should wait longer, they are evidence
+ * that nothing will change until the condition does. Backoff earned while a blocking condition
+ * stood must not outlive it, so a stalled row rechecks on this fixed interval instead of waiting
+ * out a ceiling computed from attempts that could not have succeeded.
+ */
+export const actionStallRecheckMs = 60_000;
+
+export const actionRetryDelay = (attempts: number) => Math.min(actionRetryMinMs * 2 ** Math.max(0, attempts - 1), actionRetryMaxMs);
+
+/**
+ * The longest a row can go from its first failure to being classified as stalled: the backoffs
+ * between the failures the threshold needs. A stall is therefore visible well inside the
+ * `actionIdleMs` bound the fleet applies to a row nobody is acting on — a row that is being
+ * attempted and getting nowhere reaches somebody no later than one that is not attempted at all.
+ */
+export const actionStallLatencyMs = Array.from({ length: actionStallThreshold - 1 }, (_unused, index) => actionRetryDelay(index + 1))
+  .reduce((total, delay) => total + delay, 0);
+
+/**
+ * Why a row is making no progress: the classification a row carries once its recent attempts all
+ * failed for one unchanged reason. `actionStall` derives it; nothing else decides it.
+ */
+export interface ActionStall {
+  /** The reason every one of those attempts gave, unchanged. */
+  reason: string;
+  /**
+   * Consecutive failures sharing that reason, as far back as the row's retained history goes, and
+   * the attempts the row has made in all.
+   */
+  failures: number; attempts: number;
+  /** When that unchanged run of failures began. */
+  since: string;
+}
+
+/**
+ * Whether this row is stalling rather than retrying, from its own history.
+ *
+ * An action that fails is retried, and a retry is a reasonable bet only while something about the
+ * attempt can change. A row whose last `actionStallThreshold` failures gave one identical reason
+ * is not waiting out a transient fault: it is re-running an impossibility, and every further
+ * attempt will produce the same line. The control plane already holds every fact needed to say so
+ * — the attempt count, each attempt's reason, and when the row was requested — so this is a
+ * reading of the record and not a new source of truth. A reason that changes between attempts
+ * ends the run: something moved, and the widening backoff is the right answer again.
+ */
+export function actionStall(row: ActionRow): ActionStall | null {
+  const failures: ActionRecord[] = [];
+  for (const entry of [...row.history].reverse()) {
+    if (entry.event === 'failed') { failures.push(entry); continue; }
+    // A claim or a reclaim sits between two attempts and says nothing about either. Anything else
+    // — a completion, a reopening, a fresh request — is progress, and ends the run of failures.
+    if (entry.event === 'claimed' || entry.event === 'reclaimed') continue;
+    break;
+  }
+  const run: ActionRecord[] = [];
+  for (const entry of failures) { if (run.length && entry.reason !== run[0].reason) break; run.push(entry); }
+  if (run.length < actionStallThreshold) return null;
+  return { reason: run[0].reason, failures: run.length, attempts: row.attempts, since: run[run.length - 1].at };
+}
+
+/**
+ * When a failed row is offered again.
+ *
+ * Two situations, two rules. A row whose failures keep changing is meeting faults that may pass,
+ * and each attempt costs something, so it backs off on a widening interval. A row that keeps
+ * failing for the same reason is stalled, and the attempts it made while that condition stood are
+ * not a reason to wait longer — they were made while it could not have succeeded. It rechecks on
+ * `actionStallRecheckMs` instead, so the moment its condition clears the row is claimed within a
+ * minute rather than waiting out a ten-minute ceiling it earned against an impossibility.
+ */
+export const actionRetryAt = (row: ActionRow, now: Date) =>
+  new Date(now.getTime() + (actionStall(row) ? Math.min(actionRetryDelay(row.attempts), actionStallRecheckMs) : actionRetryDelay(row.attempts))).toISOString();
+
+/** Whether an executor still holds this row: a claim that has not expired on the reading clock. */
+export const claimLive = (row: ActionRow, now: Date) => !!row.claim && Date.parse(row.claim.expiresAt) > now.getTime();
+export const settling = (row: ActionRow, now: Date) => row.state === 'done' && !!row.resolvedAt && now.getTime() - Date.parse(row.resolvedAt) < actionSettleMs;
+export const waitingToRetry = (row: ActionRow, now: Date) => !!row.retryAt && Date.parse(row.retryAt) > now.getTime();
+/** A row an executor may take now: open, out of backoff, and not inside a completed action's settle window. */
+export const claimable = (row: ActionRow, now: Date) => !settling(row, now) && !waitingToRetry(row, now) && (row.state === 'pending' || !claimLive(row, now));
+
+/** One row as a reader sees it: what it is for, how long it has waited, and what it last did. */
+export interface QueueEntry {
+  key: string; work: string; id: string; kind: NextActionKind; reason: string;
+  /** How long since the row was requested, and what its attempts have come to. */
+  waitedMs: number; attempts: number; lastFailure: string | null;
+  /** When the row is offered again, while it is inside a failure backoff; null when it is not. */
+  retryAt: string | null;
+  /** Why the row is making no progress, once its failures stopped changing; null when they have not. */
+  stall: ActionStall | null;
+}
+export interface QueueSnapshot {
+  /**
+   * Every open row on the queue — `pending + claimed + settling + backingOff` — so the count a
+   * reader sees accounts for every row that is owed, whether or not it can be claimed this instant.
+   * A row inside a backoff used to be counted by none of the four and listed by none of the lists,
+   * which is how three reviews nobody could launch read as a fleet with nothing to do.
+   */
+  open: number;
+  pending: number; claimed: number; settling: number;
+  /** Open rows waiting out a failure backoff: not claimable this instant, still owed. */
+  backingOff: number;
+  completed: number;
+  byKind: Record<string, number>;
+  /** Rows nobody is running and nothing is holding back, oldest first, with how long they have waited. */
+  waiting: QueueEntry[];
+  /** Rows inside a failure backoff, longest wait first, each with the instant it is offered again. */
+  backoff: QueueEntry[];
+  /**
+   * Every row that is stalling rather than retrying (`actionStall`), longest wait first, whatever
+   * else it is doing — being attempted again, or waiting out its recheck. Not a fifth bucket: a
+   * stalled row is already counted once above, and this names which of them are getting nowhere.
+   */
+  stalled: QueueEntry[];
+  /** The longest an open row has gone unclaimed; null when nothing is open. */
+  oldestPendingMs: number | null;
+  executors: { executor: string; host: string; actions: number }[];
+}
+
+/** What the queue holds right now, for master status and the dashboard. */
+export function queueSnapshot(all: Work[], now: Date): QueueSnapshot {
+  const rows = all.flatMap(work => (work.actionQueue?.actions ?? []).map(row => ({ work, row })));
+  const byKind: Record<string, number> = {};
+  for (const { row } of rows) byKind[row.kind] = (byKind[row.kind] ?? 0) + 1;
+  const view = (row: ActionRow): QueueEntry => ({ key: row.key, work: row.work, id: row.id, kind: row.kind, reason: row.reason,
+    waitedMs: Math.max(0, now.getTime() - Date.parse(row.requestedAt)), attempts: row.attempts,
+    lastFailure: row.result === 'failed' ? row.resolution ?? null : null,
+    retryAt: waitingToRetry(row, now) ? row.retryAt ?? null : null, stall: actionStall(row) });
+  const longestFirst = (a: QueueEntry, b: QueueEntry) => b.waitedMs - a.waitedMs;
+  const waiting = rows.filter(({ row }) => claimable(row, now)).map(({ row }) => view(row)).sort(longestFirst);
+  const backoff = rows.filter(({ row }) => waitingToRetry(row, now)).map(({ row }) => view(row)).sort(longestFirst);
+  const stalled = rows.filter(({ row }) => !!actionStall(row)).map(({ row }) => view(row)).sort(longestFirst);
+  const executors = new Map<string, { executor: string; host: string; actions: number }>();
+  for (const { row } of rows) {
+    if (!claimLive(row, now)) continue;
+    const key = `${row.claim!.executor}@${row.claim!.host}`;
+    const entry = executors.get(key) ?? { executor: row.claim!.executor, host: row.claim!.host, actions: 0 };
+    entry.actions += 1; executors.set(key, entry);
+  }
+  return {
+    open: rows.length,
+    pending: waiting.length,
+    claimed: rows.filter(({ row }) => claimLive(row, now)).length,
+    settling: rows.filter(({ row }) => settling(row, now)).length,
+    backingOff: backoff.length,
+    completed: all.reduce((total, work) => total + (work.actionQueue?.history ?? []).filter(row => row.result === 'done').length, 0)
+      + rows.filter(({ row }) => row.state === 'done').length,
+    byKind, waiting, backoff, stalled, oldestPendingMs: waiting.length ? waiting[0].waitedMs : null,
+    executors: [...executors.values()].sort((a, b) => a.executor.localeCompare(b.executor)),
+  };
+}
+
+/**
+ * Items that have something to do and nobody doing it, for longer than the bound.
+ *
+ * This is the measurement the inversion is for: under a master session an item sat idle whenever
+ * the loop had no step for its situation. With the control plane naming the action, an idle item
+ * is always an unclaimed row, and this reports exactly those.
+ */
+export function idleActionable(all: Work[], now: Date, thresholdMs = actionIdleMs) {
+  return queueSnapshot(all, now).waiting.filter(entry => entry.waitedMs > thresholdMs);
+}
+
+/**
+ * The rows of one item that are stalling rather than retrying, with how long each has been open.
+ *
+ * Its own reading is what the dashboard needs: a card is drawn from one work document, and a
+ * stall is a fact about that item, not about the fleet. `queueSnapshot(...).stalled` is the same
+ * classification across every item.
+ */
+export function stalledActions(work: Work, now: Date) {
+  return (work.actionQueue?.actions ?? []).flatMap(row => {
+    const stall = actionStall(row);
+    return stall ? [{ id: row.id, kind: row.kind, stall, retryAt: row.retryAt ?? null, openMs: Math.max(0, now.getTime() - Date.parse(row.requestedAt)) }] : [];
+  }).sort((a, b) => b.openMs - a.openMs);
+}

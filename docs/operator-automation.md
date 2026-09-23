@@ -36,17 +36,12 @@ Every decision except the three human-only ones is a two-party decision on one w
 1. The master requests it: `master decide GY-N ACTION [JSON|@FILE] REASON` (`POST /api/work/GY-N/decide`).
    - **Actions:** `release`, `unblock`, `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover` and `grant`.
    - **Binding:** the CLI fills it from the item's current state.
-   - **Refused unless:** the requester holds the action's capability and the item is still in the state it names.
    - **Limit:** one open decision per action at a time.
-2. `master approver GY-N DECISION` launches a separate session as the approver identity, prompted to judge the reason against the item and the operator's goals.
-3. `master approve GY-N DECISION REASON` applies it, after re-checking the requester's live authority and the item's state.
-   - **The server refuses, naming the conflict, when the approver:** requested the decision, has held an assignment on the item, produced evidence it rests on, or is the principal a `grant` would empower.
 
 ## Escalation context
 
 A master carrying the rules, an item's history and earlier decisions in its own window hits a context ceiling and drifts between sessions, so the control plane assembles that context from the project instead: a handler spawned for one escalation decides as well as a long-lived master. `GET /api/work/GY-N/context?trigger=TRIGGER&budget=BYTES`, printed by `master context GY-N [TRIGGER] [--budget N]`, returns four layers, read by key alone and verified against its fingerprint:
 
-- **`rules`:** the managed repository's own `AGENTS.md` at the base tip the item was last observed against, read through the control-plane App (`rules.source`), plus the item's policy — never a template, so an installation escalates against the codebase it manages; without the file, `rules.unavailable`
 - **`goals`:** priority, the reasons recorded with the item's `create`, `ready`, `requirements` and `unblock` intents, the open graph in priority order, dependencies and dependents
 - **`item`:** requirements, the standing refusal, candidate, submission, lease and a typed history summary counting every ledger kind, routine rows counted but never listed
 - **`precedent`:** every `resolve` decision across the graph with requester, reason, approver, outcome and the precedent it cited — this trigger first, the rest counted
@@ -60,11 +55,8 @@ A handler decides with `master decide GY-N resolve '{"trigger":"…"}' --precede
 - **`master autonomy --apply`:** installs the master's harness rules, also denying a command pointed at another identity's credential file.
 - **Dispatch:** installs each worker's rules in its assigned worktree.
 - **Regeneration:** idempotent; existing entries are never removed.
-- **Master may run:** its own CLI subcommands at their absolute path, `herdr`, `jq`, the audited-thread wrapper, plus [everything else it owns](master-agent.md#harness-permissions).
-- **Allowed `gh`:** read-only `gh pr`, `gh api user`, `gh api` reads of the base branch's protection and `--method PATCH` writes to its subresources, `gh api user/installations` and `gh api apps/*` reads.
 - **Files:** reads of `.graphyard/master-actions/` and writes to `.graphyard/profiles/`.
 - **Denied `gh`:** `gh pr merge`, `gh pr review`, any `gh api` call that merges, posts a review, mints a token, uses GraphQL, `PUT`, `POST` or `DELETE`.
-- **Also denied:** every direct `agent-browser` command, `git push`, reads of the coordinator credential home, `.graphyard/connection.json`, `*.pem` and `*.token`.
 
 - **worker:** may push its assigned branch (`origin BRANCH`, `-u`, `HEAD:BRANCH`), run its item's Graphyard commands and open its pull request; never force-push, push the base branch, rebase, merge, post a review or submit evidence
 - **reviewer:** may read the diff and post the one verdict it was launched for; never push, commit, claim, submit evidence or edit files
@@ -73,11 +65,9 @@ A handler decides with `master decide GY-N resolve '{"trigger":"…"}' --precede
 ## Other operator agents
 
 - **Secret:** random, at least 32 characters, kept in a password manager.
-- **File:** only non-secret configuration: `id`, `displayName`, `capabilities`, `scope`, `reason`. Prefer explicit work IDs over `"*"`.
 - **Set up:** `printf '%s' "$SECRET" | graphyard operator-agent setup operator.json --token-stdin`, then `graphyard operator-agent list`.
-- **Dashboard's Operator automation view:** redacted identity, fingerprint, capabilities, scopes, revision, revocation state and last mutation; plaintext secrets are never returned or stored.
 - **`operator-agent configure ID FILE`:** changes scope, requiring `expectedRevision` and complete replacement lists.
-- **`operator-agent rotate ID SECONDS REASON --token-stdin`:** issues a new credential with bounded overlap (zero for immediate cutover, at most 24 hours); verify the new fingerprint before it ends.
+- **`operator-agent rotate ID SECONDS REASON --token-stdin`:** issues a replacement with a bounded overlap, both credentials serving until it ends.
 - **`operator-agent revoke ID REASON`:** immediate and fail-closed for every active or transitional credential; a revoked identity is retained for audit.
 - **Never** answer a denial by weakening gates.
 

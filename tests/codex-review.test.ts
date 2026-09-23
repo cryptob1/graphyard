@@ -32,6 +32,24 @@ test('spoofed producers, edited requests, stale reactions, findings and running 
   ];
   for (const change of changes) { const f = fixture(); change(f); assert.equal((await f.run()).approved, false); }
 });
+test('only findings filed on the exact head for the completed, authenticated request are a changes-requested verdict', async () => {
+  const finding = (commit: string) => ({ user: { id: CODEX_USER_ID, type: 'Bot' }, submitted_at: '2026-01-01T00:00:30Z', state: 'COMMENTED', commit_id: commit });
+  const found = fixture(); found.reviews.push(finding(head));
+  const result = await found.run();
+  assert.equal(result.approved, false); assert.match(result.reason, /posted review findings/);
+  assert.equal(result.verdict, 'changes-requested'); assert.equal(result.requestId, 12); assert.equal(result.completedAt, '2026-01-01T00:01:00.200Z');
+  // Every other refusal is a state, not a verdict: not dispatched, still running, findings on
+  // another commit, a forged request, a reaction still pending — and an approval carries none.
+  const states = [
+    (f: ReturnType<typeof fixture>) => { f.request.sha = 'c'.repeat(40); },
+    (f: ReturnType<typeof fixture>) => { f.summary.body = f.summary.body.replace('Completed', 'Running'); },
+    (f: ReturnType<typeof fixture>) => { f.reviews.push(finding('c'.repeat(40))); },
+    (f: ReturnType<typeof fixture>) => { f.reviews.push(finding(head)); f.trigger.updated_at = '2026-01-01T00:00:01Z'; },
+    (f: ReturnType<typeof fixture>) => { f.reactions.push({ user: { id: CODEX_USER_ID, type: 'Bot' }, content: 'eyes' }); },
+    () => {},
+  ];
+  for (const change of states) { const f = fixture(); change(f); const state = await f.run(); assert.equal(state.verdict, undefined, state.reason); }
+});
 test('provider resolution failure and changed evidence never produce approval', async () => {
   const f = fixture(); f.source.request = async () => { throw new Error('Ambiguous abbreviated commit'); }; await assert.rejects(f.run(), /Ambiguous/);
   const g = fixture(), original = g.source.request;
