@@ -17,19 +17,6 @@ export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimComm
  */
 
 /**
- * One attention item per open worker scope request whose epoch still holds the lease: addressed
- * to the master, naming the requested paths and the worker's reason, with the one command that
- * approves it. A request from a lease that ended is never surfaced.
- */
-export function scopeRequestAttention(snapshot: { work: Work[]; now: string }) {
-  return snapshot.work.flatMap(work => {
-    const request = work.scopeRequest;
-    const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
-    return live ? [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}`, ...agentOwner('master', `graphyard master scope ${work.key}`) }] : [];
-  });
-}
-
-/**
  * What an item with no action is missing, in one clause: the refusal its failing gate raised, or
  * the account itself when no gate said anything.
  */

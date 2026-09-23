@@ -7,6 +7,7 @@ import { refusalAction, reviewStandstill } from './refusal-mapping.js';
 import type { Work } from './work.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
+import { carriedAction, type OpenAction } from './concerns.js';
 
 // The vocabulary lives in `action-kinds.ts`, the classification in `refusal-mapping.ts`, the
 // declared refusals in `refusal-catalogue.ts` and the accounting vocabulary in
@@ -17,6 +18,9 @@ export { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds,
 export type { LlmRole, NextAction, NextActionInputs, NextActionKind } from './action-kinds.js';
 export { refusalAction, refusalRuleFor, refusalRuleIndex, refusalRules, reviewStandstill } from './refusal-mapping.js';
 export { gateRefusalCatalogue, refusalShape, type RefusalShape } from './refusal-catalogue.js';
+// What stands beside an action lives in `concerns.ts`, re-exported here likewise.
+export { carriedAction, dispatchHold, escalationResolution, humanNeeded, humanNeededActions, openAction } from './concerns.js';
+export type { CarriedConcern, HumanNeeded, HumanNeededRow, OpenAction } from './concerns.js';
 
 /**
  * The typed next action.
@@ -83,30 +87,38 @@ const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: wo
 type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'defect'>;
 
 /**
- * What this item needs next, or null when it needs nothing from anybody.
+ * What this item needs next, or null when it needs nothing from anybody: it is delivered and
+ * verified, a session is already doing what the gate waits for, or every refusal standing against
+ * it belongs to another item (an unfinished dependency is that item's dispatch, not this one's),
+ * with every standing concern beside it (`concerns.ts`).
  *
  * This is `actionAccount` with everything but the action dropped, kept because every caller that
  * only wants the instruction — the queue, the API, the executor — should not have to know about
  * the accounting. A caller that has to tell an idle item from a stalled one calls `actionAccount`.
  */
-export function nextAction(work: Work, all: Work[], now: Date): NextAction | null {
-  return computeAccount(work, all, now).action;
+export function nextAction(work: Work, all: Work[], now: Date): OpenAction | null {
+  return carriedAction(work, computeAccount(work, all, now).action, all, now);
 }
 
 /**
  * What this item needs next, or why it needs nothing — with the failing gate it answers and how
  * long the item has held it.
  *
- * The order is the order a delivery actually unblocks in: a standing escalation first, because
- * nothing may deliver under one; then a typed request an agent left behind, because a session
- * gave up its lease waiting for that answer; then the deployment a delivered item still owes; then
- * an assignment nobody holds any more; then a live worker blocked on a scope answer; then the
- * first refusing gate; and finally the merge a fully proven candidate is authorized for.
+ * The order is the order a delivery actually unblocks in: a typed request an agent left behind
+ * first, because a session gave up its lease waiting for that answer; then the deployment a
+ * delivered item still owes; then an assignment nobody holds any more; then a live worker blocked
+ * on a scope answer; then the first refusing gate; and finally the merge a fully proven candidate
+ * is authorized for. A standing escalation is not in that order at all: it refuses delivery, the
+ * merge gate carries its refusal like any other, and `carriedAction` (concerns.ts) decides what it
+ * does to the step named here — which, for everything before delivery, is nothing.
  */
 export function actionAccount(work: Work, all: Work[], now: Date): ActionAccount {
   const heldSince = work.stageEnteredAt ?? work.updatedAt ?? now.toISOString();
   const held = Date.parse(heldSince);
-  return { work: work.id, key: work.key, ...computeAccount(work, all, now),
+  const computed = computeAccount(work, all, now);
+  // A standing escalation turns an item with nothing else to do into an `escalate` (concerns.ts).
+  const action = carriedAction(work, computed.action, all, now);
+  return { work: work.id, key: work.key, ...computed, action, ...(action && !computed.action ? { wait: null, defect: null } : {}),
     heldSince, heldMs: Number.isFinite(held) ? Math.max(0, now.getTime() - held) : 0 };
 }
 
@@ -124,10 +136,6 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
   // (to `escalate`); the item simply raises none until it is released.
   if (!work.ready) return waits({ kind: 'human', on: 'operator', detail: `${key} has not been released from the backlog; releasing it is a goals-and-priorities decision, which is the operator's` },
     'ready', 'Not released from backlog');
-
-  const escalation = standingEscalations(work)[0];
-  if (escalation) return make('escalate', `${key} has a standing ${escalation.trigger} escalation: ${escalation.reason}`,
-    { kind: 'escalate', trigger: escalation.trigger, detail: escalation.reason }, `escalation:${escalation.trigger}:${escalation.at}`);
 
   // A typed request an agent recorded instead of blocking on a prose question. A scope ask is the
   // control plane's own deterministic rule to apply; a two-party decision is somebody else's

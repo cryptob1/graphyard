@@ -15,6 +15,7 @@ import { dispatchOrder } from './coordination.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
 import { stalledItems } from './model/action-account.js';
+import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, saveReviewLedger } from './reviewer.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
@@ -1679,6 +1680,24 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (state.actions[key]) continue;
     performed.push(await record(state, key, { kind: 'human', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
       detail: `${item.key} is parked on a human-only decision (${humanDecisionLabel[request.kind]}): ${request.needed} — ${request.reason}. Its attempt ended without a lease and nothing else waits on it; the human answers with ${answerCommand(item.key, request)} and the loop dispatches it again`,
+      attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  }
+
+  // 4b-owed. An action no executor may claim is a judgment the loop cannot make: `escalate` and
+  //     `request-rework` are decided in the step itself (`actionJudgment`), so the executor holds
+  //     no handler for either and the row is never claimed, never fails, and never shows up as a
+  //     refused launch. The loop names each one once — what is waiting, what decides it, and the
+  //     command that answers it — so an item whose only action is a judgment is visible as owing
+  //     one from the cycle that computed it, instead of surfacing five minutes later as an idle
+  //     queue row nobody was ever coming for. A concern carried beside an action that is running
+  //     is named here too: the work is not frozen by it, and it is not lost behind the work. An
+  //     item parked on a human-only decision is named by the step above with the exact answer
+  //     command, so it is not named twice.
+  for (const owed of humanNeededActions(open.filter(item => !parkedOnHuman(item)), new Date(clock))) {
+    const key = `owed:${owed.work}:${owed.kind}:${owed.trigger ?? 'refusal'}:${owed.since}`;
+    if (state.actions[key]) continue;
+    performed.push(await record(state, key, { kind: 'human', work: owed.key, principal: null, state: 'done',
+      detail: `${owed.reason} — no executor may run a ${owed.kind}: it waits on ${owed.decision}, since ${owed.since}. ${owed.resolve}`,
       attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }
 
