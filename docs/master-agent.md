@@ -2046,15 +2046,62 @@ Templates: [Claude](../examples/master/claude-reviewer.json), [Cursor](../exampl
 1. verifies the exact current candidate — submitted, independently observed within the last two minutes, open, not a draft, not awaiting rework, and on a policy that expects a GitHub verdict;
 2. mints an installation token scoped to this repository, to read and review only, valid for at most an hour, and refuses a token that could write code;
 3. writes that token to a private `GH_CONFIG_DIR` outside the repository, never to a command line;
-4. cancels any pending record of the same item whose head, base, or policy revision the candidate has superseded — a session for a head that no longer exists decides nothing, so it never blocks the current head's review. A pending record for the *exact* current candidate still refuses the launch: one live session per candidate;
-5. launches the reviewer profile in its own Herdr tab with a read-only prompt naming the exact head, base, and policy revision, and the commit-bound command that posts the verdict. Posting that verdict is granted to the reviewer role — the launch allows exactly that one call and the prompt says so — so the session never has to ask for it;
-6. records the request in `.graphyard/reviews.json`.
+4. cancels any pending record of the same item whose head, base, or policy revision the candidate has superseded — a session for a head that no longer exists decides nothing, so it never blocks the current head's review. A pending record for the *exact* current candidate, or a Herdr session already serving the request, still refuses the launch: one live session per request (see [one request, one session, one verdict](#one-request-one-session-one-verdict));
+5. records the session in `.graphyard/reviews.json` as a reservation, before anything is started;
+6. launches the reviewer profile in its own Herdr tab with a read-only prompt naming the exact head, base, and policy revision, and the commit-bound command that posts the verdict. Posting that verdict is granted to the reviewer role — the launch allows exactly that one call and the prompt says so — so the session never has to ask for it. The reservation then takes the pane and the token's expiry; a launch that started nothing gives it back.
 
 `master status` reconciles pending requests: when the reviewer identity posts an `APPROVED` or `CHANGES_REQUESTED` review on that exact commit, Graphyard closes the session, removes its credential directory, and moves the record to completed — whether the verdict came on the first attempt or after the loop's retry prompt. A verdict on another commit, from another identity, or a bare comment settles nothing. An unanswered request expires with its token. A session that stopped without posting is prompted once, by the dispatch loop itself, to post the verdict it already judged — or, for a session that never took up its request, with that request — through the same [confirmed delivery](#confirmed-prompt-delivery) a paste uses; one still silent after the five-minute grace is recorded as failed, or as [never started](#acknowledgement-the-one-re-prompt-and-never-started), and the request relaunched as its next attempt (see [automatic dispatch at submit](#automatic-dispatch-at-submit)). No master ever sends that retry by hand, and no master ever edits the ledger to unstick a record.
 
 Settling a record always withdraws its credential: the session directory is removed even when Herdr could not confirm the pane is gone, because nothing revisits a settled record, so a token left there would sit on disk until it expired on its own. What an unconfirmed pane costs instead is the record's outcome. A verdict, and a superseded head, settle the record regardless — GitHub has already proven the one, and the candidate has already replaced the other — with the close failure kept on the record and shown as `attention` in `master status`. A session that merely failed or expired, which has proven nothing, stays pending with the reason attached, so the next reconcile retries the close.
 
 A reviewer session holds no Graphyard credential and no lease. Its verdict is an ordinary GitHub review: Graphyard's review gate still requires an approval of the current head from someone other than the author, and the merge gate still rechecks everything.
+
+### One request, one session, one verdict
+
+One review request yields exactly one reviewer session and exactly one verdict. Three launchers can
+answer a request — the loop's dispatch tick, a stateless executor's `request-review` handler, and
+`master review` (with the loop's failover relaunch, which goes through the same launcher) — and they
+run in separate processes. Every one of them decides and reserves under one lock on
+`.graphyard/reviews.json`, as a single step: a launch is refused when the request, or the exact
+candidate, already has a pending record (a session running, or one still being launched), or when
+Herdr already shows a session serving it — one a record of the request names, or one a
+multi-session profile named from the request id. Otherwise the session is recorded as a
+reservation *before* its runtime starts, so no session can review without a record, and a second
+launcher arriving a second later finds the reservation and stands down with `one review request is
+answered by one session`. Every other write to the ledger holds the same lock, and reconciliation
+writes back only the records it changed, so a record reserved while it was reading GitHub is never
+lost. A reservation whose launcher died before confirming its runtime is recorded as failed after
+ten minutes.
+
+**A conflicted request.** Two verdicts from the reviewer identity on the same head for the same
+request are a conflict, not a sequence. GitHub reports the identity's latest review as its current
+word, so without this the later verdict would silently replace the earlier one — an approval
+overturned a minute after it was posted by a session nobody meant to launch. The control plane
+records every verdict it observes on the current head, base and policy revision (`reviewVerdicts`
+on the item) with the request it answered. When a second standing verdict from the same identity
+answers the same request, the item is marked conflicted (`reviewConflict.state: conflicted`) with
+both verdicts, their review ids and reviewers; the history gains a `review.conflicted` entry; and
+`master status` raises an attention item naming the item, the head, both verdicts and the sessions
+that posted them (a session the reviewer ledger has no record of is named as such). Neither verdict
+is acted on: both are withheld from what the gates read, so the approval neither passes the review
+gate nor is carried onto a merge-queue tip, and the change request asks for no rework. A review
+GitHub dismissed is withdrawn rather than given, so it is never one of the two.
+
+Only the reviewer identity's verdicts can conflict. The reviewer identity is the GitHub App a
+launched reviewer session posts through, whose account GitHub names `<slug>[bot]` — a login no
+person can hold — and only two verdicts that answered the same recorded review request count. A
+person who approves a head and then requests changes on it has changed their mind, not conflicted:
+their latest verdict reaches the gates untouched, so that change request still blocks and no
+fresh review can override it. Verdicts that answered no recorded request are never grouped either.
+
+**How it is resolved.** Nothing is run by hand. With both verdicts withheld the review gate asks for
+an approval again, so the control plane opens a fresh review request for the same head and the loop
+launches one session for it. The first verdict posted after the conflict is the fresh review: it
+resolves the conflict (`review.conflict-resolved`, with the review that resolved it on the record),
+and it alone is acted on — an approval passes the gate, a change request sends the item to rework.
+A new head, base or policy revision supersedes a conflict on the old one
+(`review.conflict-superseded`). If no reviewer is running for the fresh request, `master review GY-N`
+launches it.
 
 ## Branch protection
 

@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import type { FleetProbe } from './fleet.js';
 import type { Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -61,6 +61,13 @@ export const reviewRecordSchema = z.object({
   checkout: z.string().min(1).max(1200).optional(),
   /** Why the checkout could not be removed at settlement; the reclaim pass takes it back. */
   checkoutFailure: z.string().min(1).max(500).optional(),
+  /**
+   * The launch that reserved this record has not yet confirmed its runtime started (GY-124). A
+   * session is recorded before its runtime starts, so no session can review without a record;
+   * the launcher fills in the pane and clears this once the runtime is up, or removes the record
+   * when nothing was started.
+   */
+  launching: z.literal(true).optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
@@ -181,6 +188,80 @@ export async function readReviewLedger(root: string): Promise<ReviewLedger> {
   catch (error: any) { if (error.code !== 'ENOENT') throw error; return { version: 1, reviews: [] }; }
 }
 export const saveReviewLedger = async (root: string, ledger: ReviewLedger) => atomicPrivateWrite(ledgerFile(root), reviewLedgerSchema.parse({ ...ledger, reviews: boundSessionLedger(ledger.reviews, reviewLedgerSpec) }));
+
+/**
+ * Every launcher runs in its own process — the loop's dispatch tick, a stateless executor's
+ * request-review handler, the daemon's failover relaunch, `master review` — and each used to read
+ * the ledger, decide the request had no session, start one, and write the ledger back from its
+ * own read. Two of them in the same few seconds both found no session, both started one, and the
+ * later write dropped the earlier record (GY-124). Every read-modify-write of the ledger now holds
+ * this lock, so the check that a request has no session and the record that reserves it are one
+ * step no other launcher can interleave with.
+ */
+const ledgerLockFile = (root: string) => `${ledgerFile(root)}.lock`;
+/** A holder that has not released the lock in this long is dead or wedged; its lock is broken. */
+export const reviewLedgerLockStaleMs = 60_000;
+const lockWaitMs = 30_000;
+async function acquireLedgerLock(root: string) {
+  const file = ledgerLockFile(root);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  const { open, readFile: read, unlink } = await import('node:fs/promises');
+  const deadline = Date.now() + lockWaitMs;
+  for (;;) {
+    try { const handle = await open(file, 'wx', 0o600); await handle.writeFile(`${process.pid} ${Date.now()}`); await handle.close(); return; }
+    catch (error: any) { if (error.code !== 'EEXIST') throw error; }
+    const [pid, at] = (await read(file, 'utf8').catch(() => '')).split(' ').map(Number);
+    let alive = true;
+    try { if (pid) process.kill(pid, 0); } catch (error: any) { alive = error.code !== 'ESRCH'; }
+    if (!alive || Number.isFinite(at) && Date.now() - at > reviewLedgerLockStaleMs) { await unlink(file).catch(() => {}); continue; }
+    if (Date.now() > deadline) throw new Error(`The review ledger lock ${file} is held by process ${pid || 'unknown'}; another reviewer launch or reconciliation is in progress`);
+    await new Promise(done => setTimeout(done, 20 + Math.random() * 30));
+  }
+}
+/** Read the ledger under the lock, apply one change, and write it back before the lock is released. */
+export async function updateReviewLedger<T>(root: string, change: (ledger: ReviewLedger) => T | Promise<T>): Promise<T> {
+  await acquireLedgerLock(root);
+  try {
+    const ledger = await readReviewLedger(root);
+    const result = await change(ledger);
+    await saveReviewLedger(root, ledger);
+    return result;
+  } finally { await rm(ledgerLockFile(root), { force: true }); }
+}
+/**
+ * Write back the records one pass changed, onto the ledger as it stands now. A pass that read the
+ * ledger, spent seconds on GitHub and Herdr, and saved its whole copy would drop every record a
+ * launcher reserved in the meantime; only what this pass changed is taken from its copy.
+ */
+async function saveChangedRecords(root: string, mine: ReviewRecord[], before: Map<string, string>) {
+  const changed = new Map(mine.filter(record => JSON.stringify(record) !== before.get(record.id)).map(record => [record.id, record]));
+  if (!changed.size) return;
+  await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(record => changed.get(record.id) ?? record); });
+}
+
+/** A reservation whose launcher never confirmed the runtime within this long died mid-launch. */
+export const reviewLaunchReservationMs = 10 * 60_000;
+
+/**
+ * The Herdr session already serving this request, when there is one: a session a record of the
+ * request names, or one whose name a multi-session profile derives from the request id. A fixed
+ * name is attributed through the record, since the name alone says nothing about which request.
+ */
+export function requestSessionInHerdr(records: Pick<ReviewRecord, 'key' | 'sha' | 'requestId' | 'agentName' | 'state' | 'closeFailure'>[], agents: { name?: string }[], profiles: { agentName: string; concurrency?: number }[], request: { key: string; sha: string; requestId?: string }): string | null {
+  const visible = new Set(agents.map(agent => agent.name).filter((name): name is string => !!name));
+  // A settled record whose pane was closed no longer owns its name: a fixed name visible now is another session's.
+  const recorded = records.find(record => (record.state === 'pending' || !!record.closeFailure) && (request.requestId ? record.requestId === request.requestId : record.key === request.key && record.sha === request.sha) && visible.has(record.agentName));
+  if (recorded) return recorded.agentName;
+  if (!request.requestId) return null;
+  for (const profile of profiles) {
+    if (profileConcurrency(profile) === 1) continue;
+    for (let attempt = 1; attempt <= 50; attempt++) {
+      const name = sessionAgentName(profile, { id: request.requestId, requestId: request.requestId, attempt });
+      if (visible.has(name)) return name;
+    }
+  }
+  return null;
+}
 
 // Reviewer credentials live beside the coordinator credential, outside every worktree.
 export function reviewerCredentialDirectory(config?: Pick<MasterConfig, 'credentialFile'>, input?: string) {
@@ -378,83 +459,116 @@ export async function launchReview(root: string, work: Work, profileName: string
   if (!profile) throw new Error(profileName ? `Unknown reviewer profile ${profileName}` : config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
   const binding = assertReviewCandidate(work, observedAt);
   if (binding.author.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
-  const ledger = await readReviewLedger(root);
-  // A record for a superseded head never blocks a review request for the current head: every
-  // such record is closed as cancelled with the reason on the record, and this launch proceeds.
-  // Only a record for the exact current candidate holds the key: one session per candidate.
-  const pendings = ledger.reviews.filter(record => record.state === 'pending' && record.key === work.key);
-  const superseded = new Map<ReviewRecord, string>();
-  for (const pending of pendings) {
-    const reason = staleReviewReason(pending, [work]);
-    if (!reason) throw new Error(`A reviewer session for ${work.key} is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
-    superseded.set(pending, reason);
-  }
-  for (const [pending, reason] of superseded) await closeReviewSession(root, pending, { run: dependencies.run, now }, { state: 'cancelled', resolution: reason, force: true });
-  if (superseded.size) await saveReviewLedger(root, ledger);
-  // The profile's room (GY-107): one session per name, and no more sessions than it declares.
-  // A name this session would take that Herdr already shows is the same launch twice.
+  // One request, one session (GY-124). Under the ledger lock, as one step: records for a superseded
+  // head are closed, the launch is refused when the request or the candidate already has a pending
+  // record or a Herdr session, and otherwise a pending record is reserved for this session before
+  // anything is started, so a second launcher — in this process or another — finds it and stands down.
   const id = randomUUID();
-  const attempt = dependencies.requestId ? ledger.reviews.filter(entry => entry.requestId === dependencies.requestId).length + 1 : undefined;
-  const agentName = sessionAgentName(profile, { id, requestId: dependencies.requestId, attempt });
-  if (agents.some(agent => agent.name === agentName)) throw new Error(`Reviewer agent ${agentName} is already visible in Herdr`);
-  // The ledger's room is local state, judged before any session exists: a launch whose record
-  // could not be written must never leave a running pane behind that holds the agent's name.
-  assertSessionLedgerRoom(ledger.reviews, reviewLedgerSpec, `${binding.key} review of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: now().toISOString(), key: binding.key, sha: binding.sha, requestId: dependencies.requestId });
-  const sessions = profileSessions(profile, agents, ledger.reviews);
-  if (!sessions.free) throw new Error(profileAtLimit('Reviewer', profile, sessions));
-  // Before a token is minted: an exhausted or logged-out account is skipped for the profile's next.
-  const selected = await selectAccount(config, 'reviewer', profile, { ...dependencies.probe, work: work.key });
-  // Everything past the choice can fail; the session it chose is given back at once when it does.
-  return onSelectedSession(selected, `reviewer launch for ${work.key} failed`, async () => {
-    const credential = await readReviewerCredential(root, reviewerApp.credentialFile);
-    if (credential.appId !== reviewerApp.appId || credential.installationId !== reviewerApp.installationId || credential.slug !== reviewerApp.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
-    if (credential.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App');
-    const mint = dependencies.mint ?? ((value: ReviewerCredential, repository: string) => mintReviewerToken(value, repository));
-    // Before a token exists: the one place this session may check the head out, under the managed
-    // worktree root — durable storage with room left, outside every worktree.
-    const checkout = await allocateManagedCheckout(root, config, 'review', binding.key, binding.sha, id, dependencies.filesystem);
-    const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
-    let minted: { token: string; expiresAt: string };
-    const sessionDirectory = resolve(dirname(reviewerApp.credentialFile), 'sessions', id);
-    try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
-    catch (error) { await discard(); throw error; }
-    const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
-    let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
-    try {
-      // The reviewer loads its own role rules, never the master's: it may post this one verdict.
-      // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
-      const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
-      const environment = { ...launch.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
-      const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
-        '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
-      pane = created.pane; tabId = created.tab;
-      // The request is the session's own first message, on the runtime's command line (GY-93), read
-      // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
-    } catch (error) {
-      // A launch that never became a session leaves no checkout behind.
-      await discard();
-      const malformedTab = (error as any)?.herdrTab as string | undefined;
-      if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
-        catch { await rm(sessionDirectory, { recursive: true, force: true }); throw new Error(`${error instanceof Error ? error.message : 'Reviewer launch failed'}; Herdr could not confirm cleanup, so the reviewer credential directory was removed and the token will expire at ${minted.expiresAt}`); }
-      await rm(sessionDirectory, { recursive: true, force: true });
-      // A launch that failed for want of room says so, with the path and the reclaim command.
-      throw writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
-    }
+  const sessionDirectory = resolve(dirname(reviewerApp.credentialFile), 'sessions', id);
+  const reservation = await updateReviewLedger(root, async ledger => {
+    // A record for a superseded head never blocks a review request for the current head: every
+    // such record is closed as cancelled with the reason on the record, and this launch proceeds.
+    // Only a record for the exact current candidate holds the key: one session per candidate.
+    const pendings = ledger.reviews.filter(record => record.state === 'pending' && record.key === work.key);
+    const current = pendings.find(pending => !staleReviewReason(pending, [work]));
+    if (current) return { refusal: new Error(`A reviewer session for ${work.key} is already ${current.launching ? 'being launched' : 'pending'} on ${current.sha.slice(0, 7)} (${current.agentName}${current.requestId ? `, request ${current.requestId}` : ''}); one review request is answered by one session, so no second one is launched`) };
+    for (const pending of pendings) await closeReviewSession(root, pending, { run: dependencies.run, now }, { state: 'cancelled', resolution: staleReviewReason(pending, [work])!, force: true });
+    // A Herdr session already serving this request is the same launch twice, whatever the ledger says.
+    const serving = requestSessionInHerdr(ledger.reviews, agents, config.reviewers, { key: work.key, sha: binding.sha, requestId: dependencies.requestId });
+    if (serving) return { refusal: new Error(`Reviewer session ${serving} is already visible in Herdr for ${work.key}${dependencies.requestId ? ` review request ${dependencies.requestId}` : ` on ${binding.sha.slice(0, 7)}`}; one review request is answered by one session`) };
+    // The profile's room (GY-107): one session per name, and no more sessions than it declares.
+    // A name this session would take that Herdr already shows, or a launch in progress reserved,
+    // is the same launch twice.
+    const attempt = dependencies.requestId ? ledger.reviews.filter(entry => entry.requestId === dependencies.requestId).length + 1 : undefined;
+    const agentName = sessionAgentName(profile, { id, requestId: dependencies.requestId, attempt });
+    if (agents.some(agent => agent.name === agentName)) return { refusal: new Error(`Reviewer agent ${agentName} is already visible in Herdr`) };
+    if (ledger.reviews.some(entry => entry.state === 'pending' && entry.launching && entry.agentName === agentName)) return { refusal: new Error(`Reviewer agent ${agentName} is already being launched for another request`) };
+    // The ledger's room is local state (GY-131), judged before any session exists: a launch whose
+    // record could not be written must never leave a running pane behind that holds the agent's name.
+    try { assertSessionLedgerRoom(ledger.reviews, reviewLedgerSpec, `${binding.key} review of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: now().toISOString(), key: binding.key, sha: binding.sha, requestId: dependencies.requestId }); }
+    catch (error) { return { refusal: error as Error }; }
+    const sessions = profileSessions(profile, agents, ledger.reviews);
+    if (!sessions.free) return { refusal: new Error(profileAtLimit('Reviewer', profile, sessions)) };
+    const requestedAt = now().toISOString();
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
-      profile: profile.name, agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory,
+      profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
-    // A record that cannot be written leaves no session behind: the pane is stopped and the credential withdrawn.
-    try { await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] }); }
-    catch (error) {
-      if (!await unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
-      await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
-    }
-    return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
-      pane: record.pane, checkout: checkout.directory, reviewer: `${reviewerApp.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery,
-      account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
-      recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
+    ledger.reviews.push(record);
+    return { record };
   });
+  if ('refusal' in reservation) throw reservation.refusal;
+  const { agentName } = reservation.record;
+  // A launch that never became a session gives its reservation back; one whose tab Herdr could
+  // not confirm closed keeps it, settled as failed with the reason, so the session it may have
+  // left behind is still on the record.
+  let startedTab = false;
+  const release = (error: unknown) => updateReviewLedger(root, ledger => {
+    const reason = error instanceof Error ? error.message : String(error);
+    ledger.reviews = startedTab && /could not confirm (cleanup|the created pane)/.test(reason)
+      ? ledger.reviews.map(entry => entry.id === id ? { ...entry, state: 'failed' as const, launching: undefined, closedAt: now().toISOString(), resolution: `the launch failed: ${reason}`.slice(0, 900), closeFailure: reason.slice(0, 500) } : entry)
+      : ledger.reviews.filter(entry => entry.id !== id);
+  }).catch(() => { /* a reservation that cannot be given back is failed by reconciliation once it is stale */ });
+  try {
+    // Before a token is minted: an exhausted or logged-out account is skipped for the profile's next.
+    const selected = await selectAccount(config, 'reviewer', profile, { ...dependencies.probe, work: work.key });
+    // Everything past the choice can fail; the session it chose is given back at once when it does.
+    return await onSelectedSession(selected, `reviewer launch for ${work.key} failed`, async () => {
+      const credential = await readReviewerCredential(root, reviewerApp.credentialFile);
+      if (credential.appId !== reviewerApp.appId || credential.installationId !== reviewerApp.installationId || credential.slug !== reviewerApp.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
+      if (credential.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App');
+      const mint = dependencies.mint ?? ((value: ReviewerCredential, repository: string) => mintReviewerToken(value, repository));
+      // Before a token exists: the one place this session may check the head out, under the managed
+      // worktree root — durable storage with room left, outside every worktree.
+      const checkout = await allocateManagedCheckout(root, config, 'review', binding.key, binding.sha, id, dependencies.filesystem);
+      const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
+      let minted: { token: string; expiresAt: string };
+      try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
+      catch (error) { await discard(); throw error; }
+      const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
+      let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
+      try {
+        // The reviewer loads its own role rules, never the master's: it may post this one verdict.
+        // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
+        const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
+        const environment = { ...launch.environment, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
+        startedTab = true;
+        const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
+          '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
+        pane = created.pane; tabId = created.tab;
+        // The request is the session's own first message, on the runtime's command line (GY-93), read
+        // from the request file in the session's checkout so the typed line stays short (GY-121).
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
+      } catch (error) {
+        // A launch that never became a session leaves no checkout behind.
+        await discard();
+        const malformedTab = (error as any)?.herdrTab as string | undefined;
+        if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, dependencies.run); }
+          catch { await rm(sessionDirectory, { recursive: true, force: true }); throw new Error(`${error instanceof Error ? error.message : 'Reviewer launch failed'}; Herdr could not confirm cleanup, so the reviewer credential directory was removed and the token will expire at ${minted.expiresAt}`); }
+        await rm(sessionDirectory, { recursive: true, force: true });
+        // A launch that failed for want of room says so, with the path and the reclaim command.
+        throw writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
+      }
+      // The runtime is up: the reserved record takes the pane, the token's real expiry and the delivery.
+      // A record that cannot be written leaves no session behind: the pane is stopped and the credential withdrawn.
+      let record: ReviewRecord;
+      try {
+        record = await updateReviewLedger(root, ledger => {
+          const index = ledger.reviews.findIndex(entry => entry.id === id);
+          const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory });
+          if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
+          return settled;
+        });
+      } catch (error) {
+        if (!await unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
+        await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
+      }
+      return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
+        pane: record.pane, checkout: checkout.directory, reviewer: `${reviewerApp.slug}[bot]`, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery,
+        account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
+        recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
+    });
+  } catch (error) { await release(error); throw error; }
 }
 
 /**
@@ -607,6 +721,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0 };
+  const before = new Map(ledger.reviews.map(record => [record.id, JSON.stringify(record)]));
   const reviewer = `${config.reviewer.slug}[bot]`;
   const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? defaultChildRun, answered));
   const now = (dependencies.now ?? (() => new Date()))();
@@ -617,6 +732,15 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   let changed = 0;
   for (const record of ledger.reviews) {
     if (record.state !== 'pending') continue;
+    // A reservation whose launcher is still starting the runtime is not a session yet; one that
+    // never confirmed within the bound belongs to a launcher that died mid-launch.
+    if (record.launching) {
+      if (now.getTime() - Date.parse(record.requestedAt) < reviewLaunchReservationMs) continue;
+      delete record.launching;
+      await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: 'failed', resolution: `the launch reserved at ${record.requestedAt} never confirmed its runtime started`, force: true });
+      changed++;
+      continue;
+    }
     const answered = new Set(ledger.reviews.filter(entry => entry.id !== record.id && entry.key === record.key && entry.sha === record.sha && entry.verdict).map(entry => entry.verdict!.reviewId));
     const verdict = record.verdict ?? await observe(record, reviewer, answered) ?? undefined;
     // A dismissed approval is not an answer: the session is recorded unanswered, with the
@@ -678,8 +802,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   }
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
-  if (changed) await saveReviewLedger(root, ledger);
-  return { reviews: ledger.reviews, changed };
+  if (changed) await saveChangedRecords(root, ledger.reviews, before);
+  return { reviews: changed ? (await readReviewLedger(root)).reviews : ledger.reviews, changed };
 }
 
 export function summarizeReviews(records: ReviewRecord[]) {
