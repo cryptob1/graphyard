@@ -1787,8 +1787,10 @@ GRAPHYARD_URL=… GRAPHYARD_TOKEN_FILE=… node scripts/measure-throughput.mjs \
   --record .graphyard/measurements/throughput
 ```
 
-It reads `/api/status` for the release actually serving — its build revision is the deployed commit
-the report names — and `/api/work-snapshot` for the ledger, checks that the deployed revision
+It reads `/api/status` for the release actually serving — its release revision is the deployed
+commit the report names, or, for a build that never stamped one (`GRAPHYARD_BUILD_REVISION`), the
+build identity's `commit` that the platform injects and `/healthz` serves; the report's
+`revisionSource` says which named it, and with neither the claim stays unverified — and `/api/work-snapshot` for the ledger, checks that the deployed revision
 contains the claim's own merge commit (`git merge-base --is-ancestor`, from `--repository`, which
 defaults to the working directory), and judges the window that starts where a release carrying the
 claim began serving: the coordinator's [deployment observation](#deployment-verification) on the
@@ -1821,7 +1823,9 @@ Nothing synthetic is admitted: an item with no merge commit, no pull request, no
 it, or no action an executor completed is refused before the coordinator rule is even asked.
 
 A miss is a finding about the design, never a reason to move a budget or shrink the window. The
-report records the measured values, what missed and by how much, and a follow-up naming it; raise
+report records the measured values, what missed and by how much, and a follow-up naming it — an
+unnamed release is listed beside the population and budget misses, never instead of them, and a
+figure over no deliveries reads `n/a`, never zero minutes; raise
 that follow-up as a work item against the claim, the same as any other finding.
 
 ## Escalation context

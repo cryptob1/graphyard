@@ -14,7 +14,7 @@ import { readAdministrationLedger, readSudoState, summarizeAdministration } from
 import { stalledActionAttention } from './stalled-actions.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
-import { readThroughputMeasurement, throughputClaimVisibility } from '../throughput.js';
+import { deployedRevision, readThroughputMeasurement, throughputClaimVisibility } from '../throughput.js';
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
@@ -258,7 +258,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // GY-87's throughput claim against the release now serving: verified, or unverified with what
   // missed. Delivered is not proven, and nothing else on this report would say which this is.
   const throughput = throughputClaimVisibility(await readThroughputMeasurement(root).catch(() => null),
-    { revision: coordinator?.release?.revision ?? null, version: coordinator?.release?.version ?? null },
+    { revision: deployedRevision(coordinator).revision, version: coordinator?.release?.version ?? null },
     snapshot.work.filter((item: Work) => item.stage === 'done' && item.delivery).length);
   if (throughput.attention) attentionItems.push(throughput.attention);
   return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],

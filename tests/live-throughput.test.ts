@@ -11,7 +11,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, populationRule, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
+import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, deployedRevision as revisionOf, populationRule, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { actionRetryDelay } from '../src/model/actions.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
@@ -223,6 +223,27 @@ test('integration:live-throughput-population — the population rule reads the r
   assert.match(unchecked.reason, /could not be established: git could not compare the commits/);
   assert.match(verifyThroughput(work, now, { deployed: release({ revision: 'unknown' }), claimKey }).reason, /reports no build revision/);
   assert.equal(verifyThroughput(work, now, { deployed: release({ revision: null }), claimKey }).met, null);
+  // An unnamed release over too few deliveries misses on both counts, and the follow-up says both:
+  // the release refusal never hides the population shortfall, and an empty population is reported
+  // as nothing measured rather than as zero minutes.
+  const unnamedEmpty = verifyThroughput([claimItem], now, { deployed: release({ revision: 'unknown', containsClaim: null }), claimKey });
+  assert.deepEqual(unnamedEmpty.shortfall!.missed.map(entry => entry.metric), ['deployed-release', 'population']);
+  assert.equal(unnamedEmpty.shortfall!.missed[1].by, throughputClaim.minimumDeliveries);
+  assert.match(unnamedEmpty.shortfall!.followUp.description, /What missed, and by how much: the deployed release reports no build revision.*; 0 of the 10 deliveries .*; 10 more are needed/);
+  assert.match(unnamedEmpty.shortfall!.followUp.description, /submit→merge p50 n\/a \(no deliveries measured\) against 30 min/);
+  assert.match(unnamedEmpty.reason, /reports no build revision, so what was measured cannot be named; 0 of the 10 deliveries/);
+  assert.doesNotMatch(renderThroughput(unnamedEmpty), /p50 0 min|idle-but-actionable 0 min|measure 0 min/);
+  // Beside a slow window, an empty admitted population is said to measure nothing, not zero.
+  const emptyBesideSlow = verifyThroughput(work.filter(item => item.key === claimKey || report.excluded.some(entry => entry.work === item.id)), now, { deployed: release(), claimKey });
+  assert.equal(emptyBesideSlow.population.admitted, 0);
+  assert.match(emptyBesideSlow.populationEffect!, /while the admitted deliveries measure n\/a \(no deliveries measured\)/);
+  assert.match(renderThroughput(unnamedEmpty), /Measured: submit→merge p50 n\/a \(no deliveries measured\)/);
+  // The deployed commit comes from the deployment: the release stamp first, else the build identity
+  // the platform injects (the same `commit` /healthz serves); never a guess.
+  assert.deepEqual(revisionOf({ release: { revision: deployedRevision }, build: { commit: commit('other') } }), { revision: deployedRevision, source: 'release.revision' });
+  assert.deepEqual(revisionOf({ release: { revision: 'unknown' }, build: { commit: deployedRevision } }), { revision: deployedRevision, source: 'build.commit' });
+  assert.deepEqual(revisionOf({ release: { revision: 'unknown' }, build: { commit: null } }), { revision: 'unknown', source: null });
+  assert.deepEqual(revisionOf(undefined), { revision: null, source: null });
 
   // Nothing synthetic reaches the population: the rule refuses anything it cannot point at in the
   // provider, before it ever asks whether a coordinator was present.
@@ -291,10 +312,11 @@ test('integration:live-throughput-population — the population rule reads the r
   const snapshot = await store.list();
   // The ledger the script reads, with and without the delivery that idled past the bound.
   let ledger = snapshot.filter(item => item.id !== idled.id);
+  let statusRelease: object = { release: { version: '0.9.1', revision: deployedRevision } };
   const served = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
     if (request.headers.authorization !== 'Bearer reader-token') { response.statusCode = 401; return response.end('{}'); }
-    if (request.url === '/api/status') return response.end(JSON.stringify({ actor: { id: 'reader' }, now: new Date(now).toISOString(), release: { version: '0.9.1', revision: deployedRevision } }));
+    if (request.url === '/api/status') return response.end(JSON.stringify({ actor: { id: 'reader' }, now: new Date(now).toISOString(), ...statusRelease }));
     if (request.url === '/api/work-snapshot') return response.end(JSON.stringify({ now: new Date(now).toISOString(), work: ledger }));
     response.statusCode = 404; response.end('{}');
   });
@@ -318,6 +340,15 @@ test('integration:live-throughput-population — the population rule reads the r
     const uncheckedRelease = await measureMain(['--claim', claimKey], environment, { run: () => ({ status: 128, stderr: 'bad object' }) }) as ThroughputReport;
     assert.equal(uncheckedRelease.verdict, 'unverified'); assert.equal(uncheckedRelease.met, null); assert.equal(process.exitCode, 2);
     assert.match(uncheckedRelease.reason, /could not be established/);
+    // A build that never stamped a release revision is named by the commit its build identity
+    // carries, and the report says which field named it.
+    statusRelease = { release: { version: '0.0.0-dev', revision: 'unknown' }, build: { commit: deployedRevision, protocol: 2, source: 'RAILWAY_GIT_COMMIT_SHA' } };
+    logged.length = 0; process.exitCode = undefined;
+    const fromBuild = await measureMain(['--claim', claimKey], environment, { run: () => ({ status: 0, stderr: '' }) }) as ThroughputReport;
+    assert.equal(fromBuild.deployed.revision, deployedRevision); assert.equal(fromBuild.deployed.revisionSource, 'build.commit');
+    assert.equal(fromBuild.verdict, 'verified');
+    assert.match(logged.join('\n'), new RegExp(`Deployed release: ${deployedRevision} \\(from build\\.commit\\)`));
+    statusRelease = { release: { version: '0.9.1', revision: deployedRevision } };
     // The same run over a ledger holding the delivery that idled past the bound: the finding and
     // the follow-up are printed, the report is recorded, and the exit status says it missed — a
     // scheduled measurement can never report a shortfall as a quiet success.
@@ -425,5 +456,9 @@ test('unit:throughput-claim-visible — master status carries GY-87\'s throughpu
     assert.match(raised.text, /GY-87's throughput claim is unverified against the deployed release/);
     assert.equal(raised.role, 'master'); assert.equal(raised.human, false); assert.equal(raised.next, throughputMeasurementCommand);
     assert.ok(stale.counts.attention > report.counts.attention, 'and it is counted, so an unproven claim is not reported as all clear');
+    // A deployment with no release stamp is matched by its build commit, as the measurement names it.
+    const unstamped = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' }, release: { version: '0.0.0-dev', revision: 'unknown' }, build: { commit: deployedRevision, protocol: 2 } }, { commit: null });
+    assert.equal(unstamped.throughput.deployed.revision, deployedRevision);
+    assert.equal(unstamped.throughput.verdict, 'verified');
   } finally { await rm(root, { recursive: true, force: true }); }
 });

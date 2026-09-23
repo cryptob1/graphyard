@@ -78,8 +78,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   const snapshot = await read('/api/work-snapshot', 'work snapshot');
   const now = Date.parse(snapshot.now ?? status.now ?? new Date().toISOString());
   const claim = snapshot.work.find(item => item.key === options.claim);
-  const containment = claimContainment({ revision: status.release?.revision ?? null, mergeSha: claim?.delivery?.mergeSha ?? null, claim: options.claim, repository: options.repository }, deps.run);
-  const deployed = { revision: status.release?.revision ?? null, version: status.release?.version ?? null, origin: new URL(base).origin,
+  // A build that never stamped a release revision still names its commit in the build identity
+  // the platform injects; the report says which field named it.
+  const { deployedRevision } = deps.deployedRevision ? deps : await module_();
+  const { revision, source } = deployedRevision(status);
+  const containment = claimContainment({ revision, mergeSha: claim?.delivery?.mergeSha ?? null, claim: options.claim, repository: options.repository }, deps.run);
+  const deployed = { revision, revisionSource: source, version: status.release?.version ?? null, origin: new URL(base).origin,
     observedAt: status.now ?? new Date(now).toISOString(), containsClaim: containment.contains, reason: containment.reason };
   const verify = deps.verify ?? await verifier();
   const report = verify(snapshot.work, now, { deployed, since: options.since, until: options.until, claimKey: options.claim });

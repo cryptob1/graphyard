@@ -47,6 +47,8 @@ export const throughputClaim = {
 export interface DeployedRelease {
   /** The Git revision the running image was built from; `unknown` when the build never stamped one. */
   revision: string | null;
+  /** Which field of the deployment named the revision (`deployedRevision`); absent on older reports. */
+  revisionSource?: 'release.revision' | 'build.commit' | null;
   version: string | null;
   /** The origin the ledger and the release were read from, so a reader can repeat the read. */
   origin: string;
@@ -89,7 +91,7 @@ export interface DeliveryRecord {
 
 export interface ThroughputShortfall {
   measured: { deliveries: number; submitToMergeP50Ms: number | null; idleMaxMs: number | null };
-  missed: { metric: 'population' | 'submit-to-merge-p50' | 'idle-actionable'; measured: number | null; budget: number; by: number | null; text: string }[];
+  missed: { metric: 'deployed-release' | 'population' | 'submit-to-merge-p50' | 'idle-actionable'; measured: number | null; budget: number; by: number | null; text: string }[];
   finding: string;
   followUp: { title: string; description: string };
 }
@@ -116,8 +118,26 @@ export interface ThroughputReport {
 
 export type WindowBasis = 'deployment-observation' | 'merge-instant' | 'given' | 'unknown';
 
+/**
+ * The commit the deployed control plane runs, from its own status document. The release stamp
+ * (`GRAPHYARD_BUILD_REVISION`) is read first; a build that never stamped one still carries the
+ * build identity the platform injects (`build.commit`: `GRAPHYARD_BUILD_SHA`,
+ * `RAILWAY_GIT_COMMIT_SHA` or `SOURCE_COMMIT`), which is the same fact `/healthz` serves as
+ * `commit`. Both are what is serving, never the checkout the measurement runs in; when neither
+ * names a commit the revision stays `unknown` and nothing can be verified against it.
+ */
+export function deployedRevision(status: { release?: { revision?: string | null } | null; build?: { commit?: string | null } | null } | null | undefined): { revision: string | null; source: DeployedRelease['revisionSource'] } {
+  const stamped = status?.release?.revision;
+  if (stamped && stamped !== 'unknown') return { revision: stamped, source: 'release.revision' };
+  const commit = status?.build?.commit;
+  if (commit && commit !== 'unknown') return { revision: commit, source: 'build.commit' };
+  return { revision: stamped ?? null, source: null };
+}
+
 const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : NaN; return Number.isFinite(parsed) ? parsed : null; };
 const minutes = (ms: number) => `${Math.round(ms / 6000) / 10} min`;
+/** A percentile over no deliveries is not zero minutes; it is nothing measured. */
+const measuredMinutes = (ms: number | null | undefined, count: number) => count > 0 && ms !== null && ms !== undefined ? minutes(ms) : 'n/a (no deliveries measured)';
 const sha40 = /^[0-9a-f]{40}$/;
 
 /**
@@ -329,7 +349,7 @@ export function verifyThroughput(work: Work[], now: number, options: { deployed:
   const verdict: ThroughputReport['verdict'] = met === true ? 'verified' : 'unverified';
   const measuredAt = new Date(now).toISOString();
   const where = `deployed release ${options.deployed.revision ?? 'unknown'}${options.deployed.version ? ` (${options.deployed.version})` : ''} at ${options.deployed.origin}`;
-  const reason = releaseRefusal ? `${throughputClaim.item}'s throughput claim is unverified: ${releaseRefusal}`
+  const reason = releaseRefusal ? `${throughputClaim.item}'s throughput claim is unverified: ${[releaseRefusal, ...missed.map(entry => entry.text)].join('; ')}`
     : met ? `${throughputClaim.item}'s throughput claim holds on the ${where}: over ${admitted.length} deliveries made with no master session running, submit→merge p50 is ${minutes(p50)} against ${minutes(throughputClaim.submitToMergeP50Ms)} and the longest idle-but-actionable wait is ${minutes(idleMs)} against ${minutes(throughputClaim.idleActionableMs)}`
     : `${throughputClaim.item}'s throughput claim is unverified on the ${where}: ${missed.map(entry => entry.text).join('; ')}`;
 
@@ -338,21 +358,24 @@ export function verifyThroughput(work: Work[], now: number, options: { deployed:
   // reader to notice. The rule is not changed by it; it is reported.
   const effects = [
     all.count && all.submitToMerge.p50Ms > throughputClaim.submitToMergeP50Ms && (p50 <= throughputClaim.submitToMergeP50Ms)
-      ? `submit→merge p50 over all ${all.count} real deliveries in the window is ${minutes(all.submitToMerge.p50Ms)}, past the budget, while the ${admitted.length} admitted deliveries measure ${minutes(p50)}` : null,
+      ? `submit→merge p50 over all ${all.count} real deliveries in the window is ${minutes(all.submitToMerge.p50Ms)}, past the budget, while the ${admitted.length} admitted deliveries measure ${measuredMinutes(p50, submitToMerge.count)}` : null,
     all.idleMaxMs !== null && all.idleMaxMs > throughputClaim.idleActionableMs && idleMs <= throughputClaim.idleActionableMs
-      ? `the longest idle-but-actionable wait over all real deliveries in the window is ${minutes(all.idleMaxMs)}, past the bound, while the admitted deliveries measure ${minutes(idleMs)}` : null,
+      ? `the longest idle-but-actionable wait over all real deliveries in the window is ${minutes(all.idleMaxMs)}, past the bound, while the admitted deliveries measure ${measuredMinutes(idleMaxMs, admitted.length)}` : null,
   ].filter((entry): entry is string => !!entry);
   const populationEffect = effects.length ? `${effects.join('; ')}. The excluded deliveries are listed with their figures and reasons; the budgets are unchanged.` : null;
 
   const shortfall = met === true ? null : {
     measured: { deliveries: admitted.length, submitToMergeP50Ms: admitted.length ? p50 : null, idleMaxMs },
-    missed: releaseRefusal ? [...missed, { metric: 'population' as const, measured: admitted.length, budget: throughputClaim.minimumDeliveries, by: null, text: releaseRefusal }] : missed,
+    // A release that cannot be named is a miss of its own, beside — never instead of — the
+    // population and budget misses, so the follow-up says everything that fell short.
+    missed: releaseRefusal ? [{ metric: 'deployed-release' as const, measured: null, budget: 1, by: null, text: releaseRefusal }, ...missed] : missed,
     finding: `${reason}. This is a finding about the design of ${throughputClaim.item}, recorded with the values measured against the ${where}: the budgets stay as ${throughputClaim.item} stated them and the population rule is not narrowed to make them pass.`,
     followUp: {
       title: `${throughputClaim.item}'s throughput claim is unverified against the deployed release`,
       description: [`Measured at ${measuredAt} against the ${where}, over the window ${window.since ?? 'from the first delivery'} to ${options.until ?? measuredAt} (${window.basis}: ${window.reason}).`,
         `${admitted.length} real deliveries were made with no master session running; ${excluded.length} were excluded, each with its reason, out of ${inWindow.length} in the window.`,
-        `What missed, and by how much: ${(releaseRefusal ? [releaseRefusal] : missed.map(entry => entry.text)).join('; ')}.`,
+        `What missed, and by how much: ${[...(releaseRefusal ? [releaseRefusal] : []), ...missed.map(entry => entry.text)].join('; ')}.`,
+        `Measured: submit→merge p50 ${measuredMinutes(p50, submitToMerge.count)} against ${minutes(throughputClaim.submitToMergeP50Ms)}; longest idle-but-actionable ${measuredMinutes(idleMaxMs, admitted.length)} against ${minutes(throughputClaim.idleActionableMs)}; over all ${all.count} real deliveries in the window, submit→merge p50 ${measuredMinutes(all.submitToMerge.p50Ms, all.count)} and longest idle ${measuredMinutes(all.idleMaxMs, all.count)}.`,
         populationEffect ? `Population effect: ${populationEffect}` : 'The admitted population is not faster than the window as a whole.',
         `Population rule: ${populationRule}`].join('\n'),
     },
@@ -380,11 +403,11 @@ export function renderDelivery(record: DeliveryRecord): string {
 export function renderThroughput(report: ThroughputReport): string {
   const lines = [
     `${report.claim.item} throughput claim: ${report.verdict.toUpperCase()}`,
-    `Deployed release: ${report.deployed.revision ?? 'unknown'}${report.deployed.version ? ` (${report.deployed.version})` : ''} at ${report.deployed.origin}, observed ${report.deployed.observedAt}; contains ${report.claim.item}: ${report.deployed.containsClaim === null ? `unknown (${report.deployed.reason ?? 'not checked'})` : report.deployed.containsClaim}`,
+    `Deployed release: ${report.deployed.revision ?? 'unknown'}${report.deployed.revisionSource ? ` (from ${report.deployed.revisionSource})` : ''}${report.deployed.version ? ` (${report.deployed.version})` : ''} at ${report.deployed.origin}, observed ${report.deployed.observedAt}; contains ${report.claim.item}: ${report.deployed.containsClaim === null ? `unknown (${report.deployed.reason ?? 'not checked'})` : report.deployed.containsClaim}`,
     `Window: ${report.window.since ?? 'open'} → ${report.window.until ?? report.measuredAt} (${report.window.basis}) — ${report.window.reason}`,
     `Population: ${report.population.admitted} counted of ${report.population.real} real deliveries (${report.population.delivered} delivered in the window, ${report.population.excluded} excluded)`,
-    `Measured: submit→merge p50 ${minutes(report.submitToMerge.p50Ms)} p90 ${minutes(report.submitToMerge.p90Ms)} against ${minutes(report.claim.submitToMergeP50Ms)}; longest idle-but-actionable ${report.idle.maxMs === null ? 'n/a' : minutes(report.idle.maxMs)} against ${minutes(report.claim.idleActionableMs)}`,
-    `All real deliveries in the window: ${report.all.count}; submit→merge p50 ${minutes(report.all.submitToMerge.p50Ms)}; longest idle ${report.all.idleMaxMs === null ? 'n/a' : minutes(report.all.idleMaxMs)}`,
+    `Measured: submit→merge p50 ${measuredMinutes(report.submitToMerge.p50Ms, report.submitToMerge.count)} p90 ${measuredMinutes(report.submitToMerge.p90Ms, report.submitToMerge.count)} against ${minutes(report.claim.submitToMergeP50Ms)}; longest idle-but-actionable ${measuredMinutes(report.idle.maxMs, report.population.admitted)} against ${minutes(report.claim.idleActionableMs)}`,
+    `All real deliveries in the window: ${report.all.count}; submit→merge p50 ${measuredMinutes(report.all.submitToMerge.p50Ms, report.all.count)}; longest idle ${measuredMinutes(report.all.idleMaxMs, report.all.count)}`,
     report.reason,
   ];
   if (report.populationEffect) lines.push(`Population effect: ${report.populationEffect}`);
