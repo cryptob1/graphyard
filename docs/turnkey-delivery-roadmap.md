@@ -9,7 +9,6 @@ A repository without tests needs scenarios and executable assertions first: a pl
 
 - **Through merge:** A verified, authorized merge completes the configured workflow
 - **Preview validation:** A pinned preview artifact plus required behavioural proof
-- **Production verification:** Expected artifacts independently observed across required production services, with required checks passing
 
 ## Increments
 

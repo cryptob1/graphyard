@@ -415,8 +415,8 @@ test('unit:role-capacity-visible — master status reports, per role, the sessio
 
 test('manual:capacity-sizing-onboarding-review — docs/ states how an installation sizes review and proof capacity against its worker count, and the master guide describes per-profile concurrency', async () => {
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
-  const [onboarding, masterAgent] = await Promise.all([read('docs/onboarding.md'), read('docs/master-agent.md')]);
+  const [onboarding, masterAgent] = await Promise.all([read('docs/onboarding.md'), read('docs/fleet.md')]);
   for (const fragment of ['### Size review and proof capacity', '"concurrency"', 'worker count', 'concurrency', 'longestWaitMs', 'without a restart', 'proof groups']) assert.ok(onboarding.includes(fragment), `docs/onboarding.md must state: ${fragment}`);
   assert.match(onboarding, /adding workers/i, 'an operator adding workers is told what else to add');
-  for (const fragment of ['`concurrency`', 'a name unique to its request', 'lowering it', 'without a restart', 'longestWaitMs', 'counts.concurrencyStarved', 'per role']) assert.ok(masterAgent.includes(fragment), `docs/master-agent.md must document: ${fragment}`);
+  for (const fragment of ['`concurrency`', 'a name unique to its request', 'lowering it', 'without a restart', 'longestWaitMs', 'counts.concurrencyStarved', 'per role']) assert.ok(masterAgent.includes(fragment), `docs/fleet.md must document: ${fragment}`);
 });

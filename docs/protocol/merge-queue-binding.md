@@ -20,6 +20,7 @@ Review is requested only while `baseTipContained` is not `false`:
 
 The control plane, not a rework round, brings a candidate outside the queue whose head no longer contains `baseTip` onto it.
 
+
 The record gains `baseRefresh`:
 
 - `from`: Head the refresh acted on; base it was bound to.
@@ -31,7 +32,6 @@ Required CI checks never carry anywhere: they run on the republished head, a dif
 
 - **Ledger:** `base.refreshed` or `base.conflict` with carry summary, `base.carry` with the full decision.
 - **`master run`:** `refresh` action per head and base tip.
-- **Conflict:** writes nothing (no commit, no ref, no carried binding). The build gate names it, the item returns to `build`, and the released hold invalidates approval and every proof: a resolution is unreviewed content.
 
 ## Evidence `scopeFiles`
 
@@ -57,7 +57,6 @@ Publishing a tip for an entry not on its predicted base merges that base into th
 - `from`: Replaced head.
 - `parents`, `author`, `authoredByApp`: GitHub's account of the tip.
 - `conflicts`: Always `false`: the provider merge refuses a conflict with `409`, ejecting the entry.
-- `baseChanges`: Paths changed between the replaced head's bound base and the predicted base; `null` when GitHub's list is incomplete: the compare API reports first-page files only and stops at 300.
 
 Binding the tip decides once and records `queue.speculation.carry`:
 
@@ -71,7 +70,7 @@ Nothing carries unless the tip is a two-parent merge of exactly `from.sha` and `
 - **Approval:** carries when no reviewed file changed.
 - **Proof:** carries when its declared scope is disjoint from the change.
 - **Every other case:** `carried: false` naming what was touched.
-- **Carried record:** named by its `evidenceId`, so one carried twice stays the latest decision's record.
+- **Carried binding:** holds only while the candidate is exactly `to` under the same policy revision (and, for agent review, the same reviewer App); revoking the original evidence withdraws it and ejects the tip.
 - **Ledger:** one `queue.carry` event per decision, a `carried`/`required` summary on `queue.predicted`.
 
 GitHub dismisses stale reviews on Graphyard's tip push, so before acquiring merge authority `master merge` re-posts a carried approval bound to the tip through the reviewer App that gave it (never the control-plane App, never a human reviewer's approval, never over a reviewer that has since requested changes), reported as `carriedApproval`.

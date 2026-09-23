@@ -519,7 +519,7 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   assert.deepEqual(again.roles.find(role => role.name === 'worker'), { name: 'worker', accounts: ['codex-a', 'claude-b', 'claude-c'], concurrency: 7 });
 
   const guide = await readFile(new URL('../docs/onboarding.md', import.meta.url), 'utf8');
-  const order = ['### Add a runtime', '### Add an account', '### Add a role'].map(heading => guide.indexOf(heading));
+  const order = ['master registry runtime set', 'master registry account set', 'master registry role set'].map(step => guide.indexOf(step));
   assert.ok(order.every(index => index >= 0) && order[0] < order[1] && order[1] < order[2], 'docs/onboarding.md adds a runtime, an account and a role, in that order');
   for (const command of ['master registry propose --apply', 'master registry runtime set', 'master registry account set', 'master registry role set']) assert.ok(guide.includes(command), command);
 

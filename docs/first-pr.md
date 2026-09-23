@@ -9,7 +9,6 @@ For a maintainer of `cryptob1/graphyard`: how it proves its own contracts.
 2. `node "$GRAPHYARD_CLI" github-setup https://YOUR-GRAPHYARD-HOST` registers the personal-account App; copy its private values into the deployment and redeploy.
 3. Preview, review and apply the integration configuration (`node scripts/configure-integrations.mjs --plan`, then `--apply`, then the provider's plan, apply and deploy) and branch protection (`node scripts/protect-github.mjs --plan`, then apply).
 4. Open a Graphyard-linked pull request and confirm `Graphyard / merge` refuses before acceptance evidence exists.
-6. Confirm current-head review, CI, trusted acceptance evidence, protection and the guarded merge all pass, rerun the inspection for `permitted`, then push one commit to verify old proof becomes stale.
 
 ## Adding a trusted contract
 
@@ -19,7 +18,6 @@ A trusted run executes only protected source, so a contract must reach protected
 
 `node scripts/verify-enforcement.mjs GY-N [PR_NUMBER]` joins live GitHub and Graphyard observations for one submitted item into a read-only report.
 
-- **Requires:** a completed successful run from its bound App for every protected required context, not only `Graphyard / merge`
 - **Refuses:** mismatched candidate, stale observation or blocking merge state
 - **Verdict:** `refused` while anything would block the merge, `permitted` only when everything allows it
 

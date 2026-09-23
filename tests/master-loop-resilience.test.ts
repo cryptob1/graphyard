@@ -322,8 +322,8 @@ test('integration:master-profile-management — producer profiles can be replace
     // The commands are part of the CLI and the guide.
     const help = await readFile(new URL('../src/cli/master.ts', import.meta.url), 'utf8');
     for (const command of ['master producer add FILE | replace FILE | remove NAME', 'master reviewer add FILE | remove NAME']) assert.ok(help.includes(command), `${command} is in CLI help`);
-    const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
-    for (const fragment of ['master producer replace', 'master producer remove', 'master reviewer remove', 'setup.attention']) assert.ok(guide.includes(fragment), `docs/master-agent.md documents ${fragment}`);
+    const guide = await readFile(new URL('../docs/executors.md', import.meta.url), 'utf8');
+    for (const fragment of ['master producer replace', 'master producer remove', 'master reviewer remove', 'setup.attention']) assert.ok(guide.includes(fragment), `docs/executors.md documents ${fragment}`);
   } finally { await cleanup(); }
 });
 

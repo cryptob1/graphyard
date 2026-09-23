@@ -298,16 +298,16 @@ test('manual:stall-visibility-docs-review — docs state that a repeated identic
   // Read as prose, not as source: emphasis and line wrapping are the author's, and an assertion
   // about either would fail on a reflow that changed no statement.
   const prose = async (page: string) => (await readFile(new URL(`../docs/${page}`, import.meta.url), 'utf8')).replace(/[*`_]/g, '').replace(/\s+/g, ' ');
-  const architecture = await prose('architecture.md'), master = await prose('master-agent.md');
+  const architecture = await prose('architecture.md'), master = await prose('master-loop.md');
   const numbers: Record<number, string> = { 1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five' };
   const threshold = new RegExp(`(${actionStallThreshold}|${numbers[actionStallThreshold]}) (consecutive )?(failures|identical failures)`, 'i');
-  for (const [name, text] of [['architecture.md', architecture], ['master-agent.md', master]] as const) {
+  for (const [name, text] of [['architecture.md', architecture], ['master-loop.md', master]] as const) {
     assert.match(text, /stalled rather than retrying|stall, not a retry/i, `${name} states that a repeated identical failure is a stall rather than a retry`);
     assert.match(text, /unchanged reason/i, `${name} says what makes it one`);
     assert.match(text, threshold, `${name} states the threshold`);
     assert.match(text, /does not outlive it|never outlives it/i, `${name} states what the classification does to the backoff`);
   }
-  assert.match(master, /actions\.stalled/, 'master-agent.md says where an operator sees one');
+  assert.match(master, /actions\.stalled/, 'master-loop.md says where an operator sees one');
   assert.match(master, /on the item's own card/i, 'and on the dashboard');
   assert.match(master, /reads as idle and is not|looks idle/i, 'and that it is the signal for a fleet that looks idle but is not');
   assert.match(architecture, /read exactly like an item with nothing to do|no count and no list/i);

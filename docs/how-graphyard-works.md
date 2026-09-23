@@ -8,15 +8,13 @@ For a newcomer: how work reaches a verified merge, and who may move it.
 The operator connects the repository, GitHub enforcement, one principal per session and the trusted proof producers; working rules go in `AGENTS.md` ([onboarding](onboarding.md)). Each item is created with an outcome, dependencies, planned files and acceptance criteria naming its proofs, then passes six gates in order, each a deterministic evaluation it cannot skip:
 
 1. **`ready`:** released and unblocked, its dependencies finished
-2. **`build`:** one worker principal claimed it at a new lease epoch, in a registered worktree, and submitted an exact commit
 3. **`review`:** an independent reviewer approved that exact head
-4. **`test`:** Graphyard observed the required CI checks on GitHub, never taking them on report
-5. **`acceptance`:** trusted evidence binds that head, base and policy revision; a new commit or revision makes an old pass insufficient
-6. **`merge`:** the guarded merge rechecks everything immediately before the GitHub call
 
 Only an independently observed authorized merge marks the item **Done**; history keeps the assignment, evidence, decisions and delivered commit.
 
 ## Two phases, one clear handoff
+
+2. **Phase 2 · Normal operation.** The operator supplies goals and the three human-only decisions, an operator agent may send bounded intent, and the master loop (`coordinator`), optional slice leads (`slice-lead`) and the independent reviewer and proof producers (`producer`) read ready work and gate state while the master dispatches — an invitation, not ownership — to many worker sessions.
 
 **Both phases:** identical gates and credential boundaries, Herdr hosting the sessions and reporting their health.
 
@@ -36,7 +34,6 @@ Both diagrams use the [diagram legend](glossary.md#diagram-legend).
 
 ## The boundaries that do not move
 
-- **Graphyard is the source of ownership and progression truth.** Runtime health is not ownership.
 - **Workers stay untrusted.** They never receive operator, scoped operator-agent, coordinator or trusted evidence-producer credentials.
 - **There is no shortcut.** No client-controlled lifecycle-state endpoint and no administrative merge bypass.
 

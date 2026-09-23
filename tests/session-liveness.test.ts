@@ -546,7 +546,7 @@ test('unit:overlong-session-surfaced — a session past its role\'s maximum is s
 const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
 
 test('manual:session-liveness-docs-review — docs/master-agent.md states that the control plane reconciles session liveness, on what interval, and what an operator or master does instead of closing sessions by hand', () => {
-  const section = guide.slice(guide.indexOf('### Session liveness is reconciled, not trusted'), guide.indexOf('## Automatic dispatch at submit'));
+  const section = guide.slice(guide.indexOf('## Session handles and liveness'));
   assert.ok(section.length > 1000, 'the guide carries the session-liveness section');
 
   // That the control plane does it, and that it is not the master's manual duty.

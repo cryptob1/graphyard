@@ -34,13 +34,14 @@ For whoever runs the control plane: which variables, host and backup path to cho
 ### CI producer
 
 - `{ "id": "ci-proofs", "role": "producer", "runtime": "github-actions", "proofs": ["unit:*", "integration:*"], "token": "…" }` is the principal [proofs in CI](github.md#proofs-in-ci) publish through.
-- **`github-actions` runtime** makes it the CI producer: only from it is a `ciRun` binding accepted, `manual:*` and `e2e:*` refuse whatever it is granted, every record is verified against the GitHub job.
 - **Capabilities:** no `deploymentProviders`, no `slice`, no other capability; counts toward `GRAPHYARD_MAX_REVIEWERS`.
 - **Token:** also the `GRAPHYARD_CI_PRODUCER_TOKEN` secret of the `graphyard-reporting` environment, beside the trusted-acceptance reporter's `GRAPHYARD_PRODUCER_TOKEN`, set after restricting it to the default branch; both reporters read `GRAPHYARD_URL`, set on it too. Rotation: redeploy the principal and set the secret in one change.
 
 ### Changing the roster safely
 
 - `scripts/configure-integrations.mjs --apply` never rebuilds `GRAPHYARD_PRINCIPALS` from a local file: it merges `.graphyard/credentials.json` into the live roster by id, keeping every live principal the file omits. The preview shows each id, role, change and token state (`unchanged`, `rotated`, `new`, `removed`), never a token.
+- `--remove ID`: dropping or demoting the coordinator, an admin or another live principal is refused without it; `--rotate ID` rotates one.
+- `--deploy`, required by a changed producer token: variables staged, service redeployed, GitHub secret set only once the deployed server authenticates the new token; with no token change nothing is deployed. A token the deployment does not serve in time is reported with its secret unchanged, the owed sync recorded in the ignored `.graphyard/pending-secret-sync.json`.
 
 ### Delegation capacity variables
 
@@ -56,8 +57,6 @@ For whoever runs the control plane: which variables, host and backup path to cho
 ## Hosts
 
 - **Docker Compose:** `cp .env.example .env`, replace every example secret, `docker compose --profile full up -d` (`--build` builds this checkout). `GRAPHYARD_IMAGE` pins a release or digest; `graphyard-data` holds durable state, `graphyard-backups` the logical backups. Both published ports bind loopback: put a TLS reverse proxy before 4310, never expose Postgres, and set a unique database password, the four capacity variables and `GRAPHYARD_BUILD_SHA=$(git rev-parse HEAD)` when you build
-- **Kubernetes:** `deploy/helm/graphyard`, `helm upgrade … --set image.tag=X.Y.Z`, then `helm test`: a stateless Deployment over one Postgres ledger, a Service, a TLS Ingress and a Secret, no worktree volume
-  - The chart's `pre-upgrade` hook Job (also `pre-install` with an external database) runs `graphyard db migrate` from the image being rolled out and refuses when a newer release already migrated the database, so a rollback stops at the hook rather than replacing healthy pods.
   - `secrets.existingSecret` carries `DATABASE_URL`, `GRAPHYARD_PRINCIPALS`, `GITHUB_PRIVATE_KEY` (a file, possibly empty) and `GITHUB_WEBHOOK_SECRET`; the chart refuses to render with nowhere to hold credentials, and `secrets.create=true` renders one for evaluation only. `backup.enabled=true` adds a CronJob running `graphyard db backup` onto a claim, verifying each file and pruning after `backup.retainDays`, `backup.persistence.existingClaim` outliving the release; `postgresql.enabled=true` adds an evaluation StatefulSet, production pointing `DATABASE_URL` at managed Postgres.
 
 ## Agent hosts: the managed worktree root
@@ -70,12 +69,12 @@ Every host running `graphyard master run` holds the assignment worktrees under `
 | `run.worktreeRootMinFreeGb` | Free space its volume must have, 0.1–10000; default 2 |
 | `run.worktreeRootBudgetGb` | Size it may reach, 0.1–10000; default 10 |
 
-- **Preflight:** `master init` and every launch refuse a tmpfs or ramfs root or a volume below the minimum, judging one that does not exist yet by its nearest existing ancestor; the first launch creates it
 - **`disk.worktreeRoot`** in `master status` reports free space, size, checkouts and how many no live session owns, raising `graphyard master run --once` as an attention item below the minimum, at four fifths of the budget (a user quota free space never shows) or on a tmpfs root
 - [What the loop creates there and removes](fleet.md#session-checkouts)
 
 ## Replicas and availability
 
+- `/healthz` checks database connectivity, not GitHub freshness, reports the running `commit`; monitor `/api/status` for integration job errors, `delegationLimits.attention` and `production.incidents`.
 - **One replica** initially; exercise the concurrency tests and load profile before scaling.
 
 ## Production deployment observation
@@ -92,5 +91,6 @@ Whether a merged commit reached production is observed separately, every minute,
 
 ## Backup, upgrade, restore
 
+- **Physical or provider backups:** scheduled backups, managed snapshots or `pg_dump` with a matching client, restore-verified in a separate project.
 - **Logical backups:** `graphyard db backup FILE` on the control-plane host writes every ledger table from one consistent snapshot, the serial sequences ordering work, events, grant history and observations, the schema generation and a digest over it all; `graphyard db verify FILE` checks a file without touching a database, `graphyard db restore FILE` loads one into an empty database. The documented upgrade, Helm CronJob and release verification use that format.
 - A backup holds private validation artifacts, evidence and credential hashes: store it like the database.

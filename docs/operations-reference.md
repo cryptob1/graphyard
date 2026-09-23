@@ -10,6 +10,7 @@ Terminal condition, cycle and non-stopping conditions: [master-agent guide](mast
 ## Master coordination loop
 
 - **`graphyard master run`:** durable coordinator; run under systemd or Herdr ([service unit](../examples/master/graphyard-master.service)), never as a chat session
+- **`.graphyard/master.json`:** re-read before every cycle and dispatch tick: profiles, `herdrWorkspace`, `autoMerge` and every `run` setting apply without restart
 
 Flags:
 
@@ -25,7 +26,6 @@ Flags:
 
 ## Worktree disk
 
-- **One install, shared.** An assignment worktree under the repository resolves its install by upward lookup — nothing is created, and the worker's prompt names it — while one outside it gets a mirror of links, still covered by the `node_modules/` ignore rule. The install must answer for that exact head: a differing `package-lock.json` installs its own, and a worktree that already has one is reported and left alone.
 - **`master status`:** free space under `disk` with the worktrees a reclaim would empty; below the threshold it raises a master-owned attention item while writes still succeed, and a write failing for want of room is named as that whether the kernel reports it or only a command's output does (`write error: Disk quota exceeded`). With no loop running, `master run --once` reclaims and cycles once
 
 Settings in `.graphyard/master.json`:
@@ -37,7 +37,6 @@ Settings in `.graphyard/master.json`:
 
 ### Lost worker before submission
 
-- **Expiry:** 120 seconds after the last heartbeat; a new worker claims at a higher epoch and old-epoch mutations refuse. Preserve the old worktree and use a new branch and path: expiry does not prove the process stopped
 - **`lease-loss`:** raised only by a lapse nothing explains; if you stopped the worker, attest it ([classification and settlement](delegation.md#escalation))
 
 ### Submitted implementation needs rework
@@ -63,7 +62,6 @@ If a foreground worker's supervisor dies before settling its quarantine, the fen
 An observed merge no valid execution covered (cancelled before the merge cutoff, expired, or never existing) records the violation `Merge observed without a prior authorization for this candidate` and stays out of Done; every observation re-derives that verdict. Never backfill evidence or re-run the gates against the merged head.
 
 - **Reported:** `master status` row `merged` (with the violation and last refusal), owner `master`, the recovery command and `counts.mergedUnreconciled` apart from `counts.mergeCandidates`; the loop escalates once and stops offering the item to the guarded merge
-- **Recovery, requested after the merge** (an earlier merge approval does not judge it): `master decide GY-N merge REASON`, then `master approver GY-N DECISION`. The next observation re-checks the record as it stood immediately before the merge: merge authorization for that exact head, base and policy revision, every gate passed, no standing violation, every required proof's trusted evidence live, a GitHub observation under two minutes old
 - **Holds:** delivered on the decision, citing that snapshot's `authorizationRevision` and `evidenceAsOf` and carrying `reconciliation` (decision, requester, approver, both reasons, cutoff, snapshot revision, judgement); ledger `merge.reconciled`
 - **Operator-authorized delivery:** when the record refuses a merge an operator authorized administratively, a further merge decision whose `REASON` cites the refused decision's id records it, the operator's admin credential on one side — the operator requests it through the API, or approves the master's with `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve GY-N DECISION REASON`. An operator-agent pair citing the refusal is refused again, one citing no refusal is a plain reconciliation, and `attentionOwner.next` carries the exact command. Its record is `delivery.operatorAuthorization` — `execution: null`, the `operator`, the decision, the `refusedDecision`, `unmet`, the cutoff, the pre-merge snapshot's `authorizationRevision` and a judgement — with the ledger entry `merge.operator-authorized` under the operator's identity, never `merge.reconciled`
 - **Listed apart:** `master status` `deliveries.reconciled` (`authorization: 'reconciled'`) and `deliveries.operatorAuthorized` (`authorization: 'operator'`), with `counts.reconciledDeliveries` and `counts.operatorAuthorizedDeliveries`
@@ -87,7 +85,6 @@ Revoking leaves criteria, policy revision, review and the submitted attempt unto
 - **Add or rotate principals** in `GRAPHYARD_PRINCIPALS`, then redeploy, each with a unique ID and secret ([safely](deployment.md#changing-the-roster-safely)); rotation invalidates the old credential on restarted replicas, App keys being revoked separately
 - **Proof authority** is a live [grant](#proof-authority-grants), never a `GRAPHYARD_PRINCIPALS` setting after bootstrap; **operator agents** live in the [operator-agent registry](operator-automation.md), never as an `admin` entry
 - **The master's `coordinator`:** beyond reads, only bounded merge execution, settling a verified-dead quarantine and recording a deployment observation
-- **Out of Git:** environment files, `.graphyard/` and private-key extensions, excluded from the Docker build context too; CI runs a pinned, checksum-verified Gitleaks over all fetched history — a scan, not a guarantee — and a committed credential is revoked first, then cleaned from history and caches
 
 ## Proof authority grants
 
@@ -107,6 +104,7 @@ graphyard grants history ci                        # append-only record of every
 ## Setup proposals and drift
 
 - **`graphyard init --scan`** writes `.graphyard/setup-proposal.json` (Git-ignored, mode 0600) and nothing else; **`--apply`** applies exactly that stored proposal, after review, registering only the principals it declares (operator, coordinator, producer, one worker per proposed profile, none without an agent runtime)
+- **Apply is idempotent:** unchanged artifacts left alone, existing tokens preserved, operator-edited profiles reported as drift and kept; a repository that changed between review and apply refuses. Every proposal declares the candidate-bound-environment invariant
 - **Drift** is informational, never auto-repaired: rerun `init --scan`, compare, reapply after review; `graphyard doctor` reports the stored proposal, the applied setup record and current drift
 
 ## Scale limits

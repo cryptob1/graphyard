@@ -500,8 +500,8 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
 
 test('manual:auto-dispatch-status — the master guide, the generated instructions, the protocol pages and the coordination guide describe the automatic lifecycle', async () => {
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
-  const [masterAgent, coordination, workCommands, webhook, readEndpoints, help] = await Promise.all([read('docs/master-agent.md'), read('docs/coordination.md'), read('docs/protocol/work-commands.md'), read('docs/protocol/github-webhook.md'), read('docs/protocol/read-endpoints.md'), read('src/cli/master.ts')]);
-  for (const fragment of ['## Automatic dispatch at submit', 'master producer add', 'within 30 seconds', 'never launches reviews or producers by hand', 'producerProofs', '.graphyard/producers.json', 'run.reviewerProfile', 'dispatchIntervalSeconds', 'one producer session per proof group', 'examples/master/claude-producer.json', 'autoDispatch']) assert.ok(masterAgent.includes(fragment), `docs/master-agent.md must document: ${fragment}`);
+  const [masterAgent, coordination, workCommands, webhook, readEndpoints, help] = await Promise.all([read('docs/executors.md'), read('docs/coordination.md'), read('docs/protocol/work-commands.md'), read('docs/protocol/github-webhook.md'), read('docs/protocol/read-endpoints.md'), read('src/cli/master.ts')]);
+  for (const fragment of ['## Automatic dispatch at submit', 'master producer add', 'within 30 seconds', 'never launches reviews or producers by hand', 'producerProofs', '.graphyard/producers.json', 'run.reviewerProfile', 'dispatchIntervalSeconds', 'one producer session per proof group', 'examples/master/claude-producer.json', 'autoDispatch']) assert.ok(masterAgent.includes(fragment), `docs/executors.md must document: ${fragment}`);
   const instructions = managedMasterInstructions('');
   for (const fragment of ['within\n30 seconds', 'never launch reviews or producers by hand', 'what is requested, what is running and since when', 'Keep cycling: status, dispatch ready work, shepherd review and proof collection']) assert.ok(instructions.includes(fragment), `the generated instructions must state: ${fragment}`);
   assert.ok(coordination.includes('producerProofs') && coordination.includes('producer-runnable'), 'the coordination guide explains how an item marks a manual proof producer-runnable');
@@ -776,8 +776,8 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
 });
 
 test('manual:dispatcher-state-docs-review — the master guide states that the dispatcher bounds and repairs its own state, how a persist failure is surfaced, and how a session that exits at launch is classified', async () => {
-  const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
+  const guide = await readFile(new URL('../docs/executors.md', import.meta.url), 'utf8');
   for (const fragment of ["### The dispatcher's own state", 'bounds its own state where it composes it', 'marked with an ellipsis', 'repaired, not fatal', 'logged once with the', 'path that failed',
     'A tick failure is attributed and surfaced', 'dispatch.lastFailure', 'Three consecutive failures raise one attention item', 'no reviewer or producer session is being launched for any item',
-    'A session that exits at launch is classified from its pane', 'agent_not_found', 'herdr pane read', 'provider limit notice', 'fails over exactly as a mid-session', "the pane's last words", 'exits **at launch**']) assert.ok(guide.includes(fragment), `docs/master-agent.md must state: ${fragment}`);
+    'A session that exits at launch is classified from its pane', 'agent_not_found', 'herdr pane read', 'provider limit notice', 'fails over exactly as a mid-session', "the pane's last words", 'exits **at launch**']) assert.ok(guide.includes(fragment), `docs/executors.md must state: ${fragment}`);
 });

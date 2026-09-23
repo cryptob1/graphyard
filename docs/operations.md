@@ -14,11 +14,11 @@ For the human operator with three minutes: what to check, and what never changes
 
 - **An item is not moving.** Read the refusal; a gate naming a cause re-evaluates once fixed. Never weaken requirements.
   - **In `escalations`:** a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can, except for a `lease-loss` the ledger explains ([who may settle what](delegation.md#who-may-settle-what)).
-  - **Lease expired unsubmitted, another attempt needed, or a `containment` quarantine:** the [recipes](#recovery-recipes) below.
   - **Unowned blocker:** `graphyard unblock GY-N "reason"`.
-- **[Accepted evidence was wrong](operations-reference.md#accepted-evidence-turns-out-to-be-wrong):** `graphyard revoke GY-N revoke.json` (`admin` or granted `producer` only) cancels any uncommitted merge execution.
+- **A merge is refused.** Stale observation, closed gate or queue position behind the head is normal: wait or repair; never bypass, never have a worker rebase a queued candidate. One that bypassed Graphyard is a [permanent violation](operations-reference.md#merge-bypass).
 - **[Integration jobs fail](github.md#preflight-and-holds):** App access, protection and registered branch, then `github-setup --update-permissions`.
-- **Free space low:** lower `run.reclaimIdleHours`, or run `master run --once` ([worktree disk](operations-reference.md#worktree-disk), [checkout root](deployment.md#agent-hosts-the-managed-worktree-root)).
+- **Main ahead of production, or a capacity variable flagged:** a deployment incident named within five minutes while `/healthz` stays green; fix the deployment, never the ledger.
+- **[Master loop down](operations-reference.md#master-coordination-loop):** restart `graphyard master run` freely: the cursor reconciles on start, a second loop refuses while one is alive.
 
 ## Recovery recipes
 

@@ -26,7 +26,6 @@ The change that creates a proof cannot prove its criterion: the protected harnes
 
 The acceptance gate stops demanding the deferred criterion's proofs for this candidate, and the proof becomes an obligation on its contract paths, derived from the work documents and never asserted.
 
-- **Inherited by:** later items whose `plannedFiles` overlap those paths, as a required criterion.
 - **Acceptance gate:** `Bootstrap obligation inherited from GY-N AC-M`.
 
 ## Inspecting obligations

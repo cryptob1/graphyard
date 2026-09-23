@@ -16,6 +16,4 @@ Seven recurring substitutions across the guides each resolved into one canonical
 Where each adopted lesson lives:
 
 - Derive requirement satisfaction from evidence, not a status field: [architecture](../architecture.md)
-- Attribute each run to one target, refusing strict evidence on unmeasured shared staging: [attribution](../attribution.md)
 - Reconcile release ranges, not only triggering commits: [delivery](../delivery.md)
-- Diagnose stalls, and replay preserved attempts with explicit coverage: [flow analytics](../flow-analytics.md), [evidence replay](../evidence-reuse.md)

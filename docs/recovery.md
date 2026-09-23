@@ -9,13 +9,13 @@ A session that stops on its provider's usage-limit notice needs no recovery by h
 
 `graphyard validation capacity` (`GET /api/validation/capacity`) reports:
 
-- **Backpressure:** a registration may set `queueLimit` (1–100, default 20); a request for a runner already holding that many queued refuses with HTTP 429 and the count: wait for dwell to drain, cancel stale requests or register another runner
+- **Per runner registration:** last dispatch poll, whether executing, requests queued and for how long, queue limit
 - **Every reserved protected resource:** request and attempt holding it, whether that lease is live
 - Retained-artifact usage
 - One diagnosed condition per live request:
-  - `queued-resource-held`: a needed resource reserved by an attempt whose settlement was never verified — verify execution stopped, then `validation settle` with evidence; never release on a timer
+  - `queued-waiting-for-slot`: a needed resource held under a live lease — wait, or add a registration if dwell grows
   - `unacknowledged`: dispatched, not acknowledged inside the ACK window — nothing was authorized, an expired window settles itself, `validation retry` queues another
-  - `heartbeat-missing`: acknowledged, not renewed within the 20-second interval while the lease is live — the runner may still be executing, so leave its reservations until the collector observes settlement or an operator settles it with evidence
+  - `collection-stalled`: the collector holds authority but stopped renewing — check its process; an expired collection keeps the barrier closed
   - `awaiting-settlement`: terminal, reservations held by an unsettled attempt — verify termination and its external operations, then `validation settle` with evidence
   - `retryable`: settled, attempts and deadline remaining — `validation retry`
   - `running`, `collecting`, `settled`: healthy or finished
@@ -49,7 +49,6 @@ A rollback is four records plus a repair-work link, the executor registered as a
 }
 ```
 
-- **`serialized`:** the adapter observes its own operation settle but cannot fence the write. May be automatic; no selection, rollback or other environment mutation is authorized until the operation is settled or resolved, and lease expiry alone releases nothing
 - **`none`:** neither, and **never automatic**: the definition refuses `automatic: true`, claiming an automatic rollback refuses, and the same serialized barrier holds
 
 ### Request, claim and settle
@@ -83,13 +82,13 @@ The executor claims it and reports the operation; with its host lost, an operato
 ### Completion and automatic rollback
 
 - **`applied`:** the provider's word
-- **`verified`:** complete, only when the sweep verifies the generation it selected, as in [delivery verification](delivery.md#verification); record then carries `verifiedAt` and the interval
 - **`superseded`:** one superseded first, its operation record intact
 
 `"automaticRollback": true` in the environment's `delivery` policy lets the sweep open one when a verified generation degrades. It:
 
 1. Selects the most recent release that verified here
 2. Requires its approval to still bind where the policy asks
+3. Checks an enabled `rollback` registration with `provider` or `serialized` fencing and `automatic: true` covers the environment
 4. Opens the rollback with incident IDs
 
 - **Anything missing:** refusal shown once as `automaticRollbackRefusal`

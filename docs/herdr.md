@@ -5,6 +5,7 @@ For an operator installing workers, and what a live session does not prove.
 
 ## Install the plugin
 
+
 ```sh
 export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -21,8 +22,6 @@ Run **Open Graphyard control plane** from Herdr.
 
 All machines use the same Graphyard URL.
 
-- **Each worker:** unique principal and token, stable host ID, own worktree, a GitHub identity that cannot merge the protected base branch
-- **Optional `displayName` and `runtime` in `GRAPHYARD_PRINCIPALS`:** control labels such as **Atlas · Codex** only; the authenticated principal determines ownership, and renaming affects future claims without rewriting history
 
 ## Automated recovery contract
 
@@ -31,4 +30,3 @@ All machines use the same Graphyard URL.
 - **`exclusive-claim`:** sixteen concurrent claims from two machines produce one lease and one claim event
 - **`expiry-recovery`:** lease expires without a heartbeat, the stopped machine cannot renew it, the second claims the next epoch
 - **`stale-owner-refused`:** heartbeat, release, workspace, submit, blocked, quarantine, launch, rereview and a fresh claim all refuse for the superseded owner
-- **`isolated-worktrees`:** replacement cannot reserve the stopped machine's branch or an overlapping path, registers its own; the earlier reservation is retained

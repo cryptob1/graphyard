@@ -12,13 +12,13 @@ For an operator asking where delivery waits, and what the figures cannot answer.
 
 Ledger events are projected into `flow_facts`, a normalized, append-only, trigger-protected table.
 
-- **Projection:** incremental, bounded and idempotent on exact identities: a replayed event inserts nothing, two replicas cannot duplicate a fact, a pending review is not a completed-review fact, repeated CI outcomes stay distinct
-- **Deployment observations** and their contained merge identities are repository-wide: slice, type and stage filters never narrow them, and production phases join through those containment records, never assuming an artifact SHA equals a merge SHA
-- **Graphyard's [release records](delivery.md):** a separate lineage this report does not read yet; a repository observed only through the release pipeline reports deployment metrics as unavailable
+- **Runs:** in the reconciliation loop and as a catch-up before each read, reporting lag in `coverage.projection`, shown as **stale**
+- **A provider that deletes a pull request, check run or deployment record** cannot erase a stored fact
 
 ## Windows and metrics
 
 - **Timestamps:** all UTC
+- **Window:** `[from, to)`: `to` is the observation instant, `from` is `to` minus 7, 30 or 90 days
 - **Daily buckets:** start at the window start
 - **A provider timestamp ahead of the observation instant:** falls outside until the next read, never discarded
 
@@ -27,11 +27,9 @@ Metrics:
 - **Stage dwell:** Entering to leaving a stage, for transitions completed inside the window; an open stage counts as work in progress
 - **Work in progress and aging:** Items whose latest durable stage fact has no delivered fact; age: observation instant minus stage entry
 - **Cumulative flow:** Created undelivered items per stage at each daily boundary, from stage facts plus carried-in state
-- **Throughput and lead time:** Delivered facts per bucket, written only when an authorized merge is independently observed; delivered time minus created time as a trend with p50/p75/p90 bands
 - **Queue versus active time:** Active: union of lease intervals clipped to the window; queue: released, undelivered time with no active lease
-- **Merge-ready dwell:** Merge ready to the next refusing gate fact, the observed merge or the observation instant, clipped to the window; an interval ending before it is excluded
 - **Phase durations:** Per candidate episode: pull request created, review start and complete, evidence complete, merge authorized, merged, production
-- **Evidence wait, expiry, staleness:** Review completion to the completing evidence record; evidence expired before the observation instant, or on a superseded commit
+- **CI duration, failure, retry:** Per check name and commit, first pending to first terminal observation, plus terminal failures and repeat transitions
 - **Operations:** Blockers, gate refusals, dependency critical path, unblocked work, review rounds and findings, rework rate, lease lifecycle, queue depth
 - **Deployment:** Frequency, latency from observed merge to deployment start, failure rate and rollbacks
 
@@ -54,6 +52,7 @@ The page shows exactly one state:
 
 Flow analytics describes observed work, queueing and capacity, never people:
 
+- No principal ID, provider login or producer identity is stored in a flow fact or returned by the API
 - Review facts record only whether an approval was independent of the author
 - No per-person view or ranking
 

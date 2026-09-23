@@ -9,7 +9,7 @@ The **Agent fleet** page is opened from the fleet line under the Work heading or
 
 ## Needs you
 
-**Work → Needs you** lists every open [human-only request](master-loop.md#human-only-waits), longest wait first: the item, the exact thing needed, which of the three decisions it is, who asked and why, how long it has waited, and `graphyard answer GY-N REQUEST ANSWER`. An item listed here holds no worker and delays nothing else, and on the home page reads `Stuck: Waiting on a human-only decision (…): NEEDED`. A declared human `admin` session gets an answer box: **Answer and resume** posts `work/GY-N/answer` and the loop dispatches the item on its next cycle with the answer in the new worker's prompt, **Decline** keeps it parked with your words as its blocker. Agent sessions see the requests but never the form, and the server refuses their answers. Recently answered requests stay listed underneath with the answer and how long it waited.
+**Work → Needs you** lists every open [human-only request](master-agent.md#human-only-waits), longest wait first: the item, the exact thing needed, which of the three decisions it is, who asked and why, how long it has waited, and `graphyard answer GY-N REQUEST ANSWER`. An item listed here holds no worker and delays nothing else, and on the home page reads `Stuck: Waiting on a human-only decision (…): NEEDED`. A declared human `admin` session gets an answer box: **Answer and resume** posts `work/GY-N/answer` and the loop dispatches the item on its next cycle with the answer in the new worker's prompt, **Decline** keeps it parked with your words as its blocker. Agent sessions see the requests but never the form, and the server refuses their answers. Recently answered requests stay listed underneath with the answer and how long it waited.
 
 ## The status sentence
 
@@ -26,11 +26,7 @@ Every card, and the top of every item view, carries one sentence from the item's
 
 ## Home page and item view
 
-- **Board view** draws a column for every open stage, empty ones included
-- **One source:** `homeNumbers` in `web/home-numbers.ts` returns one field per number drawn, and `unit:home-numbers-reconcile`, `unit:work-page-single-count-row`, `unit:work-page-no-derived-totals` and `integration:work-page-density` hold the page to it
-- **Item view** opens with the status sentence, owner, pull request and the one blocker
 - **Steps** lists the gates in order
-- **What must be true** lists each acceptance criterion once with one marker per proof: ✓ passed, ○ pending, × failed or withdrawn
 - **More details** holds the rest: metadata, policy and revision, worker, assignment and workspaces, coordination diagnosis, file overlaps, merge-queue position, review provider, raw gate reasons, proof details, bootstrap obligations, observed delivery, evidence with artifacts, and history; an admin session gets an **Edit** menu for the review provider, a fresh review and requirement revisions.
 
 ## Candidate links and definitions

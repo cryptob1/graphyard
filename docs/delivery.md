@@ -9,9 +9,6 @@ Record (written by): meaning.
 
 - **Approval** (`admin`): Binds one release revision, manifest hash, build and policy revision
 - **Expected release selection** (`admin` or promoter): Advances the environment's generation; fenced by `expectedGeneration`
-- **Rollback request, operation, resolution** (`admin` or promoter; a `rollback` registration; `admin`): The [rollback workflow](recovery.md#rollback)
-- **Notification** (any authenticated non-worker credential): A provider webhook relayed as a hint, never authoritative
-- **Verification, incidents, attribution** (Graphyard's bounded sweep): Derived from observations, never asserted by a client
 
 ## Environment policy
 

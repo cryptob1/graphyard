@@ -12,13 +12,10 @@ For anyone defining an E2E proof: what lives where, and what a report must match
 ## Define, version and link a case
 
 - **Dashboard:** open **Test cases** → **New test case**
-- **CLI, as an operator:** `graphyard scenario scenario.json` (`graphyard scenarios` lists them)
-- **Definition fields:** stable `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`, `expectedRevision` ([example](../examples/scenario.json))
 
 ## Report an execution
 
 A trusted producer holding that exact proof name submits ordinary [evidence](protocol/evidence.md) plus `{"scenarioRevision": 1, "environment": "staging"}`, matching the pinned scenario revision and environment, the candidate and policy:
 
 - A staging run cannot satisfy a production requirement
-- An older or newer scenario run cannot satisfy the pinned version
 

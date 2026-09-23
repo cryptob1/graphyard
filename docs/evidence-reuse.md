@@ -52,7 +52,6 @@ Once the head moves and a build producer attests the new build, the operator ask
 `POST /api/validation/reuse` (operator only, `Idempotency-Key` required) evaluates the newest sequenced attempt for that item and proof and commits one decision, listing every reason when **refused**:
 
 - Live request for the proof
-- Newest attempt not a settled, accepted pass; nothing falls back to an older one
 - Differing requirement or proof policy revision, scenario pin, environment, bundle revision or base SHA
 - Differing declared build inputs or, under `artifacts: identical`, artifact manifest
 - Changed path that is relevant or unknown
@@ -62,13 +61,11 @@ That comparison is Graphyard's own: each candidate snapshots the changed-file li
 
 A **granted** decision:
 
-- **Records trusted evidence** the acceptance gate treats as current: the original collector as producer, the original counts and artifacts, an `expiresAt` at the freshness bound, a `reuse` block naming the decision, the original evidence, the executed head and the sequence
 
 Afterwards:
 
 - **A live request:** supersedes the reused selection at once
 - **Retrying the executed request:** refused, its candidate no longer matching the head
-- **Reconciliation:** revalidates the derived candidate's build, bundle, environment and registration authority on every configuration change
 
 ## Replay
 
@@ -79,6 +76,7 @@ Operator and read-only audit credentials may; runner and collector credentials r
 Coverage is per dimension:
 
 - **`artifactIntegrity`:** `covered` when every artifact read matches its recorded digest
+- **The record:** carries the measured cost and states `authorizes: nothing` and `liveVerification: not-established`; a replay changes no evidence, selection or gate
 
 ## Execution analytics
 

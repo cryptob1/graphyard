@@ -468,7 +468,8 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
 
 test('manual:agent-env-docs-review — the onboarding and master guides describe agent environments, quota failover and permissions', async () => {
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
-  const [onboarding, masterGuide, help] = await Promise.all([read('docs/onboarding.md'), read('docs/master-agent.md'), read('src/cli/master.ts')]);
+  const [onboarding, fleet, master, help] = await Promise.all([read('docs/onboarding.md'), read('docs/fleet.md'), read('docs/master-agent.md'), read('src/cli/master.ts')]);
+  const masterGuide = `${fleet}\n${master}`;
   for (const fragment of ['master environments', '~/.coding_agents', '--create', '--apply', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME', 'CURSOR_CONFIG_DIR', 'quota']) assert.ok(onboarding.includes(fragment), `onboarding describes ${fragment}`);
   for (const fragment of ['master environments', 'quotaCeilingPercent', 'fails over', 'accounts', 'prompt', 'bypassPermissions', 'OPENCODE_PERMISSION', 'master harness', 'systemctl --user restart graphyard-master']) assert.ok(masterGuide.includes(fragment), `the master guide describes ${fragment}`);
   assert.match(help, /master environments \[--create KIND/);

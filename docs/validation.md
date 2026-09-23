@@ -36,7 +36,6 @@ Define an [E2E scenario](test-cases.md) first, then create work requiring its `e
 A request carries:
 
 - `candidateId`, `expectedWorkRevision`
-- Versioned `runner` and `collector` references; the collector authorized for the candidate's proof and environment
 - `deadline`: absolute ISO UTC, within the next hour
 - `maxAttempts`: 1 to 5
 
@@ -50,13 +49,13 @@ Only the pinned collector may call `result`, publishing `{requestId, attemptId, 
 - `behavior`: `passed`, `failed`, `blocked` or `unmeasured`
 - `executed`, `skipped`, `inventoryComplete`: Actual inventory, compared against the offline enumeration
 - `bundleDigest`, `runnerImageDigest`: What executed
-- `artifacts`, `artifactState`: Verified artifacts covering the required names; `verified`, `missing`, `upload-failed` or `expired`
 - `executionSettled`: The collector's **own** observation that execution finished
 
 ## Recovery
 
 Operator commands take `{requestId, epoch, reason}`:
 
+- `settle`: also requires `settlementEvidence`, a URL referencing independent termination proof; a manual attestation, only once the process and its external operations are confirmed stopped or fenced
 - Revoked definitions need newly authorized configuration and a new request
 
 A protected resource is never reassigned on a timer's expiry ([why](recovery.md#runner-capacity-and-request-diagnostics)). Every attempt carries a durable `sequence` ([replay and scoped reuse](evidence-reuse.md)).

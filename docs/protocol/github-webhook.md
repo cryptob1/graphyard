@@ -13,7 +13,6 @@ A signed webhook only wakes durable jobs: every fact is read back through the Ap
 
 - **Caller:** `admin` or an operator agent holding `policy:review-provider`.
 - **Body:** `{ "provider": "github"|"codex"|"agent", "expectedPolicyRevision": 1, "reason": "…" }`.
-- **Effect:** changes only the source of an already-required review, increments the policy revision, preserves criteria and CI requirements, invalidates prior acceptance, never mutates lifecycle state.
 - **`provider: "agent"`:** also requires `reviewerProfiles`; every other provider rejects the field.
 - **`reviewerProfiles`:** an ordered, nonempty list of `{ "name", "runtime", "reviewerApp", "mention"?, "timeoutSeconds"? }` ([examples](../../examples/reviewer-profiles.json)), names and reviewer Apps unique within the policy, each `reviewerApp` registered with the same runtime.
 - **CLI:** `reviewpolicy GY-N agent POLICY_REVISION REASON --profiles FILE`.
@@ -47,8 +46,7 @@ Graphyard dispatches a fresh `@codex review` comment through its own App and rec
 
 Every evaluation of a submitted item past the build gate records under `autoDispatch` what the exact head still needs from a launched session.
 
-- **`satisfied`:** an approval or verdict on the head, a carried approval, or trusted evidence for every proof of the group.
-- **`cancelled`:** with its reason, when the head, base or policy revision changes, rework is requested, or the pull request closes or merges.
+- **`producers`:** one request per proof group (`unit`, `integration`, and `manual` for proofs in `producerProofs`) naming the proofs no trusted passing evidence binds.
 - **`autoDispatch.history`:** resolved requests, the last fifty, each transition appending a `dispatch.requested`, `dispatch.satisfied` or `dispatch.cancelled` event.
 
-Nothing here moves a gate ([what the loop launches](../master-agent.md#automatic-dispatch-at-submit)).
+Nothing here moves a gate ([what the loop launches](../executors.md#automatic-dispatch-at-submit)).

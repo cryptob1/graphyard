@@ -16,7 +16,6 @@ For an integration author: every mutation a principal may send, with its JSON bo
 - `rework`: `{"reason":"Retry implementation","previousWorkerStopped":true}`; `admin` only
 - `recover`: `{"reason":"Verified delivered worker stopped","previousWorkerStopped":true}`; `admin` only, delivered quarantine only
 - `autosettle`: `{"epoch":1,"settlementHash":"…","reason":"…","verification":{…}}`; `coordinator` or `admin` ([containment settlement](leases.md#automatic-containment-settlement))
-- `decide`, `approve`: `{action, input, reason}` and `{decision, reason}` for a [two-party decision](../operator-automation.md#two-party-decisions)
 - `claim`, `heartbeat`, `release`: `{}` returning the lease and epoch; `{"epoch":1}` for the other two
 - `blocked`: `{"epoch":1,"reason":"Waiting for API contract"}`; `null` clears
 - `workspace`: `{"epoch":1,"host":"build-machine-a","path":"/work/GY-1","branch":"graphyard/gy-1-1"}`
@@ -29,8 +28,6 @@ For an integration author: every mutation a principal may send, with its JSON bo
 
 ## Submit-time regression guard
 
-- **Branch:** the observed head branch must be the epoch's registered workspace branch
-- **Without GitHub configured:** no pre-check runs; the reconciliation job still evaluates the candidate
 
 ## Deployment observations
 
@@ -58,5 +55,6 @@ Each `POST` but the webhook requires an [`Idempotency-Key`](roles.md#requests-an
 ## CLI environment
 
 - `GRAPHYARD_URL`, `GRAPHYARD_TOKEN` or the file `GRAPHYARD_TOKEN_FILE` names: override the saved connection
+- `GRAPHYARD_REQUEST_ID`: the command's `Idempotency-Key`, otherwise generated; set it only to retry the same command after a network failure. Heartbeats, automatic ones included, and new polling attempts always use fresh keys
 - `GRAPHYARD_HOST_ID`: for hostnames not globally unique; default the connection's `--host-id`, then the hostname
 - **Session markers, set by launchers only:** `GRAPHYARD_MASTER=1` (`master approve` refuses under it), `GRAPHYARD_APPROVER=1`, `GRAPHYARD_REVIEW` and `GRAPHYARD_PRODUCER` (the `GY-N@SHA` answered), `GRAPHYARD_HERDR_AGENT_KIND` (with `HERDR_ENV=1`, `watch` launches contained in the foreground); worker launches strip `GRAPHYARD_TOKEN`, `GRAPHYARD_MASTER_TOKEN` and `GRAPHYARD_REQUEST_ID`

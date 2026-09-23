@@ -25,18 +25,16 @@ Documents created before the timeline existed gain one at their next lifecycle c
 
 Every lifecycle command wrote its work document into the append-only ledger, so the bounded catch-up behind `GET /api/work-snapshot` replays it (`src/pipeline-backfill.ts`) for each item, delivered ones included, whose timeline was never reconstructed.
 
+- **Reads** project only the snapshot's `updatedAt`, `lease` and `submission` and four `details` fields in SQL, 400 rows a page, never holding the coordination lock; each write is one short coordination transaction that re-reads the document, writes only `pipeline`, refuses if anything else would change and appends a `pipeline.backfilled` event
+- **The union:** the replay runs the engine's own functions at the recorded instants (`updatedAt`, or a raw ledger entry's `at`), then unites with the live timeline — attempts by epoch, the live record winning, `submittedAt` the earliest and `resubmittedAt` the latest, a replayed count raising a recorded one but never lowering it
 - **The `backfill` marker** carries `at`, `source`, `events`, `fromEvent`, `toEvent`, `passes` and `retained`, false once the item's `create` row has left the ledger, so the timeline starts mid-life. `pipelineBackfill` on `/api/status` reports the last run, the rows it read, the items set aside as `failed` with their errors, and a failure of the run itself; none fails the read
 
 ## Derived figures
 
 `graphyard master status` reports, on every open and delivered row under `speed`, what `src/pipeline-speed.ts` derives from the timeline:
 
-- `executionMs`: lease time summed over attempts, the active one counting up to now.
-- `waitMs`: `openMs`, from the first claim to the accepted merge or now, minus `executionMs`.
-- `submitToMergeMs`: first submission to the accepted merge on the repository clock (`delivery.mergedAtRepository`, else `mergedAt`); `null` until delivered.
 - `sinceSubmitMs`: while in flight.
 - `reworkRounds`, `interventions`: as recorded.
 - `routine`: at most one rework round and no intervention.
-- `coverage`: `measured`, `awaiting-backfill` (the reconstruction has not reached or finished the item), `events-pruned` (its ledger no longer reaches its creation) or `no-submission` (the ledger, read to its end, records none); `backfill` carries the marker above.
 
 The top-level `speed` is the [periodic measurement](../master-agent.md#pipeline-speed) over every measured delivery. Its `items` report execution versus wait, rework rounds and hand-offs per delivered item. Its `coverage` accounts for every delivery in the window: how many measured, `awaitingBackfill`, `eventsPruned` or `noSubmission`, each unmeasured one's key and reason, `complete` when none is left, and a `statement`.
