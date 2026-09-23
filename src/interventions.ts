@@ -163,8 +163,11 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         const reason = text(details.reason ?? details.intent?.reason, 'requirements revised');
         const cleared = row.work ? !row.work.blocker : true;
         if (entry.asks.length && (widened || cleared)) {
-          for (const ask of entry.asks) emit(row, widened ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: widened ? ask.trigger ?? ask.kind : ask.kind, sources: [...ask.sources, source] });
-          entry.asks = [];
+          // A widening answers the scope request; a blocker it clears beside one was an escalation of its own.
+          const scopeAsked = entry.asks.some(ask => ask.kind === 'scope-request');
+          const widens = (ask: Ask) => widened && (ask.kind === 'scope-request' || !scopeAsked);
+          for (const ask of entry.asks) if (widens(ask) || cleared) emit(row, widens(ask) ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: widens(ask) ? ask.trigger ?? ask.kind : ask.kind, sources: [...ask.sources, source] });
+          entry.asks = entry.asks.filter(ask => !widens(ask) && !cleared);
         } else if (widened) emit(row, 'scope-widening', { requestedAt: row.at, blocked: `files outside plannedFiles: ${(after ?? []).filter((path: string) => !(before ?? []).includes(path)).join(', ')}`, stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: 'operator-widening', sources: [source] });
         break;
       }
@@ -298,7 +301,7 @@ export function computeInterventionReport(folded: { interventions: Intervention[
     for (const entry of bucket.entries) kinds[entry.kind] = (kinds[entry.kind] ?? 0) + 1;
     return { key: item?.key ?? bucket.entries[0].work!.key, title: item?.title ?? bucket.entries[0].work!.title, stage: item?.stage ?? 'done', count: bucket.count, waitedMs: bucket.waitedMs, kinds };
   }).sort((a, b) => b.waitedMs - a.waitedMs || b.count - a.count);
-  const patterns = detectPatterns(folded.interventions, work, policy, to).map(pattern => ({ kind: pattern.kind, stage: stageKey(pattern.stage), count: pattern.count, threshold: policy.threshold, crossed: pattern.count >= policy.threshold, work: pattern.item ? { id: pattern.item.id, key: pattern.item.key, stage: pattern.item.stage } : null }));
+  const patterns = detectPatterns(folded.interventions, work, policy, to).map(pattern => ({ kind: pattern.kind, stage: stageKey(pattern.stage), count: pattern.count, threshold: policy.threshold, crossed: pattern.item !== null || pattern.unlinked.length >= policy.threshold, work: pattern.item ? { id: pattern.item.id, key: pattern.item.key, stage: pattern.item.stage } : null }));
   return {
     window: { days: options.days, from, to }, policy, deliveries: deliveries.length,
     total: filtered.length, open: filtered.filter(entry => entry.resolvedAt === null).length, waitedMs: sum(filtered),

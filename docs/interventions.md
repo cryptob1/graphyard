@@ -52,6 +52,7 @@ A recurring intervention becomes work without a human noticing it. When interven
 - The rule is `GRAPHYARD_INTERVENTION_PATTERN_THRESHOLD` (default 3) in `GRAPHYARD_INTERVENTION_PATTERN_WINDOW_DAYS` (default 7), read at server start and reported as `policy`.
 - The server checks once a minute (`openPatternItems` in the reconciliation tick); `POST /api/interventions/patterns` with a coordinator credential runs the check now and answers with what it opened.
 - The item is opened **once**: while an item for the pattern is open (any stage but `done`), nothing is opened again, however many more instances arrive. Instances an item already links never count toward a second item, so a delivered pattern item is followed by a new one only when new instances cross the threshold on their own.
+- A pattern counts as crossed while an item stands for it or while its unlinked instances reach the threshold; once the item is delivered, the instances it linked no longer cross anything, so the report, the dashboard and `master status` stop naming the pattern until new instances cross on their own.
 - `master status` lists the crossed patterns under `interventions.patterns` and raises attention only for a pattern the server has not yet opened an item for.
 
 The opened item is ordinary backlog: the master releases it, the loop dispatches it, and it earns its gates like any other. Its `origin` is the audit of why it exists.

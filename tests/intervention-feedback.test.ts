@@ -312,6 +312,9 @@ test('integration:recurring-intervention-becomes-work — when one kind of inter
   // Once the item is delivered, the instances it linked never count again: only new ones open the next.
   await store.pool.query(`UPDATE work_items SET document=document || '{"stage":"done"}' WHERE id=$1`, [item.id]);
   assert.deepEqual((await openPatternItems(engine, policy)).opened, [], 'one unlinked instance is under the threshold');
+  const delivered = (await report('window=7')).patterns.find(entry => entry.kind === 'session-nudge' && entry.stage === stage)!;
+  assert.deepEqual({ count: delivered.count, crossed: delivered.crossed, work: delivered.work }, { count: 4, crossed: false, work: null }, 'linked instances inside the window do not claim that another item will open');
+  assert.deepEqual((await interventionSummary(async (path: string) => ok(token(coordinator), 'GET', path))).attentionItems, [], 'master status does not nag for a pattern the delivered item already handled');
   await nudge(affected[1], 5); await nudge(affected[2], 5);
   const again = (await openPatternItems(engine, policy)).opened;
   assert.equal(again.length, 1); assert.equal(again[0].origin!.pattern!.count, 3);
