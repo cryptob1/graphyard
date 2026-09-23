@@ -92,7 +92,7 @@ export async function publishReport(report, configuration, fetcher = fetch) {
   if (status.actor?.role !== 'producer' || !status.actor.proofs?.includes(report.proof)) throw new Error('Reporter identity is not an allowlisted producer');
   const work = (await request('work')).find(w => w.id === report.workId);
   if (!work || work.stage === 'done' || work.policyRevision !== report.policyRevision || work.candidate?.pr !== report.pr || work.candidate?.sha !== report.sha || work.candidate?.baseSha !== report.baseSha) throw new Error('Candidate changed or has not been observed; rerun acceptance for the current candidate');
-  await request(`work/${work.id}/evidence`, { proof: report.proof, sha: report.sha, baseSha: report.baseSha, policyRevision: report.policyRevision, result: report.result, executed: report.executed, skipped: report.skipped,
+  await request(`work/${work.id}/evidence`, { proof: report.proof, sha: report.sha, baseSha: report.baseSha, policyRevision: report.policyRevision, result: report.result, executed: report.executed, skipped: report.skipped, ...(report.exercise ? { exercise: report.exercise } : {}),
     url: `https://github.com/${report.repository}/actions/runs/${report.runId}/attempts/${report.runAttempt}`, provenance });
 }
 // ---- CI-produced evidence -------------------------------------------------------------------
@@ -173,7 +173,7 @@ export async function publishCiReport(report, configuration, fetcher = fetch) {
   if (!authority?.patterns?.some(pattern => grantAuthorizes(pattern, report.proof))) throw new Error(`The CI producer is not granted ${report.proof}`);
   const work = (await request('work')).find(w => w.id === report.workId);
   if (!work || work.stage === 'done' || work.policyRevision !== report.policyRevision || work.candidate?.pr !== report.pr || work.candidate?.sha !== report.sha || work.candidate?.baseSha !== report.baseSha) throw new Error('Candidate changed or has not been observed; the push that moved it runs its own proofs');
-  await request(`work/${work.id}/evidence`, { proof: report.proof, sha: report.sha, baseSha: report.baseSha, policyRevision: report.policyRevision, result: report.result, executed: report.executed, skipped: report.skipped,
+  await request(`work/${work.id}/evidence`, { proof: report.proof, sha: report.sha, baseSha: report.baseSha, policyRevision: report.policyRevision, result: report.result, executed: report.executed, skipped: report.skipped, ...(report.exercise ? { exercise: report.exercise } : {}),
     url: `https://github.com/${report.repository}/actions/runs/${report.runId}/attempts/${report.runAttempt}`,
     artifacts: [{ kind: 'log', label: `GitHub Actions job ${report.proof}`, availability: 'external', url: jobUrl }], ciRun: binding });
 }

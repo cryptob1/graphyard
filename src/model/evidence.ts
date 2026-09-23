@@ -1,6 +1,8 @@
+import { z } from 'zod';
 import type { Work } from './work.js';
 import type { CiRun } from './ci-proofs.js';
 import { evidenceBindsCandidate } from './carry.js';
+import { inheritedObligations } from './bootstrap.js';
 
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
 export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'upload-failed' | 'external';
@@ -46,6 +48,25 @@ export interface Evidence {
    * supersedes the selection this entry is bound to, so a later failure always wins.
    */
   reuse?: { decisionId: string; evidenceId: string; candidateId: string; requestId: string; attemptId: string; sequence: number; sourceSha: string; observedAt: string; policy: { id: string; revision: number } };
+  /**
+   * GY-135: the producer's run of the same proof against a tree with its criterion's behaviour
+   * removed, recorded beside the outcome. A pass stands only when that run failed; otherwise the
+   * record is kept untrusted with `unexercised` naming the proof, the criterion and the behaviour.
+   */
+  exercise?: ProofExercise;
+  /** Set by the control plane, never the producer: why this pass does not exercise its criterion. */
+  unexercised?: string;
+}
+export interface ProofExercise {
+  /**
+   * The criterion the proof is attached to, e.g. `AC-1`; an inherited obligation is `KEY AC-n`.
+   * It may be left out only when the proof is attached to exactly one criterion.
+   */
+  criterion?: string;
+  /** The behaviour the producer removed from the tree, in words a worker can find in the diff. */
+  behaviour: string;
+  /** How the proof came out against that tree, and how many cases ran there. */
+  result: 'pass' | 'fail'; executed: number;
 }
 export interface EvidenceAttribution {
   manifestHash: string; digestHash: string; signature: string; environmentId: string; environmentRevision: number;
@@ -91,4 +112,39 @@ export function currentEvidence(work: Work, proof: string, now = new Date()): Ev
     && (!validation || !!validation.attemptId && e.validation?.candidateId === validation.candidateId && e.validation?.requestId === validation.requestId && e.validation?.attemptId === validation.attemptId)
     && (!scenario || e.scenarioRevision === scenario.revision && e.environment === scenario.environment)).at(-1);
   return latest && (!latest.expiresAt || Date.parse(latest.expiresAt) > now.getTime()) ? latest : undefined;
+}
+
+/** What a producer submits as `exercise`. */
+export const proofExerciseSchema = z.object({
+  criterion: z.string().trim().min(1).max(80).optional(), behaviour: z.string().trim().min(1).max(300),
+  result: z.enum(['pass', 'fail']), executed: z.number().int().min(0),
+}).strict();
+
+/** The criteria a proof is attached to on this item: its own, and any bootstrap obligation it inherited. */
+export function attachedCriteria(work: Work, all: Work[], proof: string): string[] {
+  return [...work.criteria.filter(criterion => criterion.proofs.includes(proof)).map(criterion => criterion.id),
+    ...inheritedObligations(work, all).filter(obligation => obligation.proof === proof).map(obligation => `${obligation.key} ${obligation.criterionId}`)];
+}
+
+/**
+ * GY-135: a proof that passes against an unchanged tree proves nothing. A passing record for a
+ * proof attached to a criterion is trusted only when the producer also recorded the same proof
+ * failing, with cases executed, against a tree with that criterion's behaviour removed. Anything
+ * else is recorded as not exercising its criterion rather than as passing, and this reason names
+ * the proof, the criterion and the behaviour whose removal left it passing. A failing record needs
+ * no such run, and a proof attached to no criterion (post-deployment smoke) has none to exercise.
+ */
+export function exerciseRefusal(work: Work, all: Work[], data: Pick<Evidence, 'proof' | 'result' | 'exercise'>): string | null {
+  if (data.result !== 'pass') return null;
+  const criteria = attachedCriteria(work, all, data.proof);
+  if (!criteria.length) return null;
+  const named = criteria.join(', ');
+  const exercise = data.exercise;
+  if (!exercise) return `${data.proof} does not exercise ${named}: it passed, but no run of it against a tree with ${criteria.length > 1 ? 'a' : 'the'} criterion's behaviour removed was recorded, so it is recorded as not exercising its criterion rather than as passing`;
+  const criterion = exercise.criterion ?? (criteria.length === 1 ? criteria[0] : undefined);
+  if (!criterion) return `${data.proof} does not name which of ${named} its run against a tree with "${exercise.behaviour}" removed exercises; it is recorded as not exercising its criterion rather than as passing`;
+  if (!criteria.includes(criterion)) return `${data.proof} names ${criterion} for its run against a tree with "${exercise.behaviour}" removed, but it is attached to ${named}; it is recorded as not exercising its criterion rather than as passing`;
+  if (exercise.executed < 1) return `${data.proof} does not exercise ${criterion}: no case ran against the tree with "${exercise.behaviour}" removed, so it is recorded as not exercising its criterion rather than as passing`;
+  if (exercise.result === 'pass') return `${data.proof} does not exercise ${criterion}: it passed against the tree with "${exercise.behaviour}" removed as well as against the change, so it is recorded as not exercising its criterion rather than as passing`;
+  return null;
 }

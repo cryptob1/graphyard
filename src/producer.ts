@@ -27,7 +27,8 @@ import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
  */
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
-export const producerOutcomes = ['pass', 'fail', 'untrusted', 'missing'] as const;
+/** `unexercised`: the pass was recorded as not exercising its criterion (GY-135, model/evidence.ts exerciseRefusal). */
+export const producerOutcomes = ['pass', 'fail', 'unexercised', 'untrusted', 'missing'] as const;
 export type ProducerOutcome = typeof producerOutcomes[number];
 export const producerRecordSchema = z.object({
   id: z.string().uuid(),
@@ -145,14 +146,15 @@ export function independentProducerProfiles(work: Work, profiles: ProducerProfil
  */
 export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'> & { run?: MasterConfig['run'] }, binding: Pick<ProducerBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision' | 'proofs'> & { group: string; requestId?: string; checkout?: string }, profile: Pick<ProducerProfile, 'principal'>,
   checkout: SessionCheckout = binding.checkout ? { directory: binding.checkout, worktree: resolve(binding.checkout, 'checkout') } : sessionCheckout(worktreeRoot(process.cwd(), config), 'proof', binding.key, binding.sha, binding.requestId ?? '0'.repeat(8))) {
-  const worktree = checkout.worktree;
+  const worktree = checkout.worktree, stripped = resolve(checkout.directory, 'exercise');
   const evidenceFile = (proof: string) => resolve(checkout.directory, `${proof.replace(/[^a-zA-Z0-9]+/g, '-')}.evidence.json`);
   return `You are an independent Graphyard proof producer for ${config.repository}, principal ${profile.principal}. Produce trusted evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
     + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. `
     + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in this checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key} — with every GRAPHYARD_* and HERDR_* variable unset for the project's own test runs and a free GRAPHYARD_TEST_PORT. `
     + 'Do not edit, commit, push, rebase or merge the candidate, do not claim Graphyard work, do not post a review, and never weaken, skip or narrow a test to make a proof pass. '
-    + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"]} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, and a failing or incomplete run submitted as result fail rather than omitted — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
-    + `Keep everything this session writes — the install, build output, evidence files — inside ${checkout.directory}; Graphyard removes that directory when the session ends. When every proof of the group is submitted, remove the worktree with git worktree remove --force ${worktree}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence. `
+    + `A proof that passes against an unchanged tree proves nothing, so for each proof that passes also show it exercises its criterion: in a second detached worktree of the same head at ${stripped} (git worktree add --detach ${stripped} ${binding.sha}), remove the behaviour the criterion the proof is attached to describes — revert or stub exactly the lines of the change that implement it — and run the same proof there. `
+    + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"],"exercise":{"criterion":"<the criterion id, such as AC-1>","behaviour":"<the behaviour you removed, in words a worker can find in the diff>","result":"pass"|"fail","executed":N}} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, a failing or incomplete run submitted as result fail rather than omitted, and exercise as the stripped run's true outcome: a proof that still passes there is recorded as not exercising its criterion rather than as passing, which is the finding, not something to hide — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
+    + `Keep everything this session writes — the install, build output, evidence files — inside ${checkout.directory}; Graphyard removes that directory when the session ends. When every proof of the group is submitted, remove both worktrees with git worktree remove --force ${worktree} and git worktree remove --force ${stripped}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence. `
     + autonomousSession('submit pass or fail evidence for every proof of the group', `submit that proof as result fail with executed as the cases that ran, putting the blocked command and its error in environment`);
 }
 
@@ -236,6 +238,7 @@ export function proofOutcome(work: Work | undefined, record: Pick<ProducerRecord
   const bound = (work?.evidence ?? []).filter(entry => entry.proof === proof && entry.sha === record.sha && entry.baseSha === record.baseSha && entry.policyRevision === record.policyRevision && !entry.revocation);
   const trusted = bound.filter(entry => entry.trusted).at(-1);
   if (trusted) return trusted.result === 'pass' && trusted.executed > 0 && trusted.skipped === 0 ? 'pass' : 'fail';
+  if (bound.at(-1)?.unexercised) return 'unexercised';
   return bound.length ? 'untrusted' : 'missing';
 }
 
@@ -289,6 +292,11 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     }
     let next: { state: ProducerRecord['state']; resolution: string } | null = null;
     if (results.some(result => result === 'fail')) next = { state: 'completed', resolution: `trusted evidence failed for ${record.proofs.filter(proof => outcome[proof] === 'fail').join(', ')}` };
+    // A pass recorded as not exercising its criterion is the producer's finding about the proof: the
+    // worker fixes it from the reason, which names the proof, the criterion and the behaviour. The
+    // session keeps its time for the group's other proofs until none is still missing.
+    else if (results.some(result => result === 'unexercised') && !results.includes('missing')) next = { state: 'completed', resolution: `evidence does not exercise its criterion: ${record.proofs.filter(proof => outcome[proof] === 'unexercised')
+      .map(proof => item?.evidence.filter(entry => entry.proof === proof && entry.sha === record.sha && entry.unexercised).at(-1)?.unexercised ?? proof).join('; ')}`.slice(0, 900) };
     else if (results.every(result => result === 'pass')) next = { state: 'completed', resolution: `trusted passing evidence recorded for ${record.proofs.join(', ')}` };
     else if (request && request.state === 'cancelled') next = { state: 'cancelled', resolution: request.resolution ?? 'the control plane withdrew the request' };
     else if (item && (!item.candidate || item.candidate.sha !== record.sha || item.candidate.baseSha !== record.baseSha || item.policyRevision !== record.policyRevision)) next = { state: 'cancelled', resolution: `head changed from ${record.sha.slice(0, 12)} to ${item.candidate?.sha.slice(0, 12) ?? 'none'}` };
