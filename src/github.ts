@@ -72,8 +72,10 @@ export class GitHub {
   private backoff(response: Response) {
     const retry = Number(response.headers.get('retry-after'));
     const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
-    this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
-      response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
+    // An exhausted primary budget names its own reset: wait exactly that long. Doubling on each of the
+    // refusals already in flight pushed the pause up to an hour past the reset.
+    if (response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) && reset > Date.now()) { this.blockedUntil = Math.max(this.blockedUntil, reset); return; }
+    this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0);
   }
   /**
    * Turns a failed response into the right refusal. Only a rate limit pauses the client; an

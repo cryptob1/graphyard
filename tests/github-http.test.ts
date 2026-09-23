@@ -34,6 +34,12 @@ test('rate-limit responses pause every endpoint and never serve stale cache as p
   assert.equal(calls, 2);
   assert.ok((github as any).blockedUntil >= Date.now() + 590000);
 });
+test('an exhausted budget pauses until its reset, never past it, however many refusals were in flight', async t => {
+  const github = client(); const reset = Math.ceil(Date.now() / 1000) + 600;
+  t.mock.method(globalThis, 'fetch', async () => new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) } }));
+  await Promise.allSettled(Array.from({ length: 8 }, (_, i) => github.request(`/pulls/${i}`)));
+  assert.equal((github as any).blockedUntil, reset * 1000);
+});
 test('an unsolicited not-modified response cannot become evidence', async t => {
   t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 304 }));
   await assert.rejects(client().request('/pulls/1'), /304/);
