@@ -187,10 +187,19 @@ export class GitHub {
   private async apiRequest(path: string, method = 'GET', body?: unknown): Promise<any> {
     await this.authenticate();
     const cached = method === 'GET' ? this.cache.get(path) : undefined;
-    const response = await fetch(`https://api.github.com${path}`, {
-      method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
-      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
-    });
+    const started = Date.now();
+    let response: Response;
+    try {
+      response = await fetch(`https://api.github.com${path}`, {
+        method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
+        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      console.error(`GitHub ${method} ${path} failed after ${Date.now() - started} ms: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+    // A slow request is named so a stalled observation can be traced to the call that held it.
+    if (Date.now() - started > 5_000) console.error(`GitHub ${method} ${path} took ${Date.now() - started} ms (${response.status})`);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
     if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); return structuredClone(cached.value); }
     const refused = await this.refusal(response, `${method} ${path}`);
