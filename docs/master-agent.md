@@ -870,6 +870,77 @@ attention item too.
 | `run.worktreeRootMinFreeGb` | Free space setup and every launch require of the root's volume, and below which `master status` raises attention, 0.1–10000; default 2 |
 | `run.worktreeRootBudgetGb` | Size the root may reach; `master status` raises attention at four fifths of it, 0.1–10000; default 10 |
 
+### Resource observation
+
+Graphyard gates every work item, and the loop consumes bounded resources of its own: ledgers with a
+record cap, Herdr agent names, session slots, the GitHub App's request budget, its own liveness, the
+code it loaded, the plane's database and the coordinator's disk. Until these were observed, each one
+failed silently and was diagnosed from what it broke downstream — a review ledger at its cap read as
+"reviewer agent … is busy in Herdr" for hours. Every one of them is now declared once, in the
+resource registry (`resourceRegistry` in `src/master-resources.ts`), with its bound, where its usage
+is read, the component that owns it, how it is reclaimed, and the remedy. A test fails when the loop
+consumes a bounded session ledger or a resource the registry does not declare.
+
+| Resource | Bound | Usage read from | Warns when headroom falls below | Reclaimed |
+| --- | --- | --- | --- | --- |
+| `review-ledger` | `sessionLedgerBound`: 200 live and pinned records (retained terminal records do not count; see [The session ledgers](#the-session-ledgers)) | `.graphyard/reviews.json` | a tenth of the bound (20 records) | unpinned terminal records reaped 15 minutes after they settle, unless they answer a live review request; every write also reaps past the retention |
+| `producer-ledger` | `sessionLedgerBound`: 200 live and pinned records | `.graphyard/producers.json` | a tenth of the bound (20 records) | as the review ledger |
+| `agent-names:PROFILE` | the profile's concurrency: its fixed name, or that many derived names | `herdr agent list` | one name, and only when a name is held by a pane no live session owns | a finished pane on the name, its record settled and nothing pending on it, is closed once two passes a minute apart have seen it so; a worker's pane by the loop's first step once its lease ends |
+| `session-slots:ROLE` | the summed concurrency of the role's launch profiles | pending ledger records; live worker leases | one slot, and only while a request waits for one | a pending session blocked on a prompt for 10 minutes, or absent from Herdr on every pass for 10 minutes, is failed, releasing its slot |
+| `github-budget` | the installation's hourly core limit | `/healthz` `resources.github` (the plane reads `GET /rate_limit`, cached a minute; while the GitHub client is paused after a rate-limit refusal, the budget reads as spent until the pause ends) | a tenth of the limit | GitHub restores it at the reset it reports |
+| `executor-liveness` | two cycle intervals past the last cycle, plus any announced backoff | the loop's daemon cursor | half the bound | the supervisor restarts a loop whose watchdog stops hearing it |
+| `loaded-revision` | zero commits behind | the times of the checkout's HEAD reflog entries against the loop process's start time | — (any revision behind is at its bound) | a restart loads the checkout's code |
+| `database-capacity` | `GRAPHYARD_DATABASE_MAX_BYTES` on the plane (default 10 GiB, which only warns; set it to the volume's size) | `/healthz` `resources.database` (`pg_database_size`) | a tenth of the bound | none automatic: the ledger is append-only; grow the volume |
+| `worktree-disk` | the volume holding `.graphyard/worktrees` | statfs | `run.diskThresholdGb` free | [Worktree disk](#worktree-disk) |
+
+**One command reads the whole picture.** `graphyard master status` carries a `resources` block: a
+one-line `summary` naming every reading that is low or exhausted (and any that could not be read),
+then one row per reading — `used`, `bound`, `headroom`, `warnBelow`, `state` (`ok`, `low`,
+`exhausted` or `unknown`), `detail`, `owner`, `reclaim`, `reclaimable` and, for slots, `waiting` —
+and `lastReclaim`, the last pass that took anything back. A reading below its line raises an
+attention item with subject `resource:ID`, owned by the master, naming the resource, its usage, its
+bound, its headroom and its remedy — while there is still headroom, not after the first refusal. The
+namespace and slot readings are judged on what nothing live is using: a name held by a running
+session, or a full slot pool with nobody waiting, is the fleet working.
+
+**Refusals name the resource.** A launch refused by a resource at its bound records that resource
+and its bound as the action's reason — `Herdr agent-name namespace (reviewer-a) is at its bound: 1
+names used of 1 names, 0 names left — …` or `Review ledger is at its bound: 200 records used of 200
+records …` — never "busy in Herdr" or the ledger's schema error; the executor checks the reviewer's
+namespace before it asks the runtime, and attributes a ledger write its cap refused. A stalled
+action repeating that reason carries the same attribution, and `master status` rewrites any older
+attention item that is the downstream symptom of an exhausted resource so that it names the
+resource instead.
+
+**The reclaim pass.** Every cycle, after worktree reclamation, the loop runs the resource reclaim
+pass (`graphyard master run --once` runs it immediately). It reaps terminal ledger records past
+their 15-minute retention that answer no live request; closes a finished pane holding a profile's name,
+releasing the name, once its record has been settled a minute, nothing pending holds it, and an
+earlier pass at least a minute before saw it the same way — a session launched a moment ago holds
+its name before its record is written, so one sighting never closes a pane; and
+fails a pending session that has sat blocked on a prompt (a consent dialog, a question) for 10
+minutes, or that every pass for 10 minutes has found absent from Herdr — one inventory that misses a
+working session is not its end — releasing its slot so the relaunch rule may try again, and closes
+its pane. A session never acknowledged that left Herdr is recorded as `never started`, so the
+launcher's retry policy for unstarted sessions applies. The pass decides from one read of each
+ledger, closes the panes, then applies its decisions to a fresh read: a launch recorded meanwhile is
+kept, and a session that settled meanwhile keeps its own result. Each pass that took anything back is recorded as a `reclaim` action in the loop's cursor
+and appended to `.graphyard/resource-reclaims.json` (the last 50 passes). It never removes a pending
+record, a record the relaunch rule still counts, or a worker's pane.
+
+**A plane that cannot record is not dispatched into.** `/healthz` reports `healthy: false` and
+names each cause under `causes` while a write in a rolled-back transaction is refused — a read-only
+database, a standby, a role without write privilege — or while a resource the plane owns is at its
+bound: its GitHub budget (including while the client is paused after a rate limit), or its database
+once `GRAPHYARD_DATABASE_MAX_BYTES` is set (the unconfigured 10 GiB default only warns in `master
+status`). The plain endpoint answers that verdict with HTTP 200, because it is also the platform's
+liveness probe and a restart gives back neither a budget nor a volume; `/healthz?strict` answers 503
+whenever it is unhealthy, for a monitor that reads the status alone. Before it dispatches, the loop
+reads that verdict; while the plane
+reports itself unhealthy, or cannot be reached, the cycle dispatches nothing and records one
+`escalation:dispatch:plane` action naming the cause, and dispatch resumes on the first cycle after
+the plane reports healthy again.
+
 ### Scope requests the loop decides
 
 A worker that finds it needs a file outside its item's `plannedFiles` records a structured request

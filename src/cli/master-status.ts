@@ -28,6 +28,7 @@ import { nameUnresolvedThreads } from '../merge-queue.js';
 import { contextOverflows } from '../model/escalation-context.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { terminalDecisions } from './decision-report.js';
+import { attributeAttention, resourceStatus } from '../master-status.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
@@ -179,12 +180,18 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: cli.commit ?? readCommit(root) }, { hostId: master.hostId });
   attentionItems.push(...releases.attention);
   const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
-  return { ...status, ...ledgerRefusalAttention({ work: status.work, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
+  // Every registered resource against its bound (GY-132); a symptom of one at its bound names it.
+  const resources = await resourceStatus(root, master, { reviews: reviewRecords, producers: producerRecords, agents: runtime.available ? runtime.agents : null, work: snapshot.work, loop: cycling?.liveness ?? null });
+  attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
+  // A standing ledger refusal is attributed first (GY-131); what still reads as a symptom of a
+  // resource at its bound is then rewritten to name that resource (GY-132).
+  const attributed = ledgerRefusalAttention({ work: status.work, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length, needsHuman: owed.rows.length,
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + owed.counted } }, snapshot.work),
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + owed.counted + resources.attention.length } }, snapshot.work);
+  return { ...status, ...attributed, attentionItems: attributeAttention(attributed.attentionItems, resources.readings), resources: resources.report,
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
     actionless: { bound: stallBoundMs, items: actionless },

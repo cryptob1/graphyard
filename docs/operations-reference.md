@@ -57,11 +57,12 @@ the exact commit observed. Each refusal names its cause and the fix:
 
 ## Daily checks
 
-- `/healthz` should return 200, confirm database connectivity, and name the release (`version`, `revision`), the deployed `commit` and the schema generation you expect to be running.
+- `/healthz` should return 200 with `healthy: true`, confirm the database accepts writes, and name the release (`version`, `revision`), the deployed `commit` and the schema generation you expect to be running. `healthy: false` names each cause under `causes` (`/healthz?strict` answers 503 then); see [control-plane resources](#control-plane-resources).
+- `graphyard master status` should report `resources.summary` as all within their warning lines.
 - Authenticated `/api/status` should show no persistent integration errors, no `delegationLimits.attention`, and no open `production.incidents`.
 - Inspect the delivery graph for old work, stale observations, and blockers.
 - Keep backups and verify a restore in an isolated environment periodically: `graphyard db backup`, `db verify` and `db restore` are the shipped procedure — see [backup, upgrade, rollback](deployment.md#backup-upgrade-rollback).
-- Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning.
+- Monitor Postgres size: events contain work snapshots and evidence is retained. The MVP has no automatic retention pruning; `resources.database` in `/healthz` reports the size against `GRAPHYARD_DATABASE_MAX_BYTES`, and `master status` warns at nine tenths of it.
 
 ## Master coordination loop
 
@@ -154,6 +155,46 @@ Jobs keep the error and retry after 45 seconds. Expired job leases are recoverab
 A permission error is different. The server compares the installed App's permissions with the [declared set](github.md#app-permissions) at startup, every five minutes, and after any 403; a shortfall is an attention item in `GET /api/status` (`appPermissions`), the dashboard, and `master status`, naming the missing permission and the installation page. Jobs that need the missing permission are held rather than retried — `diagnose GY-N` shows `integration-held` — and a job that hits an unexpected 401/403 retries at most three times before it is held for thirty minutes, and a passing preflight releases it only if the installation reading changed since the hold (otherwise it re-checks once per hold, so attempts stay bounded even for a 403 the declaration does not explain). Accept the pending permission request (`github-setup --update-permissions` prints the exact steps) and the next preflight releases every job held on it; nothing needs restarting. See [migrating an existing App](github.md#migrating-an-existing-app).
 
 Own-App check webhooks are ignored. Other signed webhook deliveries wake jobs, but periodic polling is the fallback. Missing webhooks should delay progress rather than permanently strand it.
+
+## Control-plane resources
+
+Every bounded resource the loop and the plane consume is declared in one registry — its bound, where
+its usage is read, the component that owns it, how it is reclaimed — and the full table is in the
+[master-agent guide](master-agent.md#resource-observation). Read the whole picture with one command:
+`graphyard master status`, whose `resources.summary` names every reading that is low, exhausted or
+unread, and whose `resources.readings` gives each one as used of bound with its headroom. A reading
+below its warning line is also an attention item with subject `resource:ID` naming the remedy.
+
+- **`review-ledger` / `producer-ledger` low.** Terminal records are reaped 15 minutes after they
+  settle. Run `graphyard master run --once` to reclaim now; records that answer a live request stay
+  until the request is answered or superseded, so a ledger full of those needs the requests settled.
+- **`agent-names:PROFILE` at its bound with a pane no live session owns.** The reclaim pass closes
+  the pane once two passes a minute apart have seen it finished with its record settled. By hand: read the pane, confirm the verdict or result
+  was posted, then `herdr pane close PANE`.
+- **`session-slots:ROLE` at its bound with requests waiting.** Raise `concurrency` on a profile of
+  the role, or add a profile on another account, in `.graphyard/master.json`; the loop adopts it on
+  its next cycle. A session stuck on a prompt, or absent from Herdr, for 10 minutes is failed by the
+  reclaim pass and its slot released.
+- **`github-budget` low.** Fewer open candidates or a longer observation interval until the reset
+  the reading names (while the client is paused after a rate limit, the reading is `exhausted` and
+  names the pause's end); every guarded merge waits on observations younger than two minutes.
+- **`executor-liveness` / `loaded-revision`.** `graphyard master restart` (a supervised deployment:
+  `systemctl --user restart graphyard-master`) restarts the loop onto the checkout's code.
+- **`database-capacity` low.** Grow the database volume, then raise `GRAPHYARD_DATABASE_MAX_BYTES`
+  on the plane to the new size. Left unset, the 10 GiB default only warns; once it is set, the plane
+  reports itself unhealthy at the bound. The ledger is append-only; nothing reclaims it.
+- **`worktree-disk` low.** See the worktree disk procedure in the [master-agent guide](master-agent.md#worktree-disk).
+
+**`/healthz` reports `healthy: false`.** The plane cannot serve its purpose, and `causes` says why:
+`Writes are refused: …` (the database is read-only, a standby, or the role lost write privilege —
+restore write access), or a resource the plane owns at its bound (the database once
+`GRAPHYARD_DATABASE_MAX_BYTES` is set, the GitHub budget). While it is unhealthy — or cannot be
+reached — the master loop dispatches nothing and records one `escalation:dispatch:plane` action with
+the cause; dispatch resumes on the first cycle after it reports healthy. The plain endpoint still
+answers HTTP 200 for this verdict, so the Helm chart's and Railway's probes on it neither restart the
+plane nor pull it from its Service — the API stays up for the operator's recovery — and it fails
+(500) only when the process cannot reach its database. Alert on `/healthz?strict`, which answers 503
+whenever the verdict is unhealthy.
 
 ## GitHub or Graphyard outage
 
