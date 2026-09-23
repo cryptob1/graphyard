@@ -129,6 +129,18 @@ test('unit:auto-dispatch-binding — a verdict or trusted evidence satisfies the
     for (const transition of transitions) assert.match(transition.request.resolution!, pattern);
     assert.equal(live(fresh).length, 0);
   }
+  // A queued entry whose published tip is not this head is being replaced by it (GY-127): nothing
+  // is requested for the replaced head, and the tip observed as the head is a live candidate again.
+  {
+    const fresh = work(); reconcileAutoDispatch(fresh, [fresh], new Date(clock));
+    fresh.queue = { sequence: 1, enqueuedAt: new Date(clock).toISOString(), policyRevision: fresh.policyRevision, speculation: { ref: 'refs/graphyard/queue/gy-1', tip: sha40('d1'), base: B, baseTree: sha40('7e'), predecessors: [], policyRevision: fresh.policyRevision, publishedAt: new Date(clock).toISOString() } };
+    const transitions = reconcileAutoDispatch(fresh, [fresh], new Date(clock + 1000));
+    assert.match(dispatchIneligibility(fresh)!, /speculative tip d1ffffffffff replaces head a1ffffffffff; requests are opened for the tip once it is observed/);
+    assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.cancelled', 'dispatch.cancelled', 'dispatch.cancelled']);
+    assert.equal(live(fresh).length, 0);
+    fresh.queue.speculation!.tip = H;
+    assert.equal(dispatchIneligibility(fresh), null);
+  }
   // The control plane dispatches codex and agent review through GitHub itself; a head behind the base tip waits.
   const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 }] } as any });
   reconcileAutoDispatch(agent, [agent], new Date(clock));

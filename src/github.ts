@@ -735,7 +735,12 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
     const merge = merged ? await this.describeMerge(reviewedHead, merged, work.candidate!.baseSha, placement.predictedBase!) : null;
-    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead };
+    // A reviewed head that already contains its new predicted base is the tip itself, replacing
+    // an earlier tip with no commit produced: the carry is then decided on the files that changed
+    // between the replaced tip's bound base and the predicted base, listed here from GitHub.
+    const baseChanges = merged || tip === work.candidate!.sha ? undefined : await this.changedFiles(work.candidate!.baseSha, placement.predictedBase!);
+    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead,
+      ...(baseChanges !== undefined ? { baseChanges } : {}) };
   }
   /**
    * Restores a pull-request branch that carries another item's unlanded commits (GY-127): moves it

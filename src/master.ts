@@ -3026,8 +3026,11 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
     return mintReviewerToken(reviewerCredentialSchema.parse(JSON.parse(await readFile(file, 'utf8'))), repository, dependencies.fetcher);
   });
   const { token } = await mint(config.reviewer!.credentialFile, config.repository);
+  // The approval binds the very commit it was given on when GitHub dismissed it for a merge-base
+  // change on an unchanged head, or when the reviewed head was republished as the tip itself;
+  // the recorded reason says which.
   const body = carried.originalSha === candidate.sha
-    ? `Graphyard restored this identity's approval of ${candidate.sha} (review ${carried.reviewId ?? 'n/a'}), which GitHub dismissed for a merge-base change while the head was unchanged: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval of the same commit again.`
+    ? `Graphyard restored this identity's approval of ${candidate.sha} (review ${carried.reviewId ?? 'n/a'}) to the commit it was given on: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval of the same commit again.`
     : `Graphyard carried this identity's approval of ${carried.originalSha} (review ${carried.reviewId ?? 'n/a'}) to Graphyard-authored merge-queue tip ${candidate.sha}: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval after the control plane's own tip publication.`;
   const response = await (dependencies.fetcher ?? fetch)(`https://api.github.com/repos/${config.repository}/pulls/${candidate.pr}/reviews`, {
     method: 'POST', signal: AbortSignal.timeout(15_000),

@@ -75,6 +75,27 @@ test('unit:queue-authored-tip-carry — every refusal case requires fresh review
   assert.equal(unapproved.evidence[0].carried, true);
 });
 
+test('unit:queue-authored-tip-carry — a tip that is the reviewed head itself, republished with no merge produced, carries by the same per-file rule on the listed base changes', () => {
+  const same = (overrides: Partial<CarryInput> = {}) => input({ to: { sha: H, baseSha: P }, merge: null, baseChanges: ['src/other.ts', 'docs/other.md'], predecessor: { key: null, validated: true }, ...overrides });
+  assert.equal(carryRefusal(same()), null);
+  const carry = decideCarry(same());
+  assert.deepEqual([carry.from, carry.to, carry.predecessor, carry.changedFiles], [{ sha: H, baseSha: B }, { sha: H, baseSha: P }, 'base branch', ['src/other.ts', 'docs/other.md']]);
+  assert.deepEqual({ ...carry.approval, reason: undefined }, { carried: true, provider: 'github', reviewer: 'reviewer[bot]', sha: H, reviewId: 900, originalSha: H, reason: undefined });
+  assert.match(carry.approval.reason, /carried to tip [0-9a-f]{12}, the reviewed head itself republished unchanged onto predicted base [0-9a-f]{12}: the base branch changed none of the 2 reviewed files/);
+  assert.deepEqual(carry.evidence.map(entry => [entry.proof, entry.carried]), [['unit:queue', true], ['integration:docs', false], ['manual:unscoped', false], ['e2e:missing', false]]);
+  assert.deepEqual(states(decideCarry(same({ baseChanges: [] }))), [true, true, true, true, false], 'a predicted base that changed nothing carries every proof');
+  const touched = decideCarry(same({ baseChanges: ['src/queue.ts'] }));
+  assert.equal(touched.approval.carried, false); assert.match(touched.approval.reason, /the base branch changed reviewed files src\/queue\.ts; a fresh independent approval/);
+  assert.deepEqual(touched.evidence.map(entry => entry.carried), [false, true, false, false]);
+  // Refused as a whole: changes GitHub could not list, none recorded at all, or an unvalidated predecessor.
+  for (const [overrides, pattern] of [[{ baseChanges: null }, /could not be listed completely/], [{ baseChanges: undefined }, /could not be listed completely/], [{ predecessor: { key: 'GY-1', validated: false } }, /predecessor GY-1 is not fully validated/]] as [Partial<CarryInput>, RegExp][]) {
+    const refused = decideCarry(same(overrides));
+    assert.deepEqual(states(refused), [false, false, false, false, false], pattern.source); assert.match(refused.approval.reason, pattern);
+  }
+  // Only the reviewed head itself is an identity: a different tip with no merge is refused whatever base changes are listed.
+  assert.match(carryRefusal(input({ merge: null, baseChanges: [] }))!, /was not produced by Graphyard's merge of the approved head/);
+});
+
 test('unit:queue-authored-tip-carry — a carried binding applies only to the exact tip and policy it was decided for, and only for the policy\'s provider', () => {
   const carry = decideCarry(input());
   const speculation: QueueSpeculation = { ref: queueRef('GY-2'), tip: TIP, base: P, baseTree: sha40('7e'), predecessors: ['GY-1'], policyRevision: 1, publishedAt: at, merge: authored(), carry };

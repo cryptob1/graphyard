@@ -67,6 +67,11 @@ export function dispatchIneligibility(work: Work): string | null {
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return 'the candidate has not been independently observed';
   if (observation.prState === 'closed') return 'the pull request is closed';
   if (observation.draft) return 'the pull request is a draft';
+  // A queued entry whose published tip is not this head is being replaced by it (GY-127): the
+  // tip is observed and bound on the next reconciliation, and any request opened for the replaced
+  // head now would be cancelled as stale then — after a session had been launched for it.
+  const speculation = work.queue?.speculation;
+  if (speculation && speculation.tip !== candidate.sha && speculation.policyRevision === work.policyRevision) return `speculative tip ${short(speculation.tip)} replaces head ${short(candidate.sha)}; requests are opened for the tip once it is observed`;
   const build = work.gates.find(gate => gate.name === 'build');
   if (build && !build.passed) return `the build gate refuses: ${build.reasons[0]}`;
   return null;

@@ -12,6 +12,13 @@ export interface QueueSpeculation {
   predecessors: string[]; policyRevision: number; publishedAt: string;
   /** How Graphyard produced the tip, when it replaced the head; absent when the head already contained its base. */
   merge?: TipMerge | null;
+  /**
+   * For a tip that is the reviewed head itself, republished over an earlier tip because the head
+   * already contained its new predicted base (GY-127): the paths that changed between the
+   * replaced tip's bound base and the predicted base, as GitHub listed them, or null when it could
+   * not list them completely. The identity carry (model/carry.ts) is decided on this list.
+   */
+  baseChanges?: string[] | null;
   /** Which bindings of the replaced head carried to the tip, decided when the tip was bound. */
   carry?: QueueCarry | null;
   /** The base-branch commit the bound base was last found tree-identical to: the advance that carried the binding. */
@@ -105,8 +112,11 @@ export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseR
   if (!candidate) return null;
   const speculation = work.queue?.speculation;
   if (speculation?.tip === candidate.sha && speculation.policyRevision === work.policyRevision && speculation.restoredApproval?.sha === candidate.sha) return speculation.restoredApproval;
+  // A record that republished nothing for this head (a conflict, or a repair not yet run) holds
+  // the restored approval of the head it is bound to; see Engine.restoreDismissedApproval.
   const refresh = work.baseRefresh;
-  return refresh?.head === candidate.sha && refresh.policyRevision === work.policyRevision && refresh.restoredApproval?.sha === candidate.sha ? refresh.restoredApproval : null;
+  const bound = !!refresh && (refresh.head === candidate.sha || refresh.head === null && refresh.from.sha === candidate.sha);
+  return bound && refresh!.policyRevision === work.policyRevision && refresh!.restoredApproval?.sha === candidate.sha ? refresh!.restoredApproval! : null;
 }
 export interface QueuePlacement {
   id: string; key: string; position: number; size: number; sequence: number; enqueuedAt: string; waitMs: number;
@@ -216,6 +226,12 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   if (observation.baseTipContained !== false || !baseTip || baseTip === candidate.baseSha) return null;
   const refresh = work.baseRefresh;
   if (refresh && refresh.from.sha === candidate.sha && refresh.base === baseTip && refresh.policyRevision === work.policyRevision) return null;
+  // A head found carrying another item's unlanded commits is not brought onto a moved base: a
+  // repair requested for it runs first and replaces it, and a head found unrepairable would only
+  // carry the foreign commits along, with the record that names the remedy (rework) replaced by
+  // a refresh that says nothing of them (GY-127).
+  const restore = currentRestore(work)?.restore;
+  if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable')) return null;
   return { head: candidate.sha, boundBase: candidate.baseSha, baseTip };
 }
 

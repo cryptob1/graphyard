@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { GitHub, processJob } from '../src/github.js';
-import { branchContamination, currentRestore, dismissedApproval, ejectedTipRestore, pendingRestore, restoredApproval, reviewDismissal } from '../src/merge-queue.js';
+import { baseRefreshConflict, branchContamination, currentRestore, dismissedApproval, ejectedTipRestore, pendingBaseRefresh, pendingRestore, restoredApproval, reviewDismissal } from '../src/merge-queue.js';
 import { CHECK_NAME, Refusal, carriedApproval, exactApproval, type Principal, type Work } from '../src/model.js';
 import { branchReport, buildMasterStatus, masterConfigSchema, repostCarriedApproval, runAutonomyCommand, type MasterConfig } from '../src/master.js';
 
@@ -31,6 +31,12 @@ class Repo {
   failing = new Set<string>();
   conflicts = new Set<string>();
   calls: { path: string; method: string; body: any }[] = [];
+  /**
+   * What GitHub's dismissal says when a push stales the approvals on a branch: nothing, as a
+   * stale-review dismissal names the commit and no reason. A test that models GitHub wording the
+   * dismissal of a publication that changed the merge base sets its exact message here.
+   */
+  pushDismissal: string | null = null;
   private counter = 0;
   private reviewIds = 100;
   commit(parents: string[], message: string, author: Commit['author'] = { login: AUTHOR, type: 'User' }) {
@@ -54,7 +60,7 @@ class Repo {
    * attributed to. The review list then shows `DISMISSED` whatever the verdict was, as GitHub's
    * does; only the timeline event keeps the dismissed verdict (`dismissed_review.state`).
    */
-  dismiss(pr: number, message: string, commit: string | null, by = 'owner', verdicts: string[] = ['APPROVED', 'CHANGES_REQUESTED']) {
+  dismiss(pr: number, message: string | null, commit: string | null, by = 'owner', verdicts: string[] = ['APPROVED', 'CHANGES_REQUESTED']) {
     for (const review of this.reviews.get(pr) ?? []) {
       if (!verdicts.includes(review.state)) continue;
       const state = review.state.toLowerCase();
@@ -82,7 +88,7 @@ class Repo {
         const merged = this.commit([branchHead, head], commit_message, { login: APP, type: 'Bot' });
         this.refs.set(`heads/${base}`, merged);
         // A push to a pull-request branch stales every approval on it, as dismiss_stale_reviews does.
-        for (const [number, pull] of this.pulls) if (pull.head === base) this.dismiss(number, mergeBaseMessage, merged);
+        for (const [number, pull] of this.pulls) if (pull.head === base) this.dismiss(number, this.pushDismissal, merged);
         return { sha: merged };
       }
       if (method === 'PATCH' && path.startsWith('/git/refs/')) { this.refs.set(decodeURIComponent(path.slice('/git/refs/'.length)), (body as { sha: string }).sha); return { object: { sha: (body as { sha: string }).sha } }; }
@@ -172,6 +178,9 @@ const dismissedReview = (work: Work) => work.observation!.reviews.find(review =>
 test('integration:tip-publication-keeps-approval — publishing a tip that changes the merge base costs no approval: the review gate passes on the carried binding, no review is requested, and the reviewer App re-posts it', async () => {
   await clearQueue();
   const repo = new Repo(), github = repo.adapter();
+  // GitHub words the dismissal of a publication that changed the merge base with its merge-base
+  // reason; the record, not that wording, is what passes the gate (asserted below).
+  repo.pushDismissal = mergeBaseMessage;
   const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
   let work = await submitted(repo, 'Keeps approval', () => repo.commit([main], 'feat: queue'));
   const head = repo.refs.get(`heads/${branchOf(work)}`)!;
@@ -192,6 +201,7 @@ test('integration:tip-publication-keeps-approval — publishing a tip that chang
   assert.ok(gate(work, 'review').passed, gate(work, 'review').reasons.join('; '));
   const carried = carriedApproval(work)!;
   assert.deepEqual([carried.reviewer, carried.originalSha], [REVIEWER, head], 'the carried identity keeps the commit it approved');
+  assert.equal(restoredApproval(work), null, 'the carried record passes the gate; no dismissal needed restoring');
   assert.equal(work.autoDispatch!.review, null, 'no review request is open for the tip');
   assert.equal((await events(work, 'dispatch.requested')).filter(event => event.payload.details.kind === 'review').length, 0, 'no review was ever requested');
   assert.equal(work.stage, 'merge', work.gates.flatMap(entry => entry.reasons).join('; '));
@@ -201,6 +211,55 @@ test('integration:tip-publication-keeps-approval — publishing a tip that chang
   const config = { repository: 'owner/project', reviewer: { slug: 'graphyard-reviewer', appId: 77, installationId: 78, credentialFile: '/nonexistent/reviewer.json', boundAt: '2026-09-22T00:00:00.000Z' } } as MasterConfig;
   const result = await repostCarriedApproval(config, work, carried, { run: () => JSON.stringify(repo.reviews.get(work.submission!.pr)), mint: async () => ({ token: 'reviewer-token' }), fetcher });
   assert.deepEqual([result.posted, result.reviewId, posted[0].commit_id, posted[0].event], [true, 999, tip, 'APPROVE']);
+
+  // A rebuilt tip that is the reviewed head itself keeps its approval too: two entries, the head
+  // ejected, the base unmoved, so the survivor's reviewed head already contains its new predicted
+  // base and is republished with no commit produced. GitHub's push dismissal on the earlier
+  // publication carries no merge-base wording here, as a stale-review dismissal does not, so the
+  // record alone — the identity carry — is what passes the gate.
+  await clearQueue();
+  const graph = new Repo(), provider = graph.adapter();
+  const root = graph.commit([], 'main'); graph.refs.set('heads/main', root);
+  let ejected = await submitted(graph, 'Ejected head', () => graph.commit([root], 'feat: ejected'));
+  let survivor = await submitted(graph, 'Survivor', () => graph.commit([root], 'feat: survivor'));
+  const heads = { ejected: graph.refs.get(`heads/${branchOf(ejected)}`)!, survivor: graph.refs.get(`heads/${branchOf(survivor)}`)! };
+  ejected = await validated(graph, provider, ejected); survivor = await validated(graph, provider, survivor);
+  ejected = await cycle(provider, ejected); ejected = await cycle(provider, ejected);
+  survivor = await cycle(provider, survivor); survivor = await cycle(provider, survivor);
+  const behind = survivor.queue!.speculation!.tip;
+  assert.deepEqual(graph.commits.get(behind)!.parents, [heads.survivor, heads.ejected]);
+  assert.equal(survivor.candidate!.sha, behind);
+  const pushed = reviewDismissal(dismissedReview(survivor))!;
+  assert.deepEqual([pushed.mergeBase, pushed.reason, pushed.commit], [false, null, behind], 'the push dismissal names the commit and no merge-base reason');
+  assert.ok(gate(survivor, 'review').passed && carriedApproval(survivor)?.originalSha === heads.survivor, gate(survivor, 'review').reasons.join('; '));
+  assert.equal(restoredApproval(survivor), null);
+  const requested = async (item: Work) => (await events(item, 'dispatch.requested')).filter(event => event.payload.details.kind === 'review').length;
+  assert.equal(await requested(survivor), 0);
+  // The head fails its validation and is ejected; the base has not moved.
+  graph.failing.add(heads.ejected);
+  ejected = await cycle(provider, ejected);
+  assert.equal(ejected.queue, null);
+  survivor = await cycle(provider, survivor);
+  const identity = survivor.queue!.speculation!;
+  assert.deepEqual([identity.tip, identity.reviewedHead, identity.merge, identity.base, identity.predecessors, identity.baseChanges], [heads.survivor, heads.survivor, null, root, [], []], 'the rebuilt tip is the reviewed head itself, with no commit produced');
+  assert.equal(graph.refs.get(`heads/${branchOf(survivor)}`), heads.survivor, 'the branch was moved back to the reviewed head');
+  assert.deepEqual([identity.carry!.from.sha, identity.carry!.to, identity.carry!.approval.carried, identity.carry!.evidence.map(entry => entry.carried)], [heads.survivor, { sha: heads.survivor, baseSha: root }, true, [true]]);
+  assert.match(identity.carry!.approval.reason, /carried to tip [0-9a-f]{12}, the reviewed head itself republished unchanged/);
+  survivor = await cycle(provider, survivor);
+  assert.equal(survivor.candidate!.sha, heads.survivor);
+  assert.ok(gate(survivor, 'review').passed, gate(survivor, 'review').reasons.join('; '));
+  assert.ok(gate(survivor, 'acceptance').passed, gate(survivor, 'acceptance').reasons.join('; '));
+  const kept = carriedApproval(survivor)!;
+  assert.deepEqual([kept.reviewer, kept.originalSha, kept.sha], [REVIEWER, heads.survivor, heads.survivor]);
+  assert.equal(restoredApproval(survivor), null);
+  assert.equal(survivor.autoDispatch!.review, null, 'no review request is open for the rebuilt tip');
+  assert.equal(await requested(survivor), 0, 'no review was requested for a publication that changed nothing reviewed');
+  assert.equal(survivor.stage, 'merge', survivor.gates.flatMap(entry => entry.reasons).join('; '));
+  // The reviewer App re-posts the approval on the commit it was given on.
+  posted.length = 0;
+  const reposted = await repostCarriedApproval(config, survivor, kept, { run: () => JSON.stringify(graph.reviews.get(survivor.submission!.pr)), mint: async () => ({ token: 'reviewer-token' }), fetcher });
+  assert.deepEqual([reposted.posted, posted[0].commit_id, posted[0].event], [true, heads.survivor, 'APPROVE']);
+  assert.match(posted[0].body, /restored this identity's approval of [0-9a-f]{40} \(review \d+\) to the commit it was given on/);
 });
 
 test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unchanged head is restored, not treated as a change request, spends no attempt, and master status names it', async () => {
@@ -305,6 +364,30 @@ test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unch
   assert.equal(gate(unnamed, 'review').passed, false);
   assert.equal(restoredApproval(unnamed), null);
 
+  // A merge-base dismissal on a head whose base refresh conflicted is restored into that record:
+  // the conflict the worker owes stays named, and the refresh is not retried for it.
+  let conflicted = await submitted(repo, 'Refresh conflicted', () => repo.commit([main], 'feat: conflicted'));
+  const conflictedHead = repo.refs.get(`heads/${branchOf(conflicted)}`)!;
+  repo.approve(conflicted.submission!.pr, conflictedHead);
+  conflicted = await cycle(github, conflicted);
+  assert.ok(gate(conflicted, 'review').passed);
+  const advanced = repo.commit([main], 'Merge pull request #4 from elsewhere'); repo.refs.set('heads/main', advanced);
+  repo.conflicts.add(`${conflictedHead}+${advanced}`);
+  conflicted = await cycle(github, conflicted);
+  assert.match(baseRefreshConflict(conflicted)!, /cannot be brought onto|conflict/i);
+  const merges = () => repo.calls.filter(call => call.method === 'POST' && call.path === '/merges').length, mergesBefore = merges();
+  repo.dismiss(conflicted.submission!.pr, mergeBaseMessage, null, 'owner');
+  conflicted = await cycle(github, conflicted);
+  assert.equal(conflicted.candidate!.sha, conflictedHead);
+  assert.ok(restoredApproval(conflicted) && carriedApproval(conflicted)?.originalSha === conflictedHead, 'the approval is restored on the conflicted head');
+  assert.ok(gate(conflicted, 'review').passed, gate(conflicted, 'review').reasons.join('; '));
+  assert.ok(baseRefreshConflict(conflicted), 'the conflict record survives the restore');
+  assert.equal(conflicted.baseRefresh!.head, null); assert.equal(pendingBaseRefresh(conflicted), null);
+  assert.equal(merges(), mergesBefore, 'the refresh is not retried for a conflict already recorded');
+  assert.equal((await events(conflicted, 'base.conflict')).length, 1);
+  assert.equal((await events(conflicted, 'review.restored')).length, 1);
+  assert.equal(conflicted.autoDispatch!.review, null);
+
   // A timeline GitHub will not serve leaves the dismissal recorded as unread, and restores nothing.
   const request = github.request.bind(github);
   github.request = async (path, method, body) => { if (path.includes('/timeline')) throw new Refusal('GitHub GET /issues/timeline failed (403)', 502); return request(path, method, body); };
@@ -366,10 +449,18 @@ test('integration:ejection-leaves-no-foreign-commits — three queued candidates
     assert.equal(repo.unlanded(branchOf(item)).some(sha => sha === own.second || sha === tipSecond), false, `${item.key} carries nothing of the ejected entry`);
   }
   assert.deepEqual(repo.unlanded(branchOf(second)), [own.second]);
-  // The observation names no foreign commits on any branch, and the restored entry re-enters at the back with its own head.
+  // The observation names no foreign commits on any branch. The restored head is the reviewed head
+  // itself, but nothing carries across a restore, and GitHub's push dismissal on the ejected tip's
+  // publication named no merge-base reason: the head is reviewed afresh, on the proofs already bound to it.
   second = await cycle(github, second);
   assert.deepEqual([first, second, third].map(item => item.observation!.landing?.foreign ?? []), [[], [], []]);
   assert.equal(second.candidate!.sha, own.second);
+  assert.equal(second.queue, null);
+  assert.equal(second.autoDispatch!.review?.state, 'requested', 'the restored head is reviewed afresh');
+  assert.ok(gate(second, 'acceptance').passed, gate(second, 'acceptance').reasons.join('; '));
+  // Approved again, it re-enters at the back with its own head.
+  repo.approve(second.submission!.pr, own.second);
+  second = await cycle(github, second);
   assert.ok(second.queue && second.queue.sequence > third.queue!.sequence, 're-entry starts a new sequence at the back');
 });
 
@@ -409,6 +500,9 @@ test('integration:contaminated-branch-repaired — a branch already carrying ano
   work = await engine.execute(coordinator, 'repair', work.id, { reason: 'The branch carries a tip published behind the foreign item' }, randomUUID());
   assert.deepEqual([pendingRestore(work)!.cause, pendingRestore(work)!.requested!.by, pendingRestore(work)!.contaminated], ['repair', 'master', contaminated]);
   await assert.rejects(engine.execute(coordinator, 'repair', work.id, { reason: 'again' }, randomUUID()), /already requested/);
+  // A merge-base dismissal landing on the head meanwhile is restored into the pending repair, which it must not replace.
+  repo.approve(work.submission!.pr, contaminated);
+  repo.dismiss(work.submission!.pr, mergeBaseMessage, null, 'owner');
   assert.match(buildMasterStatus({ work: [await reload(work), foreign], now: new Date().toISOString() }, [], []).work.find(entry => entry.key === work.key)!.attention!, /A restore is requested \(repair\) and runs on the next reconciliation/);
   // `master repair` is that request: it posts the command with the coordinator credential and refuses a clean branch.
   const root = await mkdtemp(join(tmpdir(), 'graphyard-master-')), credentialFile = join(root, 'coordinator.token');
@@ -427,6 +521,7 @@ test('integration:contaminated-branch-repaired — a branch already carrying ano
   work = await cycle(github, work);
   const performed = currentRestore(work)!;
   assert.deepEqual([performed.restore!.outcome, performed.restore!.own, performed.restore!.cause, performed.restore!.requested!.reason], ['restored', ownHead, 'repair', 'The branch carries a tip published behind the foreign item']);
+  assert.equal((await events(work, 'review.restored')).length, 1, 'the dismissal was restored on the contaminated head without dropping the requested repair');
   const repaired = repo.refs.get(`heads/${branchOf(work)}`)!;
   assert.equal(performed.head, repaired);
   assert.deepEqual(repo.commits.get(repaired)!.parents, [ownHead, moved], 'the restored head is the item\'s own reviewed head merged onto the base');
@@ -457,6 +552,12 @@ test('integration:contaminated-branch-repaired — a branch already carrying ano
   assert.match(stuckRow.attention!, /A restore found no own reviewed head under it/);
   assert.match(stuckRow.attentionOwner!.next, new RegExp(`graphyard master decide ${stuck.key} rework REASON`));
   await assert.rejects(engine.execute(coordinator, 'repair', stuck.id, { reason: 'again' }, randomUUID()), /was found unrepairable/);
+  // A base branch that moves afterwards does not refresh an unrepairable head: the record that names the remedy stays.
+  const movedAgain = repo.commit([moved], 'Merge pull request #3 from elsewhere'); repo.refs.set('heads/main', movedAgain);
+  stuck = await cycle(github, stuck);
+  assert.deepEqual([stuck.candidate!.sha, pendingBaseRefresh(stuck), currentRestore(stuck)!.restore!.outcome], [stuckHead, null, 'unrepairable']);
+  assert.equal((await events(stuck, 'base.refreshed')).length, 0);
+  assert.match(buildMasterStatus({ work: [stuck, foreign], now: new Date().toISOString() }, [], []).work.find(entry => entry.key === stuck.key)!.attentionOwner!.next, new RegExp(`graphyard master decide ${stuck.key} rework REASON`));
 });
 
 test('manual:queue-tip-protection-docs-review — docs/ states how speculative tips interact with branch protection, why an approval must survive a publication, what a merge-base dismissal means, and how a contaminated branch is repaired', async () => {

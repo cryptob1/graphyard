@@ -1309,10 +1309,13 @@ export class Engine {
     const observed = !!observation && observation.candidate.sha === candidate.sha && observation.candidate.baseSha === candidate.baseSha;
     // A tip is built from the item's own reviewed head (GY-127): the replaced head when the worker
     // pushed it, or the head under the tip it replaces. The bindings carried are the ones that
-    // bind the replaced head now — exact on it, or already carried onto it.
+    // bind the replaced head now — exact on it, or already carried onto it. A tip that is the
+    // reviewed head itself (no merge: the head already contained its predicted base) is decided
+    // as an identity carry on the files the predicted base changed, never refused for lacking a
+    // merge; a record that predates `reviewedHead` names the merge's own `from`.
     return decideCarry({
-      from: { sha: speculation.merge?.from ?? candidate.sha, baseSha: candidate.baseSha }, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
-      merge: speculation.merge, predecessor: { key: aheadKey, validated }, reviewedFiles: observed ? observation!.files : [],
+      from: { sha: speculation.reviewedHead ?? speculation.merge?.from ?? candidate.sha, baseSha: candidate.baseSha }, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
+      merge: speculation.merge, baseChanges: speculation.baseChanges, predecessor: { key: aheadKey, validated }, reviewedFiles: observed ? observation!.files : [],
       approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
       app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane',
     });
@@ -1409,6 +1412,12 @@ export class Engine {
     if (speculation && speculation.tip === candidate.sha && speculation.policyRevision === work.policyRevision) {
       speculation.carry = carry(speculation.carry); speculation.restoredApproval = restored;
     } else if (work.baseRefresh && work.baseRefresh.head === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
+      work.baseRefresh.carry = carry(work.baseRefresh.carry); work.baseRefresh.restoredApproval = restored;
+    } else if (work.baseRefresh && work.baseRefresh.head === null && work.baseRefresh.from.sha === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
+      // A record of this very head that republished nothing — a refresh whose merge conflicted, or
+      // a repair the coordinator requested that has not run yet — keeps what it says, and the
+      // restored binding is written into it: replacing it would drop the conflict the worker owes
+      // or the pending repair, and a refresh would be retried for a conflict already recorded.
       work.baseRefresh.carry = carry(work.baseRefresh.carry); work.baseRefresh.restoredApproval = restored;
     } else {
       // The head is neither a queue tip nor a refreshed head: the restored binding is recorded as
