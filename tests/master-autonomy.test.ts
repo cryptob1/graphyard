@@ -167,7 +167,9 @@ test('integration:master-autonomy-setup — onboarding provisions the master and
       assert.equal((await installWorkerHarness(config, profile, 'GY-9', { epoch: 3, path: worktree, base: 'c'.repeat(40) })).applied, true);
       const rules = JSON.parse(await readFile(join(worktree, '.claude/settings.local.json'), 'utf8')).permissions;
       assert.ok(rules.allow.includes('Bash(git push origin graphyard/gy-9-3)') && rules.allow.includes('Bash(gh pr create:*)') && rules.allow.includes(`Bash(node ${config.cliPath} complete:*)`));
-      for (const denied of ['Bash(git push *--force*)', 'Bash(git push origin main*)', 'Bash(gh pr merge:*)', 'Bash(git rebase:*)', 'Read(**/*.token)']) assert.ok(rules.deny.includes(denied), `${denied} is denied`);
+      for (const denied of ['Bash(git push *--force*)', 'Bash(git push -f*)', 'Bash(git push origin main*)', 'Bash(gh pr merge:*)', 'Bash(git rebase:*)', 'Read(**/*.token)']) assert.ok(rules.deny.includes(denied), `${denied} is denied`);
+      // The one rewrite a worker may make is restore-branch's lease push of its own branch (GY-128); no raw force push, never main.
+      assert.ok(rules.allow.includes(`Bash(node ${config.cliPath} restore-branch:*)`));
       assert.ok(!rules.allow.some((rule: string) => /push origin main|--force/.test(rule)));
       assert.equal((await installWorkerHarness(config, { ...profile, kind: 'codex' }, 'GY-9', { epoch: 3, path: worktree, base: 'c'.repeat(40) })).applied, false);
       assert.equal(workerHarnessPlan({ cliPath: '/cli', branch: 'graphyard/gy-1-1', baseBranch: 'main', credentialHome: '/creds' }).allow.every(rule => rule.why.length > 20), true);

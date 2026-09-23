@@ -67,7 +67,7 @@ export function controlPlaneEffects(modules, context) {
     // is then refused rather than resumed, so two brokers never drive one merge — see
     // docs/master-agent.md, "Running executors beside the daemon".
     merge: work => m.mergeExecutor(current(), snapshot, mutate, mergeExecutor, randomUUID(), run)(work),
-    observeDeployment: delivered => d.observeDeployment(current(), delivered, run),
+    observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
   };
 }

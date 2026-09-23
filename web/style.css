@@ -90,3 +90,8 @@ abbr.term{text-decoration:underline dotted #7f9a73;text-underline-offset:3px;cur
 @media(max-width:1000px){.home-columns{grid-template-columns:1fr}}
 @media(max-width:1000px){.sidebar{width:185px;min-width:185px}.sidebar-inner{padding:25px 13px}.main{margin-left:0}}
 @media(max-width:650px){.sidebar{width:100%;min-width:0}.sidebar-inner{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:10px;padding:14px 16px}.primary-nav{flex-direction:row;margin:0;flex-wrap:wrap}.docs-link{display:none}.top-bar{height:auto;min-height:56px;flex-wrap:wrap;padding:8px 0}.top-bar .live{display:none}.facts{grid-template-columns:1fr;gap:2px}.facts dd{margin-bottom:8px}.list-tools{justify-content:flex-start;flex-wrap:wrap}.list-tools input{width:160px}}
+.status-age{white-space:nowrap;flex-shrink:0;font-variant-numeric:tabular-nums;color:#8d9d8e}
+.status-age.overdue{color:#ff8f76;font-weight:650}
+.overdue-mark{font-size:9px;vertical-align:1px}
+.card.overdue{border-color:#8a4a3a}.card.overdue:hover{border-color:#c4705a}
+.drawer-key{display:flex;justify-content:space-between;align-items:baseline;gap:12px}

@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
+import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import type { FleetProbe } from './fleet.js';
@@ -40,6 +41,8 @@ export const reviewRecordSchema = z.object({
   idleSince: z.string().min(1).max(40).optional(),
   /** How the request reached the session: on its command line, or as a paste for a runtime without that contract (GY-93). */
   delivery: z.enum(['request', 'paste']).optional(),
+  /** The first-run consent prompts the launcher answered before the session took its request, with the option it chose (GY-130). */
+  consent: z.array(consentAnswerSchema).max(8).optional(),
   /** Acknowledgement of the request, judged by the loop (acknowledgeLaunch): when sustained activity was seen, when it was re-prompted once, and the observation window. */
   acknowledgedAt: z.string().min(1).max(40).optional(),
   repromptedAt: z.string().min(1).max(40).optional(),
@@ -301,7 +304,7 @@ export async function launchReview(root: string, work: Work, profileName: string
     try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
     catch (error) { await discard(); throw error; }
     const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
-    let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
+    let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       // The reviewer loads its own role rules, never the master's: it may post this one verdict.
       // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
@@ -312,7 +315,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       pane = created.pane; tabId = created.tab;
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
+      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await discard();
@@ -324,7 +327,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       throw writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
     }
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
-      profile: profile.name, agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, checkout: checkout.directory,
+      profile: profile.name, agentName, pane: pane ?? null, sessionDirectory, requestedAt: now().toISOString(), tokenExpiresAt: minted.expiresAt, state: 'pending', delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory,
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
     await saveReviewLedger(root, { ...ledger, reviews: [...ledger.reviews, record] });
     return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
@@ -353,15 +356,45 @@ export async function reviewCommand(root: string, args: string[], snapshot: { wo
 
 const reviewStates = ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'];
 /**
- * The reviewer identity's latest verdict on this session's exact head, ignoring the verdicts an
- * earlier session of the same head already recorded. Without that, a relaunch after a dismissal
- * would read the dismissed review back as its own answer the moment it started and burn every
- * remaining attempt on a verdict GitHub had already withdrawn.
+ * Whether one GitHub review can be the verdict of a session launched at `launchedAt`.
+ *
+ * A session is answered by a review *it* collected, so only a review submitted after it was
+ * launched can settle it (GY-100). The rule is decided on the dismissal, because a dismissal is
+ * the only verdict that can predate the session it settles and the only one whose match costs
+ * anything. GitHub keeps a dismissed review listed with the timestamp it was originally submitted
+ * at, so a verdict it withdrew before the session existed — an earlier session's approval, a
+ * carried approval `master merge` re-posted through the same reviewer App, a dismissal by hand —
+ * stands on the candidate sha under the reviewer's own identity, and matching it recorded every
+ * new session unanswered the moment it started: the request burned its attempts on a verdict
+ * GitHub had already taken back, and the commit could never be reviewed again. Nothing is
+ * weakened by refusing it: a dismissal satisfies no gate, so a session that finds none stays
+ * pending until its reviewer posts or it fails on its own terms. An `APPROVED` or
+ * `CHANGES_REQUESTED` review of this exact head answers the request whichever session collected
+ * it, and is matched as it always was.
+ *
+ * A dismissal whose `submitted_at` cannot be read is not matched either: it cannot be shown to be
+ * this session's. GitHub reports whole seconds, so one submitted within the launch second counts
+ * as after it — a session takes minutes to reach a verdict, so nothing genuine turns on that.
+ */
+export function withdrawnBeforeLaunch(review: { state?: unknown; submitted_at?: unknown }, launchedAt: number) {
+  if (String(review?.state) !== 'DISMISSED' || !Number.isFinite(launchedAt)) return false;
+  const submitted = Date.parse(String(review?.submitted_at ?? ''));
+  return !Number.isFinite(submitted) || submitted < launchedAt;
+}
+/**
+ * The reviewer identity's latest verdict on this session's exact head: the verdicts an earlier
+ * session of the same head already recorded are skipped, and so is a review GitHub dismissed
+ * before this session was launched (see `withdrawnBeforeLaunch`), which no session of that head
+ * could have collected. The review this record already names as its own verdict is the one
+ * exception — the record is the evidence that this session collected it, so it is re-read whatever
+ * its timestamp, which is how an approval GitHub withdraws after the session closed is found.
  */
 export async function observeReviewVerdict(repository: string, record: ReviewRecord, reviewer: string, run: ChildRun, answered: Set<number> = new Set()) {
   const reviews = JSON.parse(await run('gh', ['api', '--paginate', `repos/${repository}/pulls/${record.pr}/reviews`]));
   if (!Array.isArray(reviews)) throw new Error('GitHub did not return a review list for the pending reviewer session');
-  const match = reviews.filter((review: any) => review?.commit_id === record.sha && typeof review?.user?.login === 'string' && review.user.login.toLowerCase() === reviewer.toLowerCase() && reviewStates.includes(review?.state) && !answered.has(Number(review?.id))).at(-1);
+  const launchedAt = Date.parse(record.requestedAt), collected = record.verdict?.reviewId;
+  const match = reviews.filter((review: any) => review?.commit_id === record.sha && typeof review?.user?.login === 'string' && review.user.login.toLowerCase() === reviewer.toLowerCase() && reviewStates.includes(review?.state)
+    && !answered.has(Number(review?.id)) && (Number(review?.id) === collected || !withdrawnBeforeLaunch(review, launchedAt))).at(-1);
   return match ? { state: String(match.state), reviewer, reviewId: Number(match.id), submittedAt: String(match.submitted_at ?? new Date().toISOString()) } : null;
 }
 
@@ -530,6 +563,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
 export function summarizeReviews(records: ReviewRecord[]) {
   const describe = (record: ReviewRecord) => ({ review: record.id, requestId: record.requestId ?? null, attempt: record.attempt ?? 1, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, profile: record.profile, agentName: record.agentName,
     state: record.state, verdict: record.verdict?.state ?? null, requestedAt: record.requestedAt, tokenExpiresAt: record.tokenExpiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null,
+    // GY-100: which GitHub review the session settled on, so a reader can name the dismissed
+    // verdict every session of a request has settled on rather than reporting an ordinary wait.
+    reviewId: record.verdict?.reviewId ?? null,
     // GY-93: how the request reached the session, and whether the session has taken it up.
     delivery: record.delivery ?? null, activity: record.state === 'pending' ? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null, neverStarted: neverStarted(record) });
   return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
