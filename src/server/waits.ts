@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
 import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
-import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanRequestBlocker, humanRequestSchema, openHumanRequests, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
-import { sessionKind } from '../delegation.js';
+import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRule, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
+import { decisionsByWork } from './decision-ledger.js';
 import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import type { Services } from './routes.js';
@@ -82,8 +82,10 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
   const fingerprint = digest({ id, answer: data });
   return services.engine.store.transaction(async (db, now) => {
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
-    demand(actor.role === 'admin', 'Only the human operator answers a human-only request', 403);
-    demand(sessionKind(actor) === 'human', `A human-only request needs a declared human session; ${actor.id} is ${sessionKind(actor)}`, 403);
+    // The rule the human surface lists this request under is the rule that refuses the answer,
+    // so neither can drift from the other (model/human-request.ts `parkRule`).
+    const refusal = humanOnlyRefusal(parkRule.kind, actor);
+    demand(!refusal, refusal!, 403);
     const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
     const request = work!.humanRequest;
     demand(request, `${work!.key} has no open human-only request`, 404);
@@ -96,11 +98,27 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
   });
 }
 
-/** Every open human-only request the caller may see, longest wait first. */
+/**
+ * The items the human-only rule table judges, with the ledger the rules that need it folded in.
+ * Delivered work carries nothing anyone must answer, and only the items a rule asks to read cost
+ * a ledger query, so the whole surface is one bounded read (GY-102).
+ */
+export async function humanOnlySubjects(services: Services, work: readonly Work[]): Promise<HumanOnlySubject[]> {
+  const open = work.filter(item => item.stage !== 'done');
+  const reads = open.filter(item => humanOnlyReadsDecisions(item));
+  const decisions = await decisionsByWork(services.engine.store.pool, reads.map(item => item.id));
+  return open.map(item => ({ work: item, decisions: decisions[item.id] ?? [] }));
+}
+
+/**
+ * Every open human-only action the caller may see, longest wait first: the whole surface the
+ * page, `graphyard human-requests` and `master status` render — a parked decision only a human
+ * may make, and every approval the server will take from the operator's own credential alone.
+ */
 export async function listHumanRequests(services: Services, actor: Principal) {
   const snapshot = await services.engine.store.workSnapshot();
   const visible = snapshot.work.filter(item => operatorScopeIncludes(actor, item));
-  return { now: snapshot.now, requests: openHumanRequests(visible, Date.parse(snapshot.now)) };
+  return { now: snapshot.now, requests: openHumanOnly(await humanOnlySubjects(services, visible), Date.parse(snapshot.now)) };
 }
 
 const capacityOf = (work: Work): CapacityState => work.capacity ?? { exhaustions: [], escalations: [] };
