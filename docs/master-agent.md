@@ -1468,6 +1468,13 @@ is acted on: both are withheld from what the gates read, so the approval neither
 gate nor is carried onto a merge-queue tip, and the change request asks for no rework. A review
 GitHub dismissed is withdrawn rather than given, so it is never one of the two.
 
+Only the reviewer identity's verdicts can conflict. The reviewer identity is the GitHub App a
+launched reviewer session posts through, whose account GitHub names `<slug>[bot]` — a login no
+person can hold — and only two verdicts that answered the same recorded review request count. A
+person who approves a head and then requests changes on it has changed their mind, not conflicted:
+their latest verdict reaches the gates untouched, so that change request still blocks and no
+fresh review can override it. Verdicts that answered no recorded request are never grouped either.
+
 **How it is resolved.** Nothing is run by hand. With both verdicts withheld the review gate asks for
 an approval again, so the control plane opens a fresh review request for the same head and the loop
 launches one session for it. The first verdict posted after the conflict is the fresh review: it

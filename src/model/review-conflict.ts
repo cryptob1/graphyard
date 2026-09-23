@@ -22,12 +22,24 @@ import { reviewProviderOf } from './review.js';
  * head, and the first verdict posted after the conflict — the fresh review — resolves it and is
  * the one the gates act on.
  *
+ * Only the reviewer identity's verdicts are recorded and can conflict (see `reviewerIdentity`),
+ * and only two that answered the same recorded request: a person's verdicts, and verdicts that
+ * answered no request, pass through to the gates exactly as GitHub reports them.
+ *
  * A dismissed review is withdrawn, not given, so it is never one of the two: the relaunch that
  * follows a dismissal answers the same request afresh. A new head, base or policy revision starts
  * a new binding and supersedes a conflict on the old one.
  */
 
 export const conflictingVerdictStates = ['APPROVED', 'CHANGES_REQUESTED'];
+/**
+ * The reviewer identity: a launched reviewer session posts through a GitHub App, whose account
+ * GitHub names `<slug>[bot]` — a login no person can hold. Only its verdicts can conflict. A
+ * person, or any identity that is not an App, reviewing a head twice is a sequence, as GitHub reads
+ * it: the latest word stands and blocks or passes the gate untouched, so a change request a person
+ * posted after approving is never withheld or overridden by a fresh reviewer verdict.
+ */
+export const reviewerIdentity = (login: string) => /\[bot\]$/i.test(login);
 /** Verdicts kept per binding; a head collecting more than this is already conflicted many times over. */
 export const verdictHistoryLimit = 20;
 
@@ -99,12 +111,12 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
     if (review.sha !== candidate!.sha || !Number.isSafeInteger(review.id)) continue;
     const known = record.verdicts.find(verdict => verdict.id === review.id);
     if (review.state === 'DISMISSED') { if (known) known.dismissed = true; continue; }
-    if (!conflictingVerdictStates.includes(review.state) || known) continue;
+    if (!conflictingVerdictStates.includes(review.state) || known || !reviewerIdentity(review.reviewer)) continue;
     record.verdicts.push({ id: review.id!, reviewer: review.reviewer, state: review.state, submittedAt: review.submittedAt ?? null, observedAt: at, requestId });
   }
   record.verdicts = record.verdicts.slice(-verdictHistoryLimit);
   work.reviewVerdicts = record;
-  const standing = record.verdicts.filter(verdict => !verdict.dismissed && !verdict.superseded);
+  const standing = record.verdicts.filter(verdict => !verdict.dismissed && !verdict.superseded && reviewerIdentity(verdict.reviewer));
   const conflict = openReviewConflict(work);
   if (conflict) {
     // The fresh review: the first standing verdict on the head that is not one of the conflict.
@@ -116,9 +128,11 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
       transitions.push({ event: 'review.conflict-resolved', conflict: work.reviewConflict });
     }
   } else {
+    // Only verdicts that answered a recorded review request can be two answers to one request.
     const groups = new Map<string, ObservedVerdict[]>();
     for (const verdict of standing) {
-      const key = `${verdict.reviewer.toLowerCase()}\0${verdict.requestId ?? ''}`;
+      if (!verdict.requestId) continue;
+      const key = `${verdict.reviewer.toLowerCase()}\0${verdict.requestId}`;
       groups.set(key, [...(groups.get(key) ?? []), verdict]);
     }
     const pair = [...groups.values()].find(group => group.length > 1);

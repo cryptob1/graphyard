@@ -13,7 +13,7 @@ import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { openReviewConflict, reviewConflictAttention } from '../src/model/review-conflict.js';
+import { openReviewConflict, reconcileReviewConflict, reviewConflictAttention } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster, sessionAgentName, type HerdrAgent } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -227,4 +227,38 @@ test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUES
   assert.equal((await store.events(item.id)).filter(event => event.kind === 'review.conflict-resolved').length, 1);
   assert.match(standingVerdict(item)!.reason, /requested changes/, 'the fresh verdict is the one the loop acts on');
   assert.deepEqual(reviewConflictAttention([item], records), []);
+
+  // A person is not the reviewer identity: approving and then requesting changes on one head is
+  // their latest word, and that change request still blocks — no conflict, nothing withheld.
+  let human = await engine.execute(operator, 'create', null, { title: 'A person changes their mind', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
+  human = await engine.execute(operator, 'ready', human.id, {}, randomUUID());
+  human = await engine.execute(implementer, 'claim', human.id, {}, randomUUID());
+  human = await engine.execute(implementer, 'workspace', human.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${human.id}`, branch: `graphyard/${human.key.toLowerCase()}-1` }, randomUUID());
+  human = await engine.execute(implementer, 'submit', human.id, { epoch: 1, pr: 120 }, randomUUID());
+  const byHuman = (reviews: Observation['reviews']): Observation => ({ ...observation({ sha: H, baseSha: B }, { reviews }), candidate: { sha: H, baseSha: B, pr: 120, branch: human.workspaces[0].branch, author: 'implementer' } });
+  human = await engine.observe(human.id, human.revision, byHuman([]));
+  assert.equal(human.autoDispatch!.review!.state, 'requested');
+  human = await engine.observe(human.id, human.revision, byHuman([{ id: 601, reviewer: 'maintainer', sha: H, state: 'APPROVED', submittedAt: '2026-09-22T09:00:00Z' }]));
+  assert.ok(human.gates.find(gate => gate.name === 'review')!.passed);
+  human = await engine.observe(human.id, human.revision, byHuman([{ id: 602, reviewer: 'maintainer', sha: H, state: 'CHANGES_REQUESTED', submittedAt: '2026-09-22T09:02:00Z' }]));
+  assert.equal(openReviewConflict(human), null, "a person's second verdict is no conflict");
+  assert.equal((await store.events(human.id)).filter(event => event.kind === 'review.conflicted').length, 0);
+  assert.ok(human.observation!.reviews.some(entry => entry.id === 602), 'the change request reaches the gates');
+  const blocked = human.gates.find(gate => gate.name === 'review')!;
+  assert.equal(blocked.passed, false);
+  assert.ok(blocked.reasons.some(reason => /Outstanding change requests/.test(reason)), 'the change request still blocks');
+  // A reviewer-identity approval afterwards does not override it.
+  human = await engine.observe(human.id, human.revision, byHuman([{ id: 602, reviewer: 'maintainer', sha: H, state: 'CHANGES_REQUESTED', submittedAt: '2026-09-22T09:02:00Z' }, { id: 603, reviewer, sha: H, state: 'APPROVED', submittedAt: '2026-09-22T09:10:00Z' }]));
+  assert.equal(human.gates.find(gate => gate.name === 'review')!.passed, false);
+  assert.ok(human.observation!.reviews.some(entry => entry.id === 602));
+
+  // Two reviewer-identity verdicts that answered no recorded request are not grouped as one request's answers.
+  const unrequested = work();
+  reconcileReviewConflict(unrequested, new Date());
+  unrequested.observation = { ...unrequested.observation!, reviews: [{ id: 701, reviewer, sha: H, state: 'APPROVED', submittedAt: '2026-09-22T10:00:00Z' }] };
+  reconcileReviewConflict(unrequested, new Date());
+  unrequested.observation = { ...unrequested.observation!, reviews: [{ id: 702, reviewer, sha: H, state: 'CHANGES_REQUESTED', submittedAt: '2026-09-22T10:01:00Z' }] };
+  assert.deepEqual(reconcileReviewConflict(unrequested, new Date()), []);
+  assert.equal(openReviewConflict(unrequested), null);
+  assert.ok(unrequested.observation.reviews.some(entry => entry.id === 702));
 });
