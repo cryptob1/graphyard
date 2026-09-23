@@ -9,21 +9,25 @@ import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewe
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { nameOrphanSupervisors, scopeRequestAttention, stalledItemAttention, unansweredRequestAttention } from './status-attention.js';
+import { nameOrphanSupervisors, scopeRequestAttention, stalledItemAttention } from './status-attention.js';
+import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
+import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
+import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
 // from here, as does everything that was reading them from here before the split.
-export { nameOrphanSupervisors, orphanSupervisorAttention, scopeRequestAttention, stalledItemAttention, supervisorReclaimCommand, unansweredRequestAttention, unansweredRequestOwner } from './status-attention.js';
+export { nameOrphanSupervisors, orphanSupervisorAttention, scopeRequestAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
+export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
 
 /**
  * One attention item per requested decision whose approver could not be launched (GY-101). A
@@ -111,7 +115,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // filling is exactly the condition that stops it. The plan behind the number is the same one the
   // loop and `master reclaim` compute, so the attention item never promises room reclaiming cannot give.
   const worktrees = worktreesDirectory(root);
-  const reclaimPlan = planWorktreeReclaim(await inventoryWorktrees(root).catch(() => []), snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
+  const trees = await inventoryWorktrees(root).catch(() => []), reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
   // live there, and it is judged against its own minimum and budget, before a write there fails.
@@ -134,18 +138,21 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, the sessions running against the declared limit and the longest wait for a slot.
-  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }),
+  const sessions = nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
   // A required check that failed on the clock says so, with the measurement against its budget.
   const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot)];
+  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot), ...consentHoldItems(trees, snapshot)];
   // A session past its role's maximum: running but making no progress is as visible as one that died.
   const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
+  // A review every session settled on a dismissal for is the stronger statement of the same
+  // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
+  const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
   // An open item the control plane names no action for. Those waiting on another item or on a
   // live session are accounted and raise nothing; what is left is named, with what is missing.
@@ -175,8 +182,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   }
   attentionItems.push(...generatedFiles);
   const decisions = await terminalDecisions(masterApi, snapshot.work);
-  return { ...status, attentionItems: [...attentionItems, ...decisions.attentionItems],
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
+  return { ...status, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
+    counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length,
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
@@ -185,6 +192,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
     actionless: { bound: stallBoundMs, items: actionless },
     terminalDecisions: decisions.listed,
+    // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
+    unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     autoMerge: master.autoMerge, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
     reviewer: master.reviewer ? { identity: `${master.reviewer.slug}[bot]`, appId: master.reviewer.appId, profiles: master.reviewers.map(profile => profile.name), automatic: master.run.reviewerProfile ?? (master.reviewers.length === 1 ? master.reviewers[0].name : null),

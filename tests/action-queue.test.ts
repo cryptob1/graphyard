@@ -259,7 +259,7 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(item.nextAction!.llmRole, 'produce-evidence');
 
   // Proven: the merge, with the queue position it will land in.
-  item = await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 4, skipped: 0 }, randomUUID());
+  item = await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   item = await publishTip(item);
   item = await engine.observe(item.id, item.revision, observation(item));
   assert.equal(item.nextAction!.kind, 'merge');
@@ -547,7 +547,7 @@ function fleetExecutor(identity: Principal, host: string, log: FleetLog, mine: S
     // A producer session: it submits evidence for the exact head the request named.
     launchProducer: async (item, request) => {
       const current = await reload(item.id);
-      for (const proof of request.proofs ?? []) await engine.execute(producer, 'evidence', current.id, { proof, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+      for (const proof of request.proofs ?? []) await engine.execute(producer, 'evidence', current.id, { proof, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
       return launched('producer', item, 'pane-p');
     },
     // The shape the guarded broker returns: its own account of what it did, never a verdict that
@@ -819,7 +819,7 @@ test('integration:multi-executor-throughput — every executor brokers merges un
   assert.match(first.instance, /^executor-/);
 
   const item = await submitted();
-  await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+  await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   // One item in the merge queue, so what this case measures is ownership and not a queue position.
   await isolateQueue(new Set([item.id]));
   let current = await engine.observe(item.id, (await reload(item)).revision, observation(await reload(item)));

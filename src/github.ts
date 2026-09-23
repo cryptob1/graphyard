@@ -7,7 +7,7 @@ import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal } from './merge-queue.js';
+import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, treeIdenticalPrediction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -59,6 +59,22 @@ export class GitHub {
   private rateFailures = 0;
   private authentication?: Promise<void>;
   private cache = new Map<string, { etag: string; value: any }>();
+  private ancestry = new Map<string, boolean>();
+  private usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map<string, number>(), remaining: null as string | null, reset: null as string | null };
+  /** Once a minute, logs what the App spent: requests, free 304s, the costliest endpoints, and GitHub's own remaining budget. */
+  private meter(method: string, path: string, response: Response) {
+    const u = this.usage;
+    u.total++; if (response.status === 304) u.notModified++;
+    const kind = `${method} ${path.replace(/^\/repos\/[^/]+\/[^/]+/, '').replace(/\?.*$/, '').replace(/[a-f0-9]{40}/g, ':sha').replace(/\/\d+/g, '/:n').replace(/^\/contents\/.*/, '/contents/:path').replace(/^\/compare\/.*/, '/compare/:range')}`;
+    u.byKind.set(kind, (u.byKind.get(kind) ?? 0) + 1);
+    u.remaining = response.headers.get('x-ratelimit-remaining') ?? u.remaining; u.reset = response.headers.get('x-ratelimit-reset') ?? u.reset;
+    if (Date.now() - u.since < 60_000) return;
+    const top = [...u.byKind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => `${k}=${n}`).join(', ');
+    console.log(`GitHub usage ${Math.round((Date.now() - u.since) / 1000)}s: ${u.total} requests, ${u.notModified} not-modified (free); remaining ${u.remaining} until ${u.reset ? new Date(Number(u.reset) * 1000).toISOString() : '?'}; top ${top}`);
+    this.usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map(), remaining: u.remaining, reset: u.reset };
+  }
+  private blobs = new Map<string, string | null>();
+  private histories = new Map<string, Set<string> | null>();
   private preflightState: AppPermissionReport | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
@@ -71,8 +87,10 @@ export class GitHub {
   private backoff(response: Response) {
     const retry = Number(response.headers.get('retry-after'));
     const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
-    this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0,
-      response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) ? reset : 0);
+    // An exhausted primary budget names its own reset: wait exactly that long. Doubling on each of the
+    // refusals already in flight pushed the pause up to an hour past the reset.
+    if (response.headers.get('x-ratelimit-remaining') === '0' && Number.isFinite(reset) && reset > Date.now()) { this.blockedUntil = Math.max(this.blockedUntil, reset); return; }
+    this.blockedUntil = Math.max(this.blockedUntil, Date.now() + Math.min(3600_000, 60_000 * 2 ** Math.min(this.rateFailures++, 6)), Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : 0);
   }
   /**
    * Turns a failed response into the right refusal. Only a rate limit pauses the client; an
@@ -184,11 +202,22 @@ export class GitHub {
   private async apiRequest(path: string, method = 'GET', body?: unknown): Promise<any> {
     await this.authenticate();
     const cached = method === 'GET' ? this.cache.get(path) : undefined;
-    const response = await fetch(`https://api.github.com${path}`, {
-      method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
-      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
-    });
-    if (response.status === 304 && cached) { this.rateFailures = 0; return structuredClone(cached.value); }
+    const started = Date.now();
+    let response: Response;
+    try {
+      response = await fetch(`https://api.github.com${path}`, {
+        method, headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
+        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      console.error(`GitHub ${method} ${path} failed after ${Date.now() - started} ms: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+    // A slow request is named so a stalled observation can be traced to the call that held it.
+    if (Date.now() - started > 5_000) console.error(`GitHub ${method} ${path} took ${Date.now() - started} ms (${response.status})`);
+    this.meter(method, path, response);
+    // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
+    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); return structuredClone(cached.value); }
     const refused = await this.refusal(response, `${method} ${path}`);
     if (refused) throw refused;
     this.rateFailures = 0;
@@ -198,12 +227,20 @@ export class GitHub {
       this.cache.delete(path);
       if (etag) {
         this.cache.set(path, { etag, value: structuredClone(value) });
-        if (this.cache.size > 256) this.cache.delete(this.cache.keys().next().value!);
+        if (this.cache.size > etagCacheEntries) this.cache.delete(this.cache.keys().next().value!);
       }
     }
     return value;
   }
   async reviewRepository(): Promise<{ id: number; fullName: string } | null> {
+    // Every status read asks this; the installation's repository changes far more rarely than that.
+    if (this.repositoryIdentity && Date.now() - this.repositoryIdentity.at < 10 * 60_000) return this.repositoryIdentity.value;
+    const value = await this.readReviewRepository();
+    this.repositoryIdentity = { at: Date.now(), value };
+    return value;
+  }
+  private repositoryIdentity: { at: number; value: { id: number; fullName: string } | null } | null = null;
+  private async readReviewRepository(): Promise<{ id: number; fullName: string } | null> {
     try {
       // Membership in the token's installation is stronger than public repository readability.
       for (let page = 1; page <= 100; page++) {
@@ -248,12 +285,41 @@ export class GitHub {
     demand(ref?.object?.type === 'commit' && typeof tip === 'string' && /^[a-f0-9]{40}$/.test(tip), `GitHub did not return a readable head for refs/heads/${this.config.base}`, 502);
     return { tip, tree: await this.commitTree(tip) };
   }
-  /** Whether `head` contains `base` by ancestry, as GitHub's compare reports it. */
+  /** Whether `head` contains `base` by ancestry, as GitHub's compare reports it. Ancestry between two commit SHAs never changes, so it is asked once. */
   async contains(base: string, head: string): Promise<boolean> {
     if (base === head) return true;
+    const key = `${base}...${head}`;
+    const known = /^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key) ? this.ancestry.get(key) : undefined;
+    if (known !== undefined) return known;
     const comparison = await this.request(`/compare/${base}...${head}?per_page=1`);
     demand(typeof comparison?.status === 'string', `GitHub did not compare ${base.slice(0, 12)} with ${head.slice(0, 12)}`, 502);
-    return comparison.status === 'ahead' || comparison.status === 'identical';
+    const contained = comparison.status === 'ahead' || comparison.status === 'identical';
+    if (/^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key)) {
+      this.ancestry.set(key, contained);
+      if (this.ancestry.size > ancestryEntries) this.ancestry.delete(this.ancestry.keys().next().value!);
+    }
+    return contained;
+  }
+  /**
+   * The commits `head` holds that `base` does not, or null when GitHub's list is truncated and
+   * ancestry must be asked per commit. Immutable for a pair of SHAs, so asked once.
+   */
+  async historySince(base: string, head: string): Promise<Set<string> | null> {
+    const key = `${base}...${head}`;
+    const pinned = /^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key);
+    if (pinned && this.histories.has(key)) return this.histories.get(key)!;
+    const shas = new Set<string>(); let total = 0;
+    for (let page = 1; page <= 3; page++) {
+      const comparison = await this.request(`/compare/${base}...${head}?per_page=100&page=${page}`);
+      // No commit list means no shortcut: containment is then asked per commit, exactly as before.
+      if (!Array.isArray(comparison?.commits) || !Number.isSafeInteger(comparison?.total_commits)) return null;
+      total = comparison.total_commits;
+      for (const commit of comparison.commits) if (typeof commit?.sha === 'string') shas.add(commit.sha);
+      if (comparison.commits.length < 100 || shas.size >= total) break;
+    }
+    const result = shas.size >= total ? shas : null;
+    if (pinned) { this.histories.set(key, result); if (this.histories.size > 2048) this.histories.delete(this.histories.keys().next().value!); }
+    return result;
   }
   /** The base a published speculative tip was built on, when the head is that tip; otherwise null. */
   private speculativeBase(work: Work, headSha: string): string | null {
@@ -386,11 +452,23 @@ export class GitHub {
     // every drop of theirs is a removal or a modification in `base...head`. So they are judged
     // there, and `carried` judges the candidates the landing commit does not hold.
     const ahead = new Set(predicted ? speculation!.predecessors : []);
-    for (const peer of open) {
-      if (ahead.has(peer.key)) continue;
-      let contained = false;
-      for (const sha of ownHeads(peer)) if (await this.contains(sha, head)) { contained = true; break; }
-      if (!contained) continue;
+    // One compare per peer, asked a few at a time: asked in turn they held an observation past the
+    // merge window's 25 seconds, so a candidate with many open peers could never be authorized in time.
+    // One compare lists what the head adds over the base; a peer head is in the head's history when it
+    // is on that list, or else only when the base itself holds it — a question every candidate on the
+    // same base shares. Asked per peer against each head, this was ~N² compares per observation round.
+    const added = await this.historySince(base, head);
+    const containment = await boundedMap(open, peerContainmentConcurrency, async peer => {
+      if (ahead.has(peer.key)) return false;
+      for (const sha of ownHeads(peer)) {
+        if (!added) { if (await this.contains(sha, head)) return true; continue; }
+        if (added.has(sha)) return true;
+        if (await this.contains(sha, base) && await this.contains(sha, head)) return true;
+      }
+      return false;
+    });
+    for (const [index, peer] of open.entries()) {
+      if (!containment[index]) continue;
       foreign.push({ key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha });
       const entry: CarriedCandidate = { key: peer.key, pr: peer.candidate!.pr, head: peer.candidate!.sha, dropped: [] };
       for (const file of peer.observation!.scopeFiles ?? []) {
@@ -469,7 +547,9 @@ export class GitHub {
    * refuses rather than passes.
    */
   private async compareScope(plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
-    const lookup = async (path: string) => budget.remaining-- > 0 ? this.blobAt(path, base) : undefined;
+    // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
+    // then asked a few at a time: in turn they held a final merge verification past its window.
+    const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
     const compared: ScopeFile[] = [];
     for (const file of files) {
       const status: ScopeFile['status'] = ['added', 'modified', 'removed', 'renamed', 'copied', 'changed', 'unchanged'].includes(file.status) ? file.status : 'modified';
@@ -477,14 +557,24 @@ export class GitHub {
       const entry: ScopeFile = { path: file.filename, status, ...(previousPath ? { previousPath } : {}),
         sha: status !== 'removed' && typeof file.sha === 'string' && /^[a-f0-9]{40}$/.test(file.sha) ? file.sha : null,
         additions: Number.isSafeInteger(file.additions) ? file.additions : 0, deletions: Number.isSafeInteger(file.deletions) ? file.deletions : 0, binary: typeof file.patch !== 'string' };
-      if (!file.uncompared && !inPlannedScope(plannedFiles, entry.path)) { const baseSha = await lookup(entry.path); if (baseSha !== undefined) entry.baseSha = baseSha; }
-      if (previousPath && status === 'renamed' && !inPlannedScope(plannedFiles, previousPath)) { const previousBaseSha = await lookup(previousPath); if (previousBaseSha !== undefined) entry.previousBaseSha = previousBaseSha; }
+      if (!file.uncompared && !inPlannedScope(plannedFiles, entry.path) && budget.remaining-- > 0) wanted.push({ entry, field: 'baseSha', path: entry.path });
+      if (previousPath && status === 'renamed' && !inPlannedScope(plannedFiles, previousPath) && budget.remaining-- > 0) wanted.push({ entry, field: 'previousBaseSha', path: previousPath });
       compared.push(entry);
     }
+    const found = await boundedMap(wanted, peerContainmentConcurrency, want => this.blobAt(want.path, base));
+    wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
     return compared;
   }
   /** Blob identity of a path at a ref, or null when the ref holds no file there. */
   async blobAt(path: string, ref: string): Promise<string | null> {
+    // A path's blob at a commit SHA never changes, so it is asked of GitHub once.
+    const pinned = /^[a-f0-9]{40}$/.test(ref) ? `${ref}:${path}` : null;
+    if (pinned && this.blobs.has(pinned)) return this.blobs.get(pinned)!;
+    const found = await this.readBlob(path, ref);
+    if (pinned) { this.blobs.set(pinned, found); if (this.blobs.size > ancestryEntries) this.blobs.delete(this.blobs.keys().next().value!); }
+    return found;
+  }
+  private async readBlob(path: string, ref: string): Promise<string | null> {
     let entry: any;
     try { entry = await this.request(`/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`); }
     catch (error) { if (error instanceof Refusal && /\(404\)/.test(error.message)) return null; throw error; }
@@ -569,6 +659,16 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const comment = await this.request(`/issues/${work.candidate.pr}/comments`, 'POST', { body });
     demand(comment.performed_via_github_app?.id === this.config.appId && comment.user?.type === 'Bot' && comment.body === body && Number.isSafeInteger(comment.id) && Number.isFinite(Date.parse(comment.created_at)), 'Review dispatch did not return an authenticated Graphyard comment', 502);
     return { commentId: comment.id, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, body, createdAt: comment.created_at };
+  }
+  /**
+   * The published tip's own tree, or undefined when it could not be read. Read after the tip is
+   * published and never allowed to fail it: the tree is what lets the entry behind this one tell a
+   * prediction that moved only in sha from one that brings content (GY-100), and an entry that
+   * cannot be told either way is republished as it was before, which costs a review round rather
+   * than a delivery.
+   */
+  private async tipTree(tip: string): Promise<string | undefined> {
+    return this.commitTree(tip).catch(() => undefined);
   }
   /**
    * Why GitHub dismissed each dismissed review of a pull request, from the issue timeline's
@@ -717,6 +817,16 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * head is a tip is first moved back to the reviewed head under it, and the predicted base is
    * merged onto that; the tip's parents are exactly the reviewed head and its predicted base, which
    * is also what lets the carry rule in model/carry.ts accept it.
+   *
+   * A published tip is never republished onto a predicted base whose tree it already lands
+   * (GY-100). A tip push replaces the head, so GitHub dismisses its approval and withdraws every
+   * verdict bound to it; when the predicted base moved only to a tree-identical commit — an entry
+   * ahead republishing its own tip, a queue merge on the base branch — the merge would produce
+   * the same tree under a new sha and cost a review round for content nobody changed. The advance
+   * is recorded on the speculation instead (`carriedBase`, as the control plane already records a
+   * tree-identical base-branch advance) and nothing is written: `predictQueue` binds the tip to
+   * that prediction, and the approval, the proofs and the checks stand on the commit they were
+   * given for.
    */
   async publishSpeculativeTip(work: Work, placement: QueuePlacement, beforeWrite: () => Promise<void> = async () => {}): Promise<QueueSpeculation> {
     demand(work.candidate && work.queue && placement.predictedBase, 'A queued candidate with a predicted base is required');
@@ -729,6 +839,12 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const branch = await this.baseBranch();
     requireCurrent(!!placement.base && (branch.tip === placement.base.sha || branch.tree === placement.base.tree), `Base branch ${this.config.base} moved before speculative prediction; retry`);
     const baseTree = await this.commitTree(placement.predictedBase!);
+    const ref = queueRef(work.key);
+    // Re-binding a published tip to a tree-identical prediction: recorded, never republished.
+    const rebound = treeIdenticalPrediction(work, placement.predictedBase!, baseTree);
+    // The re-bound record keeps its carry (see keptTipCarry) and names the entries now ahead of it.
+    if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), predecessors: placement.predecessors,
+      carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() } };
     const reviewedHead = await this.ownReviewedHead(work, pr.head.sha);
     await beforeWrite();
     // The branch is moved by a forced ref update after the head was read above, not compared and
@@ -739,7 +855,6 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
     const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
     const tip = merged ?? reviewedHead;
-    const ref = queueRef(work.key);
     await this.publishRef(ref, tip);
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
@@ -748,7 +863,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // an earlier tip with no commit produced: the carry is then decided on the files that changed
     // between the replaced tip's bound base and the predicted base, listed here from GitHub.
     const baseChanges = merged || tip === work.candidate!.sha ? undefined : await this.changedFiles(work.candidate!.baseSha, placement.predictedBase!);
-    return { ref, tip, base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead,
+    return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead,
       ...(baseChanges !== undefined ? { baseChanges } : {}) };
   }
   /**
@@ -897,6 +1012,28 @@ async function restoreBranch(engine: Engine, github: GitHub, work: Work, owed: B
 }
 /** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
 export const permissionHoldMs = 30 * 60_000;
+/**
+ * Conditional-request cache size. One observation round reads roughly ten paths per open PR; a cache
+ * smaller than a round evicts every entry before its reuse, so no request earns a free 304.
+ */
+export const etagCacheEntries = 4096;
+/** Commit-pair ancestry answers kept; each is immutable, so the bound only limits memory. */
+export const ancestryEntries = 16384;
+/** Peer containment compares one observation keeps in flight. */
+export const peerContainmentConcurrency = 8;
+async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length); let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const index = next++; results[index] = await run(items[index]); }
+  }));
+  return results;
+}
+/**
+ * Seconds between observations. Only the merge-queue head needs one under 25 s old to merge; every
+ * other item is woken at once by a webhook naming it, so its timer is only a backstop.
+ */
+export const headObservationSeconds = 20;
+export const idleObservationSeconds = 300;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
 export async function processJob(engine: Engine, github: GitHub) {
@@ -992,7 +1129,10 @@ export async function processJob(engine: Engine, github: GitHub) {
     }
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn());
-    else await engine.store.finishJob(job.work_id, job.token);
+    else {
+      const head = work?.stage === 'merge' && queuePlacement(work, await engine.store.list(), Date.now())?.position === 1;
+      await engine.store.finishJob(job.work_id, job.token, undefined, false, head ? headObservationSeconds : idleObservationSeconds);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'GitHub reconciliation failed';
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];

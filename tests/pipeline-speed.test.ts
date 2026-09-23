@@ -264,7 +264,7 @@ test('integration:speed-auto-dispatch — one passing observation records the re
     assert.equal(item.autoDispatch!.review!.sha, H2); assert.ok(item.autoDispatch!.producers.every(request => request.sha === H2));
     assert.equal((await events(item, 'dispatch.cancelled')).length, 4);
     // Trusted evidence for every proof of a group satisfies its request; the master routes nothing.
-    for (const proof of ['unit:speed-scope-diff']) item = await engine.execute(producer, 'evidence', item.id, { proof, sha: H2, baseSha: B, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0 }, randomUUID());
+    for (const proof of ['unit:speed-scope-diff']) item = await engine.execute(producer, 'evidence', item.id, { proof, sha: H2, baseSha: B, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
     assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['integration', 'manual']);
     assert.match((await events(item, 'dispatch.satisfied')).at(-1)!.payload.details.resolution, /trusted passing evidence binds every proof: unit:speed-scope-diff \(proof-runner\)/);
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -296,6 +296,7 @@ test('integration:speed-reconcile-latency — a GitHub webhook delivery wakes th
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour', token=NULL, locked_until=NULL WHERE work_id=$1", [item.id]);
   const replayed = await deliver(delivery, payload);
   assert.equal(replayed.status, 202); assert.ok(Number((await job()).due_in_ms) > 3_000_000, 'a replayed delivery ID wakes nothing');
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour', token=NULL, locked_until=NULL WHERE work_id=$1", [item.id]);
   const own = await deliver(randomUUID(), { ...payload, check_run: { app: { id: github.config.appId } } });
   assert.deepEqual(await own.json(), { accepted: true, ignored: 'own check' });
   assert.equal((await deliver(randomUUID(), { ...payload, repository: { full_name: 'other/repo' } })).status, 403);
@@ -311,6 +312,15 @@ test('integration:speed-reconcile-latency — a GitHub webhook delivery wakes th
   await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [item.id]);
   const retried = (await store.takeJob())!; await store.finishJob(item.id, retried.token, undefined, true);
   const retry = Number((await job()).due_in_ms); assert.ok(retry <= 2_000, `a requested retry is due within 2 s, not ${retry} ms`);
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour', token=NULL, locked_until=NULL WHERE work_id=$1", [item.id]);
+  // A webhook wakes only the pull requests it names; a push to the base branch wakes every job.
+  await deliver(randomUUID(), { ...payload, pull_request: { number: item.submission!.pr + 1000 } });
+  assert.ok(Number((await job()).due_in_ms) > 3_000_000, 'a delivery about another pull request wakes nothing here');
+  await deliver(randomUUID(), { repository: { full_name: 'owner/project' }, check_run: { head_sha: 'e'.repeat(40), pull_requests: [{ number: item.submission!.pr }], app: { id: -1 } } });
+  assert.ok(Number((await job()).due_in_ms) <= 0, 'a check run linked to this pull request wakes it');
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id=$1", [item.id]);
+  await deliver(randomUUID(), { repository: { full_name: 'owner/project' }, ref: 'refs/heads/main', after: 'f'.repeat(40) });
+  assert.ok(Number((await job()).due_in_ms) <= 0, 'a push to the base branch wakes every job');
   // The server's own loop: a 2-second tick over the store's cadence, four jobs per tick.
   const main = await read('src/server/main.ts');
   const interval = Number(main.match(/\}, (\d+)\);\s*\n\s*http\.listen/)?.[1]);

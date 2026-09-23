@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
-import { admin, demand, proofSchema, Refusal, type Evidence, type EvidenceArtifact, type Principal, type Work } from './model.js';
+import { admin, attachedCriteria, demand, exerciseRefusal, proofExerciseSchema, proofSchema, Refusal, type Evidence, type EvidenceArtifact, type Principal, type Work } from './model.js';
 import { save, wakeJob } from './store.js';
 import { authorizedForEveryProof, authorizedForProof } from './proof-grants.js';
 import { Engine } from './engine.js';
@@ -97,6 +97,9 @@ const reportSchema = commandSchema.extend({
   artifacts: z.array(z.object({ name, digest, url: z.union([externalUrl, z.string().regex(/^graphyard-artifact:\/\/[^?#]+\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/)]) }).strict()).max(30),
   artifactState: z.enum(['verified', 'missing', 'upload-failed', 'expired']), executionSettled: z.boolean(),
   measurements: measurementsSchema.optional(),
+  // GY-135: the same scenario run against a tree with its criterion's behaviour removed. A pass
+  // without one that failed there is recorded as not exercising its criterion rather than as passing.
+  exercise: proofExerciseSchema.optional(),
 }).strict();
 type Report = z.infer<typeof reportSchema>;
 /** Stored artifact metadata. `state` is the retention state; bytes live in the row for the postgres backend and at `location` otherwise. */
@@ -570,11 +573,19 @@ export class Validation {
       if (data.measurements) a!.measurements = data.measurements;
       if (a!.settled) await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
       await this.persist(db, current);
-      const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: true, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution };
+      // GY-135: the collector lane mints trusted evidence too, so a pass here is held to the same
+      // rule as the evidence command: trusted only beside a stripped run that failed.
+      const all: Work[] = (await db.query('SELECT document FROM work_items')).rows.map(row => row.document as Work).map(x => x.id === w.id ? w : x);
+      const unexercised = result.passed ? exerciseRefusal(w, all, { proof: c.proof, result: 'pass', exercise: data.exercise }) : null;
+      const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: !unexercised, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution,
+        ...(data.exercise ? { exercise: data.exercise } : {}), ...(unexercised ? { unexercised } : {}) };
       w.evidence.push(evidence);
+      if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [w.id, actor.id, 'evidence.exercise.refused',
+        JSON.stringify({ details: { proof: c.proof, criteria: attachedCriteria(w, all, c.proof), behaviour: data.exercise?.behaviour ?? null, sha: c.sourceSha, requestId: r.id, attemptId: a!.id, reason: unexercised } })]);
       await appendAttribution(db, now, { workId: w.id, workKey: w.key, proof: c.proof, environmentId: c.environment.id, candidateId: c.id, requestId: r.id, attemptId: a!.id, kind: 'evidence-bound', dedupe: `evidence-bound:${evidence.id}`,
         details: { evidenceId: evidence.id, result: evidence.result, ...attribution, reason: `Evidence ${evidence.result}: bound to manifest, signature and target observations` } });
-      await this.changed(db, w, actor.id, 'result', now, { requestId: r.id, attemptId: a!.id, report: data, result }); return result;
+      await this.changed(db, w, actor.id, 'result', now, { requestId: r.id, attemptId: a!.id, report: data, result });
+      return unexercised ? { ...result, unexercised } : result;
     });
   }
   private artifactUrl(requestId: string, artifactId: string) {
