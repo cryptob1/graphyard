@@ -4,6 +4,7 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { sessionNameField, suffixedSessionName } from './session-name.js';
 
 export function repositoryFromRemote(remote: string) {
   const value = remote.trim();
@@ -254,7 +255,7 @@ export function availableRuntimes(searchPath: string | undefined = process.env.P
 export const proposedWorkerProfileSchema = z.object({
   name: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/),
   principal: z.string().trim().min(1).max(200),
-  agentName: z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+  agentName: sessionNameField,
   mode: z.literal('launch'),
   kind: z.enum(agentRuntimes),
   credentialFile: z.string().startsWith('/'),
@@ -304,7 +305,7 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
   const runtimes = (options.runtimes ?? []).filter(kind => (agentRuntimes as readonly string[]).includes(kind));
   const credentialDirectory = options.credentialDirectory ?? resolve(homedir(), '.config/graphyard/workers');
   const workers = runtimes.slice(0, 2).map((kind, index) => proposedWorkerProfileSchema.parse({
-    name: `${kind}-primary`, principal: `worker-${index + 1}`, agentName: `${repoSlug}-${kind}-${index + 1}`.slice(0, 100),
+    name: `${kind}-primary`, principal: `worker-${index + 1}`, agentName: suffixedSessionName(repoSlug, kind, String(index + 1)),
     mode: 'launch', kind, credentialFile: resolve(credentialDirectory, `${kind}-primary.token`), agentArgs: [], environment: {},
   }));
   return setupProposalSchema.parse({
