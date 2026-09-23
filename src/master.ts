@@ -3311,8 +3311,9 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
 
 /**
  * A worker session's own rules, written into its assigned worktree: it runs its item's commands,
- * pushes its assigned branch and opens the pull request without a keypress, and can never push
- * the base branch, force-push, delete a ref, rebase, merge, review, or read a credential.
+ * pushes its assigned branch and opens the pull request without a keypress, and is denied pushing
+ * the base branch, force-pushing, deleting a ref, rebasing, merging, reviewing and reading a
+ * credential, in every spelling a rule names; a spelling no rule names is unmatched, not denied.
  *
  * The one history rewrite it may make goes through `restore-branch GY-N EPOCH`, never a raw push:
  * the recovery of an ejected or contaminated tip resets the assigned branch to the item's reviewed
@@ -3337,27 +3338,39 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for the worker\'s own candidate.' },
     { rule: `Bash(git merge origin/${input.baseBranch})`, why: 'sync merges the base branch; the worker never rebases.' },
   ];
+  // Every rewrite, in each spelling a rule can name: `--force`, `--force-with-lease` (bare or
+  // `=REF:SHA`) and `--force-if-includes` alike, and the abbreviations git accepts for them. The
+  // lease push of the assigned branch is restore-branch's, which checks the ref itself; no rule may
+  // end in `:*` or ` *` where the bare prefix would match an allowed push, because Claude Code reads
+  // both as "this prefix, with or without more" (` :**` ends in neither). Each rule also has a twin
+  // for a push behind git's global options (`git -C DIR push`, `git -c KEY=VALUE push`).
+  const push: [string, string][] = [
+    ['*--force*', 'A raw force push, the lease form included, could rewrite any ref: a glob cannot limit it to the assigned branch. The one restoration push is restore-branch.'],
+    ['*--f*', 'Any abbreviation git accepts for --force, --force-with-lease or --force-if-includes.'],
+    ['-f*', 'Short form of a force push.'],
+    ['* -f*', 'Short form of a force push.'],
+    ['*-*f *', 'A force flag bundled with other short flags (-uf).'],
+    ['*-*f', 'A force flag bundled with other short flags, last on the line.'],
+    ['*+*', 'A leading + refspec is a force push.'],
+    ['*--mirror*', 'Mirroring rewrites every ref on the remote.'],
+    ['*--m*', 'An abbreviation of --mirror.'],
+    ['*--all*', 'The worker pushes its assigned branch, never every branch.'],
+    ['*--al*', 'An abbreviation of --all.'],
+    ['*--delete*', 'Deleting a remote ref is never part of an attempt.'],
+    ['*--de*', 'An abbreviation of --delete.'],
+    ['*--pru*', 'Pruning deletes every remote ref the local side lacks.'],
+    ['-d *', 'Short form of deleting a remote ref.'],
+    ['* -d *', 'Short form of deleting a remote ref.'],
+    ['*-*d *', 'A delete flag bundled with other short flags (-ud).'],
+    ['* :**', 'An empty source refspec deletes the ref it names, whatever the name.'],
+    [`*:${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
+    [`origin ${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
+    [`* ${input.baseBranch}`, 'The base branch moves only through the guarded merge.'],
+    [`* ${input.baseBranch} *`, 'The base branch moves only through the guarded merge.'],
+    [`*refs/heads/${input.baseBranch}*`, 'The base branch moves only through the guarded merge, in its full ref spelling too.'],
+  ];
   const deny: HarnessRule[] = [
-    // Every rewrite, in every spelling: `--force`, `--force-with-lease` (bare or `=REF:SHA`) and
-    // `--force-if-includes` alike. The lease push of the assigned branch is restore-branch's, which
-    // checks the ref itself; no rule may end in `:*` or ` *` where the bare prefix would match an
-    // allowed push, because Claude Code reads both as "this prefix, with or without more".
-    { rule: 'Bash(git push *--force*)', why: 'A raw force push, the lease form included, could rewrite any ref: a glob cannot limit it to the assigned branch. The one restoration push is restore-branch.' },
-    { rule: 'Bash(git push -f*)', why: 'Short form of a force push.' },
-    { rule: 'Bash(git push * -f*)', why: 'Short form of a force push.' },
-    { rule: 'Bash(git push *+*)', why: 'A leading + refspec is a force push.' },
-    { rule: 'Bash(git push *--mirror*)', why: 'Mirroring rewrites every ref on the remote.' },
-    { rule: 'Bash(git push *--all*)', why: 'The worker pushes its assigned branch, never every branch.' },
-    { rule: 'Bash(git push *--delete*)', why: 'Deleting a remote ref is never part of an attempt.' },
-    { rule: 'Bash(git push -d *)', why: 'Short form of deleting a remote ref.' },
-    { rule: 'Bash(git push * -d *)', why: 'Short form of deleting a remote ref.' },
-    { rule: 'Bash(git push * :*/*)', why: 'An empty source deletes the ref: every graphyard/… branch and every refs/… spelling.' },
-    { rule: 'Bash(git push * :*-*)', why: 'An empty source deletes the ref.' },
-    { rule: `Bash(git push *:${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
-    { rule: `Bash(git push origin ${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge.' },
-    { rule: `Bash(git push * ${input.baseBranch})`, why: 'The base branch moves only through the guarded merge.' },
-    { rule: `Bash(git push * ${input.baseBranch} *)`, why: 'The base branch moves only through the guarded merge.' },
-    { rule: `Bash(git push *refs/heads/${input.baseBranch}*)`, why: 'The base branch moves only through the guarded merge, in its full ref spelling too.' },
+    ...push.flatMap(([form, why]) => [{ rule: `Bash(git push ${form})`, why }, { rule: `Bash(git -* push ${form})`, why: `${why} Also behind git's global options.` }]),
     { rule: 'Bash(git rebase:*)', why: 'sync merges the base branch; a rebase would re-resolve files outside the planned files.' },
     { rule: 'Bash(gh pr merge:*)', why: 'Workers never merge; the control plane\'s merge gate decides.' },
     { rule: 'Bash(gh pr review:*)', why: 'Workers never review their own work.' },

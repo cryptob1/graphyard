@@ -48,6 +48,13 @@ test('unit:worker-may-force-with-lease-its-own-branch — the worker restores it
   for (const command of ['git push --mirror origin', 'git push --all origin', `git push origin --delete ${branch}`, `git push -d origin ${branch}`, `git push origin -d graphyard/gy-7-1`,
     `git push origin :${branch}`, 'git push origin :graphyard/gy-7-1', 'git push origin :refs/heads/release', 'git push origin :hot-fix'])
     assert.equal(decision(command), 'deny', command);
+  // The spellings git also accepts: abbreviated long options, bundled short flags, any empty-source
+  // name, pruning, and a push behind git's global options (-C, -c).
+  for (const command of ['git push origin :foo', 'git push --del origin foo', 'git push --de origin foo', 'git push --mirr origin', 'git push --m origin', 'git push --al origin',
+    `git push --fo origin ${branch}`, `git push --force-w origin ${branch}`, `git push -uf origin ${branch}`, `git push -fu origin ${branch}`, `git push origin ${branch} -uf`, `git push -ud origin ${branch}`,
+    "git push --pru origin 'refs/heads/*:refs/heads/*'", `git -C . push --force origin ${branch}`, `git -c k=v push --force origin ${branch}`, 'git -C . push origin :foo', 'git -C . push --del origin foo',
+    'git -C /tmp/x push origin main', `git -C . push -f origin ${branch}`])
+    assert.equal(decision(command), 'deny', command);
   // The base branch: denied in every form, its full ref spelling and a lease push included.
   for (const command of ['git push origin main', 'git push --force-with-lease origin main', 'git push --force-with-lease origin HEAD:main', 'git push origin HEAD:main', 'git push -u origin main',
     `git push origin ${branch} main`, 'git push origin refs/heads/main', 'git push origin HEAD:refs/heads/main', 'git push --force-with-lease origin refs/heads/main', 'git push origin :main'])
