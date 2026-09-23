@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import type { Principal, Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { approverSessionName } from '../src/master.js';
+import { approvalStep, approvalWatchSchema } from '../src/master-daemon.js';
 import { terminalDecisions, unansweredDecisions } from '../src/cli/decision-report.js';
 
 // GY-141: an approver's refusal is a recorded outcome, not a session that ended without
@@ -230,4 +231,26 @@ test('unit:unanswered-decisions-surfaced — a decision left at requested whose 
   assert.match(stall!.next, new RegExp(`graphyard master approver GY-7 ${decision}`));
   assert.ok(report.attentionItems.some(item => item.text.includes(`Decision ${declined} (release) was refused by approver-agent: Not justified`)));
   assert.equal(report.attentionItems.filter(item => item.text.includes(declined)).every(item => !item.text.includes('unanswered')), true);
+});
+
+test('a refusal settles the loop and the approver is told to record it — the launched approver declines with master refuse, never by stating a reason in its tab and stopping; the loop neither relaunches nor re-requests a refused decision', async () => {
+  const at = Date.parse('2026-09-23T15:00:00.000Z'), decision = randomUUID();
+  const session = approverSessionName({ key: 'GY-7' }, decision);
+  const watch = approvalWatchSchema.parse({ work: 'GY-7', action: 'rework', decision, agentName: session, requestedAt: new Date(at).toISOString(), launchedAt: new Date(at).toISOString(), launches: 1 });
+  const refused = { state: 'refused', outcome: 'Not justified', refusal: { approver: 'approver-agent', reason: 'Not justified' } };
+  // Whatever the session is doing, and however many launches or requests were spent, a refusal is
+  // the approver's judgement: settled for the loop, carrying who refused and why.
+  for (const sessions of [{ agents: [], available: true }, { agents: [{ name: session, agent_status: 'done' }], available: true }, { agents: [], available: false }]) {
+    const step = approvalStep(watch, refused, sessions, at + 20 * 60_000);
+    assert.deepEqual(step, { step: 'refused', detail: `rework decision ${decision} on GY-7 was refused by approver-agent: Not justified` });
+  }
+  assert.equal(approvalStep({ ...watch, launches: 3, requests: 3 }, refused, { agents: [], available: true }, at).step, 'refused');
+  // A decision the server failed or withdrew is still asked again; only a refusal is not.
+  assert.equal(approvalStep(watch, { state: 'failed' }, { agents: [], available: true }, at).step, 'rerequest');
+
+  const source = await readFile(fileURLToPath(new URL('../src/master.ts', import.meta.url)), 'utf8');
+  const launch = source.slice(source.indexOf('export async function launchApprover'), source.indexOf('export function verifiedContext'));
+  assert.match(launch, /master refuse \$\{work\.key\} \$\{decision\} "YOUR REASON"/);
+  assert.match(launch, /a decline is recorded, never expressed by exiting/);
+  assert.doesNotMatch(launch, /state the reason in this tab/);
 });

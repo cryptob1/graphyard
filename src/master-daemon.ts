@@ -647,16 +647,20 @@ export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxAppro
 export type ApprovalStep =
   | { step: 'wait'; detail: string }
   | { step: 'settled'; detail: string }
+  | { step: 'refused'; detail: string }
   | { step: 'rerequest'; detail: string }
   | { step: 'relaunch'; detail: string }
   | { step: 'exhausted'; detail: string };
-export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null } | null | undefined,
+export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null } | null | undefined,
   sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
   const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
   // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
   if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
   if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
   if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
+  // A refusal is the approver's considered judgement (GY-141), not a session to replace or a
+  // request to repeat: the server refuses the same request unchanged, and answering it is the master's.
+  if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
   if (decision.state !== 'requested' && decision.state !== 'approved')
     return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
@@ -1045,7 +1049,7 @@ export interface DaemonEffects {
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
    */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null; outcome?: string | null }[] }>;
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null; outcome?: string | null; refusal?: { approver: string; reason: string } | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -1537,9 +1541,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //     Automatic merging turned off is the fourth: the merge itself then waits for that approval.
   //     A request is not the end of it. The approver is a launched session like any other, so every
   //     cycle reads the decision back and looks at its session again (see `approvalStep`): a
-  //     finished session is closed, a dead, declining or hung one is replaced within a bound, a
-  //     decision the server settled some other way is requested again, and one no session will
-  //     judge is escalated and left standing on the silence measure.
+  //     finished session is closed, a dead, stalled or hung one is replaced within a bound, a
+  //     refused one is left to the master to answer, a decision the server settled some other way
+  //     is requested again, and one no session will judge is escalated and left standing on the
+  //     silence measure.
   const stamp = new Date(clock).toISOString();
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
@@ -1623,6 +1628,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       await closeApprover(item, watch, 'its decision is applied');
       watch.settledAt = stamp;
       await note(`${base}:settled`, item, 'decision', 'done', step.detail);
+      return;
+    }
+    if (step.step === 'refused') {
+      // Settled for the loop: no replacement session and no re-request. The refusal stands in
+      // `master status` until the master answers it with a request that cites it, or acts on it.
+      await closeApprover(item, watch, 'its decision is refused');
+      watch.settledAt = stamp;
+      await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }
     // Every other step replaces the session, so the one that ended goes first. While it cannot be

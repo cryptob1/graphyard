@@ -333,8 +333,11 @@ decision's id and says something the refused request did not — the same rule a
 refused reconciliation. `master status` lists it under `terminalDecisions` (`state: refused`, the
 reason, `refusedBy`), counts it in `counts.refusedDecisions` while it is the latest decision of its
 action, and raises it for the master: `Decision … was refused by APPROVER: REASON. Answer the
-refusal: …`, whose `next` is a request citing it — or acting on the refusal instead. The loop's own
-re-request of an unchanged decision is refused the same way, so a refusal is never silently retried.
+refusal: …`, whose `next` is a request citing it — or acting on the refusal instead. The durable
+loop never re-requests a refused decision — it settles its watch and leaves the answer to the master
+— and any unchanged re-request is refused the same way, so a refusal is never silently retried. The
+approver session's own request names `master refuse` for a decline; it is never told to state its
+reason in its tab and stop.
 
 A decision still `requested` whose approver session is not running — gone from Herdr, or `done` —
 with no outcome recorded is **unanswered**: a stall, not a refusal. `master status` lists each under
@@ -351,7 +354,7 @@ control plane and the session back from Herdr:
 | What it sees | What it does |
 | --- | --- |
 | The decision is `applied` | Closes the approver's finished tab and retires the watch once the item has moved on |
-| The decision ended `refused` | The approver judged it and declined, with its reason; `master status` names the refusal and the next step is the master's: answer it (see [refused and unanswered decisions](#refused-and-unanswered-decisions)) |
+| The decision ended `refused` | Closes the approver's tab and settles the watch: no replacement session and no re-request. Escalates once with the approver's reason; `master status` names the refusal and the next step is the master's: answer it (see [refused and unanswered decisions](#refused-and-unanswered-decisions)) |
 | Still `requested` (or `approved` but not yet applied) and the session is working, inside ten minutes | Waits |
 | The session is gone, ended `idle`/`done`/`blocked` without approving or refusing — a stall, never a decline — or has worked past ten minutes | Closes it and launches a replacement — at most three sessions per decision |
 | The decision ended `failed`, `stale` or `withdrawn`, or the server no longer holds it, and the item still needs it | Requests it again — at most three requests per binding, on the usual widening retry interval |
