@@ -35,9 +35,10 @@ export function formatAge(startedAt: string | number, now: number): string {
  * threshold (GY-108), and the only place it is written. Every view reads its verdict from
  * `statusDuration`, so no card, column or drawer carries a number of its own.
  *
- * Thirty minutes sits between the loop's own budgets — the five-minute idle-but-actionable
- * bound and the thirty-minute p50 submit-to-merge target this repository measures itself
- * against — so an item over it has stopped moving by the pipeline's own standard.
+ * Thirty minutes is past the loop's twenty-minute idle-but-actionable bound
+ * (`silenceBudgetMs`) and equal to the thirty-minute p50 submit-to-merge target this
+ * repository measures itself against, so an item over it has stopped moving by the
+ * pipeline's own standard.
  */
 export const OVERDUE_MINUTES = 30;
 
