@@ -145,11 +145,12 @@ test('unit:auto-dispatch-binding — a verdict or trusted evidence satisfies the
     [{ gates: [{ name: 'build', passed: false, reasons: ['Candidate changes 1 file outside its planned files'] }] }, /build gate refuses: Candidate changes 1 file/], [{ observation: null }, /not been independently observed/],
   ];
   for (const [overrides, pattern] of cases) {
-    const fresh = work({ evidence: [evidence('unit:auto-dispatch-binding'), evidence('integration:auto-dispatch-review', { id: 'e2' })] }); reconcileAutoDispatch(fresh, [fresh], new Date(clock));
+    // A live review and live producers at once (see requestedWork): ineligibility cancels every one.
+    const fresh = requestedWork();
     Object.assign(fresh, overrides);
     const transitions = reconcileAutoDispatch(fresh, [fresh], new Date(clock + 1000));
     assert.match(dispatchIneligibility(fresh)!, pattern);
-    assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.cancelled'], pattern.source);
+    assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.cancelled', 'dispatch.cancelled', 'dispatch.cancelled'], pattern.source);
     for (const transition of transitions) assert.match(transition.request.resolution!, pattern);
     assert.equal(live(fresh).length, 0);
   }
@@ -249,12 +250,13 @@ test('integration:auto-dispatch-review — the control plane records the review 
   const satisfied = await events(item, 'dispatch.satisfied');
   assert.equal(satisfied.length, 5); assert.match(satisfied.at(-1)!.payload.details.resolution, /approved by graphyard-reviewer\[bot\]/);
   assert.ok(item.gates.find(gate => gate.name === 'review')!.passed);
-  // A new proof group requested by the operator's revision below is produced before anything else.
-  item = await reload(item);
+  // GitHub dismisses the approval: the proven head is asked for a review again, so a request is live.
+  item = await engine.observe(item.id, item.revision, observed(item, { sha: H2, baseSha: B }, { reviews: [{ id: 11, reviewer: 'graphyard-reviewer[bot]', sha: H2, state: 'DISMISSED' }] }));
+  assert.equal(item.autoDispatch!.review!.sha, H2);
   // Operator rework cancels what is live; the resubmitted head is requested afresh.
   item = await engine.execute(operator, 'rework', item.id, { reason: 'Reproduce the finding', previousWorkerStopped: true }, randomUUID());
   assert.equal(item.autoDispatch!.producers.length, 0); assert.equal(item.autoDispatch!.review, null);
-  assert.match(dispatchIneligibility(item)!, /rework was requested/, 'nothing is requested for a head under rework');
+  assert.match((await events(item, 'dispatch.cancelled')).at(-1)!.payload.details.resolution, /rework was requested/);
   // A requirements revision that marks the manual proof producer-runnable is carried on the record.
   item = await reload(item);
   item = await engine.execute(operator, 'requirements', item.id, { expectedPolicyRevision: item.policyRevision, reason: 'Status proof runs under a producer', criteria: item.criteria.map(({ id, text, proofs }) => ({ id, text, proofs })), dependencies: [], plannedFiles: item.plannedFiles, exclusiveResources: [], producerProofs: ['manual:auto-dispatch-status'] }, randomUUID());
