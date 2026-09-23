@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
-import { agentOwner, agentToken, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
+import { agentOwner, agentToken, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
 import { elapsed } from '../model/sessions.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type CycleMetrics, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
+import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
@@ -16,12 +16,14 @@ import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
+import { nameOrphanSupervisors } from './orphan-supervisors.js';
 import { contextOverflows } from '../model/escalation-context.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
+export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
 
 /**
  * One attention item per open worker scope request whose epoch still holds the lease: addressed
@@ -62,8 +64,6 @@ export function approverLaunchAttention(daemon: {
   });
 }
 
-type MasterStatus = ReturnType<typeof buildMasterStatus>;
-
 /** Who answers a request whose session settled unanswered, and with which command. */
 export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
   return request.kind === 'review'
@@ -86,54 +86,6 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
     return { subject: row.key, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
       ...unansweredRequestOwner(row.key, request) };
   }));
-}
-
-/**
- * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
- * coordination cycle does it on its own; this is how a master runs that cycle once when the loop
- * is stopped, which is the state the item is usually noticed in.
- */
-export const supervisorReclaimCommand = 'graphyard master run --once';
-
-/**
- * One attention line for an assignment whose watch supervisor has outlived its session.
- *
- * `Assigned worker session is done` reads as an item that finished, which is exactly what it is
- * not: the session is gone, the lease is still advancing, and the item cannot be dispatched to
- * anybody. This names the supervisor holding it, the process and scope it is held by, and the
- * command that reclaims it — an agent command, never a hand search for a pid.
- */
-export function orphanSupervisorAttention(orphan: OrphanSupervisor, host: string | null): AttentionItem {
-  return { subject: orphan.key,
-    text: `Lease epoch ${orphan.epoch} of ${orphan.key} is still advancing (to ${orphan.leaseExpiresAt}) while Herdr no longer reports session ${orphan.agentName}: an orphaned watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) holds the item for a worker that cannot act`,
-    ...agentOwner('master', `${supervisorReclaimCommand} stops that supervisor through its containment scope; on ${host ?? 'its registered host'}, systemctl --user kill --kill-whom=all --signal=SIGTERM ${orphan.scope.unit} does the same by hand`) };
-}
-
-/**
- * Rewrite the session attention of every assignment held by an orphaned supervisor, in the row
- * and in the attention list alike, so both say the same thing. A Herdr that could not be read
- * reports no sessions, and every live assignment would then look orphaned, so an unavailable
- * runtime changes nothing.
- */
-export function nameOrphanSupervisors(status: MasterStatus, work: Work[], profiles: WorkerProfile[], runtime: { agents: HerdrAgent[]; available: boolean }, now: number): MasterStatus {
-  if (!runtime.available) return status;
-  const orphans = orphanedSupervisors(work, profiles, runtime.agents, now);
-  if (!orphans.length) return status;
-  const rewritten = new Map<string, { previous: string | null; item: AttentionItem }>();
-  const rows = status.work.map(row => {
-    const orphan = orphans.find(entry => entry.key === row.key);
-    if (!orphan) return row;
-    const item = orphanSupervisorAttention(orphan, work.find(candidate => candidate.id === orphan.id)?.workspaces.find(space => space.epoch === orphan.epoch)?.host ?? null);
-    rewritten.set(row.key, { previous: row.attention, item });
-    const { subject, text, ...owner } = item;
-    return { ...row, attention: text, attentionOwner: owner };
-  });
-  const attentionItems = status.attentionItems.map(entry => {
-    const rewrite = rewritten.get(entry.subject);
-    return rewrite && entry.text === rewrite.previous ? rewrite.item : entry;
-  });
-  for (const [key, rewrite] of rewritten) if (!attentionItems.some(entry => entry.subject === key && entry.text === rewrite.item.text)) attentionItems.push(rewrite.item);
-  return { ...status, work: rows, attentionItems };
 }
 
 /**
