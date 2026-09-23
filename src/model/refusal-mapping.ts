@@ -33,6 +33,8 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'build', match: /^Pull request has not been independently observed$/, kind: 'resync' },
   { gate: 'build', match: /has not been compared against the base branch tip/, kind: 'resync' },
   { gate: 'build', match: /^(Candidate changes|Out-of-scope regression)/, kind: 'request-rework' },
+  // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
+  { gate: 'build', match: /the head returns to its worker before review$/, kind: 'request-rework' },
   // The same judgment passed on the commit the candidate would actually land on: the base has
   // gained work this head would revert. Only a new head answers it, exactly as for the diff
   // against the bound base — without this rule the refusal fell through to the catch-all and
@@ -86,10 +88,13 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
  * reviews a session answers — so this mapping is exhaustive over `ReviewState` and the only state
  * it leaves to `request-review` is the one a launched reviewer can actually answer.
  */
-export function reviewStandstill(work: Work): { kind: NextActionKind; reason: string } | null {
+export function reviewStandstill(work: Work, all: Work[] = [work], now = new Date()): { kind: NextActionKind; reason: string } | null {
   if (!work.candidate || !work.observation) return null;
-  const need = reviewNeed(work);
+  const need = reviewNeed(work, all, now);
   switch (need.state) {
+    // Mechanical proofs precede review (GY-115): producers first; a failed proof owes a new head.
+    case 'proofs-pending': return { kind: 'dispatch', reason: need.reason };
+    case 'proof-failed': return { kind: 'request-rework', reason: need.reason };
     // Changes requested on this exact head — as a GitHub review, or as the verdict an agent
     // reviewer records — means the item needs a new commit, which is a judgment's to make.
     case 'changes-requested': return { kind: 'request-rework', reason: need.reason };
@@ -113,7 +118,7 @@ export function reviewStandstill(work: Work): { kind: NextActionKind; reason: st
  * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue, and a
  * review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
-export function refusalAction(work: Work, gate: string, refusal: string): NextActionKind {
+export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
   if (gate === 'test' && /^Required CI check (.+) has not passed on the current candidate$/.test(refusal)) {
     const name = refusal.match(/^Required CI check (.+) has not passed on the current candidate$/)![1];
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
@@ -121,7 +126,7 @@ export function refusalAction(work: Work, gate: string, refusal: string): NextAc
     return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) ? 'request-rework' : 'resync';
   }
   if (gate === 'review') {
-    const standstill = reviewStandstill(work);
+    const standstill = reviewStandstill(work, all, now);
     if (standstill) return standstill.kind;
   }
   if (gate === 'merge') {

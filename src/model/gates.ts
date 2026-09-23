@@ -9,6 +9,7 @@ import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerPro
 import { carriedApproval, evidenceBindsCandidate } from './carry.js';
 import { placeInQueue } from './queue.js';
 import { regressionRefusals } from '../regression-guard.js';
+import { mechanicalFailure, mechanicalVerdicts } from './mechanical-proofs.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
@@ -25,8 +26,13 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   // A base the control plane cannot merge in cleanly is the other thing only the worker can fix:
   // the conflict is named here, the attempt returns to build, and nothing carries across it.
   const conflict = baseRefreshConflict(work);
+  // Mechanical verification precedes review (GY-115): a unit or integration proof that failed on
+  // this head returns it to its worker here, naming the criterion, so no review request stands for
+  // it and no reviewer session is spent on what a test already answered.
+  const mechanical = current && work.submission && !work.reworkRequested
+    ? mechanicalVerdicts(work, all, now).filter(verdict => verdict.outcome === 'failed').map(verdict => mechanicalFailure(verdict, candidate!.sha)) : [];
   add('build', [...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []), ...(!candidate ? ['Pull request has not been independently observed'] : []), ...(!work.workspaces.length ? ['No workspace registered'] : []),
-    ...(conflict ? [conflict] : []), ...(current ? regressionRefusals(work, obs!, all) : [])]);
+    ...(conflict ? [conflict] : []), ...(current ? regressionRefusals(work, obs!, all) : []), ...mechanical]);
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
   const agentReview = current ? obs!.agentReview : undefined;

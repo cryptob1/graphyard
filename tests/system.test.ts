@@ -741,7 +741,10 @@ test('assertions, skipped suites, zero executed, stale base, stale head, and sta
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w)); assert.equal(w.stage, 'acceptance');
   w = await engine.execute(worker, 'evidence', w.id, proof(), randomUUID()); assert.equal(w.stage, 'acceptance');
   for (const override of [{ skipped: 1 }, { executed: 0 }, { sha: 'c'.repeat(40) }, { baseSha: 'd'.repeat(40) }, { policyRevision: 2 }, { result: 'fail' }]) {
-    w = await engine.execute(producer, 'evidence', w.id, { ...proof(), ...override }, randomUUID()); assert.equal(w.stage, 'acceptance');
+    // An incomplete or failed run on the head returns it to its worker before review (GY-115), and
+    // a record bound to another head, base or policy never replaces it: the stage stays at build.
+    w = await engine.execute(producer, 'evidence', w.id, { ...proof(), ...override }, randomUUID()); assert.equal(w.stage, 'build');
+    assert.ok(!w.gates.find(g => g.name === 'acceptance')!.passed);
   }
   w = await proven(w); assert.equal(w.stage, 'merge');
   const obs = observation(w); obs.candidate.sha = 'f'.repeat(40); obs.reviews[0].sha = obs.candidate.sha;
@@ -750,7 +753,8 @@ test('assertions, skipped suites, zero executed, stale base, stale head, and sta
 test('latest failed evidence supersedes previous passing evidence', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await proven(w); assert.equal(w.stage, 'merge');
-  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID()); assert.equal(w.stage, 'acceptance');
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID()); assert.equal(w.stage, 'build');
+  assert.match(w.gates.find(g => g.name === 'build')!.reasons[0], /integration:claim-safety failed on .* the head returns to its worker before review$/);
 });
 test('legacy evidence URL remains valid and typed external artifacts do not change trust', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
@@ -1170,7 +1174,7 @@ test('integration publication discards a passing snapshot superseded by failed e
   await processJob(engine, adapter);
   assert.equal(calls, 2); assert.equal(published.length, 1);
   assert.equal(published[0].passing, false); assert.match(published[0].forced!, /fresh verification/);
-  assert.equal((await store.list()).find(x => x.id === w.id)!.stage, 'acceptance');
+  assert.equal((await store.list()).find(x => x.id === w.id)!.stage, 'build');
 });
 
 test('protected acceptance harness exercises five contracts against the real HTTP server and Postgres', async () => {
@@ -1328,6 +1332,8 @@ test('draft and closed submissions wait normally and dispatch after becoming rea
   for (const initial of [{prState:'open' as const,draft:true},{prState:'closed' as const,draft:false}]) {
     let w = await submitted();
     w = await engine.execute(operator,'reviewpolicy',w.id,{provider:'codex',expectedPolicyRevision:1,reason:'Use agent review'},randomUUID());
+    // Review follows the head's mechanical proofs (GY-115), so they pass first.
+    w = await engine.execute(producer,'evidence',w.id,{...proof(),policyRevision:w.policyRevision},randomUUID());
     let state = initial, requests = 0;
     const adapter = {
       observe: async (work: Work) => ({...observation(work),...state,mergeable:state.prState==='open'&&!state.draft}),
@@ -1823,6 +1829,7 @@ test('provider exhaustion fails over to the next profile and records it in histo
 
 test('reconciliation dispatches, fails over, and stops without approving when reviewers are exhausted', async () => {
   let w = await agentReviewed();
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), policyRevision: w.policyRevision }, randomUUID());
   const dispatched: string[] = []; let exhaust: string | null = null; let publications = 0;
   const adapter = {
     reviewerAppFor: (profile: any) => profile && reviewerApps.find(app => app.id === profile.reviewerApp),
@@ -1946,6 +1953,7 @@ test('a job whose observation needs a missing permission is held before any GitH
   await store.releaseHeldJobs();
   // A Codex policy needs Pull requests: write to dispatch; without it the request is held, the observation is not.
   w = await engine.execute(operator, 'reviewpolicy', w.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Adopt Codex review' }, randomUUID());
+  w = await engine.execute(producer, 'evidence', w.id, { ...proof(), policyRevision: w.policyRevision }, randomUUID());
   await onlyJob(w);
   let requests = 0, publications = 0;
   const dispatcher = {

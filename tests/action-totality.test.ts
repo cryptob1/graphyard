@@ -97,15 +97,18 @@ test('integration:no-failing-gate-without-action — an item whose review gate r
     const result = evaluate(probe, [...all, probe], now, [CI_APP]);
     return { ...probe, stage: result.stage, gates: result.gates, violations: result.violations, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection, queueHistory: result.queueHistory };
   };
+  // The head's mechanical proofs have passed: review follows them (GY-115), so the provider states
+  // below are the ones a proven head reaches.
+  const provenHead = [{ id: randomUUID(), proof: PROOF, sha: head, baseSha: base, policyRevision: item.policyRevision, producer: 'ci-runner', trusted: true, result: 'pass' as const, executed: 3, skipped: 0, at: now.toISOString() }];
   const states: { name: string; work: Work; kind: string }[] = [
     { name: 'a reviewer requested changes on exactly this head', kind: 'request-rework',
       work: graded({ ...item, observation: { ...item.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } } as Work) },
     { name: 'the head does not contain the base tip, so any approval would be dismissed', kind: 'resync',
       work: graded({ ...item, observation: { ...item.observation!, baseTipContained: false } } as Work) },
     { name: 'the control plane dispatches this provider through its own observation job', kind: 'resync',
-      work: graded({ ...item, policy: { ...item.policy, reviewProvider: 'codex' } } as Work) },
+      work: graded({ ...item, evidence: provenHead, policy: { ...item.policy, reviewProvider: 'codex' } } as Work) },
     { name: 'every configured reviewer profile is exhausted', kind: 'escalate',
-      work: graded({ ...item, policy: { ...item.policy, reviewProvider: 'agent', reviewerProfiles: profiles },
+      work: graded({ ...item, evidence: provenHead, policy: { ...item.policy, reviewProvider: 'agent', reviewerProfiles: profiles },
         reviewFailovers: [{ profile: 'reviewer-a', reviewerApp: 'app-a', runtime: 'claude', exhaustion: 'usage-limit', reason: 'the account is out of quota', at: now.toISOString(), sha: head, baseSha: base, policyRevision: item.policyRevision, requestCommentId: 7, nextProfile: null }] } as Work) },
   ];
   for (const state of states) {
@@ -191,6 +194,8 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'diff never compared', work: { ...unproven, observation: { ...unproven.observation!, scopeFiles: undefined } } as Work },
     { name: 'out of scope against the bound base', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [scopeFile] } } as Work },
     { name: 'would revert work on the commit it lands on', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile] } } } as Work },
+    // A unit or integration proof that failed on the head returns it to its worker before review (GY-115).
+    { name: 'mechanical proof failed', work: { ...unproven, evidence: [{ ...proven.evidence[0], id: randomUUID(), result: 'fail' as const }] } as Work },
     { name: 'no approval', work: { ...unproven, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'requirement-review baseline', work: { ...unproven, formalReviewResetRequired: true, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'changes requested', work: { ...unproven, observation: { ...unproven.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } } as Work },

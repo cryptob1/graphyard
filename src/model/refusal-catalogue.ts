@@ -52,21 +52,25 @@ export const gateRefusalCatalogue: RefusalShape[] = [
     example: 'Landing the candidate on cccccccccccc, the commit it would merge onto, would revert 2 files outside its planned files; run graphyard sync GY-1, restore each file as its owner shipped it, and push again' },
   { gate: 'build', id: 'landing-file', match: /^Landing regression: /, kinds: ['request-rework'],
     example: 'Landing regression: src/a.ts: deleted; that commit still holds it (owned by GY-A, ahead of it and not yet landed)' },
+  // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
+  { gate: 'build', id: 'mechanical-proof-failed', match: /the head returns to its worker before review$/, kinds: ['request-rework'],
+    example: 'AC-1: integration:claim failed on aaaaaaaaaaaa (trusted evidence from producer-a); the head returns to its worker before review' },
   // review — one sentence per provider, all of them meaning "no verdict binds this head"; which
-  // action that needs is decided by `reviewStandstill` from the item's own record, not the text.
+  // action that needs is decided by `reviewStandstill` from the item's own record, not the text
+  // (a head whose mechanical proofs have not passed yet is the producers' dispatch, GY-115).
   { gate: 'review', id: 'changes-requested', match: /^Outstanding change requests must be resolved through a new review$/, kinds: ['request-rework'],
     example: 'Outstanding change requests must be resolved through a new review' },
-  { gate: 'review', id: 'github-approval', match: /^Independent approval of the current commit is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate'],
+  { gate: 'review', id: 'github-approval', match: /^Independent approval of the current commit is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'Independent approval of the current commit is required' },
-  { gate: 'review', id: 'github-reset', match: /^A new independent GitHub approval after the requirement-review baseline is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate'],
+  { gate: 'review', id: 'github-reset', match: /^A new independent GitHub approval after the requirement-review baseline is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'A new independent GitHub approval after the requirement-review baseline is required' },
-  { gate: 'review', id: 'codex', match: /^Verified clean Codex review of the current commit is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate'],
+  { gate: 'review', id: 'codex', match: /^Verified clean Codex review of the current commit is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'Verified clean Codex review of the current commit is required' },
-  { gate: 'review', id: 'agent-profile', match: /^Verified approval from reviewer profile .+ is required for the current commit$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate'],
+  { gate: 'review', id: 'agent-profile', match: /^Verified approval from reviewer profile .+ is required for the current commit$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'Verified approval from reviewer profile reviewer-a is required for the current commit' },
-  { gate: 'review', id: 'profiles-exhausted', match: /^Every configured reviewer profile is exhausted for this candidate/, kinds: ['request-review', 'request-rework', 'resync', 'escalate'],
+  { gate: 'review', id: 'profiles-exhausted', match: /^Every configured reviewer profile is exhausted for this candidate/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider' },
-  { gate: 'review', id: 'provider-reason', match: /.*/, example: 'Pull request is draft; mark it ready to request code review', kinds: ['request-review', 'request-rework', 'resync', 'escalate'], free: true },
+  { gate: 'review', id: 'provider-reason', match: /.*/, example: 'Pull request is draft; mark it ready to request code review', kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'], free: true },
   // test
   { gate: 'test', id: 'check-not-passed', match: /^Required CI check .+ has not passed on the current candidate$/, kinds: ['resync', 'request-rework'],
     example: 'Required CI check test has not passed on the current candidate' },

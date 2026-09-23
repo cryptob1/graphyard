@@ -164,7 +164,8 @@ test('integration:reviewer-posts-autonomously — the launch grants the post as 
   const { root, cleanup } = await boundMaster();
   try {
     const config = await loadMasterConfig(root);
-    const item = work();
+    // GY-115: the review request follows the head's mechanical proofs, so the head is proven first.
+    const item = work({ evidence: [{ id: 'ev-1', proof: 'integration:review-ledger-reconcile', sha: H, baseSha: B, policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 2, skipped: 0, at: new Date().toISOString() }] });
     reconcileAutoDispatch(item, [item], new Date());
     const request = item.autoDispatch!.review!;
     const calls: string[][] = [];

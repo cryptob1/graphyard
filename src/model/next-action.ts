@@ -203,10 +203,11 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     // An unfinished dependency is the dependency's dispatch, not this item's; nothing waits here.
     const dependency = failing.name === 'ready' ? refusal.match(/^Dependency (.+) is unfinished$/) : null;
     if (dependency) return waits({ kind: 'dependency', on: dependency[1], detail: `${key} waits on ${dependency[1]}: ${refusal}` }, failing.name, refusal);
-    const kind = refusalAction(work, failing.name, refusal);
+    const kind = refusalAction(work, failing.name, refusal, all, now);
     const binding = `${failing.name}:${work.policyRevision}:${short(work.candidate?.sha)}:${short(work.candidate?.baseSha)}:${refusal}`;
     if (kind === 'dispatch') {
-      if (failing.name === 'acceptance') {
+      // A review refusal is a dispatch only while the head's mechanical proofs have not run (GY-115).
+      if (failing.name === 'acceptance' || failing.name === 'review') {
         const inputs = proofInputs(work, all, now);
         // Every unproven proof is a manual one the operator holds: the control plane cannot
         // dispatch it, and saying so is an escalation rather than a dispatch nobody can run.
@@ -219,14 +220,14 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     // A review refusal the reviewer's own reading already answered says "approval is required"
     // while the item is actually waiting for a new head or a base refresh; the reason and the
     // detail name what it is waiting for rather than the refusal that classified it.
-    const standstill = failing.name === 'review' ? reviewStandstill(work) : null;
+    const standstill = failing.name === 'review' ? reviewStandstill(work, all, now) : null;
     const detail = standstill?.reason ?? refusal;
     if (kind === 'request-review') {
       // Nothing may be asked of a head the control plane has not observed as a live candidate;
       // reviewNeed reads that observation, so ineligibility is decided before it is consulted.
       const ineligible = dispatchIneligibility(work);
       if (ineligible) return make('resync', `${key} cannot be reviewed yet: ${ineligible}`, resyncInputs(work), binding, failing.name, refusal);
-      const need = reviewNeed(work);
+      const need = reviewNeed(work, all, now);
       // The last guard on the invariant this item exists to hold: a review request is opened only
       // while `needed`, so asking for a reviewer when it is false would hand an executor a row
       // nothing can settle. `reviewStandstill` names an action for every such state today; a state

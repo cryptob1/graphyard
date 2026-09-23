@@ -88,8 +88,9 @@ async function submittedAndProven(work: Work, worker: Principal, extra: Partial<
   const candidate = { sha: sha40(`head:${work.id}:${work.epoch}`), baseSha: sha40('base') };
   let current = await ok(worker, 'POST', `work/${work.id}/submit`, { epoch: work.epoch, pr: ++pullRequest }) as Work;
   current = await engine.observe(current.id, current.revision, seen(current, candidate, extra));
-  if (extra.reviews) return { work: current, candidate };
   await ok(producer, 'POST', `work/${work.id}/evidence`, { proof: 'unit:wait', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: current.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } });
+  // A head observed without a review is proven and left there: its review request follows the proof (GY-115).
+  if (extra.reviews) return { work: await reload(work.id), candidate };
   // The control plane's own reconciliation job: it observes the head again and publishes the merge
   // queue's tip for it, which for a head that already contains its predicted base is the head itself.
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");

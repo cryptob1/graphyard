@@ -2,8 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Work } from './work.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
-import { currentEvidence } from './evidence.js';
-import { requiredProofs } from './bootstrap.js';
+import { automatableOutcomes, mechanicalHold } from './mechanical-proofs.js';
 
 /**
  * Automatic dispatch at submit.
@@ -48,10 +47,10 @@ export type DispatchEvent = 'dispatch.requested' | 'dispatch.satisfied' | 'dispa
 export interface DispatchTransition { event: DispatchEvent; request: DispatchRequest }
 export const dispatchHistoryLimit = 50;
 
-/** A proof a launched producer session can run: every unit and integration proof, and a manual proof the item marks producer-runnable. */
-export const automatableProof = (work: Pick<Work, 'producerProofs'>, proof: string) =>
-  /^(unit|integration):/.test(proof) || proof.startsWith('manual:') && (work.producerProofs ?? []).includes(proof);
-export const producerGroupOf = (proof: string): ProducerGroup => proof.slice(0, proof.indexOf(':')) as ProducerGroup;
+// Which proofs a machine settles and what the head's evidence says of them live in a module the
+// browser bundle can load (the gates read them); re-exported here for every existing reader.
+export { automatableOutcomes, automatableProof, mechanicalFailure, mechanicalHold, mechanicalProof, mechanicalVerdicts, producerGroupOf, type MechanicalVerdict, type ProofOutcome } from './mechanical-proofs.js';
+
 
 const short = (sha: string) => sha.slice(0, 12);
 const binds = (request: Pick<DispatchRequest, 'sha' | 'baseSha' | 'policyRevision'>, work: Work) =>
@@ -92,8 +91,8 @@ export function dispatchIneligibility(work: Work): string | null {
  * three that cannot be answered by a launched reviewer say so in their own name.
  */
 export type ReviewState = 'required' | 'not-required' | 'approved' | 'carried' | 'changes-requested'
-  | 'base-not-contained' | 'provider-dispatched' | 'provider-exhausted';
-export function reviewNeed(work: Work): { needed: boolean; reason: string; state: ReviewState } {
+  | 'base-not-contained' | 'provider-dispatched' | 'provider-exhausted' | 'proofs-pending' | 'proof-failed';
+export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): { needed: boolean; reason: string; state: ReviewState } {
   if (!work.policy.review) return { needed: false, state: 'not-required', reason: 'the policy requires no independent review' };
   const provider = reviewProviderOf(work.policy);
   const approval = exactApproval(work);
@@ -109,6 +108,11 @@ export function reviewNeed(work: Work): { needed: boolean; reason: string; state
   if (verdict?.verdict === 'changes-requested' && verdict.provider === provider && verdict.sha === candidate.sha)
     return { needed: false, state: 'changes-requested', reason: `${verdict.profile ?? provider} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
   if (observation.baseTipContained === false) return { needed: false, state: 'base-not-contained', reason: `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')}; a review of it would be dismissed when GitHub recomputes the merge base` };
+  // Mechanical verification precedes judgment, for every provider: no reviewer is asked about a
+  // head whose unit and integration proofs have not run, and a head that fails one goes back to
+  // its worker (the build gate names the criterion) instead of consuming a reviewer session.
+  const held = mechanicalHold(work, all, now);
+  if (held) return held;
   // No reviewer identity is left to ask: the roster is spent for this candidate, and adding
   // capacity or selecting another provider is the operator's judgment, not a step anyone runs.
   if (provider === 'agent' && !reviewerProfileFor(work))
@@ -129,16 +133,6 @@ export const liveDispatchHandleIds = (work: Work): string[] =>
   [work.autoDispatch?.review ?? null, ...(work.autoDispatch?.producers ?? [])]
     .filter((request): request is DispatchRequest => !!request && request.state === 'requested')
     .map(request => request.id);
-
-export type ProofOutcome = 'proven' | 'unproven' | 'failed';
-/** Every automatable required proof with what the trusted evidence bound to this head says about it. */
-export function automatableOutcomes(work: Work, all: Work[], now: Date): { proof: string; group: ProducerGroup; outcome: ProofOutcome; producer?: string }[] {
-  return requiredProofs(work, all).filter(proof => automatableProof(work, proof)).map(proof => {
-    const evidence = currentEvidence(work, proof, now);
-    const outcome: ProofOutcome = !evidence ? 'unproven' : evidence.result === 'pass' && evidence.executed > 0 && evidence.skipped === 0 ? 'proven' : 'failed';
-    return { proof, group: producerGroupOf(proof), outcome, ...(evidence ? { producer: evidence.producer } : {}) };
-  });
-}
 
 const requestId = (parts: (string | number)[]) => createHash('sha256').update(['dispatch', ...parts].join('\0')).digest('hex').slice(0, 32);
 
@@ -176,8 +170,10 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     const candidate = work.candidate!;
     // Review: one live request per head, resolved by the verdict that lands on it.
     if (state.review && !binds(state.review, work)) { resolve(state.review, 'cancelled', staleReason(state.review)); state.review = null; }
-    const need = reviewNeed(work);
-    if (state.review && !need.needed) { resolve(state.review, 'satisfied', need.reason); state.review = null; }
+    const need = reviewNeed(work, all, now);
+    // A standing request over a head whose mechanical proofs are not all passing is withdrawn, not
+    // answered: nothing reviewed it. (A request raised before GY-115 is the only way to hold one.)
+    if (state.review && !need.needed) { resolve(state.review, need.state === 'proofs-pending' || need.state === 'proof-failed' ? 'cancelled' : 'satisfied', need.reason); state.review = null; }
     if (!state.review && need.needed) state.review = open({ kind: 'review', provider: 'github', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: need.reason });
     // Producers: one live request per proof group with something left to prove. A head whose
     // trusted evidence already failed is not asked for again; the master routes that finding.

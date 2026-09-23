@@ -57,6 +57,13 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
     lease: null, workspaces: [{ host: 'h', path: `/w/gy-${200 + n}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
   reconcileAutoDispatch(item, [item], now);
+  // Since GY-115 the review request follows the head's mechanical proofs, so reconciliation alone no
+  // longer raises it beside the producer requests. The dispatcher's slots do not care why a request
+  // stands: the review request is the one a proven twin of this head raises.
+  const twin = structuredClone(item);
+  twin.evidence = ['unit:concurrency', 'integration:concurrency'].map(proof => ({ id: `twin-${proof}`, proof, sha: candidate.sha, baseSha: B, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at }));
+  twin.autoDispatch = undefined; reconcileAutoDispatch(twin, [twin], now);
+  item.autoDispatch!.review = twin.autoDispatch!.review;
   if (item.autoDispatch?.review) item.autoDispatch.review = { ...item.autoDispatch.review, id: fixedRequestId(n, 'review') };
   if (item.autoDispatch) item.autoDispatch.producers = item.autoDispatch.producers.map(request => ({ ...request, id: fixedRequestId(n, request.group ?? 'producer') }));
   return item;
