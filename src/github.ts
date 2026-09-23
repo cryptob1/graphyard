@@ -7,7 +7,7 @@ import type { Engine } from './engine.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, type BaseRefresh, type CarriedCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery } from './merge-queue.js';
+import { baseRefreshNeeded, heldBase, queuePlacement, queueRef, type BaseRefresh, type CarriedCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -17,6 +17,12 @@ export const scopeLookupBudget = 200;
  * so a list this long may be truncated: it is treated as incomplete and nothing is carried.
  */
 export const compareFileCap = 300;
+const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login } url } } }
+  } } }
+}`;
 export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
 /**
  * A 401 or a non-rate-limit 403. Retrying it does not help: the credentials or the installed
@@ -228,13 +234,54 @@ export class GitHub {
     throw new Error('GitHub pagination exceeded safety limit; refusing incomplete evidence');
   }
   async protection(requireNativeReview = false) {
+    return (await this.branchProtection(requireNativeReview)).protected;
+  }
+  /**
+   * The managed branch's protection as the gates read it: whether it is the protection Graphyard
+   * requires, and whether it requires every review conversation resolved before a merge (GY-139).
+   * An unreadable protection is neither.
+   */
+  async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean }> {
     try {
       const p = await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
       // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
       // queue supersedes that setting with a published tip that already contains its validated base.
-      return (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
+      const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
         && p.required_status_checks.checks?.some((c: any) => c.context === CHECK_NAME && c.app_id === this.config.appId);
-    } catch { return false; }
+      return { protected: !!verified, conversationResolution: p.required_conversation_resolution?.enabled === true };
+    } catch { return { protected: false, conversationResolution: false }; }
+  }
+  /** One GraphQL query as the installation. GitHub answers a failed query with 200 and `errors`, which is refused here. */
+  async graphql(query: string, variables: Record<string, unknown>): Promise<any> {
+    const response = await this.apiRequest('/graphql', 'POST', { query, variables });
+    demand(!response?.errors?.length && response?.data, `GitHub GraphQL query failed: ${response?.errors?.map((error: any) => error?.message).join('; ') || 'no data returned'}`, 502);
+    return response.data;
+  }
+  /**
+   * Every unresolved review thread on the pull request, with the author of its first comment and
+   * the path and line it is anchored to. REST exposes no resolution state, so this is the one
+   * GraphQL read an observation makes, and only when protection makes a thread block the merge.
+   * An outdated thread is still unresolved: GitHub blocks on it all the same.
+   */
+  async unresolvedThreads(pr: number): Promise<ReviewThread[]> {
+    const [owner, name] = this.config.repository.split('/');
+    const threads: ReviewThread[] = [];
+    let after: string | null = null;
+    for (let page = 0; page < 20; page++) {
+      const data = await this.graphql(reviewThreadsQuery, { owner, name, number: pr, after });
+      const connection = data?.repository?.pullRequest?.reviewThreads;
+      demand(Array.isArray(connection?.nodes), `GitHub did not list the review threads of pull request #${pr}`, 502);
+      for (const thread of connection.nodes) {
+        if (thread?.isResolved !== false) continue;
+        const comment = thread.comments?.nodes?.[0];
+        const line = Number.isSafeInteger(thread.line) ? thread.line : Number.isSafeInteger(thread.originalLine) ? thread.originalLine : null;
+        threads.push({ author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', path: typeof thread.path === 'string' ? thread.path : '(no path)', line, outdated: thread.isOutdated === true,
+          ...(typeof comment?.url === 'string' ? { url: comment.url } : {}) });
+      }
+      if (!connection.pageInfo?.hasNextPage) return threads;
+      after = connection.pageInfo.endCursor;
+    }
+    throw new Error('GitHub review thread pagination exceeded safety limit; refusing an incomplete list');
   }
   /**
    * The managed branch's head and its tree, read from `refs/heads/<base>`. A pull request's
@@ -288,9 +335,12 @@ export class GitHub {
     const pr = await this.request(`/pulls/${work.submission!.pr}`);
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
-    const [checks, reviews, protectedBranch, files, branch] = await Promise.all([
-      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.protection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
+    const [checks, reviews, protection, files, branch] = await Promise.all([
+      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
     ]);
+    // Review threads block a merge only where protection requires conversation resolution, so
+    // they are read only there, and only for a pull request that can still merge (GY-139).
+    const conversations = { required: protection.conversationResolution, unresolved: protection.conversationResolution && !pr.merged && pr.state === 'open' ? await this.unresolvedThreads(pr.number) : [] };
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
     // A published speculative tip carries its own validated base. The candidate stays bound to
@@ -340,7 +390,7 @@ export class GitHub {
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
-      protected: protectedBranch, files: files.map(f => f.filename), at: startedAt,
+      protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
     };
@@ -482,7 +532,7 @@ export class GitHub {
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
     const first = await this.observe(work, peers);
     const second = await this.observe(work, peers);
-    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, merged: o.merged, mergeable: o.mergeable, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
+    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, conversations: o.conversations, merged: o.merged, mergeable: o.mergeable, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
   }

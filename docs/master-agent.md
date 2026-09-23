@@ -1293,7 +1293,7 @@ file is gone, and a configured `herdrWorkspace` that Herdr no longer lists. `set
 registration.
 
 What this leaves the master — the loop's judgment half, or the visible session — is the
-findings: read a `CHANGES_REQUESTED` verdict or a failed proof, decide whether it needs rework,
+findings: read a `CHANGES_REQUESTED` verdict, an [unresolved review thread](#unresolved-review-threads) or a failed proof, decide whether it needs rework,
 route it, and merge when every gate passes. The master handles findings, reworks and merges; it
 never launches reviews or producers by hand, never approves a candidate, and never submits
 evidence.
@@ -1578,6 +1578,16 @@ A master merge succeeds only when Graphyard has a current authorization for the 
 - a short-lived, single-use merge execution.
 
 The command never uses an admin bypass. Graphyard marks Done only after independently observing the matching merge. Direct or late merges remain visible violations.
+
+### Unresolved review threads
+
+When branch protection sets `required_conversation_resolution`, GitHub refuses the merge while any review thread on the pull request is unresolved — whoever opened it, including a reviewer bot Graphyard does not otherwise know about. Graphyard reads the threads with each observation of such a branch and records every unresolved one under `observation.conversations` with its author, path and line. They are a gate input:
+
+- the merge gate fails naming each thread (`<author> on <path>:<line>`, `(outdated)` for a thread on code the head has since changed, which still blocks), and a candidate in that state does not enter the merge queue — a queued one is ejected, as a change request ejects it;
+- `master status` lists them under the row's `reviewThreads`, reports the row with `mergeable: false`, and its attention names the remedy: `master decide GY-N rework "Address the unresolved review threads: …"`;
+- `master merge` refuses such a candidate before it acquires anything, naming the threads, so no merge execution is issued and none is left retained with an unknown outcome.
+
+An unresolved review thread is a finding to fix, not a switch to flip. Read it, and route it the way a `CHANGES_REQUESTED` verdict is routed: request rework whose reason carries the finding, and let the next attempt address it. Resolving a thread the master did not write is not the master's call — neither is dismissing it, or asking a worker to resolve it without a change. The thread's author, or the fix that answers it, closes it; the merge gate passes once the next observation finds no unresolved thread.
 
 ### One executor per execution
 
