@@ -15,6 +15,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewI
 import { sessionRetry } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/cli/master-status.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 
 // Each test is named for the proof it produces: integration:dismissed-review-not-matched,
 // integration:recover-review-without-base-refresh, unit:unobtainable-review-visible and
@@ -53,7 +54,7 @@ function stubs(reviews: () => unknown[]) {
     calls.push(args);
     if (args[0] === 'api') return JSON.stringify(reviews());
     if (args[0] === 'agent' && args[1] === 'read') return 'reading the diff';
-    return JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+    return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
   return { calls, run, mint: async () => ({ token: 'ghs_review_session_token', expiresAt: iso(3_500_000) }) };
 }

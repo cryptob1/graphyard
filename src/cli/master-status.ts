@@ -3,13 +3,13 @@ import { probeCandidateConflicts } from '../conflicts.js';
 import { agentOwner, agentToken, assessContainment, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import type { Work } from '../model.js';
-import { elapsed } from '../model/sessions.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { daemonSummary, loopAttention, orphanedSupervisors, readDaemonState, type DaemonState, type OrphanSupervisor } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
-import { nameUnobtainableReviews, unansweredRequests, unobtainableReview, unobtainableReviewLine, type RequestProgress, type SettledReviewSession, type UnansweredRequest, type UnobtainableReview } from '../model/dispatch.js';
+import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
+import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
@@ -20,6 +20,7 @@ import type { LoopSupervisorHost } from '../supervisor.js';
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
+export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
 
 /**
  * One attention item per open worker scope request whose epoch still holds the lease: addressed
@@ -61,43 +62,6 @@ export function approverLaunchAttention(daemon: {
 }
 
 type MasterStatus = ReturnType<typeof buildMasterStatus>;
-
-/** Who answers a request whose session settled unanswered, and with which command. */
-export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
-  return request.kind === 'review'
-    ? agentOwner('master', `graphyard master review ${key} [PROFILE] forces the next attempt for the open request`)
-    : agentOwner('master', `graphyard master decide ${key} rework REASON, approved by the approver agent, so the group's proofs are requested afresh on the next head`, 'approver');
-}
-
-/**
- * One attention item per live request whose session settled without satisfying its gate. Such a
- * request is the one state `master status` used to show as nothing at all: no session running, no
- * launch refused, no failure — just a `sinceMs` climbing past the hour while the gate goes on
- * refusing. It is named here with the verdict that settled the session, how long the request has
- * stood, and the command that gets it answered, and counted apart from the requests with a
- * session actually running (`counts.dispatchRunning`).
- */
-export function unansweredRequestAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[]): (AttentionItem & { requestId: string })[] {
-  return rows.flatMap(row => unansweredRequests(row.dispatch).map(request => {
-    const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
-    const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
-    return { subject: row.key, requestId: request.requestId, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
-      ...unansweredRequestOwner(row.key, request) };
-  }));
-}
-
-/**
- * One attention item per candidate that cannot obtain a review of its commit (`unobtainableReview`
- * decides which; GY-100): the review GitHub dismissed, how many sessions settled on it, the commit
- * no verdict was ever obtained on, and the command that launches the next attempt. Counted in
- * `counts.dispatchUnobtainableReview`, apart from the reviews genuinely running.
- */
-export function unobtainableReviewAttention(rows: { key: string; dispatch: { review: RequestProgress | null; producers: RequestProgress[] } | null }[], settled: SettledReviewSession[]): (AttentionItem & { review: UnobtainableReview })[] {
-  return rows.flatMap(row => {
-    const review = unobtainableReview(row.dispatch?.review, settled);
-    return review ? [{ subject: row.key, review, text: unobtainableReviewLine(row.key, review, elapsed), ...unansweredRequestOwner(row.key, { kind: 'review' }) }] : [];
-  });
-}
 
 /**
  * The command that reclaims an assignment from a watch supervisor that outlived its agent. The
