@@ -6,7 +6,7 @@
 - `GET /api/work-snapshot`: `{work, now}` from one snapshot, with `autoDispatch` requests; age leases against `now`.
 - `GET /api/work`: every aggregate, creation-ordered.
 - `GET /api/events?work=UUID`: one item's events, newest first; `graphyard events GY-N --all` walks all.
-- `GET /api/analytics/flow`, `/api/analytics/attribution`: bounded. Flow days: UTC, ending today; the first holds earlier time. `window.covered`: a truncated scan's reach; `window.kinds`: deliveries', merges' and gate changes' own reach; `throughput[].covered: false`: unread, not zero.
+- `GET /api/analytics/flow`, `/api/analytics/attribution`: bounded. Flow days: UTC midnights to today, the first holding earlier time. `window.covered`/`window.kinds`: scan and per-kind reach; `throughput[].covered: false`: unread, not zero. Merged is Deploy; `stepDwell[].sparse` (n<5): marked, unsplit.
 - `GET /api/deployments`: `POST /api/deployments` observations (`producer`/`admin`; `state` `succeeded`, `failed` or `rolled_back`; never moves a gate).
 - `GET /api/delegation`, `/api/proof-grants`, `/api/delivery`: slices, live proof authority, release state.
 

@@ -234,13 +234,16 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   // A pending rework sends the work back to its builder (the dashboard's Build step) whichever gate
   // refuses first; it joins the identity only while set, so facts recorded before it keep their key.
   const reworkRequested = !!work.reworkRequested;
-  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0, firstUnmet?.name ?? null, reasons, ...(reworkRequested ? ['rework'] : [])]);
+  // Whether the candidate has merged: a merged item is past every pre-merge step whatever its gates
+  // still say (`gateFactStep`), so its merge is a new fact; like the rework it joins the identity only while set.
+  const merged = !!observation?.merged;
+  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0, firstUnmet?.name ?? null, reasons, ...(reworkRequested ? ['rework'] : []), ...(merged ? ['merged'] : [])]);
   if (gateKey !== state.gateKey)
     push('gates.changed', recordedAt, 'graphyard', String(sourceEvent), {
       stage: work.stage, unmet, firstUnmet: firstUnmet?.name ?? null, firstUnmetReason: firstUnmet?.reasons[0] ?? null,
       reasons, dependencyWaiting, hasCandidate: !!work.candidate,
       released: !!work.ready, blocker, violations: work.violations?.length ?? 0, pr: work.candidate?.pr ?? null,
-      queued, mergeBlockers, reworkRequested,
+      queued, mergeBlockers, reworkRequested, merged,
     });
 
   state.created = true;
@@ -1125,10 +1128,11 @@ const gateStep: [string, FlowStep][] = [['build', 'validate'], ['test', 'test'],
  * request was seen) and while a rework or a change request is pending (`reworkRequested`); then
  * or the ready gate refuses (a blocker, or a dependency a requirements revision added); then
  * the first step in travel order whose gate refuses — Test before Review, unlike the evaluation
- * order the stage follows — and Merge when none does; Deploy once it merged.
+ * order the stage follows — and Merge when none does; Deploy once it merged, whether delivered
+ * (stage done) or merged and not yet delivered (`merged`): merged work is never at a pre-merge step.
  */
 export function gateFactStep(details: Record<string, any>): FlowStep | null {
-  if (details.stage === 'done') return 'deploy';
+  if (details.stage === 'done' || details.merged === true) return 'deploy';
   if (details.stage === 'backlog') return null;
   if (details.stage === 'ready') return details.blocker ? 'build' : null;
   const unmet: string[] = details.unmet ?? [];

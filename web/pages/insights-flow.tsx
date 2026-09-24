@@ -82,6 +82,55 @@ export function LandedPerDay({ report }: { report: any }) {
   </section>;
 }
 
+/** Fewer samples than this make a step's median sparse (src/flow-analytics.ts `sparseSampleSize`). */
+const sparseSamples = 5;
+export interface StepTime { step: StepId; n: number; medianMs: number | null; marked: 'sparse' | 'partial' | null }
+/**
+ * Each step's median time from the report's step dwell, and whether it may be read as fact. A step
+ * with fewer than five samples is `sparse`; every step is `partial` when the report did not read the
+ * whole window's gate facts or its record lags the ledger. A marked step shows its sample count and
+ * marker and takes no share of the time split, so a median from two stays is never drawn as the week's.
+ */
+export function stepTimes(report: any): { steps: StepTime[]; partial: boolean; coverage: ReturnType<typeof flowCoverage> } {
+  const coverage = flowCoverage(report);
+  // Step times read from gate facts the report did not reach, or from a lagging record, are not the week's.
+  const partial = !!coverage && (coverage.stale || readUntil(report, 'gates.changed') < Date.parse(report?.window?.to ?? ''));
+  const dwell: any[] = Array.isArray(report?.stepDwell) ? report.stepDwell : [];
+  const steps = stepIds.map(step => {
+    const entry = dwell.find(candidate => candidate?.step === step);
+    const n = typeof entry?.n === 'number' ? entry.n : 0, medianMs = typeof entry?.medianMs === 'number' ? entry.medianMs : null;
+    const marked = medianMs === null ? null : partial ? 'partial' as const : n < sparseSamples || entry?.sparse === true ? 'sparse' as const : null;
+    return { step, n, medianMs, marked };
+  });
+  return { steps, partial, coverage };
+}
+const samples = (n: number) => `${n} ${n === 1 ? 'sample' : 'samples'}`;
+/** The marker a step's median carries when it is not the week's fact: its sample count and why. */
+export function StepMarker({ time }: { time: StepTime }) {
+  if (!time.marked) return null;
+  return <small className="muted step-sparse" data-sparse={time.marked} title={time.marked === 'partial' ? 'Read from part of the window only' : `Fewer than ${sparseSamples} samples`}>{samples(time.n)} · {time.marked === 'partial' ? 'partial window' : 'sparse'}</small>;
+}
+
+/**
+ * Where the time goes: the split of per-step median times, drawn only from steps with enough
+ * samples over a fully read window. A sparse or partially read step is listed with its sample
+ * count and marker, outside the split.
+ */
+export function WhereTimeGoes({ report }: { report: any }) {
+  const { steps, partial, coverage } = stepTimes(report);
+  const shares = steps.filter(entry => !entry.marked && entry.medianMs !== null && entry.medianMs > 0).map(entry => ({ step: entry.step, ms: entry.medianMs! }));
+  const marked = steps.filter(entry => entry.marked);
+  const total = shares.reduce((sum, entry) => sum + entry.ms, 0);
+  const slowest = shares.length ? shares.reduce((a, b) => b.ms > a.ms ? b : a).step : null;
+  return <section className="panel" aria-label="Where the time goes"><h2>Where the time goes <small>median time per step</small></h2>
+    {total > 0 ? <><div className="time-bar">{shares.map(entry => <span key={entry.step} className={`time-share step-${entry.step}`} style={{ flex: entry.ms }} title={`${stepLabel[entry.step]} ${minutes(entry.ms)}`}/>)}</div>
+      <ul className="time-legend">{shares.map(entry => <li key={entry.step} className={entry.step === slowest ? 'slowest' : undefined}><i className={`time-share step-${entry.step}`}/>{stepLabel[entry.step]} {Math.round(entry.ms / total * 100)}% · {minutes(entry.ms)}{entry.step === slowest ? ', slowest' : ''}</li>)}</ul></>
+      : partial ? <p className="notice" role="status">{coverage!.statement}</p>
+        : !marked.length && <p className="muted">{report ? 'No item finished a step in this window.' : 'Reading the recorded step times…'}</p>}
+    {marked.length > 0 && <ul className="time-legend" data-flow="sparse-steps">{marked.map(entry => <li key={entry.step} data-step={entry.step}>{stepLabel[entry.step]} {minutes(entry.medianMs)} <StepMarker time={entry}/></li>)}</ul>}
+  </section>;
+}
+
 /**
  * The items the Now view draws: every open item that has a current step. That is the Moving and
  * Blocked groups, and also rework waiting for a builder while its pull request is still open —
@@ -144,21 +193,17 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const row = new Map<string, number>(); const perStep = new Map<StepId, number>();
   for (const { item, steps } of now7) { const n = perStep.get(steps.current!) ?? 0; row.set(item.id, n); perStep.set(steps.current!, n + 1); }
   const nowHeight = Math.max(170, 24 + Math.max(0, ...perStep.values()) * 22 + 40);
-  const dwell = new Map<StepId, number | null>();
-  // Per-step medians come from the same recorded step moves the replay plays (the report's stepDwell).
-  const coverage = flowCoverage(report);
-  // Step times read from gate facts the report did not reach, or from a lagging record, are not the week's.
-  const dwellPartial = !!coverage && (coverage.stale || readUntil(report, 'gates.changed') < Date.parse(report?.window?.to ?? ''));
-  if (!dwellPartial) for (const entry of Array.isArray(report?.stepDwell) ? report.stepDwell : []) if ((stepIds as readonly string[]).includes(entry.step)) dwell.set(entry.step, entry.medianMs ?? null);
-  const shares = stepIds.map(step => ({ step, ms: dwell.get(step) ?? 0 })).filter(entry => entry.ms > 0);
-  const total = shares.reduce((sum, entry) => sum + entry.ms, 0);
-  const slowest = shares.length ? shares.reduce((a, b) => b.ms > a.ms ? b : a).step : null;
+  // Per-step medians come from the same recorded step moves the replay plays (the report's stepDwell);
+  // the slowest step is named only among those with enough samples over a fully read window.
+  const times = new Map(stepTimes(report).steps.map(entry => [entry.step, entry]));
+  const counted = [...times.values()].filter(entry => !entry.marked && entry.medianMs !== null && entry.medianMs > 0);
+  const slowest = counted.length ? counted.reduce((a, b) => b.medianMs! > a.medianMs! ? b : a).step : null;
   return <>
     <div className="page-heading"><div><h1>Flow</h1><p className="summary">Build to live, one column per step. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
     {error && <p className="notice" role="status">The recorded history could not be read: {error}. The Now view below is live.</p>}
     <section className="flow-panel" aria-label="Flow">
       <div className="flow-columns-head">{stepIds.map(step => <div key={step} className={step === slowest ? 'flow-step slowest' : 'flow-step'}>
-        <strong>{stepLabel[step]}</strong><span>{now7.filter(entry => entry.steps.current === step).length} now · median {minutes(dwell.get(step))}</span>{step === slowest && <small>slowest step</small>}
+        <strong>{stepLabel[step]}</strong><span>{now7.filter(entry => entry.steps.current === step).length} now · median {minutes(times.get(step)?.medianMs)}</span><StepMarker time={times.get(step)!}/>{step === slowest && <small>slowest step</small>}
       </div>)}</div>
       <div className="flow-subhead"><span className="dot live"/><h2>Now</h2><span>Real time. A dot moves only when its item changes step.</span></div>
       <div className="flow-lane now-lane" data-flow="now" style={{ height: `${nowHeight}px` }}>{now7.map(({ item, steps }) => <button type="button" key={item.id} className={`now-dot group-${byGroup.blocked.includes(item) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
@@ -179,12 +224,7 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
     </section>
     <div className="insight-charts">
       <LandedPerDay report={report}/>
-      <section className="panel" aria-label="Where the time goes"><h2>Where the time goes <small>median time per step</small></h2>
-        {total > 0 ? <><div className="time-bar">{shares.map(entry => <span key={entry.step} className={`time-share step-${entry.step}`} style={{ flex: entry.ms }} title={`${stepLabel[entry.step]} ${minutes(entry.ms)}`}/>)}</div>
-          <ul className="time-legend">{shares.map(entry => <li key={entry.step} className={entry.step === slowest ? 'slowest' : undefined}><i className={`time-share step-${entry.step}`}/>{stepLabel[entry.step]} {Math.round(entry.ms / total * 100)}% · {minutes(entry.ms)}{entry.step === slowest ? ', slowest' : ''}</li>)}</ul></>
-          : dwellPartial ? <p className="notice" role="status">{coverage!.statement}</p>
-            : <p className="muted">{report ? 'No item finished a step in this window.' : 'Reading the recorded step times…'}</p>}
-      </section>
+      <WhereTimeGoes report={report}/>
     </div>
   </>;
 }

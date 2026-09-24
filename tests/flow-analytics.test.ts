@@ -12,12 +12,12 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import {
-  classifyWait, computeFlow, coveredWindow, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits,
+  classifyWait, computeFlow, coveredWindow, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, gateFactStep,
   mergeReadyGate, projectFlow, readFlow, separateKinds, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import InsightsFlow, { LandedPerDay, flowNow } from '../web/pages/insights-flow.js';
+import InsightsFlow, { LandedPerDay, WhereTimeGoes, flowNow } from '../web/pages/insights-flow.js';
 import { groupOf } from '../web/groups.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 
@@ -1037,6 +1037,65 @@ test('unit:flow-truncation-visible — a truncated or stale report shows its cov
   const whole = renderToStaticMarkup(createElement(LandedPerDay, { report: computeFlow(calendarDataset(to, facts), { days: 7 }) }));
   assert.doesNotMatch(whole, /data-flow="coverage"/);
   assert.equal([...whole.matchAll(/class="landed-bar"/g)].length, 7);
+});
+
+test('unit:merged-never-prove — a gate fact recorded once the candidate merged says so, and a merged but undelivered item is never counted at Prove or any other pre-merge step', () => {
+  const at = Date.parse('2026-09-24T10:00:00.000Z');
+  const acceptanceRefuses = [
+    { name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] }, { name: 'test', passed: true, reasons: [] },
+    { name: 'acceptance', passed: false, reasons: ['AC-1: unit:flow needs trusted passing evidence'] }, { name: 'merge', passed: false, reasons: ['Acceptance must pass first'] },
+  ];
+  const item = { ...calendarItem, stage: 'acceptance', ready: true, gates: acceptanceRefuses, candidate: { sha: head, baseSha: base, pr: 903, branch: 'graphyard/gy-900', author: 'implementer', createdAt: new Date(at).toISOString() }, submission: { pr: 903, epoch: 1 } } as unknown as Work;
+  const merged = { at: new Date(at).toISOString(), candidate: item.candidate!, merged: true, mergeSha: 'f'.repeat(40), mergedAt: new Date(at + 60_000).toISOString(), checks: [], reviews: [], files: [], scopeFiles: [] } as unknown as Observation;
+  const state: ProjectionState = {};
+  const gates = (seq: number, work: Work) => deriveFacts({ seq, work_id: work.id, actor: 'system', kind: 'observed', created_at: new Date(at + seq * 60_000).toISOString(), payload: { work } }, state).filter(fact => fact.kind === 'gates.changed');
+  const before = gates(1, item);
+  assert.equal(before.length, 1);
+  assert.equal(before[0].details.merged, false);
+  assert.equal(gateFactStep(before[0].details), 'prove', 'unmerged, a refusing acceptance gate is Prove');
+  // The same refusing gates once the candidate merged: the merge is a new gate fact, and it records the merge.
+  const after = gates(2, { ...item, observation: merged });
+  assert.equal(after.length, 1, 'the merge alone is a new gate fact');
+  assert.equal(after[0].details.merged, true, 'the gate fact records that the candidate merged');
+  const step = gateFactStep(after[0].details);
+  assert.notEqual(step, 'prove');
+  assert.ok(step === 'merge' || step === 'deploy', `a merged, undelivered item is at Merge or Deploy, not ${step}`);
+  // Whatever gate refuses first, rework or change requests included, a merged item never maps to a pre-merge step.
+  for (const details of [
+    { stage: 'acceptance', unmet: ['acceptance'], firstUnmet: 'acceptance', hasCandidate: true, merged: true },
+    { stage: 'review', unmet: ['review', 'acceptance'], firstUnmet: 'review', reasons: ['Outstanding change requests must be resolved through a new review'], hasCandidate: true, merged: true },
+    { stage: 'build', unmet: ['build'], firstUnmet: 'build', reasons: ['Worker has not submitted implementation for this attempt'], hasCandidate: true, reworkRequested: true, merged: true },
+  ]) assert.ok(['merge', 'deploy'].includes(gateFactStep(details)!), JSON.stringify(details));
+  // Its time after the merge is Deploy's in the step moves, so none of it is counted as Prove.
+  const moves = stepMoves({ facts: [...before, ...after], carryIn: [] }, item);
+  assert.deepEqual(moves.map(move => move.to), ['prove', 'deploy']);
+  assert.equal(moves[1].at, after[0].observedAt, 'Prove ends when the merge is recorded');
+});
+
+test('unit:sparse-step-marked — a step median from fewer than five samples, or from a partially read window, shows its sample count and a sparse marker and takes no share of the time split', () => {
+  const to = '2026-09-24T22:55:00.000Z';
+  const report = computeFlow(calendarDataset(to, []), { days: 7 });
+  const dwell = (step: string, values: number[]) => ({ step, ...distribution(values) });
+  const hours = (n: number, h: number) => Array.from({ length: n }, () => h * 3600_000);
+  const sparse = { ...report, stepDwell: [dwell('build', hours(6, 2)), dwell('validate', []), dwell('test', hours(5, 1)), dwell('review', hours(7, 3)), dwell('prove', [9 * 3600_000, 9.6 * 3600_000]), dwell('merge', hours(5, 0.5)), dwell('deploy', [])] };
+  const page = renderToStaticMarkup(createElement(WhereTimeGoes, { report: sparse }));
+  const bar = /<div class="time-bar">(.*?)<\/div>/.exec(page)?.[1] ?? '';
+  assert.ok(bar, 'the split is drawn for the steps with enough samples');
+  for (const step of ['build', 'test', 'review', 'merge']) assert.match(bar, new RegExp(`time-share step-${step}"`), `${step} is in the split`);
+  assert.doesNotMatch(bar, /step-prove/, 'the 2-sample step takes no share of the split');
+  assert.doesNotMatch(page, /Prove \d+%/, 'nor a percentage');
+  const marked = /<li data-step="prove">(.*?)<\/li>/.exec(page)?.[1] ?? '';
+  assert.match(marked, /data-sparse="sparse"/, 'Prove carries the sparse marker');
+  assert.match(marked, /2 samples · sparse/, 'and its sample count');
+  assert.match(marked, /Prove 9h/, 'its median is still shown, marked');
+  assert.doesNotMatch(page, /data-step="(build|test|review|merge)"[^>]*>[^<]*<small[^>]*data-sparse/, 'steps with enough samples carry no marker');
+  // A window whose gate facts were read only in part marks every step, and draws no split at all.
+  const covered = coveredWindow(new Date(Date.parse(to) - 7 * day).toISOString(), to, '2026-09-21T00:00:00.000Z', 100_000, flowLimits.scan);
+  const partial = { ...sparse, window: { ...sparse.window, truncated: true, covered, kinds: [{ kind: 'gates.changed', toCovered: covered.toCovered }] } };
+  const partialPage = renderToStaticMarkup(createElement(WhereTimeGoes, { report: partial }));
+  assert.doesNotMatch(partialPage, /class="time-bar"/);
+  assert.equal([...partialPage.matchAll(/data-sparse="partial"/g)].length, 5, 'every step with a median is marked');
+  assert.match(partialPage, /6 samples · partial window/);
 });
 
 function escapeHtml(text: string) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;'); }
