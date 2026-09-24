@@ -84,7 +84,9 @@ export const reviewRecordSchema = z.object({
     observedAt: z.string().min(1).max(40).optional(), reopened: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
     item: z.string().min(1).max(40).optional(), replied: z.array(z.string().min(1).max(200)).max(listedThreadLimit), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
     // Unbounded: a filing that created no item is retried for as long as its approval stands (fileApprovedFollowUps).
-    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1) }).optional(),
+    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1),
+    /** When the loop saw the approval of a failed filing stop standing: the record is pinned until then (pinnedSessionRecords). */
+    releasedAt: z.string().min(1).max(40).optional() }).optional(),
   /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
   criteriaOnly: z.literal(true).optional(),
 }).strict();
@@ -107,7 +109,10 @@ export type ReviewLedger = z.infer<typeof reviewLedgerSchema>;
  * - it carries a verdict and its sha is still the item's undelivered candidate (no `headReleasedAt`),
  *   or a pending session reviews the same key and sha: a session of that head — pending now, or
  *   launched later when GitHub dismisses the approval with the head unchanged — reads its
- *   `answered` set (reconcileReviews) from these records, so an old verdict is never adopted.
+ *   `answered` set (reconcileReviews) from these records, so an old verdict is never adopted;
+ * - its approval's follow-up filing created no item and failed (GY-166): the retry reads the record,
+ *   delivered or not, for as long as the approval stands, and releaseClosedRequests releases it
+ *   (`followUps.releasedAt`) only once the approval no longer stands.
  * Every write keeps every live and every pinned record, and only the newest
  * `sessionLedgerRetention` of the other terminal records (by when they settled) for diagnostics,
  * so a session whose record nothing reads is reaped in the write that resolves or releases it.
@@ -124,12 +129,15 @@ export const terminalSessionStates = ['completed', 'failed', 'cancelled', 'expir
 /** `idleGraceMs`: how long a session Herdr reports finished, blocked or gone is given before its record is failed. */
 export interface SessionLedgerSpec { name: string; path: string; role: 'reviewer' | 'producer'; idleGraceMs: number }
 export const reviewLedgerSpec: SessionLedgerSpec = { name: 'review ledger', path: '.graphyard/reviews.json', role: 'reviewer', idleGraceMs: 5 * 60_000 };
-type LedgerRecord = { state: string; requestedAt: string; closedAt?: string; requestId?: string; requestClosedAt?: string; headReleasedAt?: string; key?: string; sha?: string; verdict?: unknown };
+type LedgerRecord = { state: string; requestedAt: string; closedAt?: string; requestId?: string; requestClosedAt?: string; headReleasedAt?: string; key?: string; sha?: string; verdict?: unknown;
+  followUps?: { item?: string; failure?: string; releasedAt?: string } };
 const live = (record: LedgerRecord) => !(terminalSessionStates as readonly string[]).includes(record.state);
+/** A follow-up filing that created no item and failed: its retry reads the record, and its findings live nowhere else (GY-166). */
+const followUpsOwed = (record: LedgerRecord) => !!record.followUps && !record.followUps.item && !!record.followUps.failure && !record.followUps.releasedAt;
 /** The terminal records something still reads: those of an open request, and verdicts a session of the same head, pending or relaunched, checks against. */
 export function pinnedSessionRecords<T extends LedgerRecord>(records: T[]): Set<T> {
   const pendingHeads = new Set(records.filter(live).map(record => `${record.key}@${record.sha}`));
-  return new Set(records.filter(record => !live(record) && (!!record.requestId && !record.requestClosedAt || !!record.verdict && (!record.headReleasedAt || pendingHeads.has(`${record.key}@${record.sha}`)))));
+  return new Set(records.filter(record => !live(record) && (!!record.requestId && !record.requestClosedAt || !!record.verdict && (!record.headReleasedAt || pendingHeads.has(`${record.key}@${record.sha}`)) || followUpsOwed(record))));
 }
 
 /** The refusal of a write that would hold more live and pinned records than the bound. */
@@ -191,6 +199,8 @@ export function releaseClosedRequests(records: LedgerRecord[], work: Work[], now
     }
     const current = !!item && item.stage !== 'done' && !item.observation?.merged && item.candidate?.sha === record.sha;
     if (record.verdict && !record.headReleasedAt && !current) { record.headReleasedAt = now.toISOString(); released++; }
+    // Pinned exactly as long as fileApprovedFollowUps retries it.
+    if (followUpsOwed(record) && !approvesFinalHead(record as ReviewRecord, work)) { record.followUps!.releasedAt = now.toISOString(); released++; }
   }
   return released;
 }

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { coalescedScope, followUpItem, parseFollowUpFindings, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
-import { bindReviewer, followUpExhaustedRetryMs, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts, updateReviewLedger } from '../src/reviewer.js';
+import { bindReviewer, boundSessionLedger, followUpExhaustedRetryMs, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, releaseClosedRequests, reviewLedgerSpec, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts, updateReviewLedger } from '../src/reviewer.js';
 import { routineDecision, setAsideFollowUpThreads, threadResolutionGraceMs } from '../src/master-daemon.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -632,5 +632,47 @@ test('unit:review-followups-filed — an approval whose item merged before the f
     // Filed once: the next pass leaves the delivered item alone.
     await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [delivered], threadsRun: gh.run, createFollowUpItem: items.create });
     assert.equal(items.created.length, 1);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a named follow-up thread somebody resolved before the filing pass is still filed, and left as they resolved it', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github('AC-1 met. AC-2 met.\nResolved threads: none\nFollow-up threads: PRRT_follow001'), items = creator();
+    gh.resolved.push('PRRT_follow001');
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.equal(items.created.length, 1, 'the resolution race does not erase a finding the reviewer judged FOLLOW-UP');
+    assert.ok(items.created[0].item.description.includes('PRRT_follow001') && items.created[0].item.description.includes('finding on PRRT_follow001'));
+    assert.deepEqual(gh.replies, [], 'a thread already resolved is not answered again');
+    const record = settled.reviews[0];
+    assert.equal(record.followUps?.item, 'GY-201');
+    assert.deepEqual(record.followUps?.resolved, ['PRRT_follow001']);
+    assert.deepEqual(record.followUps?.refused, []);
+    assert.equal(record.followUps?.failure, undefined);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a failed filing of a delivered approval stays pinned in the bounded ledger until the approval no longer stands', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github('AC-1 met.\nFollow-up finding: src/c.ts:12 — the retry is unbounded\nResolved threads: none\nFollow-up threads: none');
+    const refusing = async () => { throw new Error('Graphyard refused the follow-up item (503): unavailable'); };
+    const delivered = work({ stage: 'done' } as Partial<Work>, { merged: true, mergeSha: 'c1'.padEnd(40, 'f'), prState: 'closed' } as Partial<Observation>);
+    await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [delivered], threadsRun: gh.run, createFollowUpItem: refusing });
+    const record = (await readReviewLedger(root)).reviews[0];
+    assert.ok(record.headReleasedAt, 'the delivered head is released');
+    assert.ok(record.followUps?.failure && !record.followUps.item);
+    // Newer terminal records past the retention window would reap an unpinned record.
+    const fillers = Array.from({ length: 60 }, (_, index) => ({ ...record, followUps: undefined, requestId: undefined, verdict: undefined, closedAt: new Date(Date.now() + index * 1000).toISOString() }));
+    assert.ok(boundSessionLedger([record, ...fillers], reviewLedgerSpec).includes(record), 'the retry and its findings survive the next bounded write');
+    // Its item delivered and still carrying the approval: the retry still reads it.
+    assert.equal(releaseClosedRequests([record], [delivered], new Date()), 0);
+    assert.ok(boundSessionLedger([record, ...fillers], reviewLedgerSpec).includes(record));
+    // Once the approval no longer stands, nothing retries it and the record is released.
+    assert.equal(releaseClosedRequests([record], [], new Date()), 1);
+    assert.ok(record.followUps?.releasedAt);
+    assert.ok(!boundSessionLedger([record, ...fillers], reviewLedgerSpec).includes(record));
   } finally { await cleanup(); }
 });

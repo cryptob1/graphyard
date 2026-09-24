@@ -23,8 +23,13 @@ const firstLine = (error: unknown) => (error instanceof Error ? error.message : 
  * records it, never reads it as "no threads".
  */
 export async function readUnresolvedThreads(repository: string, pr: number, run: ChildRun): Promise<LaunchThread[]> {
+  return (await readReviewThreads(repository, pr, run)).filter(entry => !entry.resolved).map(entry => entry.thread);
+}
+
+/** Every review thread of the pull request, resolved or not, read and refused as readUnresolvedThreads reads them. */
+export async function readReviewThreads(repository: string, pr: number, run: ChildRun): Promise<{ thread: LaunchThread; resolved: boolean }[]> {
   const [owner, name] = repository.split('/');
-  const threads: LaunchThread[] = [];
+  const threads: { thread: LaunchThread; resolved: boolean }[] = [];
   let after: string | null = null;
   for (let page = 0; page < 20; page++) {
     const output = await run('gh', ['api', 'graphql', '-f', `query=${threadsQuery}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${pr}`, ...(after ? ['-f', `after=${after}`] : [])]);
@@ -32,12 +37,12 @@ export async function readUnresolvedThreads(repository: string, pr: number, run:
     const connection: any = parsed?.data?.repository?.pullRequest?.reviewThreads;
     if (!Array.isArray(connection?.nodes)) throw new Error(`GitHub did not list the review threads of pull request #${pr}${parsed?.errors?.[0]?.message ? `: ${parsed.errors[0].message}` : ''}`);
     for (const thread of connection.nodes) {
-      if (thread?.isResolved !== false || typeof thread.id !== 'string') continue;
+      if (typeof thread?.isResolved !== 'boolean' || typeof thread.id !== 'string') continue;
       const comment = thread.comments?.nodes?.[0];
-      threads.push({ id: thread.id, author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', path: typeof thread.path === 'string' ? thread.path : '(no path)',
+      threads.push({ resolved: thread.isResolved, thread: { id: thread.id, author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', path: typeof thread.path === 'string' ? thread.path : '(no path)',
         line: Number.isSafeInteger(thread.line) ? thread.line : Number.isSafeInteger(thread.originalLine) ? thread.originalLine : null, outdated: thread.isOutdated === true,
         excerpt: typeof comment?.body === 'string' ? comment.body.replace(/\s+/g, ' ').trim().slice(0, 240) : '',
-        ...(typeof comment?.createdAt === 'string' ? { createdAt: comment.createdAt } : {}), ...(typeof comment?.url === 'string' ? { url: comment.url } : {}) });
+        ...(typeof comment?.createdAt === 'string' ? { createdAt: comment.createdAt } : {}), ...(typeof comment?.url === 'string' ? { url: comment.url } : {}) } });
     }
     if (!connection.pageInfo?.hasNextPage) return threads;
     after = connection.pageInfo.endCursor;
@@ -288,7 +293,8 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * File the threads an approval named as follow-up, with the findings it wrote on `Follow-up finding:`
  * lines: one backlog item for all of them, then a reply
  * naming the item on each thread and its resolution. Only named threads are touched, and only those
- * unresolved on the pull request and opened before the approval; nothing else is ever answered.
+ * of the pull request opened before the approval; nothing else is ever answered. A named thread
+ * somebody else resolved first is still filed, and left as they resolved it.
  * `listed` names the threads the reviewer's launch prompt listed; a named thread outside it is
  * refused, and a launch that could not read the threads vouches for none. Each step is recorded as it lands, so a retry creates no second item (the item key is kept, and
  * the create is idempotent on the approval) and replies to no thread twice. Runs outside every
@@ -309,11 +315,14 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
   // of them; once created, the item holds every one and the record is kept as it was.
   const findings = previous?.item ? carried.findings : parseFollowUpFindings(review.body);
   if (!named.length && !findings.length) return { ...base, named, threads: [], findings, replied: [], resolved: [], refused: [] };
-  let open: LaunchThread[] = [];
+  // Every thread of the pull request, resolved or not: a named thread somebody resolved after the
+  // approval is still a finding the reviewer judged FOLLOW-UP, and is filed in the item all the same.
+  let all: { thread: LaunchThread; resolved: boolean }[] = [];
   if (named.length) {
-    try { open = await readUnresolvedThreads(input.repository, input.pr, run); }
+    try { all = await readReviewThreads(input.repository, input.pr, run); }
     catch (error) { return { ...base, ...carried, named, failure: `the review threads could not be read: ${firstLine(error)}` }; }
   }
+  const open = all.filter(entry => !entry.resolved).map(entry => entry.thread);
   let threads = carried.threads, refused = carried.refused;
   if (!previous?.item && !previous?.threads.length) {
     const submitted = Date.parse(String(review.submitted_at ?? ''));
@@ -322,8 +331,8 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       // The reviewer judged only the threads its launch prompt listed: an ID it was not shown — past
       // the listing bound, or quoted from an untrusted excerpt — is never answered or resolved.
       if (!input.listed?.includes(id)) { refused.push(`${id}: not listed to the reviewer at launch`); continue; }
-      const thread = open.find(entry => entry.id === id);
-      if (!thread) { refused.push(`${id}: not an unresolved thread of pull request #${input.pr}`); continue; }
+      const thread = all.find(entry => entry.thread.id === id)?.thread;
+      if (!thread) { refused.push(`${id}: not a review thread of pull request #${input.pr}`); continue; }
       const created = Date.parse(thread.createdAt ?? '');
       if (!Number.isFinite(created) || !Number.isFinite(submitted) || created >= submitted) { refused.push(`${id}: not opened before review ${input.reviewId}`); continue; }
       threads.push(thread);
