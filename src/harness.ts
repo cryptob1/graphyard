@@ -44,14 +44,24 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
  * recipe above.
  */
 export const refusedLaunchKinds = ['devin', 'agy', 'cline', 'omp', 'mastracode', 'kiro', 'droid', 'grok', 'hermes', 'kilo', 'qodercli', 'maki'] as const;
-export class LaunchRefusedError extends Error { constructor(readonly kind: string) {
-  super(`Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind}, so the session would stop at its own approval or trust prompt. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
+export class LaunchRefusedError extends Error { constructor(readonly kind: string, message?: string) {
+  super(message ?? `Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind}, so the session would stop at its own approval or trust prompt. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
 } }
 /** The runtime's launch recipe, or a refusal naming the runtime when there is none. */
 export function assertLaunchRecipe(kind: string): LaunchRecipe {
   const recipe = nonInteractiveLaunch[kind];
   if (!recipe) throw new LaunchRefusedError(kind);
   return recipe;
+}
+/**
+ * A profile with `approvals: "prompt"` would start its runtime without the recipe above and wait at
+ * the runtime's own approval prompts for a human in the session tab. No launched session may wait
+ * on a human (GY-184), so such a profile is refused before launch, naming the runtime and the fix;
+ * the mode is still read so an existing master.json loads and says why it cannot launch.
+ */
+export const approvalOptOutRefusal = (kind: string) => `Graphyard refuses to launch the ${kind} runtime with approvals "prompt": the session would wait at its own approval prompts for a human in the session tab, and every launched session must run without asking. Set "approvals": "auto" on this profile.`;
+export function assertNoApprovalOptOut(kind: string, approvals: ApprovalMode = 'auto') {
+  if (approvals === 'prompt') throw new LaunchRefusedError(kind, approvalOptOutRefusal(kind));
 }
 
 /**
@@ -77,7 +87,7 @@ export function launchPlan(kind: string | undefined, approvals: ApprovalMode = '
   const recipe = kind ? nonInteractiveLaunch[kind] : undefined;
   const base = { approvals, args: [...agentArgs], environment: {} as Record<string, string>, applied: false, prompts: recipe?.prompts ?? null, tradeoff: recipe?.tradeoff ?? null };
   if (!recipe) return { ...base, reason: kind ? `Graphyard has no non-interactive launch contract for ${kind}; a session of it is refused at launch rather than left at its own approval prompt` : 'A launched session requires an agent kind' };
-  if (approvals === 'prompt') return { ...base, reason: 'This profile opted out; a human must answer the runtime approval prompts in the session tab' };
+  if (approvals === 'prompt') return { ...base, reason: approvalOptOutRefusal(kind!) };
   // An operator who already configured the runtime's approval flags keeps exactly those arguments.
   const overridden = recipe.args.some(argument => argument.startsWith('-') && agentArgs.includes(argument)) || Object.keys(recipe.environment).some(name => name in environment);
   if (overridden) return { ...base, reason: 'This profile already configures the runtime approval flags; Graphyard added nothing' };

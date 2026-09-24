@@ -391,7 +391,8 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
   assert.deepEqual(agentLaunchPlan('cursor', 'auto').args, ['--force', '--trust']);
   const opencode = JSON.parse(agentLaunchPlan('opencode', 'auto').environment.OPENCODE_PERMISSION);
   for (const permission of ['*', 'edit', 'bash', 'webfetch', 'external_directory', 'doom_loop']) assert.equal(opencode[permission], 'allow', `opencode ${permission} is allowed`);
-  assert.equal(agentLaunchPlan('opencode', 'prompt').applied, false, 'an explicit opt-out is still honoured');
+  assert.equal(agentLaunchPlan('opencode', 'prompt').applied, false, 'an explicit opt-out plans no recipe');
+  assert.throws(() => accountLaunch({ kind: 'opencode', approvals: 'prompt', agentArgs: [], environment: {} }, null), /refuses to launch the opencode runtime with approvals "prompt"/, 'and is refused at launch (GY-184)');
   // Codex keeps its sandbox, widened to what the role needs: network, and the shared Git directory.
   const codex = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: {} }, null, { writable: ['/repo/.git'] });
   assert.deepEqual(codex.args.slice(-4), ['-c', 'sandbox_workspace_write.network_access=true', '--add-dir', '/repo/.git']);

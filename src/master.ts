@@ -15,7 +15,7 @@ import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, d
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
-import { assertLaunchRecipe, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { assertLaunchRecipe, assertNoApprovalOptOut, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { withAutonomyContract } from './autonomy.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
@@ -43,8 +43,9 @@ const safeEnvironment = z.record(
 
 export const agentKindSchema = z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki', 'muse']);
 const profileName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/);
-// 'auto' installs the runtime's own non-interactive startup contract; 'prompt' keeps the
-// runtime's approval prompts and requires a human in the session tab.
+// 'auto' installs the runtime's own non-interactive startup contract. 'prompt' would keep the
+// runtime's approval prompts for a human in the session tab, so a profile that sets it is still
+// read but refused at launch (GY-184, assertNoApprovalOptOut).
 const approvalMode = z.enum(['auto', 'prompt']).default('auto');
 
 // An agent environment is one isolated config and login home for one agent CLI account, such as
@@ -1025,6 +1026,8 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   const kind = account?.kind ?? profile.kind;
   const own = !account || account.kind === profile.kind ? profile.agentArgs : [];
   const model = contract?.modelFlag && account && 'fleet' in account && account.fleet.modelId && !own.includes(contract.modelFlag) && !contract.args.includes(contract.modelFlag) ? [contract.modelFlag, account.fleet.modelId] : [];
+  // An approvals opt-out is refused, naming the runtime, before any session starts (GY-184).
+  assertNoApprovalOptOut(kind ?? 'unnamed', profile.approvals);
   const plan = agentLaunchPlan(kind, profile.approvals, [...(contract?.args ?? []), ...model, ...own], { ...contract?.environment, ...profile.environment });
   const environment: Record<string, string> = { ...plan.environment, ...contract?.environment, ...profile.environment };
   if (account) {
@@ -2956,6 +2959,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   } else {
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
+    // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
+    assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // The account is chosen before anything is claimed: a profile whose accounts are all logged out
     // or out of quota claims nothing, and the refusal names every account it skipped and why.
     selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });

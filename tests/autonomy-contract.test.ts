@@ -10,7 +10,7 @@ import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { autonomyContract, withAutonomyContract } from '../src/autonomy.js';
 import { assertLaunchRecipe, launchPlan, LaunchRefusedError, nonInteractiveLaunch, refusedLaunchKinds } from '../src/harness.js';
-import { agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, launchRoleContracts, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
+import { accountLaunch, agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, launchRoleContracts, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
@@ -157,6 +157,10 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
         // Pi is the one runtime with no prompt to suppress; every other recipe sets a flag or variable.
         if (kind !== 'pi') assert.ok(recipe.args.length + Object.keys(recipe.environment).length > 0, `${kind}: the recipe suppresses its prompts`);
         assert.ok(recipe.prompts && recipe.tradeoff, `${kind}: the recipe says what it suppresses and what that costs`);
+        // A profile that opts out of the recipe (approvals "prompt") would wait at the runtime's prompts: refused, naming the runtime.
+        assert.throws(() => accountLaunch({ kind, approvals: 'prompt', agentArgs: [], environment: {} }, null),
+          (error: unknown) => error instanceof LaunchRefusedError && error.kind === kind && error.message.includes(`the ${kind} runtime with approvals "prompt"`));
+        assert.equal(accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, null).plan.applied, true);
         continue;
       }
       assert.throws(() => assertLaunchRecipe(kind), (error: unknown) => error instanceof LaunchRefusedError && error.kind === kind && error.message.includes(`the ${kind} runtime`));
