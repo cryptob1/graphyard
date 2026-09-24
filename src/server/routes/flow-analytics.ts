@@ -1,13 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { demand, stages } from '../../model.js';
-import { computeFlow, flowDrilldown, flowExport, flowWindows, productionEnvironmentFromEnv, projectFlow, readFlow, type FlowWindow } from '../../flow-analytics.js';
+import { computeFlow, flowDrilldown, flowExport, flowWindows, projectFlow, resolvedProductionEnvironment, readFlow, type FlowWindow } from '../../flow-analytics.js';
 import { Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** Roles that may see exact pull-request, commit and evidence identities behind an aggregate. */
 const auditRoles = ['admin', 'coordinator', 'producer'];
-// Read once at boot so every analytics response of this process names the same environment.
-const productionEnvironment = productionEnvironmentFromEnv();
 
 const deploymentSchema = z.object({
   provider: z.string().trim().min(1).max(100), externalId: z.string().trim().min(1).max(200),
@@ -28,7 +26,7 @@ const flowQuerySchema = z.object({
   slice: z.string().max(200).nullish(), asOf: z.string().datetime().nullish(),
   metric: z.string().max(60).nullish(), key: z.string().max(200).nullish(), format: z.enum(['json', 'csv']).default('json'),
 }).strict();
-function flowQuery(url: URL) {
+function flowQuery(url: URL, productionEnvironment: string) {
   const raw = Object.fromEntries([...url.searchParams].filter(([, value]) => value !== ''));
   const parsed = flowQuerySchema.parse(raw);
   return { ...parsed, days: parsed.window as FlowWindow, productionEnvironment };
@@ -50,7 +48,8 @@ export const flowAnalyticsRoutes = defineRoutes('flow-analytics', [
     async handle({ url, actor, res, services: { engine, production } }, [part]) {
       // The watch's report as this request reads it, so the flow holds merges at Deploy exactly
       // where the board (grouped by the same report on /api/status) does.
-      const query = { ...flowQuery(url), production: production?.status() ?? null };
+      // The environment is the one the master verifies deployments under (as /api/status reads it).
+      const query = { ...flowQuery(url, await resolvedProductionEnvironment(engine.store.pool)), production: production?.status() ?? null };
       // Bounded catch-up keeps the read current without blocking on a full backfill.
       await projectFlow(engine.store, { batches: 3 });
       const dataset = await readFlow(engine.store, query);

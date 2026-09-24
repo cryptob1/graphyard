@@ -10,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
+import { daemonEffects } from '../src/master-daemon.js';
 import {
   classifyWait, computeFlow, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits,
   mergeReadyGate, projectFlow, readFlow, workSlices, type FlowQuery, type FlowWindow, type ProjectionState,
@@ -712,6 +713,38 @@ test('integration:flow-analytics-production-hold', async () => {
     assert.ok((await steps(url)).includes('deploy to outside'), 'with no production watch the merge takes it out of the flow');
     assert.ok(!(await steps(`http://127.0.0.1:${(watched.address() as any).port}`)).includes('deploy to outside'), 'the watch holds it at Deploy on the flow read alone');
   } finally { await new Promise<void>(resolve => watched.close(() => resolve())); }
+});
+
+test('integration:flow-analytics-master-production-environment', async () => {
+  // The master verifies deployments under `config.run.productionEnvironment`, a setting on its own
+  // host; its loop publishes that name and the dashboard and flow report read releases under it.
+  const read = async () => ({ status: (await api('/api/status')).body.productionEnvironment, flow: (await api('/api/analytics/flow?window=7')).body.productionEnvironment });
+  assert.deepEqual(await read(), { status: 'production', flow: 'production' }, 'before any publication the server reads its own setting');
+  assert.equal((await api('/api/production-environment', tokens.worker, { method: 'POST', body: JSON.stringify({ environment: 'elsewhere' }) })).status, 403, 'only the master (or an operator) names it');
+  assert.equal((await api('/api/production-environment', tokens.coordinator, { method: 'POST', body: JSON.stringify({ environment: ' ' }) })).status, 400);
+  const posted: string[] = [];
+  const mutate = async (path: string, data: unknown) => {
+    posted.push(path);
+    const response = await api(`/api/${path}`, tokens.coordinator, { method: 'POST', body: JSON.stringify(data) });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    return response.body;
+  };
+  let configured: string | undefined = 'graphyard / production';
+  const effects = daemonEffects(process.cwd(), () => ({ url, run: { productionEnvironment: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
+  try {
+    await effects.publishProductionEnvironment!();
+    await effects.publishProductionEnvironment!();
+    assert.deepEqual(posted, ['production-environment'], 'published once, not every cycle');
+    assert.deepEqual(await read(), { status: 'graphyard / production', flow: 'graphyard / production' }, 'both routes read the master-configured name per request');
+    // Clearing the setting publishes what the master then resolves (its environment, else production).
+    configured = undefined;
+    const previous = process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT; delete process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT;
+    try { await effects.publishProductionEnvironment!(); } finally { if (previous !== undefined) process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT = previous; }
+    assert.equal(posted.length, 2);
+    assert.deepEqual(await read(), { status: 'production', flow: 'production' });
+  } finally {
+    await api('/api/production-environment', tokens.coordinator, { method: 'POST', body: JSON.stringify({ environment: 'production' }) });
+  }
 });
 
 test('integration:flow-analytics-bounded-indexed', async () => {

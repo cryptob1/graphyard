@@ -32,6 +32,25 @@ export function productionEnvironmentFromEnv(env: NodeJS.ProcessEnv = process.en
   return value;
 }
 
+/**
+ * The installation ledger entry (an event with no work item) in which the master loop publishes
+ * the production environment it verifies deployments under: `config.run.productionEnvironment`,
+ * else its own GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`. That setting lives in the
+ * master's configuration on the master's host, so the control plane learns it only from here.
+ */
+export const productionEnvironmentEvent = 'production.environment';
+export const productionEnvironmentName = (value: unknown) => typeof value === 'string' && value.trim() && value.trim().length <= 100 ? value.trim() : null;
+
+/**
+ * The production environment every dashboard and flow read uses, read per request so a master
+ * reconfiguration applies without a restart: the master's latest publication, else this
+ * process's own setting. Verification and release reading then name the same environment.
+ */
+export async function resolvedProductionEnvironment(pool: pg.Pool, env: NodeJS.ProcessEnv = process.env) {
+  const row = (await pool.query('SELECT payload->>\'environment\' AS environment FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [productionEnvironmentEvent])).rows[0];
+  return productionEnvironmentName(row?.environment) ?? productionEnvironmentFromEnv(env);
+}
+
 export type FlowSource = 'graphyard' | 'github' | 'ci' | 'evidence' | 'deployment';
 export const flowKinds = ['work.created', 'work.released', 'dependencies.changed', 'blocker.set', 'blocker.cleared',
   'lease.claimed', 'lease.released', 'lease.lost', 'rework.requested', 'pr.submitted', 'candidate.observed',
