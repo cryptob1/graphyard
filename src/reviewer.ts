@@ -988,7 +988,7 @@ export const followUpFilingBoundMs = 30 * 60_000;
  * line, until filing them has failed on every retry — then they return to rework, where the stuck
  * item shows. An approval the head has moved past sets nothing aside, since the loop no longer files
  * for it. With `pending`, also the threads listed to a review whose
- * approval of the current head GitHub already shows but whose filing the loop has not yet recorded,
+ * approval of the current head (or carried onto it) GitHub already shows but whose filing the loop has not yet recorded,
  * for `followUpFilingBoundMs` after that approval: that approval judged each of them fixed or
  * follow-up, and none BLOCKING.
  */
@@ -1009,8 +1009,13 @@ export function followUpThreadIds(records: ReviewRecord[], work: Work[], pending
     }
     if (!pending || !record.threadsListed?.length || record.verdict && record.verdict.state !== 'APPROVED' || filing && filing.reviewId === record.verdict?.reviewId) continue;
     const item = work.find(entry => entry.key === record.key);
-    if (!item?.candidate || item.candidate.sha !== record.sha || item.candidate.pr !== record.pr) continue;
-    const approvedAt = Math.max(...(item.observation?.reviews ?? []).filter(review => review.sha === record.sha && review.state === 'APPROVED' && review.reviewer.toLowerCase() === pending.reviewer.toLowerCase())
+    if (!item?.candidate || item.candidate.pr !== record.pr) continue;
+    // The reviewed head itself, or a Graphyard-authored tip its approval was carried onto (a base
+    // refresh or the merge queue's tip), exactly as approvesCurrentHead accepts it once filed.
+    const carried = item.candidate.sha === record.sha ? null : carriedApproval(item);
+    if (item.candidate.sha !== record.sha && carried?.originalSha !== record.sha) continue;
+    const approvedAt = Math.max(...(item.observation?.reviews ?? []).filter(review => review.sha === record.sha && review.state === 'APPROVED' && review.reviewer.toLowerCase() === pending.reviewer.toLowerCase()
+      && (!carried || carried.reviewId === undefined || carried.reviewId === review.id))
       .map(review => Date.parse(review.submittedAt ?? '')).filter(Number.isFinite));
     if (Number.isFinite(approvedAt) && pending.now - approvedAt < followUpFilingBoundMs) add(record.key, record.threadsListed);
   }

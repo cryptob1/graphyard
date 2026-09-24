@@ -213,6 +213,25 @@ export interface FollowUpItem { title: string; description: string; type: 'chore
 export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ key: string }>;
 
 const replyMutation = 'mutation($thread:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread,body:$body}){comment{id}}}';
+const threadCommentsQuery = 'query($thread:ID!,$after:String){node(id:$thread){... on PullRequestReviewThread{comments(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{body}}}}}';
+const followUpReplyPrefix = (item: string) => `Filed as follow-up ${item}:`;
+/**
+ * Whether the thread already carries the loop's reply naming `item`: a reply GitHub accepted whose
+ * response was lost, or whose record was never saved, is found here rather than posted twice. A read
+ * that fails or is incomplete throws, so the caller retries instead of replying blind.
+ */
+async function hasFollowUpReply(thread: string, item: string, run: ChildRun): Promise<boolean> {
+  let after: string | null = null;
+  for (let page = 0; page < 20; page++) {
+    const parsed: any = JSON.parse(String(await run('gh', ['api', 'graphql', '-f', `query=${threadCommentsQuery}`, '-f', `thread=${thread}`, ...(after ? ['-f', `after=${after}`] : [])])));
+    const connection: any = parsed?.data?.node?.comments;
+    if (!Array.isArray(connection?.nodes)) throw new Error(`GitHub did not list the comments of review thread ${thread}${parsed?.errors?.[0]?.message ? `: ${parsed.errors[0].message}` : ''}`);
+    if (connection.nodes.some((comment: any) => typeof comment?.body === 'string' && comment.body.startsWith(followUpReplyPrefix(item)))) return true;
+    if (!connection.pageInfo?.hasNextPage) return false;
+    after = connection.pageInfo.endCursor;
+  }
+  throw new Error(`GitHub comment pagination of review thread ${thread} exceeded safety limit`);
+}
 /** The bounds on a work item's description and on each plannedFiles entry (`src/model/work.ts`). */
 const descriptionMax = 20000, plannedPathMax = 500;
 const clipEnd = (text: string, max: number) => text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
@@ -250,8 +269,9 @@ const plannedFilesMax = 100;
 /**
  * Scopes for every follow-up path within the plannedFiles count: while there are more than the bound,
  * the deepest entries are replaced by their containing directory, so each path stays covered by some
- * entry and none is dropped. Only root-level entries are never widened further; past the bound there,
- * the create is refused and the failure recorded, never a scope that silently misses a file.
+ * entry and none is dropped. Root-level entries are never widened further (no scope names the whole
+ * repository), so past the bound there more than the bound is returned: followUpItem plans the first
+ * ones and names the rest in the description, so the create is never refused over its scope.
  */
 export function coalescedScope(paths: string[]): string[] {
   const depth = (scope: string) => scope.split('/').filter(Boolean).length;
@@ -275,16 +295,22 @@ export function coalescedScope(paths: string[]): string[] {
 export function followUpItem(input: { key: string; workId: string; pr: number; sha: string; reviewId: number }, threads: LaunchThread[], findings: FollowUpFinding[] = []): FollowUpItem {
   const judged = [threads.length ? `${threads.length} review thread${threads.length === 1 ? '' : 's'}` : '', findings.length ? `${findings.length} finding${findings.length === 1 ? '' : 's'} with no thread` : ''].filter(Boolean).join(' and ');
   const intro = `The independent reviewer approved ${input.key} at ${input.sha} (review ${input.reviewId}) with every acceptance criterion met, and judged these ${judged} FOLLOW-UP: beyond the item's criteria. Graphyard filed them here${threads.length ? ' and resolved each thread with a reply naming this item' : ''}.`;
+  const scopes = coalescedScope([...threads.map(thread => thread.path).filter(path => path !== '(no path)'), ...findings.map(finding => finding.path).filter((path): path is string => !!path)]
+    .map(plannedScope).filter((path): path is string => !!path));
+  // More top-level paths than the work schema plans: the schema would refuse the create on every
+  // retry, so the item plans the first ones and its description names the rest for a scope request.
+  const unplanned = scopes.slice(plannedFilesMax);
+  const overflow = unplanned.length ? clipEnd(`Planned files name ${plannedFilesMax} of the ${scopes.length} top-level paths these follow-ups touch (the work schema's bound); request scope for the rest: ${unplanned.join(', ')}`, Math.floor(descriptionMax / 4)) : '';
+  const head = overflow ? `${intro}\n${overflow}` : intro;
   const entries = threads.length + findings.length;
-  const budget = Math.floor((descriptionMax - intro.length - 1 - entries) / Math.max(1, entries));
+  const budget = Math.floor((descriptionMax - head.length - 1 - entries) / Math.max(1, entries));
   return {
     title: `Follow-ups from the approved review of ${input.key} (PR #${input.pr})`.slice(0, 200),
-    description: [intro, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget)),
+    description: [head, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget)),
       ...findings.map((finding, index) => clipEnd(`${threads.length + index + 1}. Finding with no thread: ${finding.text}`, budget))].join('\n'),
     type: 'chore', priority: 2, dependencies: [input.workId],
     criteria: [{ id: 'AC-1', text: `Each follow-up listed in the description is addressed in code, or declined with a recorded reason.`, proofs: ['manual:review-followups-triaged'] }],
-    plannedFiles: coalescedScope([...threads.map(thread => thread.path).filter(path => path !== '(no path)'), ...findings.map(finding => finding.path).filter((path): path is string => !!path)]
-      .map(plannedScope).filter((path): path is string => !!path)),
+    plannedFiles: scopes.slice(0, plannedFilesMax),
     reason: `Follow-ups named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,
   };
 }
@@ -297,7 +323,8 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * somebody else resolved first is still filed, and left as they resolved it.
  * `listed` names the threads the reviewer's launch prompt listed; a named thread outside it is
  * refused, and a launch that could not read the threads vouches for none. Each step is recorded as it lands, so a retry creates no second item (the item key is kept, and
- * the create is idempotent on the approval) and replies to no thread twice. Runs outside every
+ * the create is idempotent on the approval) and replies to no thread twice: before replying, the thread
+ * is read for a reply already naming the item, so a reply whose record was lost is not posted again. Runs outside every
  * coordination transaction.
  */
 export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[] }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
@@ -350,8 +377,10 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
     // Resolved by somebody else since: nothing is left to answer on it.
     if (!open.some(entry => entry.id === thread.id)) { resolved.push(thread.id); continue; }
     try {
+      // A reply posted by an attempt whose record was lost is recognised on the thread, never repeated.
+      if (!replied.includes(thread.id) && await hasFollowUpReply(thread.id, item, run)) replied.push(thread.id);
       if (!replied.includes(thread.id)) {
-        const body = `Filed as follow-up ${item}: the independent review approved ${input.key} at ${input.sha.slice(0, 12)} with every acceptance criterion met and judged this finding beyond them. Graphyard resolves this thread; the finding is tracked in ${item}.`;
+        const body = `${followUpReplyPrefix(item)} the independent review approved ${input.key} at ${input.sha.slice(0, 12)} with every acceptance criterion met and judged this finding beyond them. Graphyard resolves this thread; the finding is tracked in ${item}.`;
         const reply = JSON.parse(String(await run('gh', ['api', 'graphql', '-f', `query=${replyMutation}`, '-f', `thread=${thread.id}`, '-f', `body=${body}`])));
         if (!reply?.data?.addPullRequestReviewThreadReply?.comment?.id) throw new Error('GitHub did not report the reply as posted');
         replied.push(thread.id);

@@ -123,9 +123,9 @@ test('unit:review-criteria-only-prompt — the Follow-up line is parsed exactly 
 });
 
 /** GitHub as the loop's own gh sees it: the approval, the PR's threads, replies and resolves. */
-function github(body: string, options: { failReply?: string[]; paths?: Record<string, string>; extra?: string[] } = {}) {
+function github(body: string, options: { failReply?: string[]; loseReply?: string[]; paths?: Record<string, string>; extra?: string[] } = {}) {
   const calls: string[][] = [], resolved: string[] = [], replies: { thread: string; body: string }[] = [];
-  const failReply = new Set(options.failReply ?? []);
+  const failReply = new Set(options.failReply ?? []), loseReply = new Set(options.loseReply ?? []);
   const thread = (id: string, createdAt: string, path = 'src/a.ts') => ({ id, path: options.paths?.[id] ?? path, isResolved: resolved.includes(id), isOutdated: false, line: 3,
     comments: { nodes: [{ author: { login: 'chatgpt-codex-connector' }, body: `finding on ${id}`, createdAt, url: `https://github.com/owner/project/pull/64#discussion_${id}` }] } });
   const run = (command: string, args: string[]) => {
@@ -137,8 +137,12 @@ function github(body: string, options: { failReply?: string[]; paths?: Record<st
     if (query.includes('addPullRequestReviewThreadReply')) {
       if (failReply.has(target!)) { failReply.delete(target!); throw new Error('gh: HTTP 502'); }
       replies.push({ thread: target!, body: args.find(arg => arg.startsWith('body='))!.slice('body='.length) });
+      // GitHub accepted the reply, but its response never reached the loop.
+      if (loseReply.has(target!)) { loseReply.delete(target!); throw new Error('gh: connection reset'); }
       return JSON.stringify({ data: { addPullRequestReviewThreadReply: { comment: { id: `C_${target}` } } } });
     }
+    if (query.includes('... on PullRequestReviewThread')) return JSON.stringify({ data: { node: { comments: { pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{ body: `finding on ${target}` }, ...replies.filter(reply => reply.thread === target).map(reply => ({ body: reply.body }))] } } } });
     if (query.includes('resolveReviewThread')) { resolved.push(target!); return JSON.stringify({ data: { resolveReviewThread: { thread: { id: target, isResolved: true } } } }); }
     if (query.includes('reviewThreads')) return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
       thread('PRRT_fixed0001', '2026-09-24T11:00:00Z'), thread('PRRT_follow001', '2026-09-24T11:00:00Z', 'src/b.ts'), thread('PRRT_follow002', '2026-09-24T11:10:00Z'),
@@ -674,5 +678,54 @@ test('unit:review-followups-filed — a failed filing of a delivered approval st
     assert.equal(releaseClosedRequests([record], [], new Date()), 1);
     assert.ok(record.followUps?.releasedAt);
     assert.ok(!boundSessionLedger([record, ...fillers], reviewLedgerSpec).includes(record));
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — an approval carried onto a new tip before its filing sets its listed threads aside all the same', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    const listed = ['PRRT_follow001', 'PRRT_follow002'].map(id => ({ id, author: 'codex', path: 'src/a.ts', line: 3, outdated: false, excerpt: 'finding', createdAt: '2026-09-24T11:00:00Z' }));
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => listed });
+    const { reviews } = await readReviewLedger(root);
+    // The merge queue published a new tip after GitHub recorded the approval of H, and carried it there.
+    const tip = 'c2'.padEnd(40, 'f'), approvedAt = Date.parse(submittedAt), at = approvedAt + threadResolutionGraceMs;
+    const carriedOnto = (reviewId: number) => {
+      const candidate = { sha: tip, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
+      return work({ candidate, baseRefresh: { head: tip, carry: { to: { sha: tip, baseSha: B }, policyRevision: 1, evidence: [],
+        approval: { carried: true, provider: 'github', reviewer, sha: H, reviewId, originalSha: H, reason: 'carried' } } } } as unknown as Partial<Work>,
+      { at: new Date(at).toISOString(), candidate: { ...candidate }, reviews: [{ reviewer, sha: H, state: 'APPROVED', id: 77, submittedAt }],
+        conversations: { required: true, unresolved: listed.map(({ excerpt: _excerpt, createdAt: _createdAt, ...thread }) => thread) } } as Partial<Observation>);
+    };
+    const item = carriedOnto(77);
+    assert.deepEqual([...followUpThreadIds(reviews, [item], { reviewer, now: at }).get('GY-64') ?? []].sort(), ['PRRT_follow001', 'PRRT_follow002']);
+    assert.equal(routineDecision(setAsideFollowUpThreads({ work: [item] }, followUpThreadIds(reviews, [item], { reviewer, now: at })).work[0], { autoMerge: true }, at), null, 'no thread rework for the carried approval\'s follow-ups');
+    // A carry of some other approval vouches nothing for these threads.
+    assert.equal(followUpThreadIds(reviews, [carriedOnto(78)], { reviewer, now: at }).get('GY-64'), undefined);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — follow-ups in more than 100 root-level files still make a fileable item that names every file', () => {
+  const threads = Array.from({ length: 130 }, (_, index) => ({ id: `PRRT_${String(index).padStart(3, '0')}bbbbbbbb`, author: 'codex', path: `root${index}.ts`, line: 1, outdated: false, excerpt: 'finding' }));
+  const item = followUpItem({ key: 'GY-64', workId: 'work-64', pr: 64, sha: H, reviewId: 77 }, threads);
+  assert.equal(item.plannedFiles.length, 100, 'within the work schema bound, so the create is not refused');
+  assert.ok(item.description.length <= 20000);
+  for (const thread of threads) assert.ok(item.plannedFiles.includes(thread.path) || item.description.includes(thread.path), `${thread.path} is planned or named`);
+  assert.match(item.description, /Planned files name 100 of the 130 top-level paths/);
+});
+
+test('unit:review-followups-filed — a reply GitHub accepted but whose response was lost is found on the thread, never posted twice', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github(approvalBody, { loseReply: ['PRRT_follow002'] }), items = creator(), config = await loadMasterConfig(root);
+    const first = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.match(first.reviews[0].followUps!.failure!, /PRRT_follow002: gh: connection reset/);
+    assert.ok(!first.reviews[0].followUps!.replied.includes('PRRT_follow002'), 'the lost reply is not on the record');
+    const second = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.deepEqual(gh.replies.map(reply => reply.thread), ['PRRT_follow001', 'PRRT_follow002'], 'one reply per thread');
+    assert.deepEqual(second.reviews[0].followUps!.replied, ['PRRT_follow001', 'PRRT_follow002']);
+    assert.deepEqual(second.reviews[0].followUps!.resolved, ['PRRT_follow001', 'PRRT_follow002']);
+    assert.equal(second.reviews[0].followUps!.failure, undefined);
+    assert.equal(items.created.length, 1);
   } finally { await cleanup(); }
 });
