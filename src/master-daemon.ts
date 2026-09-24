@@ -13,7 +13,7 @@ import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scope
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { countHeldChildren, endedScopeStates } from './quarantine.js';
+import { countHeldChildren, endedScopeStates, paneShellReport, recordedPane } from './quarantine.js';
 import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
 export { threadResolutionGraceMs, threadsAwaitReview } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
@@ -27,7 +27,7 @@ import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.j
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, herdrJson, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 
@@ -1910,19 +1910,18 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const assessment = assessments[item.id], quarantine = item.containmentQuarantine;
     const recorded = assessment?.verification?.recordedScope;
     if (!quarantine?.scope || !recorded || recorded.unit !== quarantine.scope.unit || recorded.pid !== quarantine.scope.pid || !endedScopeStates.includes(recorded.activeState)) continue;
-    const epoch = quarantine.epoch;
-    const session = (item.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.principal === quarantine.owner && (entry.epoch === epoch || entry.id === `${quarantine.owner}:${epoch}`) && entry.pane);
-    if (!session) continue;
-    const key = `close:ended-scope:${item.id}:${epoch}:${session.pane}`, previous = state.actions[key];
+    const epoch = quarantine.epoch, pane = recordedPane(item);
+    if (!pane) continue;
+    const key = `close:ended-scope:${item.id}:${epoch}:${pane}`, previous = state.actions[key];
     if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) continue;
     const attempts = (previous?.attempts ?? 0) + 1, why = `its supervisor scope ${recorded.unit} is ${recorded.activeState}`;
-    await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'started', detail: `Closing pane ${session.pane} of ${item.key} epoch ${epoch}: ${why}`, attempts, cycle: state.cycle }, now(), effects.persist);
+    await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'started', detail: `Closing pane ${pane} of ${item.key} epoch ${epoch}: ${why}`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
       let gone = false;
-      try { await effects.closeSession(session.pane!); } catch (error) { if (!paneAlreadyGone(error)) throw error; gone = true; }
-      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'done', detail: `${gone ? 'Pane was already gone' : 'Closed pane'} ${session.pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`, attempts, cycle: state.cycle }, now(), effects.persist));
+      try { await effects.closeSession(pane); } catch (error) { if (!paneAlreadyGone(error)) throw error; gone = true; }
+      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'done', detail: `${gone ? 'Pane was already gone' : 'Closed pane'} ${pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`, attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'failed', detail: `Could not close pane ${session.pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'failed', detail: `Could not close pane ${pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) {
@@ -3074,7 +3073,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
-    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => countHeldChildren(await probeSupervisorAbsence(target, { run })) }),
+    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => {
+      const report = countHeldChildren(await probeSupervisorAbsence(target, { run }));
+      // The recorded session's pane shell, read from Herdr, is the only shell settlement may excuse (GY-189).
+      const pane = recordedPane(work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch) ?? {});
+      if (!pane || !report.held.length) return report;
+      const paneShell = await herdrJson(['pane', 'process-info', '--pane', pane], run).then(result => paneShellReport(pane, result), () => null);
+      return paneShell ? { ...report, paneShell } : report;
+    } }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present

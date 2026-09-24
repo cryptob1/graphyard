@@ -180,6 +180,12 @@ export const containmentVerificationSchema = z.object({
     children: z.number().int().min(0).optional() }).strict()).max(400).default([]),
   /** The scope the quarantine recorded at launch and how systemd reports it now. */
   recordedScope: z.object({ unit: z.string().min(1).max(200), pid: z.number().int().positive(), activeState: z.string().min(1).max(40) }).strict().nullable().default(null),
+  /**
+   * The recorded implementation session's Herdr pane as Herdr reports it: the pid of the pane's
+   * own shell and the terminal's foreground process group (null when Herdr named none). Absent
+   * when the pane is gone or could not be read, and from a probe before GY-189.
+   */
+  paneShell: z.object({ pane: z.string().min(1).max(200), pid: z.number().int().positive(), foregroundGroup: z.number().int().positive().nullable() }).strict().nullable().optional(),
   /** Privileged host processes outside every containment scope that withheld inspection. */
   inaccessible: z.number().int().min(0),
   unverifiable: z.array(z.string().min(1).max(500)).max(50),
@@ -199,12 +205,26 @@ export const endedScopeStates = ['not-found', 'inactive', 'failed', 'dead'];
 const interactiveShells = ['bash', 'sh', 'zsh', 'fish', 'dash', 'ksh'];
 /**
  * An interactive shell by its command line: a shell binary (a login shell's `-bash` too) given
- * only option flags, none of them `-c`, so it runs no command or script of its own.
+ * only option flags, none of them `-c` or `-s`, so it runs no command, script or stdin script of its own.
  */
 export function isInteractiveShell(command: string) {
   const [binary, ...args] = command.trim().split(/\s+/);
   const name = (binary ?? '').split('/').pop()!.replace(/^-/, '');
-  return interactiveShells.includes(name) && args.every(arg => /^-/.test(arg) && !/^-[A-Za-z]*c/.test(arg) && arg !== '--');
+  return interactiveShells.includes(name) && args.every(arg => /^-/.test(arg) && !/^-[A-Za-z]*[cs]/.test(arg) && arg !== '--' && arg !== '-');
+}
+/** The Herdr pane of the quarantined epoch's implementation session, as the session ledger recorded it. */
+export function recordedPane(work: Pick<Work, 'containmentQuarantine' | 'sessions'>) {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return null;
+  return (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.principal === quarantine.owner
+    && (entry.epoch === quarantine.epoch || entry.id === `${quarantine.owner}:${quarantine.epoch}`) && entry.pane)?.pane ?? null;
+}
+/** What `herdr pane process-info --pane PANE` reports about the pane's own shell, or null when it names none. */
+export function paneShellReport(pane: string, result: unknown): NonNullable<ContainmentVerification['paneShell']> | null {
+  const info = (result as { process_info?: { pane_id?: unknown; shell_pid?: unknown; foreground_process_group_id?: unknown } } | null)?.process_info;
+  const positive = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+  if (!info || info.pane_id !== pane || !positive(info.shell_pid)) return null;
+  return { pane, pid: info.shell_pid as number, foregroundGroup: positive(info.foreground_process_group_id) ? info.foreground_process_group_id as number : null };
 }
 export interface ProcessTableDeps { listProcesses?: () => string[]; readParent?: (pid: number) => number }
 /**
@@ -232,18 +252,23 @@ export function countHeldChildren<T extends { held: { pid: number }[] }>(verific
   return { ...verification, held: verification.held.map(entry => ({ ...entry, children: parents.filter(parent => parent === entry.pid).length })) };
 }
 /**
- * The launch pane's own shell, left in the worktree after `watch` exited (GY-189): a process
- * matched only by its working directory, outside every containment scope, that is an
- * interactive shell with no child processes, while systemd reports the recorded supervisor
- * scope ended. The worker ran inside that scope and the pane's shell never did, so with the
- * scope gone and nothing running under the shell there is no worker left for it to be.
- * A shell with a child, a shell a live scope holds, a probe that did not count children, or a
- * quarantine without a recorded scope still holds the fence.
+ * The launch pane's own shell, left in the worktree after `watch` exited (GY-189): the process
+ * Herdr reports as the shell of the recorded implementation session's pane, holding its
+ * terminal's foreground (no job runs in front of it), matched only by its working directory,
+ * outside every containment scope, an interactive shell with no child processes, while systemd
+ * reports the recorded supervisor scope ended. The worker ran inside that scope and the pane's
+ * shell never did, so with the scope gone and nothing running under the shell there is no
+ * worker left for it to be. Any other shell in the worktree, a shell with a child or a
+ * foreground job, a shell a live scope holds, a probe that did not count children or read the
+ * pane, or a quarantine without a recorded scope still holds the fence.
  */
-function paneShell(quarantine: NonNullable<Work['containmentQuarantine']>, verification: ContainmentVerification, process: ContainmentVerification['processes'][number]) {
-  if (process.evidence !== 'workspace' || !quarantine.scope) return false;
+function paneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verification: ContainmentVerification, process: ContainmentVerification['processes'][number]) {
+  const quarantine = work.containmentQuarantine;
+  if (process.evidence !== 'workspace' || !quarantine?.scope) return false;
   const recorded = verification.recordedScope;
   if (recorded?.unit !== quarantine.scope.unit || recorded.pid !== quarantine.scope.pid || !endedScopeStates.includes(recorded.activeState)) return false;
+  const shell = verification.paneShell, pane = recordedPane(work);
+  if (!shell || !pane || shell.pane !== pane || shell.pid !== process.pid || shell.foregroundGroup !== process.pid) return false;
   const found = verification.held.find(entry => entry.pid === process.pid);
   return !!found && found.unit === null && found.children === 0 && isInteractiveShell(found.command)
     && !verification.scopes.some(scope => scope.processes.includes(process.pid) || scope.attributed.includes(process.pid));
@@ -253,7 +278,7 @@ function paneShell(quarantine: NonNullable<Work['containmentQuarantine']>, verif
  * Every check states what it could not prove; an empty result is the only authorization.
  */
 export function containmentSettlementRefusals(
-  work: Pick<Work, 'containmentQuarantine' | 'lease' | 'workspaces'>,
+  work: Pick<Work, 'containmentQuarantine' | 'lease' | 'workspaces' | 'sessions'>,
   verification: ContainmentVerification,
   options: { now: number; graceMs?: number; freshnessMs?: number; clockToleranceMs?: number },
 ): string[] {
@@ -297,7 +322,7 @@ export function containmentSettlementRefusals(
     refusals.push(`Host verification did not inspect recorded containment scope ${quarantine.scope.unit} (supervisor pid ${quarantine.scope.pid}) of epoch ${quarantine.epoch}`);
   for (const failure of verification.unverifiable) refusals.push(`Host verification was incomplete: ${failure}`);
   for (const process of verification.processes) {
-    if (paneShell(quarantine, verification, process)) continue;
+    if (paneShell(work, verification, process)) continue;
     refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})${heldDetail(verification, process.pid)}`);
   }
   for (const scope of verification.scopes.filter(entry => entry.processes.length))
