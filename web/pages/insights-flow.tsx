@@ -22,6 +22,19 @@ export async function readFlow(api: Dashboard['api'], now: number) {
 }
 
 /**
+ * The replay lane at replay position `t`: each dot stands where its item's latest recorded move put
+ * it. Every item the replay plays has its own row, and the lane grows to fit them, so no two dots
+ * overlap however many items moved in the last day.
+ */
+export function ReplayLane({ frames, t }: { frames: ReplayFrame[]; t: number }) {
+  const positions = positionsAt(frames, t);
+  const lanes = [...new Set(frames.map(frame => frame.key))];
+  return <div className="flow-lane replay-lane" data-flow="replay" data-frames={frames.length} style={{ height: `${Math.max(60, lanes.length * 14 + 20)}px` }} aria-label={`${frames.length} recorded step changes in the last 24 hours`}>
+    {lanes.map((key, lane) => { const at = positions.get(key); return at ? <span key={key} className={`replay-dot${at.rework ? ' rework' : ''}`} data-key={key} data-step={at.step} data-row={lane} style={{ left: column(at.step), top: `${10 + lane * 14}px` }} title={`${key}: ${stepLabel[at.step as StepId]}`}/> : null; })}
+  </div>;
+}
+
+/**
  * Insights → Flow (GY-161): build to live, one column per pull-request step.
  *
  * - **Now** places every open item at its true step (`prSteps`, the same reading the Work page
@@ -78,8 +91,6 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const slowest = shares.length ? shares.reduce((a, b) => b.ms > a.ms ? b : a).step : null;
   const landed: { bucket: string; delivered: number }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7);
   const peak = Math.max(1, ...landed.map(day => day.delivered));
-  const positions = frames ? positionsAt(frames, t) : new Map();
-  const lanes = [...new Set((frames ?? []).map(frame => frame.key))];
   return <>
     <div className="page-heading"><div><h1>Flow</h1><p className="summary">Build to live, one column per step. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
     {error && <p className="notice" role="status">The recorded history could not be read: {error}. The Now view below is live.</p>}
@@ -95,9 +106,7 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
       <div className="flow-subhead"><h2>Last 24 hours, replayed</h2><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>
       {frames === null ? <p className="muted flow-wait">{error ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
         : frames.length === 0 ? <p className="muted flow-wait">No item changed step in the last 24 hours.</p>
-          : <div className="flow-lane replay-lane" data-flow="replay" data-frames={frames.length} style={{ height: `${Math.max(60, Math.min(lanes.length, 12) * 14 + 20)}px` }} aria-label={`${frames.length} recorded step changes in the last 24 hours`}>
-            {lanes.map((key, lane) => { const at = positions.get(key); return at ? <span key={key} className={`replay-dot${at.rework ? ' rework' : ''}`} data-key={key} data-step={at.step} style={{ left: column(at.step), top: `${10 + (lane % 12) * 14}px` }} title={`${key}: ${stepLabel[at.step as StepId]}`}/> : null; })}
-          </div>}
+          : <ReplayLane frames={frames} t={t}/>}
       {frames && frames.length > 0 && <div className="replay-controls">
         <span>24 h ago</span>
         <input type="range" min={0} max={1000} value={Math.round(t * 1000)} aria-label="Replay position" onChange={e => { setPlaying(false); setT(Number(e.target.value) / 1000); }}/>

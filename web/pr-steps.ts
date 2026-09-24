@@ -63,19 +63,35 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number):
     }
     case 'test': {
       const required = work.policy.checks ?? [];
-      // Only each check's latest run counts, as in the test gate: a re-run replaces an old failure or success.
-      const result = (name: string) => latestCheck((work.observation?.checks ?? []).filter(check => check.name === name))?.result ?? '';
-      const finished = (name: string) => !pendingCheck.has(result(name));
-      const failed = required.filter(name => finished(name) && result(name) !== 'success');
+      // The test gate counts only runs from the trusted CI Apps, which the dashboard is not told. So
+      // its own reasons decide which checks have not passed: a check it does not name has passed, and
+      // no run from another App with the same name can make a named one read done.
+      const named = (name: string) => reasons.includes(`Required CI check ${name} has not passed on the current candidate`);
+      const unpassed = gate ? required.filter(named) : required;
+      // A named check reads failed once every App's latest run of it has finished and one of them did
+      // not succeed; while any is still running it stays pending. Only each App's latest run counts,
+      // as in the test gate: a re-run replaces an old failure or success.
+      const failed = unpassed.filter(name => {
+        const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
+        const latest = [...new Set(runs.map(check => check.appId))].map(app => latestCheck(runs.filter(check => check.appId === app))?.result ?? '');
+        return latest.length > 0 && latest.every(result => !pendingCheck.has(result)) && latest.some(result => result !== 'success');
+      });
       if (failed.length) return { detail: `the check ${failed.join(', ')} failed`, who: 'Builder agent' };
-      return { detail: `${required.filter(finished).length} of ${required.length} checks done`, who: 'Automated checks' };
+      return { detail: `${required.length - unpassed.length} of ${required.length} checks done`, who: 'Automated checks' };
     }
     case 'review':
       return { detail: 'waiting for the reviewer', who: 'Reviewer agent' };
     case 'prove': {
-      const total = work.criteria.filter(c => !c.bootstrap).flatMap(c => c.proofs).length;
-      const open = reasons.filter(reason => /^AC-\d+:/.test(reason)).length;
-      return { detail: total ? `${total - open} of ${total} proofs passed` : 'waiting for proof', who: 'Prover agent' };
+      // Every proof the acceptance gate demands: the item's own and the obligations it inherits from
+      // another change's deferred proof. A proof the gate still refuses — unproven, inherited and
+      // unproven, or no longer independent — is open, so the count never reads complete while it refuses.
+      const own = work.criteria.filter(c => !c.bootstrap).flatMap(c => c.proofs);
+      const refused = reasons.map(reason => reason.match(/^(?:AC-\d+|Bootstrap obligation inherited from \S+ \S+): (\S+) needs /)?.[1] ?? reason.match(/^Trusted (\S+) evidence from /)?.[1]);
+      const open = new Set(refused.filter((proof): proof is string => !!proof));
+      const total = new Set([...own, ...open]).size;
+      if (!total) return { detail: 'waiting for proof', who: 'Prover agent' };
+      if (!open.size && reasons.length) return { detail: 'checking the proofs', who: 'Prover agent' };
+      return { detail: `${total - open.size} of ${total} proofs passed`, who: 'Prover agent' };
     }
     case 'merge': {
       const queued = reasons.map(reason => reason.match(/^Merge queue position (\d+) of \d+: (\S+) is ahead$/)).find(Boolean);

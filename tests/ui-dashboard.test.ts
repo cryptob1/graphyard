@@ -18,7 +18,7 @@ import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
-import InsightsFlow, { readFlow } from '../web/pages/insights-flow.js';
+import InsightsFlow, { ReplayLane, readFlow } from '../web/pages/insights-flow.js';
 import Sidebar from '../web/components/sidebar.js';
 import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
@@ -282,6 +282,7 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
   const work = board();
   const withReasons = (item: Work, reasons: Record<string, string[]>) => ({ ...item, gates: item.gates.map(gate => reasons[gate.name] ? { ...gate, passed: reasons[gate.name].length === 0, reasons: reasons[gate.name] } : gate) }) as Work;
   const handedIn = find('GY-22', work);
+  const ci = (name: string) => `Required CI check ${name} has not passed on the current candidate`;
   const cases: [string, Work, string, string, string][] = [
     ['worker building', find('GY-14', work), 'build', 'Building · the builder is writing the code', 'Builder agent'],
     ['scope check', withReasons(handedIn, { build: ['Candidate diff has not been compared with the planned files'] }), 'validate', 'Validating · checking which files it changes', 'Graphyard (automatic)'],
@@ -289,10 +290,18 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     ['CI running', handedIn, 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
     ['CI failed', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1 }, { name: 'typecheck', result: 'success', appId: 1 }] } } as Work, 'test', 'Testing · the check test failed', 'Builder agent'],
     ['CI re-run after a failure', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'in_progress', appId: 1, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
-    ['CI re-run after a success', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'success', appId: 1, id: 1 }, { name: 'test', result: 'queued', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, 'test', 'Testing · 0 of 2 checks done', 'Automated checks'],
-    ['CI fixed on a re-run', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
+    ['CI re-run after a success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'success', appId: 1, id: 1 }, { name: 'test', result: 'queued', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, { test: [ci('test'), ci('typecheck')] }), 'test', 'Testing · 0 of 2 checks done', 'Automated checks'],
+    ['CI fixed on a re-run', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, { test: [ci('typecheck')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
+    // Only the trusted CI App's runs count, as in the test gate, whose reasons name the checks not yet passed:
+    // a newer run of the same name from another App neither completes a check nor fails it.
+    ['CI pending behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'in_progress', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
+    ['CI pending behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'queued', appId: 1, id: 1 }, { name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
+    ['CI failed behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · the check test failed', 'Builder agent'],
     ['review requested', find('GY-15', work), 'review', 'Reviewing · waiting for the reviewer', 'Reviewer agent'],
     ['proofs pending', find('GY-16', work), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
+    // An obligation inherited from another change's deferred proof counts in the total and stays open until proven.
+    ['proofs pending on an inherited obligation', withReasons(find('GY-16', work), { acceptance: ['Bootstrap obligation inherited from GY-9 AC-2: integration:contract needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'] }), 'prove', 'Proving · 3 of 4 proofs passed', 'Prover agent'],
+    ['proofs no longer independent', withReasons(find('GY-16', work), { acceptance: [`Trusted ${find('GY-16', work).criteria[0].proofs[0]} evidence from producer-1 is no longer independent: producer-1 has since held an assignment on GY-16`] }), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
     ['merging', find('GY-21', work), 'merge', 'Merging · Graphyard is merging it', 'Graphyard (automatic)'],
     ['queued to merge', withReasons(find('GY-21', work), { merge: ['Merge queue position 2 of 3: GY-5 is ahead'] }), 'merge', 'Merging · 2nd in line, after GY-5', 'Graphyard (automatic)'],
     // Deploy is a step only where the policy asks for the check after deploying (GY-161, AC-11).
@@ -395,6 +404,13 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   const places = [...crowded.matchAll(/class="now-dot[^"]*" data-step="([\w-]+)" data-key="[^"]+" data-row="(\d+)" style="left:([^;]+);top:(\d+)px"/g)].map(match => `${match[3]}|${match[4]}`);
   assert.equal(places.length, [...crowded.matchAll(/class="now-dot/g)].length);
   assert.ok(places.length >= 9); assert.equal(new Set(places).size, places.length, 'no two Now dots overlap');
+  // The replay gives every item it plays its own row too, however many moved in the day: no thirteenth dot lands on the first.
+  const busyDay = replayFrames(Array.from({ length: 30 }, (_, index) => ({ key: `GY-${200 + index}`, from: null, to: 'build' as const, at: new Date(NOW - (index + 1) * 600_000).toISOString() })), NOW);
+  const lane = markup(createElement(ReplayLane, { frames: busyDay, t: 1 }));
+  const replayPlaces = [...lane.matchAll(/class="replay-dot[^"]*" data-key="[^"]+" data-step="[\w-]+" data-row="(\d+)" style="left:([^;]+);top:(\d+)px"/g)].map(match => `${match[2]}|${match[3]}`);
+  assert.equal(replayPlaces.length, 30); assert.equal(new Set(replayPlaces).size, 30, 'no two replay dots overlap');
+  const laneHeight = Number(lane.match(/height:(\d+)px/)![1]);
+  assert.ok(Math.max(...replayPlaces.map(place => Number(place.split('|')[1]))) < laneHeight, 'the replay lane grows to hold every row');
   // On a phone the step heads keep the seven columns the lanes below are drawn in.
   const cssFlow = await read('web/style.css');
   assert.deepEqual([...cssFlow.matchAll(/\.flow-columns-head\{[^}]*grid-template-columns:repeat\((\d+)/g)].map(match => match[1]), ['7']);
