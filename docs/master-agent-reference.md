@@ -75,6 +75,12 @@ A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator`
 
 `master escalation GY-N` spawns a handler that answers with `master decide GY-N resolve … --context FINGERPRINT REASON` (`master context GY-N` prints the context).
 
+## Fault classes
+
+Every attention item, escalation and failed loop action carries a `kind` and a `faultClass` from the catalogue in `src/model/fault-classes.ts` (session-liveness, review-convergence, decision, scope, overlap-hold, observation, deployment, configuration, containment, merge, proof, capacity, resources, loop, human-decision, stalled-gate). `master status` groups open problems under `faults`, largest class first; the Work page shows the same counts under Problems by class. An `unclassified` line means the catalogue needs an entry.
+
+The loop records each fault as an instance under `daemon.faults`. When a class reaches `GRAPHYARD_FAULT_CLASS_THRESHOLD` instances (default 3) within `GRAPHYARD_FAULT_CLASS_WINDOW_HOURS` (default 24) and no open item names it, the loop files one backlog item as the master's operator-agent. The item lists the instances and records the class it closes in `origin.faultClass`. Later instances link to that item instead of filing more. Fix the shared cause, not each instance.
+
 ## Pipeline speed
 
 The target is submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs [--split GY-N] [--record DIR]` records what `manual:speed-target-met` reads. Never trade a gate or proof for the number.

@@ -1,5 +1,6 @@
 import { agentOwner, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import type { ActionRow } from './model/actions.js';
+import { classifyAttention, groupFaults } from './model/fault-classes.js';
 import type { Work } from './model.js';
 import { producerLedgerSpec, type ProducerRecord } from './producer.js';
 import { reviewLedgerSpec, sessionLedgerRefusal, sessionLedgerRemedy, type ReviewRecord } from './reviewer.js';
@@ -136,6 +137,16 @@ export function attributeAttention(items: AttentionItem[], readings: ResourceRea
     if (item.subject.startsWith('resource:')) return item;
     const reading = attributionFor(item.text, readings);
     if (!reading) return item;
-    return { ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy };
+    return { ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy, kind: 'resource-bound' };
   });
+}
+
+/**
+ * The final attention list with every item's fault kind and class (GY-173), and the open problems
+ * grouped by class with a count. It runs on the list as `master status` reports it — after the
+ * ledger and resource attribution — so an item rewritten to name a resource is counted as one.
+ */
+export function faulted(items: AttentionItem[]) {
+  const attentionItems = classifyAttention(items);
+  return { attentionItems, faults: groupFaults(attentionItems) };
 }

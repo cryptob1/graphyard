@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -8,6 +8,7 @@ import { ciReportingEnvironment } from './install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
+import { classified, faultClasses, faultClassItem, faultClassPolicyFromEnv, faultInstanceSchema, noteFault, recurringClasses, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from './model/fault-classes.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
@@ -37,8 +38,10 @@ import { probeSupervisorAbsence } from './containment-probe.js';
  * evidence, never calls an operator route, and reaches GitHub only through the guarded merge.
  */
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
+/** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
+export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
 /** The most an action's detail may carry: daemonActionSchema's bound, which record() enforces. */
 export const actionDetailMax = 2000;
 export const daemonActionSchema = z.object({
@@ -53,6 +56,8 @@ export const daemonActionSchema = z.object({
   epoch: z.number().int().min(0).nullable().default(null),
   cycle: z.number().int().min(0),
   at: z.string(),
+  /** Set on a failed or indeterminate action: the fault class that failure is an instance of (GY-173). */
+  faultClass: z.enum(faultClasses).optional(),
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
@@ -306,6 +311,12 @@ export const daemonStateSchema = z.object({
   absences: z.record(z.string(), z.object({ epoch: z.number().int().min(0), owner: z.string().max(200), firstSeenAt: z.string(), cycle: z.number().int().min(0) }).strict()).default({}),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
+  /**
+   * Every fault instance the loop recorded, each with its class (GY-173), and per standing fault
+   * (`kind|subject`) the instance it is. A class that recurs files one item; later instances link to it.
+   * The default is a factory: zod 4 hands a literal default out by reference, which would share one record between states.
+   */
+  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}) }).strict().default(() => ({ instances: [], open: {} })),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -1221,6 +1232,8 @@ export async function noteCycleFailure(state: DaemonState, error: unknown, phase
   const at = new Date(options.now).toISOString();
   const last = { cycle: state.cycle, at, phase, call, reason: message(error).slice(0, 1000), delayMs, nextAt: new Date(options.now + delayMs).toISOString() };
   state.failures = { ...state.failures, consecutive, total: state.failures.total + 1, last };
+  // A run of failures reaching the attention bound is one loop fault instance (GY-173), not one per retry.
+  if (consecutive === cycleFailureAttentionAfter) noteFault(state.faults, { ...classified('loop-failures'), subject: 'loop', text: `${consecutive} consecutive failed cycles, the last in ${describeFailingCall(last)}: ${last.reason}` }, at);
   // The cycle ended, failed, and the loop is alive: the counter and the heartbeat both say so.
   state.cycle += 1;
   state.lastCycleAt = at;
@@ -1276,25 +1289,25 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
     ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; the time went to child processes in the ${cost.longestWait.step} step (${Math.round(cost.longestWait.childWaitMs / 1000)}s), so look at what Herdr, gh or git is slow on rather than restarting a loop that is still cycling`
     : cost?.slowest ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; shorten the ${cost.slowest.step} step rather than restarting a loop that is still cycling`
       : 'graphyard master status shows the last cycle under daemon.cost';
-  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart) });
+  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart), ...classified('loop-liveness') });
   // A cycle whose own work does not fit its interval is raised whatever the lag says: the loop
   // looks healthy the instant a long cycle ends, and the cost is the only reading that names
   // what took the time. A cycle that merely waited is reported net: its work fit, and the wait is
   // in the breakdown for anyone reading it.
   if (cost && !cost.withinInterval && report.liveness.state !== 'slow' && report.liveness.state !== 'absent') {
-    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.slowest ? `. The ${cost.slowest.step} step is the slowest, at ${Math.round(cost.slowest.ms / 1000)}s of work` : ''}`, ...agentOwner('master', shorten) });
+    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.slowest ? `. The ${cost.slowest.step} step is the slowest, at ${Math.round(cost.slowest.ms / 1000)}s of work` : ''}`, ...agentOwner('master', shorten), ...classified('loop-cost') });
   }
   // A cycle that keeps failing is retried in-process with backoff; past the bound it names the
   // failing call, because a restart would not clear a read that times out every time.
   const failures = report.failures;
   if (failures?.last && failures.consecutive >= cycleFailureAttentionAfter) items.push({ subject: 'loop',
     text: `The master loop has failed ${failures.consecutive} consecutive cycles, the last (cycle ${failures.last.cycle} at ${failures.last.at}) in ${describeFailingCall(failures.last)}: ${failures.last.reason}. It keeps cycling in-process, waiting ${Math.round(failures.last.delayMs / 1000)}s before the next attempt (due ${failures.last.nextAt}); a restart does not clear this`,
-    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
+    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`), ...classified('loop-failures') });
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
-    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`) });
+    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`), ...classified('loop-silence') });
   if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
-    ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step') });
+    ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step'), ...classified('delivery-budget') });
   return items;
 }
 
@@ -1470,12 +1483,71 @@ export interface DaemonEffects {
    */
   snapshot: () => Promise<{ work: Work[]; now: string; jobs?: { work_id?: string; error?: string | null }[] }>;
   persist: (state: DaemonState) => Promise<void>;
+  /**
+   * Files the one backlog item a recurring fault class gets (GY-173), as the master's own
+   * operator-agent identity, under an idempotency key naming the class and its instances. Absent
+   * while no such identity is provisioned: the classes are still recorded and reported.
+   */
+  fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
+  /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
+  faultClassPolicy?: FaultClassPolicy;
 }
 
 async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist']) {
-  const entry = daemonActionSchema.parse({ ...action, at: action.at ?? new Date(now).toISOString() });
+  const failed = action.state === 'failed' || action.state === 'indeterminate';
+  const entry = daemonActionSchema.parse({ ...action, at: action.at ?? new Date(now).toISOString(), ...(failed ? { faultClass: classified(daemonActionFaultKind(action.kind)).faultClass } : {}) });
   state.actions[key] = entry; await persist(state);
   return entry;
+}
+
+/**
+ * What this cycle saw wrong, classified (GY-173): every open item's own faults (escalations,
+ * fences, parks, scope requests, proof gaps, spent accounts, violations, blockers) and every
+ * action standing failed. A fault that keeps standing is one instance; one that clears and returns
+ * is another.
+ */
+export function cycleFaults(state: DaemonState, work: Work[], now: number): FaultObservation[] {
+  const actions = Object.entries(state.actions).filter(([, action]) => action.state === 'failed' || action.state === 'indeterminate')
+    .map(([key, action]) => ({ ...classified(daemonActionFaultKind(action.kind)), subject: action.work ?? key, text: action.detail.slice(0, 500) }));
+  return [...work.flatMap(item => workFaults(item, now)), ...actions];
+}
+export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
+/**
+ * One structural item per recurring class (AC-2). A class whose unaccounted instances in the window
+ * reach the threshold, with no open item naming it, gets one backlog item filed as the master's
+ * operator-agent identity, listing the instances; while that item is open, every later instance is
+ * linked to it instead of filing another. Nothing is filed below the threshold.
+ */
+export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[]) {
+  const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
+  for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock)) {
+    if (recurrence.item) { for (const instance of recurrence.unlinked) instance.linkedTo = recurrence.item.key; continue; }
+    if (!recurrence.file || !effects.fileFaultClass) continue;
+    const key = faultActionKey(recurrence.faultClass), previous = state.actions[key];
+    if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) continue;
+    const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
+    // The same instances always file under the same key, so a retry after a lost reply returns the item already filed.
+    const idempotency = `fault-class:${recurrence.faultClass}:${createHash('sha256').update(recurrence.recent.map(entry => entry.id).sort().join(',')).digest('hex').slice(0, 32)}`;
+    await record(state, key, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item for the recurring ${recurrence.faultClass} fault class: ${recurrence.count} instances in ${policy.windowHours} hours`, attempts, cycle: state.cycle }, now(), effects.persist);
+    try {
+      const filed = await effects.fileFaultClass(faultClassItem(recurrence, policy, clock), idempotency);
+      for (const instance of recurrence.recent) instance.linkedTo = filed.key;
+      work.push(filed);
+      performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the recurring ${recurrence.faultClass} fault class (${recurrence.count} ≥ ${policy.threshold} in ${policy.windowHours} hours), linking ${recurrence.recent.length} instance(s); later instances link to it`, attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the recurring ${recurrence.faultClass} fault class: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
+}
+/** The recurrences `master status` reports under daemon.faults: per class, the window's count and the item standing for it. */
+export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy: FaultClassPolicy, now: number) {
+  const instances = state.faults.instances;
+  const linked = (faultClass: string) => [...new Set(instances.filter(entry => entry.faultClass === faultClass && entry.linkedTo).map(entry => entry.linkedTo!))];
+  return { policy, recorded: instances.length, standing: Object.keys(state.faults.open).length,
+    classes: faultClasses.flatMap(faultClass => {
+      const from = now - policy.windowHours * 3_600_000, inWindow = instances.filter(entry => entry.faultClass === faultClass && Date.parse(entry.at) >= from);
+      return inWindow.length ? [{ faultClass, instances: inWindow.length, unlinked: inWindow.filter(entry => !entry.linkedTo).length, items: linked(faultClass), latest: inWindow.at(-1)!.at }] : [];
+    }).sort((a, b) => b.instances - a.instances) };
 }
 
 /** One preservation per attempt: the record an interrupted attempt leaves for the next one. */
@@ -2465,6 +2537,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
 
+  // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
+  //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
+  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock), new Date(clock).toISOString());
+  await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
+
   spent('deployment');
 
   // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have
@@ -2747,6 +2824,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     reclaim: state.reclaim,
     // Every decision the loop has put to an approver and not yet seen applied and retired.
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
+    // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
+    faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
   };
 }
 
@@ -2897,11 +2976,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
    * The coordinator credential cannot, and the approver's
    * credential is never read here: an agent that requested a decision may not approve it.
    */
-  const asOperatorAgent = async (method: 'GET' | 'POST', path: string, body?: unknown) => {
+  const asOperatorAgent = async (method: 'GET' | 'POST', path: string, body?: unknown, key: string = randomUUID()) => {
     const config = current();
     if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can request routine decisions');
     const token = await agentToken(root, config, 'operatorAgent');
-    const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
+    const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
     const result = await response.json();
     if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
     return result;
@@ -3038,6 +3117,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
+    // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173).
+    get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),

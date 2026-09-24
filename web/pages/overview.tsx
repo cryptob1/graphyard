@@ -6,6 +6,7 @@ import { formatAge } from '../duration';
 import { classify, groupLabel, groupOf, mergedAt, releasedAt, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
 import { releaseView } from '../release';
 import { stalledCards } from './actionless';
+import { groupFaults, workFaults } from '../../src/model/fault-classes';
 import type { Dashboard } from './dashboard';
 
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -28,6 +29,9 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   const humanOnly = humanOnlyIds(work, status?.humanOnly);
+  // Open problems by fault class (GY-173): one count per shared cause, read from each open item's
+  // own record the same way the master loop reads it, so a cause behind several items reads as one.
+  const faults = groupFaults(work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now)));
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const delivered = work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped');
   const recent = delivered.filter(w => releasedAt(w, release) !== null && now - releasedAt(w, release)! <= week).sort((a, b) => releasedAt(b, release)! - releasedAt(a, release)!);
@@ -57,6 +61,10 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
         <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{groupMeaning[group]}</small>
       </button>)}</div>
       {only && <p className="filter-note">Showing {groupLabel[only]} only · <button type="button" className="text-button" onClick={() => setOnly(null)}>Show every group</button></p>}
+      {faults.length > 0 && <section className="fault-classes" aria-label="Problems by class">
+        <h2>Problems by class <small>one cause, counted once per class</small></h2>
+        <ul>{faults.map(group => <li key={group.faultClass} data-fault-class={group.faultClass} title={group.meaning}><span className="mono">{group.faultClass}</span> <strong>{group.count}</strong> <small>{group.subjects.join(', ')}</small></li>)}</ul>
+      </section>}
       {section('needs-you', humanOnly.size ? 'only you can decide these' : undefined)}
       {section('blocked')}
       {section('moving')}
