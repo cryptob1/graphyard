@@ -243,15 +243,17 @@ export type ScopeRequestOutcome = { state: 'pending' | 'ended'; text: string } |
  * control plane holds it now. A refusal by the widening rule (`decidedBy` graphyard) is not the
  * answer: the loop puts it to the independent approver, so it is still pending. An approval by
  * any path — the rule, a finding, the approver or a master — shows as the paths now planned.
+ * A lease past its deadline ends the wait even before reconciliation clears it: no approval or
+ * refusal can reach that attempt any more.
  */
-export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly string[]; lease?: { epoch: number } | null; scopeRequest?: ScopeRequestState | null; scopeDecision?: ScopeDecision | null },
-  ask: { epoch: number; at: string; paths: readonly string[] }, cli = 'graphyard'): ScopeRequestOutcome {
+export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly string[]; lease?: { epoch: number; expiresAt: string } | null; scopeRequest?: ScopeRequestState | null; scopeDecision?: ScopeDecision | null },
+  ask: { epoch: number; at: string; paths: readonly string[] }, cli = 'graphyard', now = Date.now()): ScopeRequestOutcome {
   const own = item.scopeRequest?.epoch === ask.epoch && item.scopeRequest.at === ask.at ? item.scopeRequest : null;
   const decided = item.scopeDecision?.requestedAt === ask.at ? item.scopeDecision : null;
   const covered = ask.paths.every(path => (item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
   if (!own && covered) return { state: 'approved', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'approved', paths: ask.paths, approver: decided?.state === 'approved' && decided.decidedBy !== 'graphyard' ? decided.decidedBy : null, reason: decided?.state === 'approved' ? decided.reason : null }, cli) };
   const refusal = own?.decision ?? decided;
   if (refusal?.state === 'refused' && refusal.decidedBy !== 'graphyard') return { state: 'refused', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'refused', paths: ask.paths, approver: refusal.decidedBy, reason: refusal.reason }, cli) };
-  if (!own || item.lease?.epoch !== ask.epoch) return { state: 'ended', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) is no longer open — withdrawn, re-asked or outlived by its lease — and nothing widened plannedFiles for it` };
+  if (!own || item.lease?.epoch !== ask.epoch || Date.parse(item.lease.expiresAt) <= now) return { state: 'ended', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) is no longer open — withdrawn, re-asked or outlived by its lease — and nothing widened plannedFiles for it` };
   return { state: 'pending', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) for ${ask.paths.join(', ')} is ${own.decision ? 'with the independent approver: the widening rule could not ground it' : 'waiting for the widening rule'}; you keep your lease` };
 }

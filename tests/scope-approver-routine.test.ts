@@ -362,3 +362,24 @@ test('unit:scope-outcome-delivered — the worker reads the outcome in its sessi
   assert.deepEqual(scopeRequestAttention(refusedOwn, daemonSummary(refusedState, Date.now(), 30_000).approvals), [], 'status still names no master scope once the approver refused');
   assert.equal(scopeOutcomeMessage('GY-1', 1, { state: 'refused', paths: ['a.ts'], approver: null, reason: null }).includes('no reason recorded'), true);
 });
+
+test('unit:scope-outcome-delivered — a wait on a request whose lease passed its deadline ends, even before reconciliation clears the lease', async () => {
+  const work = await claimed('outcome lapsed');
+  await ask(work, ['src/server/routes/work.ts'], 'The route would be easier to change here too');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  // The lease lapses (a failed heartbeat, say) and nothing has reconciled it yet.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [work.id, new Date(Date.now() - 60_000).toISOString()]);
+  const lapsed = await reload(work.id);
+  assert.equal(lapsed.lease?.epoch, work.epoch, 'the lease is still on the item');
+  assert.ok(lapsed.scopeRequest, 'and so is the request');
+  const started = Date.now();
+  const heard = await awaitScopeOutcome({ api: path => ok(token(implementer), 'GET', path) }, lapsed, lapsed.epoch, { waitMs: 10_000, everyMs: 20, cli: 'graphyard' });
+  assert.equal(heard.state, 'ended', 'no approval or refusal can reach an attempt whose lease has lapsed');
+  assert.ok(Date.now() - started < 5_000, 'the wait ends at once rather than reporting pending until it times out');
+  assert.doesNotMatch(heard.text, /you keep your lease/);
+  const at = lapsed.scopeRequest!.at, paths = lapsed.scopeRequest!.paths;
+  const deadline = Date.parse(lapsed.lease!.expiresAt);
+  assert.equal(scopeRequestOutcome(lapsed, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'pending', 'while the lease is live the request is still pending');
+  assert.equal(scopeRequestOutcome(lapsed, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline).state, 'ended');
+});
