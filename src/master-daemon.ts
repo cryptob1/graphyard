@@ -13,7 +13,8 @@ import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, s
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, type ReviewThread } from './merge-queue.js';
+import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
+export { threadResolutionGraceMs, threadsAwaitReview } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
@@ -778,25 +779,6 @@ export function reworkDecisionReason(prefix: string, grounds: string, refused: s
   const bare = ` Answers refused rework decisions ${refused.join(' ')}.`;
   const suffix = [prose, bare].find(text => decisionReasonMax - prefix.length - text.length >= Math.min(reworkGroundsMin, grounds.length));
   return suffix === undefined ? null : fitDecisionReason(prefix, grounds, suffix);
-}
-/** How long after an approval of the current head the loop's thread resolution is waited for. */
-export const threadResolutionGraceMs = 300_000;
-/**
- * Whether unresolved threads still wait on the current head's review rather than on a worker: a
- * reviewed item's review session for this head is still running, no reviewer has yet approved or
- * refused this head (the reviewer answers every listed thread with one or the other; a refusal is a
- * standing verdict), or it approved within the grace the loop takes to resolve the threads it named.
- */
-export function threadsAwaitReview(work: Work, observedAt: number): boolean {
-  if (!work.policy.review || !work.candidate) return false;
-  const sha = work.candidate.sha, observation = work.observation;
-  if (work.sessions?.some(session => session.kind === 'review' && session.state === 'running' && session.head === sha)) return true;
-  const judged = (observation?.reviews ?? []).filter(review => review.sha === sha && (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED'));
-  const agent = observation?.agentReview?.sha === sha && (observation.agentReview.approved || observation.agentReview.verdict === 'changes-requested') ? observation.agentReview : null;
-  if (!judged.length && !agent) return true;
-  const approvedAt = Math.max(...judged.filter(review => review.state === 'APPROVED').map(review => Date.parse(review.submittedAt ?? '')).filter(Number.isFinite),
-    ...(agent?.approved ? [Date.parse(agent.completedAt ?? '')].filter(Number.isFinite) : []));
-  return Number.isFinite(approvedAt) && !(observedAt - approvedAt >= threadResolutionGraceMs);
 }
 /**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`

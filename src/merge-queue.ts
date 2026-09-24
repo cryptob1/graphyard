@@ -67,6 +67,25 @@ export function blockingThreads(work: Pick<Work, 'candidate' | 'observation'>): 
   if (!candidate || !observation?.conversations?.required || observation.candidate?.sha !== candidate.sha || observation.merged) return [];
   return observation.conversations.unresolved;
 }
+/** How long after an approval of the current head the loop's thread resolution is waited for. */
+export const threadResolutionGraceMs = 300_000;
+/**
+ * Whether unresolved threads still wait on the current head's review rather than on a worker: a
+ * reviewed item's review session for this head is still running, no reviewer has yet approved or
+ * refused this head (the reviewer answers every listed thread with one or the other; a refusal is a
+ * standing verdict), or it approved within the grace the loop takes to resolve the threads it named.
+ */
+export function threadsAwaitReview(work: Work, observedAt: number): boolean {
+  if (!work.policy.review || !work.candidate) return false;
+  const sha = work.candidate.sha, observation = work.observation;
+  if (work.sessions?.some(session => session.kind === 'review' && session.state === 'running' && session.head === sha)) return true;
+  const judged = (observation?.reviews ?? []).filter(review => review.sha === sha && (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED'));
+  const agent = observation?.agentReview?.sha === sha && (observation.agentReview.approved || observation.agentReview.verdict === 'changes-requested') ? observation.agentReview : null;
+  if (!judged.length && !agent) return true;
+  const approvedAt = Math.max(...judged.filter(review => review.state === 'APPROVED').map(review => Date.parse(review.submittedAt ?? '')).filter(Number.isFinite),
+    ...(agent?.approved ? [Date.parse(agent.completedAt ?? '')].filter(Number.isFinite) : []));
+  return Number.isFinite(approvedAt) && !(observedAt - approvedAt >= threadResolutionGraceMs);
+}
 /**
  * The merge refusal for those threads, or null. Each thread is a reviewer's finding: the remedy
  * is rework that addresses it, never resolving or dismissing a thread somebody else wrote.
@@ -79,10 +98,12 @@ export function unresolvedThreadRefusal(work: Pick<Work, 'candidate' | 'observat
 /**
  * `master status` for candidates GitHub will not merge over unresolved threads: each row lists
  * them under `reviewThreads`, is never `mergeable`, and its attention names the remedy — a rework
- * decision that addresses the findings. The row's attention and its attention item are rewritten
- * together, so both say the same thing.
+ * decision that addresses the findings — unless the threads still wait on the current head's review
+ * (`threadsAwaitReview`), when the loop defers that rework and the status names the wait instead: a
+ * rework requested then invalidates the review that would resolve them. The row's attention and its
+ * attention item are rewritten together, so both say the same thing.
  */
-export function nameUnresolvedThreads<S extends { work: { key: string; mergeable: boolean; attention: string | null; attentionOwner: unknown }[]; attentionItems: { subject: string; text: string }[]; counts: { attention: number; mergeable: number } }, O extends object>(status: S, work: Work[], owner: (role: 'master', next: string, approvedBy: 'approver') => O): Omit<S, 'work'> & { work: (S['work'][number] & { reviewThreads: ReviewThread[] })[] } {
+export function nameUnresolvedThreads<S extends { work: { key: string; mergeable: boolean; attention: string | null; attentionOwner: unknown }[]; attentionItems: { subject: string; text: string }[]; counts: { attention: number; mergeable: number } }, O extends object>(status: S, work: Work[], owner: (role: 'master', next: string, approvedBy: 'approver' | null) => O): Omit<S, 'work'> & { work: (S['work'][number] & { reviewThreads: ReviewThread[] })[] } {
   const rewritten = new Map<string, { previous: string | null; item: S['attentionItems'][number] }>();
   const rows = status.work.map(row => {
     const item = work.find(candidate => candidate.key === row.key);
@@ -92,7 +113,9 @@ export function nameUnresolvedThreads<S extends { work: { key: string; mergeable
     // The thread's path and author are contributor-controlled text, so the reason is one quoted
     // argument and the command is the whole of `next`: nothing in it can end the argument or run.
     const reason = `Address the unresolved review threads: ${threads.map(describeThread).join('; ')}. Fix each finding; resolving or dismissing a thread the master did not write is not the master's call`;
-    const attentionOwner = owner('master', `graphyard master decide ${row.key} rework ${shellQuote(reason)}`, 'approver');
+    const attentionOwner = threadsAwaitReview(item!, Date.parse(item!.observation?.at ?? ''))
+      ? owner('master', `Request no rework yet: the review of ${item!.candidate!.sha.slice(0, 12)} judges these threads first — an approval names the ones fixed and the loop resolves them, and the loop requests the rework itself if the review settles without resolving them`, null)
+      : owner('master', `graphyard master decide ${row.key} rework ${shellQuote(reason)}`, 'approver');
     rewritten.set(row.key, { previous: row.attention, item: { subject: row.key, text, ...attentionOwner } as S['attentionItems'][number] });
     return { ...row, mergeable: false, reviewThreads: threads, attention: text, attentionOwner };
   });

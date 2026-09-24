@@ -211,6 +211,29 @@ test('the loop requests thread rework only after the current head\'s review sett
   assert.equal(decide({ ...item([]), policy: { checks: ['test'], review: false } } as Work), 'rework', 'no review policy: nothing else judges the threads');
 });
 
+test('master status names the wait, not a rework command, while the threads wait on the current head\'s review', () => {
+  const now = new Date('2026-09-24T06:00:00Z');
+  const thread = { author: reviewer, path: 'src/claims.ts', line: 42, outdated: false };
+  const item = (reviews: Observation['reviews'], sessions: unknown[] = []) => ({ ...authorized({ ...observation([thread], now), reviews }, now), sessions } as unknown as Work);
+  const approvedAt = (ms: number) => [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 7, submittedAt: new Date(now.getTime() - ms).toISOString() }];
+  const running = { id: 'r-1', kind: 'review', state: 'running', head, principal: 'reviewer', runtime: 'claude', host: 'h', subject: 'review', startedAt: now.toISOString(), updatedAt: now.toISOString(), endedAt: null, outcome: null };
+  const waiting = [item([]), item([{ reviewer: 'chatgpt-codex-connector[bot]', sha: head, state: 'COMMENTED', id: 8 }]), item(approvedAt(threadResolutionGraceMs * 2), [running]), item(approvedAt(60_000))];
+  for (const work of waiting) {
+    assert.equal(routineDecision(work, { autoMerge: true }, now.getTime()), null, 'the loop defers the rework');
+    const report = status(work, now), row = report.work[0];
+    assert.equal(row.mergeable, false, 'the threads still block the merge');
+    assert.deepEqual(row.reviewThreads, [thread]);
+    assert.doesNotMatch(row.attentionOwner!.next!, /master decide/, 'status offers no rework the loop deferred');
+    assert.match(row.attentionOwner!.next!, new RegExp(`Request no rework yet: the review of ${head.slice(0, 12)} judges these threads first`));
+    assert.equal(row.attentionOwner!.approvedBy, null);
+    assert.equal(report.attentionItems.find(entry => entry.subject === 'GY-130')?.next, row.attentionOwner!.next, 'the attention item says the same');
+  }
+  // Once the review settled without resolving them, the loop and the status name the same rework.
+  const settled = item(approvedAt(threadResolutionGraceMs + 1));
+  assert.equal(routineDecision(settled, { autoMerge: true }, now.getTime())?.action, 'rework');
+  assert.match(status(settled, now).work[0].attentionOwner!.next!, /^graphyard master decide GY-130 rework /);
+});
+
 test('a thread rework request stays within the control plane\'s reason bound however many threads, and however long their paths', () => {
   const now = new Date('2026-09-24T06:00:00Z');
   const threads = Array.from({ length: 40 }, (_, index) => ({ id: `PRRT_${index}`, author: reviewer, path: `src/${'deeply/nested/'.repeat(20)}file-${index}.ts`, line: index + 1, outdated: false }));
