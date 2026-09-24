@@ -887,7 +887,8 @@ async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, 
     if (!verdict || !approvesCurrentHead(record, work)) continue;
     const previous: FollowUpFiling | undefined = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
     if (previous && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
-    const outcome = await fileFollowUpThreads({ repository, key: record.key, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous }, run, create, now);
+    const workId = work.find(entry => entry.key === record.key)!.id;
+    const outcome = await fileFollowUpThreads({ repository, key: record.key, workId, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous }, run, create, now);
     record.followUps = { ...outcome, threads: outcome.threads.map(thread => ({ ...thread, excerpt: thread.excerpt.slice(0, 300) })), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
     if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} as ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
@@ -906,27 +907,29 @@ export const followUpFilingBoundMs = 30 * 60_000;
 
 /**
  * The review threads, per item key, that the loop files and resolves as follow-up (GY-166), so no
- * thread-rework decision is requested for them meanwhile: those a standing approval named on its
- * `Follow-up threads:` line, until filing them has failed on every retry — then they return to
- * rework, where the stuck item shows. With `pending`, also the threads listed to a review whose
+ * thread-rework decision is requested for them meanwhile: those a standing approval of the item's
+ * current head (or of the head whose approval was carried onto it) named on its `Follow-up threads:`
+ * line, until filing them has failed on every retry — then they return to rework, where the stuck
+ * item shows. An approval the head has moved past sets nothing aside, since the loop no longer files
+ * for it. With `pending`, also the threads listed to a review whose
  * approval of the current head GitHub already shows but whose filing the loop has not yet recorded,
  * for `followUpFilingBoundMs` after that approval: that approval judged each of them fixed or
  * follow-up, and none BLOCKING.
  */
-export function followUpThreadIds(records: ReviewRecord[], pending?: { work: Work[]; reviewer: string; now: number }): Map<string, Set<string>> {
+export function followUpThreadIds(records: ReviewRecord[], work: Work[], pending?: { reviewer: string; now: number }): Map<string, Set<string>> {
   const ids = new Map<string, Set<string>>();
   const add = (key: string, threads: string[]) => { const set = ids.get(key) ?? new Set<string>(); for (const id of threads) set.add(id); ids.set(key, set); };
   for (const record of records) {
     const filing = record.followUps;
     if (record.state === 'completed' && record.verdict?.state === 'APPROVED' && filing?.reviewId === record.verdict.reviewId) {
-      if (filing.failure && filing.attempts >= threadResolutionAttempts) continue;
+      if (filing.failure && filing.attempts >= threadResolutionAttempts || !approvesCurrentHead(record, work)) continue;
       // Every thread the approval named, but one it could not have judged: opened after it, or not open then.
       const refused = filing.refused.map(entry => entry.slice(0, entry.indexOf(':')));
       add(record.key, [...filing.named, ...filing.threads.map(thread => thread.id)].filter(id => !refused.includes(id)));
       continue;
     }
     if (!pending || !record.threadsListed?.length || record.verdict && record.verdict.state !== 'APPROVED' || filing && filing.reviewId === record.verdict?.reviewId) continue;
-    const item = pending.work.find(entry => entry.key === record.key);
+    const item = work.find(entry => entry.key === record.key);
     if (!item?.candidate || item.candidate.sha !== record.sha || item.candidate.pr !== record.pr) continue;
     const approvedAt = Math.max(...(item.observation?.reviews ?? []).filter(review => review.sha === record.sha && review.state === 'APPROVED' && review.reviewer.toLowerCase() === pending.reviewer.toLowerCase())
       .map(review => Date.parse(review.submittedAt ?? '')).filter(Number.isFinite));

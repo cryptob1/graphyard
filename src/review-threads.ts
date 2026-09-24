@@ -164,7 +164,7 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
  */
 export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number }
 /** The backlog item the follow-ups become: the loop's create payload for the control plane. */
-export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; criteria: { id: string; text: string; proofs: string[] }[]; plannedFiles: string[]; reason: string }
+export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; dependencies: string[]; criteria: { id: string; text: string; proofs: string[] }[]; plannedFiles: string[]; reason: string }
 /** Creates the item, idempotent on `key`: a retry with the same key returns the item already created. */
 export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ key: string }>;
 
@@ -190,14 +190,18 @@ function describeFollowUp(thread: LaunchThread, index: number, budget: number) {
   return clipEnd(`${index + 1}. ${thread.id} — ${clipStart(thread.path, share.path)}${line} by ${clipEnd(thread.author, share.author)}${url}: "${clipEnd(excerpt, share.excerpt)}"`, budget);
 }
 
-/** The one backlog item for an approval's follow-up threads: each thread's id, path:line, author, URL and excerpt. */
-export function followUpItem(input: { key: string; pr: number; sha: string; reviewId: number }, threads: LaunchThread[]): FollowUpItem {
+/**
+ * The one backlog item for an approval's follow-up threads: each thread's id, path:line, author, URL
+ * and excerpt. It depends on the approved source item (`workId`), so it is not dispatched against a
+ * base that lacks the reviewed change until that change has landed.
+ */
+export function followUpItem(input: { key: string; workId: string; pr: number; sha: string; reviewId: number }, threads: LaunchThread[]): FollowUpItem {
   const intro = `The independent reviewer approved ${input.key} at ${input.sha} (review ${input.reviewId}) with every acceptance criterion met, and judged these ${threads.length} review thread${threads.length === 1 ? '' : 's'} FOLLOW-UP: findings beyond the item's criteria. Graphyard filed them here and resolved each thread with a reply naming this item.`;
   const budget = Math.floor((descriptionMax - intro.length - 1 - threads.length) / Math.max(1, threads.length));
   return {
     title: `Follow-ups from the approved review of ${input.key} (PR #${input.pr})`.slice(0, 200),
     description: [intro, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget))].join('\n'),
-    type: 'chore', priority: 2,
+    type: 'chore', priority: 2, dependencies: [input.workId],
     criteria: [{ id: 'AC-1', text: `Each follow-up thread listed in the description is addressed in code, or declined with a recorded reason.`, proofs: ['manual:review-followups-triaged'] }],
     plannedFiles: [...new Set(threads.map(thread => thread.path).filter(path => path !== '(no path)'))].slice(0, 100),
     reason: `Follow-up threads named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,
@@ -212,7 +216,7 @@ export function followUpItem(input: { key: string; pr: number; sha: string; revi
  * the create is idempotent on the approval) and replies to no thread twice. Runs outside every
  * coordination transaction.
  */
-export async function fileFollowUpThreads(input: { repository: string; key: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
+export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts: (previous?.attempts ?? 0) + 1 };
   const carried = { named: previous?.named ?? [], threads: previous?.threads ?? [], replied: previous?.replied ?? [], resolved: previous?.resolved ?? [], refused: previous?.refused ?? [], ...(previous?.item ? { item: previous.item } : {}) };

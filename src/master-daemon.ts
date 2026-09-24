@@ -3011,7 +3011,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     snapshot: deps.snapshot,
     followUpThreads: async (work, at) => {
       const reviewer = current().reviewer;
-      return followUpThreadIds((await readReviewLedger(root)).reviews, reviewer ? { work, reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
+      return followUpThreadIds((await readReviewLedger(root)).reviews, work, reviewer ? { reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
     },
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
