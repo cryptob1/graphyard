@@ -424,6 +424,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, undefined, store.commit);
   assert.equal(result.result.startsWith('merge requested'), true);
@@ -447,6 +448,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     throw new Error('provider response lost');
   }, undefined, lostStore.commit), /outcome is unknown/);
@@ -456,6 +458,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     return JSON.stringify({ merged: false, message: 'branch protection refused merge' });
   }, undefined, refusedStore.commit), /branch protection refused merge/);
@@ -482,6 +485,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     if (args[1] === 'view') return JSON.stringify({ headRefOid: resumed.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(resumed.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, resumedStore.commit);
   assert.equal(reacquired, false, 'the owning coordinator resumes its active authority'); assert.match(resumedResult.result, /merge requested/);
@@ -497,6 +501,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     if (args[1] === 'view') return JSON.stringify({ headRefOid: uncommitted.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(uncommitted.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, async (_work, held) => { recommitted = held.id; return uncommittedStore.commit(); });
   assert.match(uncommittedResult.result, /merge requested/); assert.equal(recommitted, execution.id, 'the resumed execution is committed before the provider call');
@@ -529,6 +534,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
       if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
       if (args[1]?.includes('/git/ref/heads/')) return baseRef(narrow.candidate!.baseSha);
       if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+      if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
       if (args[1] === '--method') throw new Error('the provider must not be invoked without reserved attribution margin');
       return JSON.stringify(validProtection);
     }, execution.owner, skewed.commit), /insufficient merge authority/);
@@ -538,6 +544,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     if (args[1] === 'view') return JSON.stringify({ headRefOid: narrow.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(narrow.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, execution.owner, tight.commit)).result, /merge requested/);
 
@@ -551,6 +558,7 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   };
   // Each broker run re-reads the record four times: before GitHub verification, after it,
@@ -600,6 +608,7 @@ test('merge broker refuses the provider call when committed authority died durin
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     if (args[1] !== '--method') return JSON.stringify(validProtection);
     puts++;
     return JSON.stringify({ merged: true, sha: 'c'.repeat(40) });
@@ -639,6 +648,7 @@ test('manual merge remains guarded when automatic merge is disabled and GitHub c
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   }, undefined, store.commit);
   assert.match(result.result, /merge requested/);
@@ -669,6 +679,7 @@ test('unit:queue-authored-tip-carry — the broker re-posts a carried approval t
     if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return baseRef(candidate.candidate!.baseSha);
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+    if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
     return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
   };
   const order: string[] = [];
@@ -772,6 +783,7 @@ test('integration:landing-follower-merges — the broker lands a queued follower
       if (args[1]?.includes('/check-runs')) return JSON.stringify({ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] });
       if (args[1]?.startsWith('repos/owner/project/commits/')) { const sha = args[1].split('/commits/')[1]; assert.ok(sha in trees, `unexpected commit read ${sha}`); return JSON.stringify({ sha, commit: { tree: { sha: trees[sha] } } }); }
       if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+      if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
       return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
     };
     return { calls, run };

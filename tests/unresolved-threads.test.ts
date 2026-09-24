@@ -6,6 +6,7 @@ import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { agentOwner, assertMergeCandidate, buildMasterStatus, mergeWork } from '../src/master.js';
 import { nameUnresolvedThreads, queueRef } from '../src/merge-queue.js';
+import { unansweredRefusal, uncitedRefusals } from '../src/model/approval.js';
 import { decisionReasonMax, fitDecisionReason, observedFrom, reworkDecisionReason, reworkGroundsMin, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
 
 // GY-139. Each test is named for the proof it produces: integration:unresolved-threads-fail-merge-gate,
@@ -244,4 +245,25 @@ test('a rework request cites every refused rework decision by id within the reas
   // Past what the bound can hold beside the grounds, no reason satisfies the server: the loop escalates instead of retrying a refused request.
   assert.equal(reworkDecisionReason(prefix, decision.reason, ids(60)), null);
   assert.equal(reworkDecisionReason(prefix, decision.reason, []), fitDecisionReason(prefix, decision.reason, ''));
+});
+
+test('a refusal chain never outgrows the reason bound: answering the newest refusal answers every one it cited, and a precedent list cites like the reason', () => {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const input = { previousWorkerStopped: true };
+  const id = (index: number) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+  // Sixty refusals, each request having cited the one before it (as the server required): newest first.
+  const history = Array.from({ length: 60 }, (_, index) => 59 - index).map(index => ({ id: id(index), action: 'rework' as const, state: 'refused', input,
+    reason: index ? `Grounds ${index}. Answers refused rework decisions ${id(index - 1)}.` : 'Grounds 0.', refusal: { approver: 'approver', reason: 'not yet', at: '2026-09-24T06:00:00Z' } }));
+  assert.deepEqual(uncitedRefusals(history, 'rework', input, same), [id(59)], 'only the newest refusal is left for the request to cite');
+  assert.equal(unansweredRefusal(history, 'rework', input, `New grounds. Answers refused rework decisions ${id(59)}.`, same), null, 'citing the newest answers the chain');
+  assert.match(unansweredRefusal(history, 'rework', input, 'New grounds.', same)!, new RegExp(id(59)), 'citing nothing answers nothing');
+  assert.equal(unansweredRefusal(history, 'rework', input, 'New grounds, cited structurally.', same, [id(59)]), null, 'a precedent citation answers like a reason citation');
+  assert.match(unansweredRefusal(history, 'rework', input, `Grounds 59. Answers refused rework decisions ${id(58)}.`, same, [id(59)])!, new RegExp(id(59)), 'repeating a refused reason is not an answer, however it cites');
+  // A refusal nobody in the chain cited (a legacy request) must still be cited itself.
+  const legacy = [...history, { id: id(99), action: 'rework' as const, state: 'refused', input, reason: 'Legacy grounds.', refusal: null }];
+  assert.deepEqual(uncitedRefusals(legacy, 'rework', input, same), [id(59), id(99)]);
+  assert.match(unansweredRefusal(legacy, 'rework', input, `New grounds. Answers ${id(59)}.`, same)!, new RegExp(id(99)));
+  assert.equal(unansweredRefusal(legacy, 'rework', input, `New grounds. Answers ${id(59)} ${id(99)}.`, same), null);
+  const reason = reworkDecisionReason('', 'New grounds', uncitedRefusals(legacy, 'rework', input, same));
+  assert.ok(reason && unansweredRefusal(legacy, 'rework', input, reason, same) === null, 'the loop\'s own reason answers every refusal');
 });

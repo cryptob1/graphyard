@@ -200,6 +200,10 @@ export const masterRunSchema = z.object({
   proofWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted producer workflow file, such as acceptance.yml').optional(),
   deploymentUrl: z.string().url().max(500).optional(),
   deploymentShaField: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$/).default('commit'),
+  // The deployment provider's whole name for the production environment, read from GitHub
+  // deployments when no deployment URL is configured. Railway names it `<project> / production`
+  // (`graphyard / production`); unset, GRAPHYARD_PRODUCTION_ENVIRONMENT or `production` applies.
+  productionEnvironment: z.string().trim().min(1).max(100).optional(),
   smokeWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted post-deployment smoke workflow file, such as deploy-smoke.yml').optional(),
   // Automatic dispatch at submit: how often the loop reads the control plane's review and
   // producer requests (the launch bound is 30 seconds from the request), which reviewer profile
@@ -623,11 +627,11 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
  * writes it, and the master's harness grants no direct edit of master.json, so flipping autoMerge
  * or re-pointing a credential can never be a routine master action.
  */
-export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'reviewerProfile', 'producerTimeoutMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent'] as const;
-const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'reviewerProfile', 'quotaCeilingPercent'] as const;
+export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent'] as const;
+const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'quotaCeilingPercent'] as const;
 export interface MasterOwnedSettings {
   intervalSeconds?: number | null; dispatchIntervalSeconds?: number | null; proofWorkflow?: string | null; smokeWorkflow?: string | null;
-  deploymentUrl?: string | null; deploymentShaField?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
+  deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
   accounts?: { profile: string; accounts: string[] }[];
 }
 
@@ -3291,8 +3295,11 @@ export function definiteProviderRefusal(error: unknown) {
  * nor defers the merge.
  */
 export function assertMergeCheckPublished(payload: any, key: string, sha: string, appId: number) {
-  if (!Array.isArray(payload?.check_runs)) return;
-  const runs = payload.check_runs.filter((entry: any) => entry?.name === CHECK_NAME && entry?.app?.id === appId)
+  // Read with `--paginate --slurp`, the answer is the list of pages; GitHub filters check runs by
+  // name but not by App, so every page is read before the App's own runs are picked out.
+  const pages = Array.isArray(payload) ? payload : [payload];
+  if (!pages.length || pages.some(page => !Array.isArray(page?.check_runs))) throw new Error(`${key} merge deferred: GitHub's check runs on ${sha.slice(0, 12)} could not be read; retry`);
+  const runs = pages.flatMap(page => page.check_runs).filter((entry: any) => entry?.name === CHECK_NAME && entry?.app?.id === appId)
     .sort((a: any, b: any) => Date.parse(b?.started_at ?? b?.completed_at ?? '') - Date.parse(a?.started_at ?? a?.completed_at ?? ''));
   const latest = runs[0];
   if (latest?.status !== 'completed' || latest?.conclusion !== 'success')
@@ -3401,7 +3408,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // GitHub refuses the merge while the published `Graphyard / merge` check lags the gates it
     // reports (HTTP 405, GY-159 2026-09-24). Read it before committing, while a refusal still
     // releases the execution.
-    assertMergeCheckPublished(JSON.parse(await run('gh', ['api', `repos/${config.repository}/commits/${authorization.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&app_id=${config.githubAppId}`])), work.key, authorization.sha, config.githubAppId);
+    assertMergeCheckPublished(JSON.parse(await run('gh', ['api', `repos/${config.repository}/commits/${authorization.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=all&per_page=100`, '--paginate', '--slurp'])), work.key, authorization.sha, config.githubAppId);
     if (!commit) throw new Error(`${work.key} merge broker commit callback is unavailable`);
     const committed = await commit(latest, granted.execution);
     const committingTime = Date.parse(committed.committingAt);

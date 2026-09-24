@@ -5,8 +5,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cycleCost, daemonSummary, emptyDaemonState, loopAttention, loopLiveness, maxDeploymentRequests, observeDeployment, runCycle, type ContainmentRetention, type CycleSteps, type DaemonEffects } from '../src/master-daemon.js';
-import { masterConfigSchema, type MasterConfig, type MasterRun } from '../src/master.js';
+import { cycleCost, daemonSummary, deploymentListingSize, emptyDaemonState, loopAttention, loopLiveness, maxDeploymentRequests, observeDeployment, runCycle, type ContainmentRetention, type CycleSteps, type DaemonEffects } from '../src/master-daemon.js';
+import { masterConfigSchema, masterSettingsFromArgs, type MasterConfig, type MasterRun } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 /**
@@ -315,7 +315,12 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
     // default `production` matches none of the Railway records and the reason names the ones seen.
     const unconfigured = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(unconfigured.source, 'unavailable');
-    assert.match(unconfigured.reason!, /deployments to 'staging-copy \/ production', 'graphyard \/ production' are not the 'production' environment — set GRAPHYARD_PRODUCTION_ENVIRONMENT/);
+    assert.match(unconfigured.reason!, /deployments to 'staging-copy \/ production', 'graphyard \/ production' are not the 'production' environment — name the one production serves with graphyard master config productionEnvironment=/);
+    // The master's own run configuration carries the provider's whole identity; the environment
+    // variable is the fallback when it names none.
+    const configured = await observeDeployment(config(fixture.token, { run: { productionEnvironment: 'graphyard / production' } }), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    assert.equal(configured.sha, old, 'the configured production environment is the one read');
+    assert.deepEqual(masterSettingsFromArgs(['productionEnvironment=graphyard / production']), { productionEnvironment: 'graphyard / production' }, 'the master sets it with master config');
     process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT = 'graphyard / production';
     const observation = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(observation.source, 'github-deployment');
@@ -334,6 +339,37 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
     const offBranch = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(offBranch.source, 'unavailable', 'nothing on the list is a release of the base branch');
   } finally { delete process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT; await rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test('unit:deployment-source-is-a-release — a run of failed production attempts newer than the served release leaves the last observed release standing', async () => {
+  const fixture = await deliveredHistory(3);
+  try {
+    await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const [old, , release] = fixture.shas;
+    // More failed attempts of the newest commit than the candidate bound reads, then the release.
+    const listed = [...Array.from({ length: deploymentListingSize + 5 }, (_, index) => ({ id: 100 + index, sha: release, ref: release, environment: 'graphyard / production' })),
+      { id: 2, sha: old, ref: old, environment: 'graphyard / production' }];
+    const statuses: string[] = [];
+    const run = (command: string, args: string[]) => {
+      if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      if (args[1].includes('/deployments?')) return JSON.stringify(args[1].endsWith('page=1') ? listed : []);
+      const status = /\/deployments\/(\d+)\/statuses/.exec(args[1]);
+      if (status) { statuses.push(status[1]); return JSON.stringify([{ state: status[1] === '2' ? 'success' : 'failure' }]); }
+      throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
+    };
+    const configured = config(fixture.token, { run: { productionEnvironment: 'graphyard / production' } });
+    const first = await observeDeployment(configured, fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    assert.equal(first.source, 'unavailable', 'with no release observed before, the bound leaves nothing to stand on');
+    assert.equal(statuses.length, deploymentListingSize);
+    const retained = { release: old, settled: { 'GY-1': old } };
+    const later = await observeDeployment(configured, fixture.delivered, run, fetch, () => clock, { root: fixture.checkout, retained });
+    assert.equal(later.source, 'github-deployment');
+    assert.equal(later.sha, old, 'production still serves the release last observed');
+    assert.ok(later.deployed.includes('GY-1'), 'already-live deliveries stay deployed');
+    assert.ok(!later.deployed.includes(fixture.delivered[2].key), 'the failed release\'s delivery is not deployed');
+    assert.match(later.reason!, /none of the 20 newest graphyard \/ production deployment attempt\(s\).*still serve/);
+    assert.ok(later.requests! <= maxDeploymentRequests);
+  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
 
 test('unit:deployment-source-is-a-release — records that are not releases never hide the release behind them: the listing is paged, and only release candidates cost a status read', async () => {

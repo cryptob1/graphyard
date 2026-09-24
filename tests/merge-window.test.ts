@@ -73,7 +73,13 @@ test('unit:merge-window-sizing — only the control plane App\'s Graphyard / mer
   const item = work(); const store = broker(() => item);
   const gh = github({});
   await mergeWork(config, item, store.snapshot, store.acquire, async () => {}, verify, gh.run, execution.owner, async () => store.commit()).catch(() => {});
-  assert.ok(gh.calls.some(args => args[1]?.includes('/check-runs?') && args[1].includes('app_id=1234')), 'the check read names the App');
+  assert.ok(gh.calls.some(args => args[1]?.includes('/check-runs?') && args[1].includes('per_page=100') && args.includes('--paginate') && args.includes('--slurp')), 'every page of same-named runs is read before the App filter applies');
+  // GitHub does not filter check runs by App: a first page full of another App's newer runs must
+  // not hide the control plane's own run on the next page.
+  const foreign = Array.from({ length: 100 }, (_, index) => ({ name: 'Graphyard / merge', status: 'completed', conclusion: 'failure', started_at: at(-index), app: { id: 999 } }));
+  assert.doesNotThrow(() => assertMergeCheckPublished([{ check_runs: foreign }, { check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', started_at: at(-600_000), app: { id: 1234 } }] }], 'GY-1', 'a'.repeat(40), 1234));
+  assert.throws(() => assertMergeCheckPublished([{ check_runs: foreign }], 'GY-1', 'a'.repeat(40), 1234), /not published/);
+  assert.throws(() => assertMergeCheckPublished({ message: 'Not Found' }, 'GY-1', 'a'.repeat(40), 1234), /could not be read/, 'an unreadable answer defers the merge rather than passing it');
 });
 
 test('unit:merge-window-sizing — an observation too old for a provider-sized window acquires nothing; with a refresh the attempt re-reads and continues', async () => {

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { ciReportingEnvironment } from './install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
+import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
@@ -1319,7 +1320,7 @@ export interface DaemonEffects {
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
    */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null; outcome?: string | null; refusal?: { approver: string; reason: string } | null }[] }>;
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; reason?: string; precedent?: string[]; approvedBy: string | null; outcome?: string | null; refusal?: { approver: string; reason: string } | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -2017,15 +2018,17 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       const observed = decision.action === 'rework' && item.observation ? { at: item.observation.at, sha: item.observation.candidate.sha } : null;
       // The server refuses a request identical to a refused one unless it cites that refusal. The loop
       // reaches this point only on grounds no refused request of its own rested on (a rework binding
-      // names its grounds, and a refused binding is never requested again), so it answers each prior
-      // refusal of this action on the item by citing it.
-      const refused = decision.action === 'rework' ? history.filter(entry => entry.action === 'rework' && entry.state === 'refused').map(entry => entry.id) : [];
+      // names its grounds, and a refused binding is never requested again), so it answers the prior
+      // refusals of this action on the item by citing them. A refusal an earlier refused request
+      // already cited is answered through it, so only the uncited ones are named: however many
+      // refusals the item gathers, the citation stays the newest one or few (GY-163).
+      const refused = decision.action === 'rework' ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), 'rework', decisionInput('rework', item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b)) : [];
       const reason = decision.action === 'rework' ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, refused) : fitDecisionReason('', decision.reason, '');
       if (reason === null) {
         // Retrying would be refused every time; the request is not sent, and the master is told once.
         const escalation = `escalation:rework-refusals:${item.key}:${refused.length}`;
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Did not request the rework decision for ${item.key}: its ${refused.length} refused rework decisions no longer fit, cited, within the reason bound`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-        if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused rework decisions, and a rework request must cite every one by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then act on the item yourself`);
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Did not request the rework decision for ${item.key}: its ${refused.length} uncited refused rework decisions no longer fit, cited, within the reason bound`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused rework decisions that no later refused request cited, and a rework request must cite each by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then request it with graphyard master decide ${item.key} rework --precedent ID[,ID] REASON citing them, or act on the item yourself`);
         return;
       }
       const requested = standing ?? await effects.decide!(item, decision.action, reason);
@@ -2424,8 +2427,8 @@ function localAncestry(root: string, baseBranch: string, run: ChildRun) {
  * the retention and every delivery is derived again.
  */
 /**
- * Whether a GitHub deployment's environment is the configured production environment
- * (GRAPHYARD_PRODUCTION_ENVIRONMENT, `production` by default), compared as the provider's whole
+ * Whether a GitHub deployment's environment is the configured production environment (the master
+ * run's `productionEnvironment`, else GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`), compared as the provider's whole
  * identity. Railway names the GitHub environment `<project> / <environment>`, and one repository can
  * deploy several Railway projects: `staging-copy / production` is not the managed installation's
  * release, so a Railway installation configures the full name (`graphyard / production`), as the
@@ -2439,7 +2442,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   let requests = 0;
   const unavailable = (reason: string): DeploymentObservation => ({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key), requests, derived: 0, retained: 0, containment: options.retained ?? null });
   if (!delivered.length) return { source: 'unavailable', sha: null, at, reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [], requests, derived: 0, retained: 0, containment: options.retained ?? null };
-  let sha: string | null = null, source: DeploymentObservation['source'] = 'unavailable';
+  let sha: string | null = null, source: DeploymentObservation['source'] = 'unavailable', fallback: string | null = null;
   if (config.run.deploymentUrl) {
     let payload: any;
     try {
@@ -2457,7 +2460,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     // listing is read page by page, newest first, until a release answers or a bound is reached.
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
     let production: string;
-    try { production = productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
+    try { production = config.run.productionEnvironment ?? productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
     let listed = 0, candidates = 0, exhausted = false;
     // Environments named like production under another identity, reported when no release is found
     // so an unconfigured Railway installation is told the name to configure rather than left pending.
@@ -2499,8 +2502,16 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       }
     }
     if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
+    // Failed, pending and unreadable production attempts each cost a status read, so a run of them
+    // newer than the release production still serves can use up the bound before it is reached.
+    // Production then still serves the last release this loop saw succeed (a newer success, a
+    // rollback included, would have been among the attempts read), and its containment stands.
+    if (!sha && candidates && options.retained?.release) {
+      sha = options.retained.release; source = 'github-deployment';
+      fallback = `none of the ${candidates} newest ${production} deployment attempt(s) of the managed base branch reports a successful status, so production is taken to still serve ${sha.slice(0, 12)}, the last release observed`;
+    }
     if (!sha) return unavailable(`No GitHub deployment of the managed base branch to the ${production} environment reports a successful status${namesake.size
-      ? `; deployments to ${[...namesake].map(name => `'${name}'`).join(', ')} are not the '${production}' environment — set GRAPHYARD_PRODUCTION_ENVIRONMENT to the one production serves`
+      ? `; deployments to ${[...namesake].map(name => `'${name}'`).join(', ')} are not the '${production}' environment — name the one production serves with graphyard master config productionEnvironment='${[...namesake][0]}' (or GRAPHYARD_PRODUCTION_ENVIRONMENT)`
       : ''}`);
   }
   const ancestry = localAncestry(options.root, config.baseBranch, run);
@@ -2525,7 +2536,8 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   // A base branch this checkout could not fetch is said out loud: containment was then derived
   // from whatever objects are here, and a delivery git could not place stays pending, never deployed.
   const stale = ancestry.fetchFailure;
-  return deploymentObservationSchema.parse({ source, sha, at, reason: stale ? `Containment was derived without a fresh base branch: ${stale}` : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
+  const reason = [fallback, stale ? `Containment was derived without a fresh base branch: ${stale}` : null].filter(Boolean).join('; ').slice(0, 500) || null;
+  return deploymentObservationSchema.parse({ source, sha, at, reason, deployed: deployed.slice(-200), pending: pending.slice(-200),
     requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
 }
 

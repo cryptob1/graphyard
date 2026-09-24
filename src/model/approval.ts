@@ -132,15 +132,39 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
 
 /**
  * The refusal a new request would repeat, or null. A request of the same action and input as a
- * decision an approver refused is accepted only when it answers that refusal: its reason names
- * the refused decision's id and is not the reason the refused request already gave. Anything
+ * decision an approver refused is accepted only when it answers that refusal: its reason, or its
+ * precedent list, names the refused decision's id, and its reason is not the one the refused
+ * request already gave. Answering a refusal also answers every refusal that refused request itself
+ * cited: it was accepted only by answering them, so a request cites the newest refusals and the
+ * chain carries the rest — a history of refusals never outgrows the reason bound (GY-163). Anything
  * else is the same unjustified request retried, and it is refused naming the prior refusal.
  */
-export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | 'input' | 'reason' | 'refusal'> & { state: string })[], action: DecisionAction, input: unknown, reason: string, same: (a: unknown, b: unknown) => boolean): string | null {
+export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | 'input' | 'reason' | 'refusal'> & { state: string; precedent?: string[] })[], action: DecisionAction, input: unknown, reason: string, same: (a: unknown, b: unknown) => boolean, precedent: string[] = []): string | null {
   const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input));
   const bare = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const standing = refused.find(decision => !reason.includes(decision.id) || bare(reason.split(decision.id).join(' ')) === bare(decision.reason));
+  const names = (text: string, cited: string[], id: string) => text.includes(id) || cited.includes(id);
+  // Whatever else it cites, a request whose reason is a refused request's own reason repeats it.
+  const repeats = (decision: { id: string; reason: string }) => bare(reason.split(decision.id).join(' ')) === bare(decision.reason);
+  const answered = new Set(refused.filter(decision => names(reason, precedent, decision.id) && !repeats(decision)).map(decision => decision.id));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const decision of refused) {
+      if (answered.has(decision.id) || repeats(decision)) continue;
+      if (refused.some(later => answered.has(later.id) && names(later.reason, later.precedent ?? [], decision.id))) { answered.add(decision.id); grew = true; }
+    }
+  }
+  const standing = refused.find(decision => !answered.has(decision.id));
   return standing ? `Decision ${standing.id} (${action}) with this input was refused by ${standing.refusal?.approver ?? 'its approver'}: ${standing.refusal?.reason ?? standing.reason}. An identical request is refused; answer the refusal with a new request whose reason cites ${standing.id} and gives what the refused request lacked` : null;
+}
+
+/**
+ * The refusals a new request must cite itself: those no other refused request of the same action
+ * and input already cited. Citing these answers the rest through the chain `unansweredRefusal`
+ * follows. Newest first, as the history lists them.
+ */
+export function uncitedRefusals(decisions: { id: string; action: string; input: unknown; reason: string; state: string; precedent?: string[] }[], action: DecisionAction, input: unknown, same: (a: unknown, b: unknown) => boolean): string[] {
+  const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input));
+  return refused.filter(decision => !refused.some(other => other.id !== decision.id && (other.reason.includes(decision.id) || (other.precedent ?? []).includes(decision.id)))).map(decision => decision.id);
 }
 
 /**
