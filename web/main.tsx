@@ -14,7 +14,7 @@ import { useFeatures } from './features';
 import LoginPage from './pages/login';
 import WorkDetails from './pages/work-details';
 import CreateWork from './pages/create-work';
-import { useStepMoves } from './step-moves';
+import { readsFlowAnalytics, useStepMoves } from './step-moves';
 
 /**
  * The dashboard shell: session state, polling, the sidebar generated from the view
@@ -68,7 +68,7 @@ function App() {
     void load(); const timer = setInterval(load, 5000);
     return () => { active = false; controller.abort(); clearInterval(timer); };
   }, [token]);
-  const stepMoves = useStepMoves(!!token && !!status, token, api, sessionEpoch);
+  const stepMoves = useStepMoves(!!token && !!status && readsFlowAnalytics(status.actor?.role), token, api, sessionEpoch);
   useEffect(() => { setEvents([]); setEditingRequirements(false); window.scrollTo?.(0, 0); }, [selected, token]);
   useEffect(() => { let active = true; const epoch = sessionEpoch.current; if (selected) void api(`events?work=${selected}`).then(rows => { if (active && epoch === sessionEpoch.current) setEvents(rows); }).catch(e => { if (active && epoch === sessionEpoch.current) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
   const codexAvailable = status?.reviewProviders?.includes('codex') === true;

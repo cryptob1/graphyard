@@ -354,11 +354,16 @@ test('truncated history labels durations as newest-delivery samples, never as bo
   await expect(sampled.first()).toContainText('they are not lower bounds');
 });
 
-test('shipping pulse is not offered to operator agents whose scoped API cannot serve it', async ({ page }) => {
+test('the analytics pages are not offered to operator agents whose scoped API cannot serve them, nor are their routes read', async ({ page }) => {
+  const analytics: string[] = [];
+  page.on('request', request => { if (/\/api\/analytics\//.test(request.url())) analytics.push(request.url()); });
   await fixture(page, 'operator-agent'); await login(page);
-  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Work', exact: true })).toBeVisible();
-  await sidebarEntry(page, 'Insights');
-  await expect(page.getByRole('button', { name: /Shipping pulse/ })).toHaveCount(0);
+  const primary = page.getByRole('navigation', { name: 'Primary' });
+  await expect(primary.getByRole('button', { name: 'Work', exact: true })).toBeVisible();
+  // Flow, Shipping pulse and Flow analytics all read analytics/flow*; with no other Insights page configured the entry is gone.
+  await expect(primary.getByRole('button', { name: 'Insights', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Shipping pulse|Flow analytics/ })).toHaveCount(0);
+  expect(analytics).toEqual([]);
 });
 
 async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {

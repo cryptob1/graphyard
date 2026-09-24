@@ -1,6 +1,13 @@
 import { useEffect, useState, type RefObject } from 'react';
 import { transitionsFromRows, type StepTransition } from './flow-replay';
 
+/**
+ * Whether a session's role may read the flow analytics routes (`analytics/flow*`): an operator
+ * agent's scoped API refuses them (src/server/auth.ts `operatorAgentRouteGuard`), so its sessions
+ * are neither offered the pages that read them nor polled for step moves.
+ */
+export const readsFlowAnalytics = (role: string | undefined) => role !== 'operator-agent';
+
 /** The most pages one read follows; a board past that is read as incomplete, never as all of it. */
 export const stepPagesLimit = 20;
 type StepRow = { workKey: string; observedAt: string | null; detail: string };

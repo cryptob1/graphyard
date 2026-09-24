@@ -196,7 +196,10 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.doesNotMatch(markup(createElement(WorkersPage, dashboard())), /Delivery slices/);
   assert.match(markup(createElement(WorkersPage, dashboard({ status: led }))), /Delivery slices/);
   // Operator agents cannot read the analytics pages, so they are not offered.
-  assert.ok(!visibleViews(dashboard({}, 'operator-agent')).some(view => ['pulse', 'flow'].includes(view.id)));
+  assert.ok(!visibleViews(dashboard({}, 'operator-agent')).some(view => ['pulse', 'flow', 'insights'].includes(view.id)));
+  assert.ok(visibleViews(dashboard({}, 'admin')).some(view => view.id === 'insights'));
+  // Nor are their sessions polled for step moves, which read the same refused analytics route.
+  assert.match(await read('web/main.tsx'), /useStepMoves\(!!token && !!status && readsFlowAnalytics\(status\.actor\?\.role\)/);
   // web/main.tsx builds the sidebar from the registry through primaryEntry.
   assert.match(await read('web/main.tsx'), /views\.map\(entry => primaryEntry\(dashboard, entry\)\)/);
 });

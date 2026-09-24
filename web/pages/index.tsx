@@ -15,6 +15,7 @@ import ProofGrantsView from '../grants';
 import ShippingPulse from '../shipping-pulse';
 import FlowAnalytics from '../flow-analytics';
 import InsightsFlow from './insights-flow';
+import { readsFlowAnalytics } from '../step-moves';
 
 /**
  * The one navigation (GY-161): the sidebar and nothing beside it. Every page belongs to one of
@@ -64,9 +65,10 @@ export const views: readonly View[] = [
   // What shipping cost people (GY-98): every intervention, and the operator's judgement about what shipped, as a tab beside the delivered list.
   { id: 'interventions', icon: '☝', label: 'Interventions', section: 'shipped', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <InterventionsPage {...dashboard}/> },
   // The Flow panel (GY-161): where every open item is now, the last day replayed, landed per day and where the time goes.
-  { id: 'insights', icon: '◷', label: 'Flow', section: 'insights', render: dashboard => <InsightsFlow {...dashboard}/> },
-  { id: 'pulse', icon: '∿', label: 'Shipping pulse', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <ShippingPulse token={dashboard.token} repository={dashboard.status?.repository}/> },
-  { id: 'flow', icon: '◷', label: 'Flow analytics', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <FlowAnalytics request={dashboard.api} token={dashboard.token} canAudit={['admin', 'coordinator', 'producer'].includes(role(dashboard))}/> },
+  // It reads the flow analytics routes, which an operator agent's scoped API refuses, so that role is not offered it.
+  { id: 'insights', icon: '◷', label: 'Flow', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <InsightsFlow {...dashboard}/> },
+  { id: 'pulse', icon: '∿', label: 'Shipping pulse', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <ShippingPulse token={dashboard.token} repository={dashboard.status?.repository}/> },
+  { id: 'flow', icon: '◷', label: 'Flow analytics', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <FlowAnalytics request={dashboard.api} token={dashboard.token} canAudit={['admin', 'coordinator', 'producer'].includes(role(dashboard))}/> },
   { id: 'validation', icon: '↻', label: 'Validation', section: 'insights', visible: dashboard => configured(dashboard.features.validation), render: dashboard => <ValidationView api={dashboard.api} work={dashboard.work}/> },
   { id: 'releases', icon: '⇈', label: 'Releases', section: 'insights', visible: dashboard => configured(dashboard.features.releases), render: dashboard => <ReleasesView api={dashboard.api} work={dashboard.work}/> },
   { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'settings', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
