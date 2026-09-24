@@ -22,6 +22,7 @@ import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
+import { wellFormedPulse } from '../web/shipping-pulse.js';
 import InsightsFlow, { Headline, InsightsDetails, ReplayLane, readFlow } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
 import Sidebar from '../web/components/sidebar.js';
@@ -1124,6 +1125,12 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   assert.match(failed, /class="kpi stale" data-kpi="start-to-live" data-stale="true"/);
   assert.match(failed, /<small>pull request to production · 3 of 4 measured · stale: last read 3m ago, the latest read failed<\/small>/);
   assert.match(kpi({ pulse: measured, unavailable: false, elapsed: 4 * 60_000, stale: true }), /· stale: last read 4m ago<\/small>/);
+  // A pulse without a production metric, or a malformed one, never breaks the headline and is refused as a read.
+  for (const prToProduction of [undefined, null, {}, { configured: true, medianHours: '5' }]) {
+    assert.match(kpi({ pulse: { prToProduction }, unavailable: false, elapsed: 0, stale: false }), /<strong>Unavailable<\/strong>/);
+    assert.equal(wellFormedPulse({ counts: {}, weeks: [], recent: [], prToProduction }), false);
+  }
+  assert.equal(wellFormedPulse({ counts: {}, weeks: [], recent: [], ...measured }), true);
   // Show details: exactly one toggle on the page, collapsed, and nothing of the detail read or drawn until it opens.
   assert.equal(page.match(/Show details/g)?.length, 1, 'one Show details toggle');
   assert.match(page, /<details class="insight-details"><summary>Show details<\/summary><\/details>/, 'collapsed and empty until opened');

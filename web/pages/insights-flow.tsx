@@ -48,13 +48,15 @@ export function ReplayLane({ frames, t }: { frames: ReplayFrame[]; t: number }) 
  * Unavailable, never zero.
  */
 export function Headline({ shipped, moving, waiting, now, pulse, requests }: { shipped: number; moving: number; waiting: Work[]; now: number; pulse: PulseRead; requests?: HumanRequestRow[] | null }) {
-  const production = pulse.pulse?.prToProduction;
+  // A report without the production metric reads Unavailable rather than breaking the page.
+  const production = pulse.pulse?.prToProduction ?? null;
+  const measured = !!production && production.configured !== false && typeof production.medianHours === 'number';
   const live = !pulse.pulse ? (pulse.unavailable ? 'Unavailable' : '…')
-    : production!.configured === false || production!.medianHours === null ? 'Unavailable' : formatDuration(production!.medianHours * 60);
+    : measured ? formatDuration(production!.medianHours! * 60) : 'Unavailable';
   // A cached median after a failed or late read is marked stale, never shown as current.
   const stale = !!pulse.pulse && pulse.stale ? ` · stale: last read ${formatDuration(pulse.elapsed / 60000)} ago${pulse.unavailable ? ', the latest read failed' : ''}` : '';
   const liveNote = !pulse.pulse ? (pulse.unavailable ? 'the shipping pulse could not be read' : 'reading the shipping pulse')
-    : (production!.configured === false ? 'no production observation is recorded' : `pull request to production · ${production!.sampleSize} of ${production!.eligible} measured`) + stale;
+    : (!production || typeof production.configured !== 'boolean' ? 'the shipping pulse reported no production metric' : production.configured === false ? 'no production observation is recorded' : `pull request to production · ${production.sampleSize} of ${production.eligible} measured`) + stale;
   // An item waits from when it was asked: its oldest open human-only row (status `humanOnly`),
   // else its own parked request; its stage clock only when neither says.
   const asked = (item: Work) => {

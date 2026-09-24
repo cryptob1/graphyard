@@ -5,6 +5,18 @@ const STALE_AFTER_MS = 120_000;
 const hours = (value: number | null) => value === null ? 'Unavailable' : `${value}h`;
 
 /**
+ * Whether a body read from /api/shipping-pulse has the shape the page draws: counts, weeks and
+ * recent, and a production metric that says whether it is configured and carries a numeric or
+ * null median. Anything else reads as unavailable instead of breaking the page.
+ */
+export function wellFormedPulse(body: any): body is Pulse {
+  const production = body?.prToProduction;
+  return !!body && typeof body === 'object' && !!body.counts && Array.isArray(body.weeks) && Array.isArray(body.recent)
+    && !!production && typeof production === 'object' && typeof production.configured === 'boolean'
+    && (production.medianHours === null || typeof production.medianHours === 'number');
+}
+
+/**
  * One live read of the shipping pulse: the report, whether the last read failed, and how stale
  * the figures are. Insights reads it once for its headline numbers and its detail (GY-168).
  */
@@ -25,7 +37,7 @@ export function usePulse(token: string) {
         if (!response.ok) throw new Error(String(response.status));
         const next = await response.json();
         // Opening Insights lands here, so a malformed body reads as unavailable instead of breaking the page.
-        if (!next || typeof next !== 'object' || !next.counts || !Array.isArray(next.weeks) || !Array.isArray(next.recent)) throw new Error('The shipping pulse report is malformed');
+        if (!wellFormedPulse(next)) throw new Error('The shipping pulse report is malformed');
         if (active) { setPulse(next); setUnavailable(false); readAt.current = performance.now(); setElapsed(0); }
       } catch { if (active) { setUnavailable(true); setElapsed(performance.now() - readAt.current); } }
     };
