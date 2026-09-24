@@ -1183,6 +1183,12 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   const heldPage = markup(createElement(WorkersPage, dashboard({ work: deploying, status: status as any })));
   const heldOpen = heldPage.slice(heldPage.indexOf('aria-label="Agent sessions"'), heldPage.indexOf('<details class="finished-sessions"'));
   for (const id of ['p1', 's1']) assert.match(heldOpen, new RegExp(`data-session="${id}"`));
+  // Work merged before delivery records existed is Shipped on the board, so an idle session on it is ended too.
+  const legacyItem = { ...real[1], id: 'legacy-item', key: 'GY-9', delivery: undefined, sessions: [running('l1', 'Legacy GY-9', 3 * hour), running('l2', 'Legacy GY-9 fresh', 5 * 60_000)] } as unknown as Work;
+  assert.equal(groupOf(legacyItem, NOW), 'shipped');
+  const legacy = workersView([legacyItem], new Date(NOW));
+  assert.equal(legacy.finished.find(row => row.id === 'l1')!.leftOn, 'delivered', 'a legacy shipped item files its idle session as ended');
+  assert.equal(legacy.running.find(row => row.id === 'l2')!.leftOn, null, 'a session seen within the hour stays open');
 });
 
 test('unit:ui-shipped-strip-latest — the shipped strip names the most recently merged item as latest, and its not-yet-live count comes from the production observation: zero when production serves the newest merge', () => {

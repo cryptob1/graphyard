@@ -36,7 +36,8 @@ export function staleSession(handle: Pick<SessionHandle, 'state' | 'updatedAt'>,
  * How long a running handle on a delivered or closed item may go unseen before the tab files it
  * with the ended sessions (GY-168). Its item is finished, so nothing will end the session's work;
  * a handle nobody has touched for an hour is left over from a dead session, not one still working.
- * Delivered means out of the flow as the board reads it (`leftFlowAt`): merged work the production
+ * Delivered means out of the flow as the board reads it (`leftFlowAt`, or no delivery record at all
+ * for work merged before those records existed): merged work the production
  * watch still holds at Deploy, or a smoke-gated merge without its passing check, is still moving.
  */
 export const endedItemIdleMs = 60 * 60_000;
@@ -137,7 +138,8 @@ export function workerRow(work: Pick<Work, 'id' | 'key'> & Partial<Work>, handle
   const startedAt = parsed(handle.startedAt) ?? now.getTime();
   const stale = staleSession(handle, now, thresholdMs);
   // Stage done is not enough: merged work still at Deploy keeps its sessions open until it leaves the flow.
-  const finished = work.stage !== 'done' ? null : work.closure ? 'closed' : leftFlowAt(work as Work, release) !== null ? 'delivered' : null;
+  // Work merged before delivery records existed has nothing left to wait on, as the board reads it (groupOf).
+  const finished = work.stage !== 'done' ? null : work.closure ? 'closed' : !work.delivery || leftFlowAt(work as Work, release) !== null ? 'delivered' : null;
   const leftOn = stale && stale.idleMs > endedItemIdleMs ? finished : null;
   // A session left on a finished item stopped counting when it was last seen, not at the page clock.
   const endedAt = handle.state === 'running' && !leftOn ? now.getTime() : parsed(handle.endedAt) ?? parsed(handle.updatedAt) ?? startedAt;
