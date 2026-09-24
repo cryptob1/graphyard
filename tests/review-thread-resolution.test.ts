@@ -8,6 +8,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
+import { listedThreadLimit, threadSection } from '../src/review-threads.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews, updateReviewLedger } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -152,6 +153,20 @@ test('unit:threads-listed-resolution — an approval without a Resolved threads 
       assert.equal(settled.reviews[0].threadResolution?.implicit, scenario.name === 'no line', scenario.name);
     } finally { await cleanup(); }
   }
+});
+
+test('unit:threads-listed-resolution — past the listing limit the prompt and the record hold the same threads, and an approval without the line resolves only those', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    const open = Array.from({ length: listedThreadLimit + 5 }, (_, index) => listedThread(`PRRT_open${String(index).padStart(4, '0')}`));
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => open });
+    const recorded = (await readReviewLedger(root)).reviews[0].threadsListed!;
+    assert.deepEqual(recorded, open.slice(0, listedThreadLimit).map(thread => thread.id));
+    // The prompt shows exactly the recorded set, and says how many more it left out.
+    const section = threadSection(H, open.slice(0, listedThreadLimit), open.length);
+    for (const thread of open) assert.equal(section.includes(thread.id), recorded.includes(thread.id), thread.id);
+    assert.match(section, /5 more unresolved threads are not listed here: do not name them/);
+  } finally { await cleanup(); }
 });
 
 test('unit:threads-listed-resolution — a settlement that named nothing before listings were recorded is judged once more, by what its launch recorded: no listing vouches for no thread', async () => {
