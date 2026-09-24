@@ -28,7 +28,7 @@ import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
 import WorkersPage, { roleWords, shortShas } from '../web/pages/workers.js';
 import { CandidateSha } from '../web/candidate.js';
-import { computeFlow, deliveredAt, flowDrilldown, gateFactStep, releaseObservedAt, servedAt, stepMoves } from '../src/flow-analytics.js';
+import { computeFlow, deliveredAt, flowDrilldown, gateFactStep, productionHold, releaseObservedAt, servedAt, stepMoves } from '../src/flow-analytics.js';
 
 // GY-161: the dashboard, rendered over the board fixture the browser suite also serves
 // (browser-tests/ui-board.ts): an item parked on a human-only decision, one blocked, items building,
@@ -630,7 +630,7 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   // stays pending until the release serves it); the merges not yet seen live are counted apart.
   const week = 7 * 24 * hour;
   assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(page)?.[1]), work.filter(item => groupOf(item, NOW) === 'shipped' && releasedAt(item) !== null && NOW - releasedAt(item)! <= week).length);
-  const unseen = work.filter(item => groupOf(item, NOW) === 'shipped' && releasedAt(item) === null && NOW - mergedAt(item) <= week).length;
+  const unseen = work.filter(item => item.stage === 'done' && !item.closure && !!item.delivery && releasedAt(item) === null && NOW - mergedAt(item) <= week).length;
   assert.ok(real.filter(item => NOW - mergedAt(item) <= week).length >= 3 && unseen >= 3);
   assert.equal(Number(/data-unreleased="(\d+)"/.exec(page)?.[1]), unseen);
   assert.match(page, new RegExp(`${unseen} merged, not yet seen live\\.`));
@@ -672,6 +672,29 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   for (const release of [failing, pending]) { assert.equal(prSteps(stale, NOW, release).current, 'deploy'); assert.equal(stepHeld(stale, NOW, [], release).overdue, true, 'a pending Deploy goes overdue'); }
   assert.equal(stepHeld({ ...stale, policy: smoke.policy } as Work, NOW, []).overdue, true, 'an outstanding smoke check keeps the clock running');
   assert.equal(stepHeld(stale, NOW, []).overdue, false, 'work that left the flow is never overdue');
+  // The step history holds a merge at Deploy exactly where the board does (one rule, `flowExitAt`):
+  // while the watch reports it pending or failed, or it merged after the watch's last pass.
+  const atDeploy = { facts: [{ workId: stale.id, kind: 'gates.changed', observedAt: new Date(NOW - 47 * hour).toISOString(), details: { stage: 'done' } }], carryIn: [] } as any;
+  const exits = (production?: typeof noRelease) => stepMoves({ ...atDeploy, production }, stale).map(move => `${move.from}>${move.to}`);
+  assert.deepEqual(exits(), ['null>deploy', 'deploy>null'], 'no production observation: the merge leaves Deploy');
+  for (const release of [failing, pending, { ...noRelease, observedAt: NOW - 49 * hour }]) {
+    assert.deepEqual(exits(release), ['null>deploy'], 'held at Deploy in the history as on the board');
+    assert.notEqual(groupOf(stale, NOW, undefined, undefined, release), 'shipped');
+  }
+  assert.deepEqual(exits({ ...noRelease, observedAt: NOW - hour }), ['null>deploy', 'deploy>null'], 'looked for since, and not reported unserved');
+  // The flow API reads the watch's report the same way as the board, so its steps drill-down and
+  // step dwell agree with the Now view and each row's clock.
+  const watch = { observedAt: new Date(NOW).toISOString(), serving: 'abc', pending: [keys[0]], incidents: [{ key: keys[1] }] };
+  const watchView = releaseView({ ...boardStatus(), production: watch });
+  assert.deepEqual([...productionHold(watch).unserved], [...watchView.unserved]); assert.deepEqual([...productionHold(watch).failed], [...watchView.failed]);
+  assert.equal(groupOf(real[0], NOW, undefined, undefined, watchView), 'moving'); assert.equal(groupOf(real[1], NOW, undefined, undefined, watchView), 'blocked');
+  const heldData = { ...flowDataset(work), production: productionHold(watch) };
+  const heldRows = flowDrilldown(heldData, computeFlow(heldData, { days: 30 }), { metric: 'steps', key: null, authorized: true }).rows;
+  for (const key of keys.slice(0, 2)) assert.ok(!heldRows.some(row => row.workKey === key && row.detail === 'deploy to outside'), `${key} stays at Deploy in the history`);
+  assert.ok(heldRows.some(row => row.workKey === keys[2] && row.detail === 'deploy to outside'), `${keys[2]} is not held`);
+  // Merges the watch holds at Deploy (Moving, Blocked) are still merged and not yet seen live: the footer counts them.
+  const watched = home(dashboard({ work, status: { ...boardStatus(), production: watch } as any }));
+  assert.equal(Number(/data-unreleased="(\d+)"/.exec(watched)?.[1]), unseen);
   // A production incident blocks at Deploy and says so, on the row and the item page — never "Shipped".
   assert.equal(groupOf(stale, NOW, undefined, undefined, failing), 'blocked');
   const row = markup(createElement(WorkCard, { item: stale, now: NOW, onOpen: noop, release: failing }));

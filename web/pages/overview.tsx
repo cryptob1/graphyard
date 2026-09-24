@@ -31,8 +31,9 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const delivered = work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped');
   const recent = delivered.filter(w => releasedAt(w, release) !== null && now - releasedAt(w, release)! <= week).sort((a, b) => releasedAt(b, release)! - releasedAt(a, release)!);
-  // Merged this week but not yet seen live: delivered, still waiting for the release to serve it.
-  const unreleased = delivered.filter(w => releasedAt(w, release) === null && now - mergedAt(w) <= week).length;
+  // Merged this week but not yet seen live, whatever its group: a merge the production watch holds
+  // at Deploy (Moving) or reports failed (Blocked) counts here as much as one already Shipped.
+  const unreleased = work.filter(w => w.stage === 'done' && !isClosed(w) && !!w.delivery && releasedAt(w, release) === null && now - mergedAt(w) <= week).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>

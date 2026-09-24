@@ -289,7 +289,11 @@ export async function projectFlow(store: Store, options: { batch?: number; batch
   return { processed, inserted, checkpoint };
 }
 
-export interface FlowQuery { days: FlowWindow; type?: string | null; stage?: string | null; slice?: string | null; asOf?: string | null; limit?: number; productionEnvironment?: string }
+export interface FlowQuery {
+  days: FlowWindow; type?: string | null; stage?: string | null; slice?: string | null; asOf?: string | null; limit?: number; productionEnvironment?: string;
+  /** The production watch's report (`ProductionWatch.status()`), when this process runs one. */
+  production?: unknown;
+}
 export interface FlowDataset {
   observedAt: string; from: string; to: string; days: FlowWindow;
   work: Work[]; included: Work[]; facts: FlowFact[]; latest: FlowFact[]; carryIn: FlowFact[]; deployments: DeploymentObservation[];
@@ -299,6 +303,8 @@ export interface FlowDataset {
    * a dataset assembled by hand may leave it out and is then read as fully covered.
    */
   covered?: CoveredWindow;
+  /** What the production watch holds at Deploy (`productionHold`); absent reads as no observation. */
+  production?: ProductionHold;
   projection: { lastEvent: number; updatedAt: string | null; pendingEvents: number; pendingCapped: boolean };
 }
 /**
@@ -349,6 +355,8 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const clock = iso((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
   const observedAt = query.asOf && time(query.asOf) !== null && time(query.asOf)! <= time(clock)! ? new Date(time(query.asOf)!).toISOString() : clock;
   const to = observedAt, from = new Date(time(observedAt)! - query.days * day).toISOString();
+  // The watch's report is what production serves now; a report as of an earlier instant has none.
+  const production = query.asOf ? noProductionHold : productionHold(query.production);
   // One extra work item and one extra deployment probe their own scan bounds, so an
   // exhausted bound is reported as partial coverage instead of silently dropping the
   // newest records.
@@ -358,7 +366,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const included = work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));
   const ids = included.map(item => item.id);
   const stateIds = work.map(item => item.id);
-  const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false, deploymentMergesTruncated: false, covered: fullyCovered(from, to) };
+  const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false, deploymentMergesTruncated: false, covered: fullyCovered(from, to), production };
   const projectionRow = (await store.pool.query('SELECT last_event,updated_at FROM flow_projection WHERE id=1')).rows[0];
   const lastEvent = Number(projectionRow?.last_event ?? 0);
   // Lag counts exactly the events the projector consumes; ledger entries without a work
@@ -408,7 +416,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND details->>'mergeSha'=ANY($1) ORDER BY observed_at,id LIMIT $2`, [mergeShas, flowLimits.deploymentMerges + 1])).rows : [];
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, projection };
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, production, projection };
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -1055,16 +1063,60 @@ export function deliveredAt(work: Work, productionEnvironment = defaultProductio
   return delivery.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt;
 }
 
+/**
+ * What the production watch observes about production (GY-161), as the board and the step history
+ * both read it: the merged items it reports not served yet (`pending`) and those with an open
+ * deployment incident, and when it last saw what production serves. Empty, with no instant, when
+ * the watch has not observed production: a merge alone then takes work out of the flow (AC-11).
+ */
+export interface ProductionHold {
+  unserved: ReadonlySet<string>;
+  failed: ReadonlySet<string>;
+  observedAt: number | null;
+}
+export const noProductionHold: ProductionHold = { unserved: new Set(), failed: new Set(), observedAt: null };
+
+/** The hold from the production watch's report (`ProductionWatch.status()`, status `production`). */
+export function productionHold(report: any): ProductionHold {
+  // Only a pass that saw what production serves is an observation; an unknown serving commit or a
+  // failed provider read says nothing about any one item.
+  const observed = !!report?.observedAt && !!report?.serving && !report?.error;
+  if (!observed || time(report.observedAt) === null) return noProductionHold;
+  const keys = (list: unknown) => Array.isArray(list) ? list.filter((key): key is string => typeof key === 'string') : [];
+  return {
+    unserved: new Set(keys(report.pending)),
+    failed: new Set(keys((Array.isArray(report.incidents) ? report.incidents : []).map((incident: any) => incident?.key))),
+    observedAt: time(report.observedAt),
+  };
+}
+
+/**
+ * When a merged item left the flow, as every reader counts it: when the release was observed
+ * serving it; else, where the production watch observes production, never while it reports the
+ * item unserved or failed, or while the item merged after the watch's last pass (not looked for
+ * yet) — it is at Deploy until a live observation is recorded; else `deliveredAt` — its merge, or
+ * the passing post-deployment check its policy asks for. Only with no production observation at
+ * all (or for a merge older than the watch's window) does a merge alone take it out of the flow.
+ */
+export function flowExitAt(work: Work, productionEnvironment = defaultProductionEnvironment, hold: ProductionHold = noProductionHold): string | null {
+  const served = servedAt(work, productionEnvironment);
+  if (served) return served;
+  if (hold.unserved.has(work.key) || hold.failed.has(work.key)) return null;
+  const merged = time(work.delivery?.mergedAt ?? '');
+  if (hold.observedAt !== null && work.stage === 'done' && !work.closure && merged !== null && merged > hold.observedAt) return null;
+  return deliveredAt(work, productionEnvironment);
+}
+
 export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | null; pr: number | null; carried: boolean }
 /**
  * One item's moves between the seven steps, oldest first: the gate fact carried in from before the
  * window says where it started (`carried`, not a move inside the window), each recorded gate fact
- * that puts it at a different step is a move, and its delivery (`deliveredAt`) takes it from
- * Deploy out of the flow. Nothing after the report's cutoff (`dataset.to`) is a move, and work that
+ * that puts it at a different step is a move, and its exit (`flowExitAt`) takes it from Deploy
+ * out of the flow — never while the production watch (`dataset.production`) holds it at Deploy. Nothing after the report's cutoff (`dataset.to`) is a move, and work that
  * left the flow before the window opened (`dataset.from`) has no moves in it at all: its finished
  * Deploy stay belongs to an earlier window. The replay and the per-step dwell both read these.
  */
-export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { from?: string; to?: string }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
+export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { from?: string; to?: string; production?: ProductionHold }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
   const moves: StepMove[] = [];
   const cutoff = dataset.to !== undefined && time(dataset.to) !== null ? time(dataset.to)! : Infinity;
   const start = dataset.from !== undefined && time(dataset.from) !== null ? time(dataset.from)! : -Infinity;
@@ -1079,7 +1131,7 @@ export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { fr
   }
   // Recorded as delivered before the gate fact that said so (a merge-time `deliveredAt`), it
   // leaves Deploy at that fact, never before it; a delivery after the cutoff is not in the report.
-  const left = deliveredAt(item, productionEnvironment);
+  const left = flowExitAt(item, productionEnvironment, dataset.production);
   if (at === 'deploy' && left && time(left) !== null && time(left)! <= cutoff) {
     const exit = moves.length && time(left)! < time(moves.at(-1)!.at)! ? moves.at(-1)!.at : left;
     if (time(exit)! < start) return [];

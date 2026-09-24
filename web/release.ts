@@ -1,5 +1,5 @@
 import type { Work } from '../src/model';
-import { defaultProductionEnvironment, deliveredAt, servedAt } from '../src/flow-analytics';
+import { defaultProductionEnvironment, flowExitAt, noProductionHold, productionHold, servedAt, type ProductionHold } from '../src/flow-analytics';
 
 /**
  * What the control plane knows about production, as every page reads it (GY-161): the
@@ -13,17 +13,8 @@ import { defaultProductionEnvironment, deliveredAt, servedAt } from '../src/flow
  * the master loop still owes `master verify-deployment` for it, which `master status` keeps under
  * `pending` until the release serves it (AGENTS.md).
  */
-export interface ReleaseView {
+export interface ReleaseView extends ProductionHold {
   environment: string;
-  /** Merged items production is observed not to serve yet: still moving, at Deploy. */
-  unserved: ReadonlySet<string>;
-  /** Merged items with an open deployment incident (failed or missing): blocked at Deploy. */
-  failed: ReadonlySet<string>;
-  /**
-   * When the production watch last observed what production serves (ms), or null when it has
-   * not. A merge after that pass has not been looked for in production yet, so it waits at Deploy.
-   */
-  observedAt: number | null;
   /**
    * The CI Apps whose check runs the test gate counts (status `ciAppIds`), so a check reads failed
    * only on a trusted App's own failure; null when status has not said.
@@ -31,22 +22,17 @@ export interface ReleaseView {
   ciAppIds: readonly number[] | null;
 }
 
-export const noRelease: ReleaseView = { environment: defaultProductionEnvironment, unserved: new Set(), failed: new Set(), observedAt: null, ciAppIds: null };
+export const noRelease: ReleaseView = { environment: defaultProductionEnvironment, ...noProductionHold, ciAppIds: null };
 
 /** The release view from the status read every page already has. */
 export function releaseView(status: any): ReleaseView {
   const configured = status?.productionEnvironment;
   const environment = typeof configured === 'string' && configured.trim() ? configured.trim() : defaultProductionEnvironment;
-  const production = status?.production;
-  // Only a pass that saw what production serves is an observation; an unknown serving commit or a
-  // failed provider read says nothing about any one item.
-  const observed = !!production?.observedAt && !!production?.serving && !production?.error;
-  const keys = (list: unknown) => Array.isArray(list) ? list.filter((key): key is string => typeof key === 'string') : [];
   return {
     environment,
-    unserved: new Set(observed ? keys(production.pending) : []),
-    failed: new Set(observed ? keys((Array.isArray(production.incidents) ? production.incidents : []).map((incident: any) => incident?.key)) : []),
-    observedAt: observed && Number.isFinite(Date.parse(production.observedAt)) ? Date.parse(production.observedAt) : null,
+    // Merged items production is observed not to serve yet (still moving, at Deploy), those with an
+    // open deployment incident (blocked at Deploy), and when the watch last looked.
+    ...productionHold(status?.production),
     ciAppIds: Array.isArray(status?.ciAppIds) ? status.ciAppIds.filter((id: unknown): id is number => typeof id === 'number') : null,
   };
 }
@@ -57,18 +43,9 @@ export function servedFor(work: Work, release: ReleaseView = noRelease): string 
 }
 
 /**
- * When a merged item left the flow as the board reads it: when the release was observed serving
- * it; else, where the production watch observes production, never while it reports the item
- * unserved or failed, or while the item merged after the watch's last pass (not looked for yet) —
- * it is at Deploy until a live observation is recorded; else `deliveredAt` — its merge, or the
- * passing post-deployment check its policy asks for. Only with no production observation at all
- * (or for a merge older than the watch's window) does a merge alone take it out of the flow.
+ * When a merged item left the flow as the board reads it: `flowExitAt`, the same rule the steps
+ * history and the Insights replay are built from, under this installation's production watch.
  */
 export function leftFlowAt(work: Work, release: ReleaseView = noRelease): string | null {
-  const served = servedFor(work, release);
-  if (served) return served;
-  if (release.unserved.has(work.key) || release.failed.has(work.key)) return null;
-  const merged = Date.parse(work.delivery?.mergedAt ?? '');
-  if (release.observedAt !== null && work.stage === 'done' && !work.closure && Number.isFinite(merged) && merged > release.observedAt) return null;
-  return deliveredAt(work, release.environment);
+  return flowExitAt(work, release.environment, release);
 }
