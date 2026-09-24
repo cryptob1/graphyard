@@ -169,6 +169,7 @@ test('unit:fault-classes — master status and the dashboard group open problems
   const troubled = { ...boardStatus('admin'), appPermissions: { attention: ['The App lacks Checks: write', 'The App lacks Contents: write'] }, executors: { live: 1, attention: [{ kind: 'merge', text: 'No executor serves merge' }] } };
   assert.deepEqual(groupFaults(statusFaults(troubled)).map(group => [group.faultClass, group.count]), [['configuration', 3]]);
   assert.match(render(quiet, troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'the status-level problems are counted under their class');
+  assert.match(render([], troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'with no work at all the status-level problems are still grouped');
 });
 
 test('unit:recurring-class-item — below the threshold nothing is filed', async () => {
@@ -310,6 +311,12 @@ test('unit:recurring-class-item — a fault that clears and returns is a new ins
   assert.equal(trackFaults(record, [observation], iso(180_000)).length, 1, 'cleared and back: a second instance');
   noteFault(record, { kind: 'loop-failures', faultClass: 'loop', subject: 'loop', text: 'failed' }, iso(200_000));
   assert.deepEqual(record.instances.map(entry => entry.faultClass), ['scope', 'scope', 'loop']);
+  // Past the retention bound the oldest instances go, never the one a standing fault still is.
+  const churn = (index: number) => ({ kind: 'blocker' as const, faultClass: 'stalled-gate' as const, subject: `GY-${index + 100}`, text: 'blocked' });
+  for (let index = 0; index < 1200; index++) trackFaults(record, [observation, churn(index)], iso(240_000 + index));
+  assert.ok(record.instances.length <= 1001, `history stays bounded: ${record.instances.length}`);
+  assert.equal(trackFaults(record, [observation], iso(2_000_000)).length, 0, 'the fault that never cleared is still one instance');
+  assert.equal(record.instances.filter(entry => entry.kind === 'scope-request' && entry.at === iso(180_000)).length, 1);
 });
 
 test('unit:recurring-class-item — derived and status-level faults reach recurrence tracking and file their class', async () => {
@@ -351,7 +358,7 @@ test('unit:recurring-class-item — derived and status-level faults reach recurr
   assert.equal(state.faults.instances.filter(entry => entry.faultClass === 'configuration').length, 3, 'a shortfall that clears and returns is a new instance each time');
   assert.deepEqual(classesFiled(), ['session-liveness', 'configuration'], 'the recurring status-level class files its own item');
   // A failed integration job on the coordination read is an observation fault, with or without the status read.
-  assert.deepEqual(cycleFaults(state, [], clock, { jobs: [{ work_id: 'GY-1', error: 'GitHub answered 502' }] }).map(fault => [fault.kind, fault.faultClass, fault.subject]), [['integration-job', 'observation', 'GY-1']]);
+  assert.deepEqual(cycleFaults(state, [], clock, { jobs: [{ work_id: 'GY-1', error: 'GitHub answered 502' }, { work_id: 'GY-2', error: null }, { work_id: 'GY-3' }] }).map(fault => [fault.kind, fault.faultClass, fault.subject]), [['integration-job', 'observation', 'GY-1']], 'a healthy scheduled job is no fault');
   // An item's own fault and the same fault derived again for it are one observation, not two.
   const both = cycleFaults(state, [blocked('GY-9')], clock, { config: config() });
   assert.equal(both.filter(fault => fault.subject === 'GY-9').length, 1, `one blocker is one fault: ${JSON.stringify(both)}`);

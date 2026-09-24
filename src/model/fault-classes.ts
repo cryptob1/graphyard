@@ -239,7 +239,7 @@ export function statusFaults(status: any): FaultObservation[] {
   if (status.heldJobs > 0) found.push(observe('held-jobs', 'installation', `${status.heldJobs} integration job(s) held on a permission shortfall`));
   for (const line of lines(status.delegationLimits?.attention)) found.push(observe('delegation-limits', 'installation', line));
   if (status.githubBudget?.paused) found.push(observe('github-budget', 'github', `GitHub requests are paused until ${status.githubBudget.paused.until}`));
-  else for (const job of Array.isArray(status.jobs) ? status.jobs : []) found.push(observe('integration-job', job?.work_id ?? 'github', `A GitHub update failed: ${job?.error ?? 'no reason recorded'}`));
+  else for (const job of Array.isArray(status.jobs) ? status.jobs.filter((job: any) => job?.error) : []) found.push(observe('integration-job', job?.work_id ?? 'github', `A GitHub update failed: ${job?.error ?? 'no reason recorded'}`));
   for (const entry of Array.isArray(status.executors?.attention) ? status.executors.attention : []) found.push(observe('executor', 'executors', String(entry?.text ?? entry?.kind ?? 'an action no executor serves')));
   return found;
 }
@@ -249,9 +249,9 @@ export interface FaultRecord { instances: FaultInstance[]; open: Record<string, 
 export const retainedFaultInstances = 1000;
 const instanceOf = (observation: FaultObservation, at: string): FaultInstance => ({ id: `${observation.kind}|${observation.subject.slice(0, 200)}|${at}`, kind: observation.kind, faultClass: observation.faultClass,
   subject: observation.subject.slice(0, 200), text: observation.text.slice(0, 500), at, lastSeenAt: at, linkedTo: null });
-function retain(record: FaultRecord) {
-  const dropped = record.instances.splice(0, Math.max(0, record.instances.length - retainedFaultInstances));
-  for (const entry of dropped) for (const map of [record.open, record.failing]) for (const [key, id] of Object.entries(map)) if (id === entry.id) delete map[key];
+function retain(record: FaultRecord) { // drops the oldest past the bound, never one a standing fault or failing run names
+  let excess = record.instances.length - retainedFaultInstances; const standing = new Set([...Object.values(record.open), ...Object.values(record.failing)]);
+  if (excess > 0) record.instances.splice(0, record.instances.length, ...record.instances.filter(entry => excess <= 0 || standing.has(entry.id) || excess-- <= 0));
 }
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is

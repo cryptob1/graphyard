@@ -60,15 +60,16 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
     {status?.githubBudget?.paused && <div className="notice danger" role="alert"><strong>GitHub requests are paused until {status.githubBudget.paused.until}.</strong> {status.githubBudget.paused.reason}. What exhausted the budget: {status.githubBudget.lastHour.requests} requests in the last hour{status.githubBudget.lastHour.byKind.length > 0 && ` (${status.githubBudget.lastHour.byKind.map((entry: any) => `${entry.kind} ${entry.requests}`).join(', ')})`}. Every gate reads stale until the pause lifts{status.jobs?.length > 0 && `; ${status.jobs.length} integration job${status.jobs.length === 1 ? '' : 's'} recorded the refusal`}.</div>}
     {status?.jobs?.length > 0 && !status?.githubBudget?.paused && <div className="notice danger">{status.jobs.length} GitHub update(s) failed: {status.jobs[0].error}</div>}
     {status?.executors?.attention?.length > 0 && <div className="notice danger" role="alert" aria-label="Unserved actions"><strong>{status.executors.live === 0 ? 'No executor is running.' : `No executor serves ${status.executors.attention.map((entry: any) => entry.kind).join(', ')}.`}</strong> {status.executors.attention.map((entry: any) => <p key={entry.kind}>{entry.text}</p>)}<p className="muted">An action nobody can claim is not queued behind other work; nothing moves until an executor of its kind is started. <a href="/docs/master-agent-reference#running-executors-under-supervision">How executors are supervised ↗</a></p></div>}
+    {/* Drawn whether or not any work exists: status-level faults stand without an item. */}
+    {faults.length > 0 && <section className="fault-classes" aria-label="Problems by class">
+      <h2>Problems by class <small>one cause, counted once per class</small></h2>
+      <ul>{faults.map(group => <li key={group.faultClass} data-fault-class={group.faultClass} title={group.meaning}><span className="mono">{group.faultClass}</span> <strong>{group.count}</strong> <small>{group.subjects.join(', ')}</small></li>)}</ul>
+    </section>}
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
       <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
         <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{groupMeaning[group]}</small>
       </button>)}</div>
       {only && <p className="filter-note">Showing {groupLabel[only]} only · <button type="button" className="text-button" onClick={() => setOnly(null)}>Show every group</button></p>}
-      {faults.length > 0 && <section className="fault-classes" aria-label="Problems by class">
-        <h2>Problems by class <small>one cause, counted once per class</small></h2>
-        <ul>{faults.map(group => <li key={group.faultClass} data-fault-class={group.faultClass} title={group.meaning}><span className="mono">{group.faultClass}</span> <strong>{group.count}</strong> <small>{group.subjects.join(', ')}</small></li>)}</ul>
-      </section>}
       {section('needs-you', humanOnly.size ? 'only you can decide these' : undefined)}
       {section('blocked')}
       {section('moving')}
