@@ -66,10 +66,10 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
     + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: the head fails a stated acceptance criterion, or a correctness or security defect in the changed code breaks one of the item\'s own criteria. '
     + 'FOLLOW-UP: everything else — edge cases beyond the criteria, style, naming, hypotheticals, further hardening, and bot suggestions. '
     + 'APPROVE when every criterion is met and no finding or thread is BLOCKING; list the FOLLOW-UP ones in the body instead of requesting changes for them. '
-    + 'Graphyard files only review threads: a FOLLOW-UP finding of your own that has no thread is not filed, so write it in the body under a line starting "Unfiled follow-ups:" for the operator to raise as a thread or item. '
+    + 'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own, before the closing lines, exactly of the form "Follow-up finding: PATH:LINE — what is wrong and why"; Graphyard files those in the same backlog item as the Follow-up threads. '
     + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion it blocks; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. '
     + 'End the review body with two lines, exactly of the forms "Resolved threads: ID1 ID2" and "Follow-up threads: ID3 ID4": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP. Write "none" after a line\'s colon when it names nothing. '
-    + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and files the Follow-up threads as one backlog item and resolves each with a reply naming that item. ';
+    + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and files the Follow-up threads and findings as one backlog item and resolves each thread with a reply naming that item. ';
 }
 
 /** The launch prompt's thread section: each thread with its ID, and how the verdict names the fixed ones. `total` counts the unresolved threads when more exist than `threads` lists. */
@@ -98,6 +98,30 @@ function parseThreadLine(body: unknown, label: string): string[] {
 export const parseResolvedThreads = (body: unknown) => parseThreadLine(body, 'resolved threads');
 /** The thread IDs a verdict names on its last `Follow-up threads:` line, read exactly as the Resolved line is. */
 export const parseFollowUpThreads = (body: unknown) => parseThreadLine(body, 'follow-up threads');
+
+/** A FOLLOW-UP the reviewer found in the diff, with no review thread: one `Follow-up finding:` line of its verdict. */
+export interface FollowUpFinding { path: string | null; line: number | null; text: string }
+/** The most `Follow-up finding:` lines one verdict files, and the most characters kept of each. */
+export const followUpFindingLimit = 50, followUpFindingMax = 500;
+/**
+ * The findings a verdict writes on its `Follow-up finding: PATH:LINE — text` lines (GY-166): a
+ * FOLLOW-UP with no thread is filed in the same item as the Follow-up threads, never left in free
+ * text nobody files. A line without a leading PATH[:LINE] is kept whole, with no path.
+ */
+export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
+  if (typeof body !== 'string') return [];
+  const findings: FollowUpFinding[] = [];
+  for (const entry of body.split(/\r?\n/)) {
+    const match = /^\s*(?:[-*]\s+)?follow-up finding:\s*(.+)$/i.exec(entry);
+    const text = match?.[1]!.replace(/\s+/g, ' ').trim();
+    if (!text || /^none\.?$/i.test(text)) continue;
+    const located = /^`?([^\s`:]+)(?::(\d+))?`?\s+[—–-]+\s+\S/.exec(text);
+    const path = located && /[/.]/.test(located[1]!) ? located[1]! : null;
+    findings.push({ path, line: path && located![2] ? Number(located![2]) : null, text: text.slice(0, followUpFindingMax) });
+    if (findings.length === followUpFindingLimit) break;
+  }
+  return findings;
+}
 
 /** Whether a verdict carries a `Resolved threads:` line at all; `Resolved threads: none` names nothing, explicitly. */
 export const hasResolvedThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^resolved threads:/i.test(entry.trim()));
@@ -164,7 +188,7 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
  * `threads` is the set judged on the first pass, kept so a retry files exactly the same item;
  * `refused` names the named threads that were not eligible, `failure` what a retry is owed.
  */
-export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number }
+export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; findings?: FollowUpFinding[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number }
 /** The backlog item the follow-ups become: the loop's create payload for the control plane. */
 export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; dependencies: string[]; criteria: { id: string; text: string; proofs: string[] }[]; plannedFiles: string[]; reason: string }
 /** Creates the item, idempotent on `key`: a retry with the same key returns the item already created. */
@@ -193,26 +217,42 @@ function describeFollowUp(thread: LaunchThread, index: number, budget: number) {
 }
 
 /**
- * The one backlog item for an approval's follow-up threads: each thread's id, path:line, author, URL
- * and excerpt. It depends on the approved source item (`workId`), so it is not dispatched against a
- * base that lacks the reviewed change until that change has landed.
+ * A path as a plannedFiles entry within the work schema's bound: the path itself, or else its
+ * longest containing directory that fits, so the follow-up's worker may still edit the file.
+ * GitHub bounds each path segment, so some prefix always fits.
  */
-export function followUpItem(input: { key: string; workId: string; pr: number; sha: string; reviewId: number }, threads: LaunchThread[]): FollowUpItem {
-  const intro = `The independent reviewer approved ${input.key} at ${input.sha} (review ${input.reviewId}) with every acceptance criterion met, and judged these ${threads.length} review thread${threads.length === 1 ? '' : 's'} FOLLOW-UP: findings beyond the item's criteria. Graphyard filed them here and resolved each thread with a reply naming this item.`;
-  const budget = Math.floor((descriptionMax - intro.length - 1 - threads.length) / Math.max(1, threads.length));
+export function plannedScope(path: string): string | null {
+  if (path.length <= plannedPathMax) return path;
+  const cut = path.lastIndexOf('/', plannedPathMax - 1);
+  return cut > 0 ? path.slice(0, cut + 1) : null;
+}
+
+/**
+ * The one backlog item for an approval's follow-ups: each thread's id, path:line, author, URL and
+ * excerpt, then each finding the reviewer wrote with no thread. It depends on the approved source
+ * item (`workId`), so it is not dispatched against a base that lacks the reviewed change until that
+ * change has landed.
+ */
+export function followUpItem(input: { key: string; workId: string; pr: number; sha: string; reviewId: number }, threads: LaunchThread[], findings: FollowUpFinding[] = []): FollowUpItem {
+  const judged = [threads.length ? `${threads.length} review thread${threads.length === 1 ? '' : 's'}` : '', findings.length ? `${findings.length} finding${findings.length === 1 ? '' : 's'} with no thread` : ''].filter(Boolean).join(' and ');
+  const intro = `The independent reviewer approved ${input.key} at ${input.sha} (review ${input.reviewId}) with every acceptance criterion met, and judged these ${judged} FOLLOW-UP: beyond the item's criteria. Graphyard filed them here${threads.length ? ' and resolved each thread with a reply naming this item' : ''}.`;
+  const entries = threads.length + findings.length;
+  const budget = Math.floor((descriptionMax - intro.length - 1 - entries) / Math.max(1, entries));
   return {
     title: `Follow-ups from the approved review of ${input.key} (PR #${input.pr})`.slice(0, 200),
-    description: [intro, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget))].join('\n'),
+    description: [intro, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget)),
+      ...findings.map((finding, index) => clipEnd(`${threads.length + index + 1}. Finding with no thread: ${finding.text}`, budget))].join('\n'),
     type: 'chore', priority: 2, dependencies: [input.workId],
-    criteria: [{ id: 'AC-1', text: `Each follow-up thread listed in the description is addressed in code, or declined with a recorded reason.`, proofs: ['manual:review-followups-triaged'] }],
-    // A path past the work schema's 500-character bound on an entry would refuse the whole item; it stays listed in the description.
-    plannedFiles: [...new Set(threads.map(thread => thread.path).filter(path => path !== '(no path)' && path.length <= plannedPathMax))].slice(0, 100),
-    reason: `Follow-up threads named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,
+    criteria: [{ id: 'AC-1', text: `Each follow-up listed in the description is addressed in code, or declined with a recorded reason.`, proofs: ['manual:review-followups-triaged'] }],
+    plannedFiles: [...new Set([...threads.map(thread => thread.path).filter(path => path !== '(no path)'), ...findings.map(finding => finding.path).filter((path): path is string => !!path)]
+      .map(plannedScope).filter((path): path is string => !!path))].slice(0, 100),
+    reason: `Follow-ups named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,
   };
 }
 
 /**
- * File the threads an approval named as follow-up: one backlog item for all of them, then a reply
+ * File the threads an approval named as follow-up, with the findings it wrote on `Follow-up finding:`
+ * lines: one backlog item for all of them, then a reply
  * naming the item on each thread and its resolution. Only named threads are touched, and only those
  * unresolved on the pull request and opened before the approval; nothing else is ever answered.
  * `listed` names the threads the reviewer's launch prompt listed; a named thread outside it is
@@ -223,7 +263,7 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
 export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[] }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts: (previous?.attempts ?? 0) + 1 };
-  const carried = { named: previous?.named ?? [], threads: previous?.threads ?? [], replied: previous?.replied ?? [], resolved: previous?.resolved ?? [], refused: previous?.refused ?? [], ...(previous?.item ? { item: previous.item } : {}) };
+  const carried = { named: previous?.named ?? [], threads: previous?.threads ?? [], findings: previous?.findings ?? [], replied: previous?.replied ?? [], resolved: previous?.resolved ?? [], refused: previous?.refused ?? [], ...(previous?.item ? { item: previous.item } : {}) };
   let review: any;
   try { review = JSON.parse(String(await run('gh', ['api', `repos/${input.repository}/pulls/${input.pr}/reviews/${input.reviewId}`]))); }
   catch (error) { return { ...base, ...carried, failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
@@ -231,12 +271,16 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
     return { ...base, ...carried, failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
   const resolvedLine = parseResolvedThreads(review.body);
   const named = parseFollowUpThreads(review.body).filter(id => !resolvedLine.includes(id)).slice(0, listedThreadLimit);
-  if (!named.length) return { ...base, named, threads: [], replied: [], resolved: [], refused: [] };
-  let open: LaunchThread[];
-  try { open = await readUnresolvedThreads(input.repository, input.pr, run); }
-  catch (error) { return { ...base, ...carried, named, failure: `the review threads could not be read: ${firstLine(error)}` }; }
+  // Kept from the first pass, so a retry files exactly the item it began.
+  const findings = previous?.item ? carried.findings : parseFollowUpFindings(review.body);
+  if (!named.length && !findings.length) return { ...base, named, threads: [], findings, replied: [], resolved: [], refused: [] };
+  let open: LaunchThread[] = [];
+  if (named.length) {
+    try { open = await readUnresolvedThreads(input.repository, input.pr, run); }
+    catch (error) { return { ...base, ...carried, named, failure: `the review threads could not be read: ${firstLine(error)}` }; }
+  }
   let threads = carried.threads, refused = carried.refused;
-  if (!previous?.threads.length) {
+  if (!previous?.item && !previous?.threads.length) {
     const submitted = Date.parse(String(review.submitted_at ?? ''));
     threads = []; refused = [];
     for (const id of named) {
@@ -250,11 +294,11 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       threads.push(thread);
     }
   }
-  if (!threads.length) return { ...base, named, threads, replied: [], resolved: [], refused };
+  if (!threads.length && !findings.length) return { ...base, named, threads, findings, replied: [], resolved: [], refused };
   let item = carried.item;
   if (!item) {
-    try { item = (await create(followUpItem(input, threads), `graphyard-followups:${input.repository}#${input.pr}:${input.reviewId}`.slice(0, 200))).key; }
-    catch (error) { return { ...base, named, threads, replied: [], resolved: [], refused, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
+    try { item = (await create(followUpItem(input, threads, findings), `graphyard-followups:${input.repository}#${input.pr}:${input.reviewId}`.slice(0, 200))).key; }
+    catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
   }
   const replied = [...carried.replied], resolved = [...carried.resolved], failed: string[] = [];
   for (const thread of threads) {
@@ -273,5 +317,5 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       resolved.push(thread.id);
     } catch (error) { failed.push(`${thread.id}: ${firstLine(error)}`.slice(0, 300)); }
   }
-  return { ...base, named, threads, item, replied, resolved, refused, ...(failed.length ? { failure: `${failed.length} follow-up thread(s) could not be answered and resolved: ${failed[0]}` } : {}) };
+  return { ...base, named, threads, findings, item, replied, resolved, refused, ...(failed.length ? { failure: `${failed.length} follow-up thread(s) could not be answered and resolved: ${failed[0]}` } : {}) };
 }

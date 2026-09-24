@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
-import { criteriaRuleSection, fileFollowUpThreads, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, type CreateFollowUpItem, type FollowUpFiling, type LaunchThread, type ThreadResolution } from './review-threads.js';
+import { criteriaRuleSection, fileFollowUpThreads, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, type CreateFollowUpItem, type FollowUpFiling, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -79,6 +79,9 @@ export const reviewRecordSchema = z.object({
   /** The threads this session's approval named on its `Follow-up threads:` line: the backlog item filed for them, and each thread answered and resolved (GY-166). */
   followUps: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
     threads: z.array(z.object({ id: z.string().min(1).max(200), author: z.string().max(200), path: z.string().max(1000), line: z.number().int().nullable(), outdated: z.boolean(), excerpt: z.string().max(300), createdAt: z.string().max(40).optional(), url: z.string().max(1000).optional() }).strict()).max(listedThreadLimit),
+    findings: z.array(z.object({ path: z.string().min(1).max(1000).nullable(), line: z.number().int().nullable(), text: z.string().min(1).max(followUpFindingMax) }).strict()).max(followUpFindingLimit).optional(),
+    /** The observation (the control plane's `at`) the loop last checked the resolved threads against, and those GitHub showed reopened since. */
+    observedAt: z.string().min(1).max(40).optional(), reopened: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
     item: z.string().min(1).max(40).optional(), replied: z.array(z.string().min(1).max(200)).max(listedThreadLimit), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
     refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50) }).optional(),
 }).strict();
@@ -898,18 +901,45 @@ async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, 
   for (const record of records) {
     const verdict = record.verdict;
     if (!verdict || !approvesCurrentHead(record, work)) continue;
-    const previous: FollowUpFiling | undefined = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
-    if (previous && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
-    const workId = work.find(entry => entry.key === record.key)!.id;
-    const outcome = await fileFollowUpThreads({ repository, key: record.key, workId, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
+    const previous = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
+    const item = work.find(entry => entry.key === record.key)!, observedAt = item.observation?.at && item.observation.at.length <= 40 ? item.observation.at : undefined;
+    if (previous && !previous.failure) {
+      const event = await checkReopenedFollowUps(record, previous, item, repository, run);
+      if (event) { changed++; events.push(event); }
+      continue;
+    }
+    if (previous && previous.attempts >= threadResolutionAttempts) continue;
+    const outcome = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
       ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, create, now);
-    record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
+    // The observation the loop held when it resolved: a later one showing a resolved thread open is checked on GitHub.
+    record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}), ...(observedAt ? { observedAt } : {}) };
     changed++;
     if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} as ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
     for (const id of outcome.resolved.filter(id => !previous?.resolved.includes(id))) events.push(`resolved follow-up review thread ${id} on ${record.key} PR #${record.pr} with a reply naming ${outcome.item}`);
     if (outcome.failure) events.push(`follow-up filing for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);
   }
   return { events, changed };
+}
+
+/**
+ * Whether a follow-up thread the loop resolved was reopened since. A thread that an observation newer
+ * than the record's marker shows unresolved is read again on GitHub; those GitHub shows open are
+ * recorded `reopened`, and return to rework. Both sides of the comparison are the control plane's
+ * observation `at`, never the coordinator's clock, so a clock skew between them cannot hide a reopen.
+ * A stale observation only advances the marker, so the same observation is never re-read.
+ */
+async function checkReopenedFollowUps(record: ReviewRecord, filing: NonNullable<ReviewRecord['followUps']>, item: Work, repository: string, run: ChildRun) {
+  const observation = item.observation, at = Date.parse(observation?.at ?? '');
+  if (!observation || !Number.isFinite(at) || observation.at.length > 40 || filing.observedAt && at <= Date.parse(filing.observedAt)) return null;
+  const shown = (observation.conversations?.unresolved ?? []).map(thread => thread.id).filter((id): id is string => !!id && filing.resolved.includes(id) && !filing.reopened?.includes(id));
+  if (!shown.length) return null;
+  let open: LaunchThread[];
+  try { open = await readUnresolvedThreads(repository, record.pr, run); }
+  catch (error) { return `follow-up reopen check for ${record.key} could not read the review threads: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 300)}`; }
+  const reopened = shown.filter(id => open.some(thread => thread.id === id));
+  filing.observedAt = observation.at;
+  if (reopened.length) filing.reopened = [...new Set([...(filing.reopened ?? []), ...reopened])].slice(0, listedThreadLimit);
+  return reopened.length ? `follow-up review thread(s) ${reopened.join(' ')} on ${record.key} PR #${record.pr} were reopened after filing; they return to rework` : `follow-up threads on ${record.key} PR #${record.pr} stay resolved on GitHub`;
 }
 
 /**
@@ -939,11 +969,9 @@ export function followUpThreadIds(records: ReviewRecord[], work: Work[], pending
       if (filing.failure && filing.attempts >= threadResolutionAttempts || !approvesCurrentHead(record, work)) continue;
       // Every thread the approval named, but one it could not have judged: opened after it, or not open then.
       const refused = filing.refused.map(entry => entry.slice(0, entry.indexOf(':')));
-      // A thread the loop resolved that an observation taken after the filing shows unresolved again
-      // was reopened: the filing never answers it twice, so it returns to rework instead of sitting aside.
-      const observation = work.find(entry => entry.key === record.key)?.observation, observedAt = Date.parse(observation?.at ?? '');
-      const reopened = Number.isFinite(observedAt) && observedAt > Date.parse(filing.at)
-        ? (observation!.conversations?.unresolved ?? []).map(thread => thread.id).filter((id): id is string => !!id && filing.resolved.includes(id)) : [];
+      // A thread the loop resolved that GitHub showed reopened since (checkReopenedFollowUps): the
+      // filing never answers it twice, so it returns to rework instead of sitting aside.
+      const reopened = filing.reopened ?? [];
       add(record.key, [...filing.named, ...filing.threads.map(thread => thread.id)].filter(id => !refused.includes(id) && !reopened.includes(id)));
       continue;
     }

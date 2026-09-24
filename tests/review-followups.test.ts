@@ -8,7 +8,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { followUpItem, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
+import { followUpItem, parseFollowUpFindings, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
 import { bindReviewer, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts } from '../src/reviewer.js';
 import { routineDecision, setAsideFollowUpThreads, threadResolutionGraceMs } from '../src/master-daemon.js';
 import type { Observation, Work } from '../src/model.js';
@@ -66,9 +66,9 @@ test('unit:review-criteria-only-prompt — the reviewer launch prompt states the
     'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion it blocks', 'never request changes for a FOLLOW-UP',
     // The closing lines.
     '"Resolved threads: ID1 ID2"', '"Follow-up threads: ID3 ID4"', 'End the review body with two lines',
-    'files the Follow-up threads as one backlog item',
-    // A finding with no thread is not filed, and the prompt says where it goes instead.
-    'a FOLLOW-UP finding of your own that has no thread is not filed', '"Unfiled follow-ups:"',
+    'files the Follow-up threads and findings as one backlog item',
+    // A finding with no thread has its own line, which the loop files in the same item.
+    'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own', '"Follow-up finding: PATH:LINE — what is wrong and why"',
   ]) assert.ok(prompt.includes(fragment), `the prompt must state: ${fragment}`);
   assert.match(prompt, /never weaken a requirement/);
   // The thread section repeats the classification for the listed threads.
@@ -107,6 +107,13 @@ test('unit:review-criteria-only-prompt — the Follow-up line is parsed exactly 
   const both = 'Criteria met.\nResolved threads: PRRT_fixed0001\nFollow-up threads: PRRT_later0001';
   assert.deepEqual(parseResolvedThreads(both), ['PRRT_fixed0001']);
   assert.deepEqual(parseFollowUpThreads(both), ['PRRT_later0001']);
+  // Findings with no thread are read from their own lines, with the path and line when given.
+  assert.deepEqual(parseFollowUpFindings('AC-1 met.\nFollow-up finding: src/c.ts:12 — the retry is unbounded\n- follow-up finding: `docs/x.md` - stale wording\nFollow-up finding: naming could be clearer\nFollow-up finding: none\nFollow-up threads: none'), [
+    { path: 'src/c.ts', line: 12, text: 'src/c.ts:12 — the retry is unbounded' },
+    { path: 'docs/x.md', line: null, text: '`docs/x.md` - stale wording' },
+    { path: null, line: null, text: 'naming could be clearer' },
+  ]);
+  assert.deepEqual(parseFollowUpFindings(undefined), []);
 });
 
 /** GitHub as the loop's own gh sees it: the approval, the PR's threads, replies and resolves. */
@@ -317,32 +324,82 @@ test('unit:review-followups-filed — the loop requests no thread rework for thr
   assert.equal(decide(item(['PRRT_follow001']), new Map([['GY-99', new Set(['PRRT_follow001'])]]))?.action, 'rework');
 });
 
-test('unit:review-followups-filed — a filed thread reopened before the merge returns to rework instead of staying set aside', async () => {
+test('unit:review-followups-filed — a filed thread reopened before the merge returns to rework instead of staying set aside, whatever the coordinator clock says', async () => {
   const { root, cleanup } = await boundMaster();
   try {
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
-    const gh = github(approvalBody), items = creator();
-    const { reviews } = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
-    const filedAt = Date.parse(reviews[0].followUps!.at);
+    const gh = github(approvalBody), items = creator(), config = await loadMasterConfig(root);
+    const filedObservation = Date.now();
     const open = (at: number, ids: string[]) => work({}, { at: new Date(at).toISOString(), reviews: [{ reviewer, sha: H, state: 'APPROVED', id: 77, submittedAt }], conversations: { required: true, unresolved: ids.map(id => ({ id, author: 'codex', path: 'src/a.ts', line: 3, outdated: false })) } } as Partial<Observation>);
-    // An observation from before the filing still shows the threads open: they stay set aside.
-    assert.deepEqual([...followUpThreadIds(reviews, [open(filedAt - 1000, ['PRRT_follow001', 'PRRT_follow002'])]).get('GY-64') ?? []].sort(), ['PRRT_follow001', 'PRRT_follow002']);
-    // One observed open after the loop resolved it was reopened: it is no longer set aside, so the cycle sends it to rework.
-    const reopened = open(filedAt + 1000, ['PRRT_follow001']);
-    const ids = followUpThreadIds(reviews, [reopened]);
+    // The coordinator's clock runs an hour ahead of the control plane's.
+    const ahead = () => new Date(Date.now() + 3_600_000);
+    const reconcile = (entry: Work) => reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [entry], threadsRun: gh.run, createFollowUpItem: items.create, now: ahead });
+    let { reviews } = await reconcile(open(filedObservation, []));
+    assert.deepEqual(reviews[0].followUps?.resolved, ['PRRT_follow001', 'PRRT_follow002']);
+    assert.equal(reviews[0].followUps?.observedAt, new Date(filedObservation).toISOString(), 'the marker is the control plane observation, not the coordinator clock');
+    // The observation the filing held, or an older one, still shows the threads open: nothing is re-read, both stay aside.
+    const reads = () => gh.calls.filter(call => call.some(arg => arg.includes('reviewThreads'))).length, before = reads();
+    ({ reviews } = await reconcile(open(filedObservation, ['PRRT_follow001', 'PRRT_follow002'])));
+    assert.equal(reads(), before);
+    assert.deepEqual([...followUpThreadIds(reviews, [work()]).get('GY-64') ?? []].sort(), ['PRRT_follow001', 'PRRT_follow002']);
+    // A newer observation taken before GitHub settled shows one open, but GitHub has it resolved: it stays aside.
+    ({ reviews } = await reconcile(open(filedObservation + 1000, ['PRRT_follow002'])));
+    assert.equal(reads(), before + 1);
+    assert.deepEqual(reviews[0].followUps?.reopened ?? [], []);
+    // Somebody reopens PRRT_follow001 on GitHub; a newer observation shows it — an hour behind the coordinator's filing time.
+    gh.resolved.splice(gh.resolved.indexOf('PRRT_follow001'), 1);
+    const reopened = open(filedObservation + 2000, ['PRRT_follow001']);
+    const settled = await reconcile(reopened);
+    assert.deepEqual(settled.reviews[0].followUps?.reopened, ['PRRT_follow001']);
+    assert.ok(settled.threads.some(line => /PRRT_follow001 on GY-64 PR #64 were reopened after filing/.test(line)), settled.threads.join('\n'));
+    const ids = followUpThreadIds(settled.reviews, [reopened]);
     assert.deepEqual([...ids.get('GY-64') ?? []], ['PRRT_follow002']);
-    const at = Date.parse(submittedAt) + threadResolutionGraceMs;
-    const decision = routineDecision(setAsideFollowUpThreads({ work: [reopened] }, ids).work[0], { autoMerge: true }, Math.max(at, filedAt + 1000));
+    const at = Math.max(Date.parse(submittedAt) + threadResolutionGraceMs, filedObservation + 2000);
+    const decision = routineDecision(setAsideFollowUpThreads({ work: [reopened] }, ids).work[0], { autoMerge: true }, at);
     assert.equal(decision?.action, 'rework');
     assert.equal(decision?.binding, `${H}:threads:PRRT_follow001`);
+    assert.equal(items.created.length, 1, 'a reopen files nothing twice');
   } finally { await cleanup(); }
 });
 
-test('unit:review-followups-filed — a thread path past the plannedFiles bound is left out of plannedFiles and kept in the description', () => {
+test('unit:review-followups-filed — findings the approval wrote with no thread are filed in the same item', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const config = await loadMasterConfig(root);
+    const body = 'AC-1 met. AC-2 met.\nFollow-up finding: src/c.ts:12 — the retry is unbounded\nFollow-up finding: naming could be clearer\nResolved threads: none\nFollow-up threads: PRRT_follow001';
+    const gh = github(body), items = creator();
+    const settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.equal(items.created.length, 1);
+    const { item } = items.created[0];
+    for (const text of ['PRRT_follow001', 'Finding with no thread: src/c.ts:12 — the retry is unbounded', 'Finding with no thread: naming could be clearer']) assert.ok(item.description.includes(text), text);
+    assert.deepEqual([...item.plannedFiles].sort(), ['src/b.ts', 'src/c.ts']);
+    assert.deepEqual(gh.replies.map(reply => reply.thread), ['PRRT_follow001'], 'a finding has no thread to answer');
+    assert.equal(settled.reviews[0].followUps?.findings?.length, 2);
+    // An approval with findings only still files them, and reads no threads it does not need.
+    const { root: second, cleanup: cleanupSecond } = await boundMaster();
+    try {
+      await launchReview(second, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+      const only = github('AC-1 met.\nFollow-up finding: src/c.ts:12 — the retry is unbounded\nResolved threads: none\nFollow-up threads: none'), onlyItems = creator();
+      const result = await reconcileReviews(second, await loadMasterConfig(second), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: only.run, createFollowUpItem: onlyItems.create });
+      assert.equal(onlyItems.created.length, 1);
+      assert.match(onlyItems.created[0].item.description, /1 finding with no thread FOLLOW-UP/);
+      assert.equal(result.reviews[0].followUps?.item, 'GY-201');
+      assert.deepEqual(only.replies, []);
+      // Idempotent: the next cycle files nothing more.
+      await reconcileReviews(second, await loadMasterConfig(second), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: only.run, createFollowUpItem: onlyItems.create });
+      assert.equal(onlyItems.created.length, 1);
+    } finally { await cleanupSecond(); }
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a thread path past the plannedFiles bound is scoped by its longest containing directory that fits, and kept in the description', () => {
   const path = `src/${'deep/'.repeat(120)}file.ts`;
   const threads = [{ id: 'PRRT_longpath01', author: 'codex', path, line: 1, outdated: false, excerpt: 'finding' }, { id: 'PRRT_short0001', author: 'codex', path: 'src/a.ts', line: 2, outdated: false, excerpt: 'finding' }];
   const item = followUpItem({ key: 'GY-64', workId: 'work-64', pr: 64, sha: H, reviewId: 77 }, threads);
-  assert.deepEqual(item.plannedFiles, ['src/a.ts']);
+  const scope = item.plannedFiles[0];
+  assert.ok(scope.length <= 500 && scope.endsWith('/') && path.startsWith(scope) && path.lastIndexOf('/', 499) + 1 === scope.length, scope);
+  assert.deepEqual(item.plannedFiles.slice(1), ['src/a.ts']);
   assert.ok(item.description.includes('PRRT_longpath01'));
 });
 
