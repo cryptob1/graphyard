@@ -60,3 +60,20 @@ test('unit:healthz-select-bounded — a probe that queued briefly, then held its
   const handedAt = healthCheckWaitMs - healthCheckQueryGraceMs - 1000;
   await assert.rejects(probe(() => new Promise(() => {}), { queued: true, handedAt }), /held its pooled connection for \d+ ms without an answer; the database is unreachable/);
 });
+
+test('unit:healthz-select-bounded — a probe abandoned on an unanswered connection fails the next probe at once, without taking another pool slot', async () => {
+  // A blackholed network: the first probe opens a connection that never answers. Were the next probes
+  // to ask the pool too, their abandoned attempts would fill it and later probes would queue and read as the busy pool.
+  let connects = 0, waiting = 0;
+  const pool = {
+    get waitingCount() { return waiting; }, get idleCount() { return connects === 0 ? 1 : 0; },
+    connect: () => { connects++; return new Promise(() => {}); },
+  };
+  const services = { engine: { store: { pool } }, github: null, build: { commit: 'c'.repeat(40), protocol: 1 } } as any;
+  const context = { services, url: new URL('http://plane/healthz'), send: () => { throw new Error('not a 503'); } } as any;
+  await assert.rejects(healthRoutes.routes[0].handle(context, []), /was not waiting for a pooled connection; the database is unreachable/);
+  const started = Date.now();
+  await assert.rejects(healthRoutes.routes[0].handle(context, []), /1 earlier database probe is still waiting on a connection the database has not answered; the database is unreachable/);
+  assert.ok(Date.now() - started < 100);
+  assert.equal(connects, 1);
+});

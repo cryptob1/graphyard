@@ -26,6 +26,16 @@ import { defineRoutes } from '../routes.js';
 export const healthCheckWaitMs = 3000;
 /** How long a probe handed its client from the pool's queue may hold it without an answer and still be the busy pool rather than an unreachable database. */
 export const healthCheckQueryGraceMs = 1000;
+/**
+ * The probes that answered past their bound while their acquisition or SELECT 1 was still open, per
+ * pool: each holds a pool slot until the database answers or the socket gives up (minutes, on a
+ * blackholed network). A probe that never queued was opening a connection the database did not
+ * answer, and one handed its client that has held it past the grace is waiting on a database that
+ * does not answer: while either is still open, the next probe fails at once instead of asking the
+ * pool for another slot, so abandoned probes cannot fill the pool and make an outage read as the
+ * busy pool. A queued probe still waiting for its client is the busy pool and does not count.
+ */
+const abandonedProbes = new WeakMap<object, Set<{ queued: boolean; acquiredAt: () => number | null }>>();
 export const healthRoutes = defineRoutes('health', [
   { method: '*', path: '/healthz', handle: async ({ services, send, url }) => {
     const pool = services.engine.store.pool;
@@ -38,6 +48,10 @@ export const healthRoutes = defineRoutes('health', [
     // was handed one: a queued probe still waiting at the bound, or handed its client too late for a
     // SELECT 1 to have answered, is the busy pool; one that held its client for most of the bound
     // without an answer met a database that did not answer, whatever queue it waited in first.
+    const abandoned = abandonedProbes.get(pool) ?? new Set();
+    abandonedProbes.set(pool, abandoned);
+    const stuck = [...abandoned].filter(entry => { const at = entry.acquiredAt(); return !entry.queued || (at !== null && Date.now() - at >= healthCheckQueryGraceMs); }).length;
+    if (stuck) throw new Error(`${stuck} earlier database probe${stuck === 1 ? ' is' : 's are'} still waiting on a connection the database has not answered; the database is unreachable`);
     const waiting = Number(pool.waitingCount) || 0, idle = Number(pool.idleCount) || 0;
     const startedAt = Date.now();
     const connecting = pool.connect();
@@ -51,6 +65,11 @@ export const healthRoutes = defineRoutes('health', [
     // A probe that finishes after the bound has already been answered for; its failure is not unhandled.
     answered.catch(() => {});
     const reachable = await Promise.race([answered, new Promise<false>(resolve => setTimeout(() => resolve(false), healthCheckWaitMs).unref())]);
+    if (!reachable) {
+      const entry = { queued, acquiredAt: () => acquiredAt };
+      abandoned.add(entry);
+      answered.then(() => abandoned.delete(entry), () => abandoned.delete(entry));
+    }
     const held = acquiredAt === null ? 0 : startedAt + healthCheckWaitMs - acquiredAt;
     if (!reachable && !(queued && held < healthCheckQueryGraceMs)) throw new Error(`database probe did not finish within ${healthCheckWaitMs} ms ${queued ? `and held its pooled connection for ${held} ms without an answer` : 'and was not waiting for a pooled connection'}; the database is unreachable`);
     if (!reachable) return { ok: true, healthy: true, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,

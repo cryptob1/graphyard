@@ -6,7 +6,7 @@ import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { agentOwner, assertMergeCandidate, buildMasterStatus, mergeWork } from '../src/master.js';
 import { nameUnresolvedThreads, queueRef } from '../src/merge-queue.js';
-import { decisionReasonMax, fitDecisionReason, observedFrom, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
+import { decisionReasonMax, fitDecisionReason, observedFrom, reworkDecisionReason, reworkGroundsMin, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
 
 // GY-139. Each test is named for the proof it produces: integration:unresolved-threads-fail-merge-gate,
 // unit:unresolved-threads-surfaced, integration:blocked-merge-refused-before-execution.
@@ -224,4 +224,24 @@ test('a thread rework request stays within the control plane\'s reason bound how
   const reason = fitDecisionReason(`${observedFrom(work)} `, `${decision.reason} ${'x'.repeat(3000)}`, answers);
   assert.ok(reason.length <= decisionReasonMax, `${reason.length} characters`);
   assert.ok(reason.startsWith(observedFrom(work)) && reason.endsWith(answers));
+});
+
+test('a rework request cites every refused rework decision by id within the reason bound, and is not sent once they cannot fit', () => {
+  const now = new Date('2026-09-24T06:00:00Z');
+  const threads = [{ id: 'PRRT_1', author: reviewer, path: 'src/a.ts', line: 1, outdated: false }];
+  const work = { ...candidate(observation(threads, now)), policy: { checks: ['test'], review: false } } as unknown as Work;
+  const decision = routineDecision(work, { autoMerge: true }, now.getTime())!;
+  const prefix = `${observedFrom(work)} `;
+  const ids = (count: number) => Array.from({ length: count }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+  for (const count of [1, 8, 30, 40]) {
+    const reason = reworkDecisionReason(prefix, `${decision.reason} ${'x'.repeat(3000)}`, ids(count));
+    assert.ok(reason !== null, `${count} refusals still fit`);
+    assert.ok(reason.length <= decisionReasonMax, `${count} refusals: ${reason.length} characters`);
+    assert.ok(reason.startsWith(observedFrom(work)), 'the observation is kept whole');
+    assert.ok(ids(count).every(id => reason.includes(id)), `${count} refusals: every refusal is cited, as the server requires`);
+    assert.ok(reason.slice(prefix.length).length - ids(count).join(' ').length >= reworkGroundsMin, 'the grounds keep their room');
+  }
+  // Past what the bound can hold beside the grounds, no reason satisfies the server: the loop escalates instead of retrying a refused request.
+  assert.equal(reworkDecisionReason(prefix, decision.reason, ids(60)), null);
+  assert.equal(reworkDecisionReason(prefix, decision.reason, []), fitDecisionReason(prefix, decision.reason, ''));
 });

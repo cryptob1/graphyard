@@ -761,6 +761,23 @@ export function fitDecisionReason(prefix: string, grounds: string, suffix: strin
   const room = decisionReasonMax - prefix.length - suffix.length;
   return prefix + (grounds.length <= room ? grounds : `${grounds.slice(0, Math.max(0, room - 1))}…`) + suffix;
 }
+/** The least of its own grounds a rework request keeps beside the refusals it cites; below it the request would not say why. */
+export const reworkGroundsMin = 160;
+/**
+ * A rework reason that cites every refused rework decision on the item — the server refuses a
+ * request of the same input unless its reason names each one by id — within the control plane's
+ * bound. The citations are written out in prose while they leave the grounds room, then as a bare
+ * id list; when even that leaves the grounds less than `reworkGroundsMin`, no reason can satisfy
+ * both the bound and the server's check, and this is null: the loop escalates rather than sending a
+ * request the server refuses on every retry.
+ */
+export function reworkDecisionReason(prefix: string, grounds: string, refused: string[]): string | null {
+  if (!refused.length) return fitDecisionReason(prefix, grounds, '');
+  const prose = ` This rests on different grounds from refused rework decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.`;
+  const bare = ` Answers refused rework decisions ${refused.join(' ')}.`;
+  const suffix = [prose, bare].find(text => decisionReasonMax - prefix.length - text.length >= Math.min(reworkGroundsMin, grounds.length));
+  return suffix === undefined ? null : fitDecisionReason(prefix, grounds, suffix);
+}
 /** How long after an approval of the current head the loop's thread resolution is waited for. */
 export const threadResolutionGraceMs = 300_000;
 /**
@@ -2003,8 +2020,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // names its grounds, and a refused binding is never requested again), so it answers each prior
       // refusal of this action on the item by citing it.
       const refused = decision.action === 'rework' ? history.filter(entry => entry.action === 'rework' && entry.state === 'refused').map(entry => entry.id) : [];
-      const answers = refused.length ? ` This rests on different grounds from refused rework decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.` : '';
-      const reason = decision.action === 'rework' ? fitDecisionReason(`${observedFrom(item)} `, decision.reason, answers) : fitDecisionReason('', decision.reason, '');
+      const reason = decision.action === 'rework' ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, refused) : fitDecisionReason('', decision.reason, '');
+      if (reason === null) {
+        // Retrying would be refused every time; the request is not sent, and the master is told once.
+        const escalation = `escalation:rework-refusals:${item.key}:${refused.length}`;
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Did not request the rework decision for ${item.key}: its ${refused.length} refused rework decisions no longer fit, cited, within the reason bound`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused rework decisions, and a rework request must cite every one by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then act on the item yourself`);
+        return;
+      }
       const requested = standing ?? await effects.decide!(item, decision.action, reason);
       const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [], observation: observed });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it
