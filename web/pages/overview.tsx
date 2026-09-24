@@ -1,9 +1,9 @@
-import { isClosed, isDelivered, type Work } from '../../src/model';
+import { isClosed, type Work } from '../../src/model';
 import WorkCard from '../components/work-card';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../duration';
-import { classify, groupLabel, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
+import { classify, groupLabel, groupOf, shippedAt, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
 import { stalledCards } from './actionless';
 import type { Dashboard } from './dashboard';
 
@@ -24,8 +24,8 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   const humanOnly = humanOnlyIds(work, status?.humanOnly);
-  const shippedAt = (w: Work) => Date.parse(w.observation?.mergedAt ?? w.stageEnteredAt);
-  const recent = work.filter(w => isDelivered(w) && now - shippedAt(w) <= week).sort((a, b) => shippedAt(b) - shippedAt(a));
+  // Shipped this week by the page's one classification: served by the release, dated from it.
+  const recent = work.filter(w => groupOf(w, now) === 'shipped' && now - shippedAt(w) <= week).sort((a, b) => shippedAt(b) - shippedAt(a));
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>

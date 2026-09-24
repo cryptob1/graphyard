@@ -17,7 +17,6 @@ const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').re
 async function open(page: Page) {
   await page.clock.setFixedTime(new Date(NOW));
   await page.route('**/api/**', route => { const url = new URL(route.request().url()); return route.fulfill({ json: boardApi(url.pathname.slice(1) + url.search) }); });
-  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
   await page.goto('/');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();

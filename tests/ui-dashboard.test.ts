@@ -9,7 +9,7 @@ import { predictQueue } from '../src/merge-queue.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
 import { visibleWords } from '../scripts/dashboard-fixture.mjs';
-import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, timedGroups, type OpenGroup } from '../web/groups.js';
+import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, nextActor, shippedAt, timedGroups, type OpenGroup } from '../web/groups.js';
 import { prSteps, stepIds } from '../web/pr-steps.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
 import { jargon } from '../web/plain-status.js';
@@ -117,6 +117,18 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   const releasingPage = home(dashboard({ work: work.map(item => item.key === 'GY-18' ? awaiting : item) }));
   assert.equal(tileCount(releasingPage, 'moving'), rowsOf(releasingPage, 'moving').length);
   assert.ok(rowsOf(releasingPage, 'moving').includes('GY-18'));
+  // "Shipped this week" counts what the page classifies as Shipped, dated from when the release served it:
+  // a merge from this morning still waiting on its release is in Moving, not in the footer.
+  const shippedLine = (html: string) => Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(html)?.[1]);
+  const servedThisWeek = (items: Work[]) => items.filter(item => groupOf(item, NOW) === 'shipped' && NOW - shippedAt(item) <= 7 * 24 * hour).map(item => item.key);
+  assert.equal(shippedLine(page), servedThisWeek(work).length);
+  const mergedToday = { ...awaiting, observation: { ...merged.observation!, mergedAt: new Date(NOW - hour).toISOString() } } as Work;
+  const pending = work.map(item => item.key === 'GY-18' ? mergedToday : item);
+  const pendingPage = home(dashboard({ work: pending }));
+  assert.ok(!servedThisWeek(pending).includes('GY-18'));
+  assert.equal(shippedLine(pendingPage), servedThisWeek(pending).length);
+  assert.ok(rowsOf(pendingPage, 'moving').includes('GY-18'), 'the pending merge is counted once, in Moving');
+  assert.doesNotMatch(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /GY-18/);
   // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
   const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
   assert.ok(classify(stalled, NOW).byGroup.blocked.some(item => item.key === 'GY-15'));
@@ -219,6 +231,18 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
   assert.equal(reviewRow(find('GY-22')), 'Waiting for approval');
   const changes = { ...find('GY-21'), gates: find('GY-21').gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] } : gate) } as Work;
   assert.equal(reviewRow(changes), 'Changes requested', 'an approval beside an open change request is not reported as approved');
+  // Blocked by a refusal no retry clears (no reviewer left, merge protection unconfirmed): the step's own
+  // actor cannot move it, so the master agent acts next, whichever step it is at.
+  for (const reason of ['Every configured reviewer profile is exhausted for this item', 'Required Graphyard check and merge-queue branch protection is not verified']) {
+    const base = find('GY-22');
+    const failing = base.gates.find(gate => !gate.passed)!.name;
+    const refused = { ...base, gates: base.gates.map(gate => gate.name === failing ? { ...gate, reasons: [reason] } : gate) } as Work;
+    const refusedBoard = board().map(entry => entry.key === base.key ? refused : entry);
+    const group = groupWithin(refused, refusedBoard, NOW);
+    assert.equal(group, 'blocked', reason);
+    assert.equal(nextActor(refused, group, NOW).who, 'Master agent', reason);
+    assert.match(firstScreen(itemPage(base.key, dashboard({ work: refusedBoard }))), /Who acts next:<\/span> <strong>Master agent<\/strong>/, reason);
+  }
   const guide = visibleWords(markup(createElement(GuidePage)));
   assert.ok(guide.length < 300, `the guide is ${guide.length} words`);
 });
@@ -386,7 +410,17 @@ test('unit:ui-matches-design — the shared tokens and IBM Plex fonts are the on
   assert.match(rootBlock, /--font-sans:'IBM Plex Sans',/); assert.match(rootBlock, /--font-mono:'IBM Plex Mono',/);
   for (const [, value] of css.matchAll(/font-family:([^;}]+)/g)) assert.match(value.trim(), /^var\(--font-(sans|mono)\)$/, `font-family: ${value}`);
   assert.doesNotMatch(css.replace(rootBlock, ''), /Inter|Georgia|Segoe/, 'no other family');
-  assert.match(await read('web/index.html'), /family=IBM\+Plex\+Mono[^"]*family=IBM\+Plex\+Sans/);
+  // The fonts are self-hosted: the server's Content-Security-Policy admits styles and fonts from
+  // its own origin only, so a third-party stylesheet would never load in production.
+  const html = await read('web/index.html');
+  assert.match(html, /<link rel="stylesheet" href="\/fonts\/plex\.css">/);
+  assert.doesNotMatch(html, /https?:\/\//, 'index.html loads nothing from another origin');
+  const csp = /'Content-Security-Policy', "([^"]+)"/.exec(await read('src/server/index.ts'))![1];
+  assert.match(csp, /default-src 'self'/); assert.match(csp, /style-src 'self'/); assert.doesNotMatch(csp, /font-src|https?:/);
+  const faces = await read('web/public/fonts/plex.css');
+  assert.doesNotMatch(faces, /https?:\/\//, 'every font file is same-origin');
+  assert.deepEqual([...new Set([...faces.matchAll(/font-family:'([^']+)'/g)].map(match => match[1]))], ['IBM Plex Sans', 'IBM Plex Mono']);
+  for (const [, file] of faces.matchAll(/url\(\/fonts\/([^)]+)\)/g)) assert.equal((await readFile(new URL(`web/public/fonts/${file}`, root))).subarray(0, 4).toString('latin1'), 'wOF2', file);
   // The sidebar: exactly the approved entries, Tests marked planned (GY-162).
   const d = dashboard();
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(d, view)), dashboard: d }));

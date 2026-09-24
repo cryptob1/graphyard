@@ -38,6 +38,11 @@ export function humanOnlyIds(work: Work[], rows: HumanRequestRow[] | null | unde
   return new Set([...(rows ?? []).map(row => row.id), ...work.filter(item => item.stage !== 'done' && parkedOnHuman(item)).map(item => item.id)]);
 }
 
+/** When a shipped item shipped: the recorded release serving it, or its merge for work that predates delivery records. */
+export function shippedAt(work: Work): number {
+  return Date.parse(servedAt(work) ?? work.observation?.mergedAt ?? work.stageEnteredAt);
+}
+
 /** The group of one item. `humanOnly` is the set from `humanOnlyIds`; `stalled` the ids nothing is moving. */
 export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set()): Group | null {
   if (isClosed(work)) return null;
@@ -114,8 +119,9 @@ export function nextActor(work: Work, group: Group | null, now: number): { who: 
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
     return dependency && work.ready ? { who: 'Nobody yet', does: plainReason(dependency, 'ready').text } : { who: 'Master agent', does: 'Release it for work when it is a priority' };
   }
-  if (group === 'blocked' && (work.blocker || work.escalation || work.violations.length || (work.actionQueue?.actions ?? []).some(row => row.stall)))
-    return { who: 'Master agent', does: 'Clear what blocks it, or hand the decision to an approver agent' };
+  // Blocked means the step's own actor cannot clear it (a recorded blocker, a stall, a violation,
+  // a refusal no retry fixes, a failed check after deploying): the master agent acts next.
+  if (group === 'blocked') return { who: 'Master agent', does: 'Clear what blocks it, or hand the decision to an approver agent' };
   if (group === 'up-next') {
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
     return dependency ? { who: 'Nobody yet', does: plainReason(dependency, 'ready').text } : { who: 'Graphyard (assigns a builder)', does: 'Hands it to the next free builder agent' };
