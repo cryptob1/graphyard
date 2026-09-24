@@ -76,8 +76,8 @@ export function mergeDecisionRecovery(work: Work, loop: Pick<LoopSessions, 'requ
   return null;
 }
 
-/** One session as the loop's reviewer or producer ledger records it, and the launches of each request the loop's cursor saw refused. */
-type LoopSession = Parameters<typeof sessionRetry>[0][number];
+/** One session as the loop's reviewer or producer ledger records it (a reviewer's with the verdict it posted), and the launches of each request the loop's cursor saw refused. */
+type LoopSession = Parameters<typeof sessionRetry>[0][number] & { verdict?: { state: string } };
 type ReviewSession = LoopSession;
 export interface LoopSessions {
   sessions: LoopSession[]; failures: Record<string, { attempts: number }>; now: number;
@@ -90,9 +90,17 @@ export interface LoopSessions {
  * last session settled without satisfying it, its sessions are exhausted, or its launch was
  * refused `dispatchFailureLimit` times. These are the states in which the loop's dispatch step
  * says no further automatic attempt follows.
+ *
+ * A session closed `completed` on the verdict it posted has answered the request even while the
+ * snapshot still carries it: the control plane has not ingested that GitHub review yet. A second
+ * session would post a second verdict for the same request, which review-conflict.ts withholds
+ * together with the first, so the request is stopped only once that verdict is dismissed — and
+ * a dismissal reopens the record as `failed`, which the loop relaunches itself.
  */
 function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number): string | null {
   const retry = sessionRetry(sessions, request.id, now);
+  const answered = sessions.filter(session => session.requestId === request.id).at(-1);
+  if (answered?.state === 'completed' && answered.verdict && answered.verdict.state !== 'DISMISSED') return null;
   if (retry.settled && retry.last && retry.last.state !== 'pending') return `${label} request ${request.id}'s session attempt ${retry.attempts} ${retry.last.state} without satisfying it`;
   if (retry.exhausted) return `${label} request ${request.id} exhausted its ${retry.attempts} automatic sessions`;
   if (failure && failure.attempts >= dispatchFailureLimit) return `the loop's launch of ${label} request ${request.id} was refused ${failure.attempts} time(s)`;
@@ -143,8 +151,14 @@ const implementationDispatch = (row: ActionRow) => row.kind === 'dispatch' && ro
  * one dispatch attempt is given before its row is offered to the next.
  */
 export const handDispatchFenceMs = actionClaimMs;
-/** The headroom a hand launch keeps before the row's backoff ends: its lease claim is one CLI call. */
-export const handDispatchClaimMarginMs = 15_000;
+/**
+ * The headroom a hand launch keeps before the row's backoff ends. Its lease claim is one child
+ * `graphyard claim` process whose HTTP request may run for the CLI's whole request timeout
+ * (`AbortSignal.timeout(30_000)`, src/cli/context.ts), plus the process's startup; a claim begun
+ * inside this margin could still be in flight when the executor may claim the row.
+ */
+export const handDispatchClaimTimeoutMs = 30_000;
+export const handDispatchClaimMarginMs = handDispatchClaimTimeoutMs + 15_000;
 
 /** When the item's backed-off implementation dispatch row is offered to the executor again, or null when it is not in a backoff. */
 export function dispatchRetryAt(work: Pick<Work, 'actionQueue'>, now: Date): number | null {

@@ -13,7 +13,7 @@ import { actionClaimMs, actionId, type ActionRow } from '../src/model/actions.js
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
-import { assertHandDispatch, dispatchRaceRefusal, handDecision, mergeDecisionRecovery, handDispatchClaimMarginMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
+import { assertHandDispatch, dispatchRaceRefusal, handDecision, mergeDecisionRecovery, handDispatchClaimMarginMs, handDispatchClaimTimeoutMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
 
 // GY-175: the master-side rules the loop depends on are enforced by the master CLI itself, not
@@ -244,6 +244,11 @@ test('unit:system-driven-items master review stays open only as the recovery of 
   assert.equal(reviewRecovery(item({ systemDriven: true }), [session('completed', -120_000)], { attempts: dispatchFailureLimit }, now), null, 'no live request: nothing to recover');
   // The loop stopped: a settled session, exhausted sessions, exhausted launch refusals.
   assert.match(reviewRecovery(underReview(), [session('completed', -120_000)], undefined, now)!, /session attempt 1 completed without satisfying it/);
+  // A session closed on the verdict it posted answered the request; until the control plane ingests that review a second session would only post a conflicting verdict.
+  const verdict = (state: string) => ({ ...session('completed', -120_000), verdict: { state, reviewer: 'graphyard-reviewer[bot]', reviewId: 7, submittedAt: new Date(now - 60_000).toISOString() } });
+  assert.equal(reviewRecovery(underReview(), [verdict('APPROVED')], undefined, now), null);
+  assert.equal(reviewRecovery(underReview(), [verdict('CHANGES_REQUESTED')], undefined, now), null);
+  assert.match(reviewRecovery(underReview(), [verdict('DISMISSED')], undefined, now)!, /completed without satisfying it/, 'a dismissed verdict answers nothing');
   assert.match(reviewRecovery(underReview(), [1, 2, 3, 4].map(n => session('failed', -n * 3_600_000)), undefined, now)!, /exhausted its 4 automatic sessions/);
   assert.match(reviewRecovery(underReview(), [], { attempts: dispatchFailureLimit }, now)!, /refused 12 time\(s\)/);
   const master = await masterHarness({ work: [underReview()] });
@@ -289,6 +294,8 @@ test('unit:dispatch-race-guard a hand launch through a long backoff claims nothi
   const { claimBy } = await assertHandDispatch(backedOff, now, 10, async () => [], requestedAt);
   // The deadline is the row's retryAt carried onto this host's clock from before the snapshot was read, less the claim's headroom.
   assert.equal(claimBy, requestedAt + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs);
+  // The headroom outlasts the lease claim itself: one CLI request bounded by its 30s timeout, plus the child's startup; and the fence outlasts the headroom.
+  assert.ok(handDispatchClaimMarginMs > handDispatchClaimTimeoutMs && handDispatchClaimTimeoutMs >= 30_000 && handDispatchFenceMs > handDispatchClaimMarginMs);
   // Time spent reading after the snapshot is counted against the backoff: 61s gone brings its end inside the fence, and the hand dispatch is refused.
   await assert.rejects(assertHandDispatch(backedOff, now, 10, async () => [], Date.now() - 61_000), /is in a failure backoff that ends at .*master dispatch is refused/);
   assert.deepEqual(await assertHandDispatch(item({ systemDriven: false }), now, 10, async () => []), {}, 'no backoff, no deadline');
