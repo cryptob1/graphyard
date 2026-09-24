@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { acquireDaemonLock, candidateKey, daemonStatePath, daemonSummary, dispatchKey, emptyDaemonState, missingProofs, observeDeployment, percentiles, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, runCycle, runDaemon, stageMetrics, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { acquireDaemonLock, actionDetailMax, candidateKey, daemonStatePath, daemonSummary, dispatchKey, emptyDaemonState, missingProofs, observeDeployment, percentiles, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, runCycle, runDaemon, stageMetrics, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
@@ -556,6 +556,30 @@ test('a busy fleet is capacity, not an escalation; a fleet that cannot take work
     assert.match(first.actions.find(action => action.kind === 'escalation')!.detail, /No worker profile can take GY-80.*unreadable/);
     const second = await runCycle(master, state, broken, () => clock + 20_000);
     assert.equal(second.actions.some(action => action.kind === 'escalation'), false, 'an unchanged escalation is stated once, not every cycle');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('record() bounds an over-long action detail instead of failing the cycle', async () => {
+  const { directory, token } = await privateDirectory();
+  const worker = join(directory, 'worker.token');
+  await writeFile(worker, workerToken, { mode: 0o600 });
+  try {
+    const master = config(token, { workers: [profile('verbose', worker)] });
+    const state = emptyDaemonState(master);
+    const item = work({ id: 'long', key: 'GY-179' });
+    const error = `Herdr refused the operation: ${'x'.repeat(actionDetailMax * 2)}`;
+    const result = await runCycle(master, state, effects({
+      snapshot: async () => ({ work: [item], now: iso(0) }),
+      dispatch: async () => { throw new Error(error); },
+    }), () => clock);
+    const dispatch = state.actions[dispatchKey(item)];
+    assert.equal(dispatch.state, 'failed');
+    assert.ok(`Dispatch of GY-179 to verbose failed: ${error}`.length > actionDetailMax, 'the unbounded detail exceeds the bound');
+    assert.ok(dispatch.detail.length <= actionDetailMax, 'the stored detail is cut to within the bound');
+    assert.ok(dispatch.detail.endsWith('…'), 'the cut detail ends in an ellipsis');
+    assert.match(dispatch.detail, /^Dispatch of GY-179 to verbose failed: Herdr refused the operation: x+…$/);
+    assert.ok(result.actions.some(action => action === dispatch), 'the bounded action is reported by the cycle');
+    assert.equal(result.metrics.cycle, 0, 'the cycle completes and measures instead of failing');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

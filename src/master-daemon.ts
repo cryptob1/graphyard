@@ -824,7 +824,7 @@ export function fitDecisionReason(prefix: string, grounds: string, suffix: strin
 /**
  * An action detail within its bound. A scope request carries up to 50 paths of up to 500 characters,
  * so a detail that lists them — or quotes an error that does — is cut, never left to fail record()
- * after the action it records has already happened.
+ * after the action it records has already happened. record() applies it to every detail it stores.
  */
 export function boundDetail(detail: string, max = actionDetailMax): string {
   return detail.length <= max ? detail : `${detail.slice(0, max - 1)}…`;
@@ -1472,8 +1472,12 @@ export interface DaemonEffects {
   persist: (state: DaemonState) => Promise<void>;
 }
 
+/**
+ * Put an action on the cursor. The detail is bounded here, before the schema sees it, so a caller
+ * that quotes a long error or path list cannot fail every cycle with an over-long string (GY-179).
+ */
 async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist']) {
-  const entry = daemonActionSchema.parse({ ...action, at: action.at ?? new Date(now).toISOString() });
+  const entry = daemonActionSchema.parse({ ...action, detail: boundDetail(action.detail), at: action.at ?? new Date(now).toISOString() });
   state.actions[key] = entry; await persist(state);
   return entry;
 }
