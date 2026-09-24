@@ -8,7 +8,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
+import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews, updateReviewLedger } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 
 // The reviewer names the threads it verified fixed on a `Resolved threads:` line of its approval;
@@ -93,7 +93,7 @@ test('the loop resolves only the named, pre-existing, unresolved threads after a
   } finally { await cleanup(); }
 });
 
-test('nothing is resolved on CHANGES_REQUESTED, for a stale head, or without a Resolved threads line', async () => {
+test('nothing is resolved on CHANGES_REQUESTED, for a stale head, or by a prose-only approval of a prompt that listed no thread', async () => {
   for (const scenario of [
     { name: 'changes requested', verdict: verdict('CHANGES_REQUESTED'), work: work(), body },
     { name: 'stale head', verdict: verdict(), work: work(H2), body },
@@ -131,5 +131,43 @@ test('a failed thread read at launch is recorded on the session and told to the 
     const record = (await readReviewLedger(root)).reviews[0];
     assert.match(record.threadReadFailure!, /gh: HTTP 403/);
     assert.match((summarizeReviews([record]).pending[0] as any).threadReadFailure, /gh: HTTP 403/);
+  } finally { await cleanup(); }
+});
+
+const listedThread = (id: string) => ({ id, author: 'codex', path: 'src/a.ts', line: 3, outdated: false, excerpt: 'finding', createdAt: '2026-09-23T11:00:00Z' });
+
+test('an approval without a Resolved threads line vouches for exactly the threads its prompt listed', async () => {
+  for (const scenario of [
+    { name: 'no line', body: 'All listed findings are fixed at this head.', resolved: ['PRRT_fixed0001'] },
+    { name: 'explicit none', body: 'Looks good.\nResolved threads: none', resolved: [] as string[] },
+  ]) {
+    const { root, cleanup } = await boundMaster();
+    try {
+      // The prompt listed one of the PR's two pre-existing threads; the unlisted one is never resolved.
+      await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => [listedThread('PRRT_fixed0001')] });
+      assert.deepEqual((await readReviewLedger(root)).reviews[0].threadsListed, ['PRRT_fixed0001']);
+      const gh = github({ body: scenario.body });
+      const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+      assert.deepEqual(gh.resolved, scenario.resolved, scenario.name);
+      assert.equal(settled.reviews[0].threadResolution?.implicit, scenario.name === 'no line', scenario.name);
+    } finally { await cleanup(); }
+  }
+});
+
+test('a settlement that named nothing before listed threads were recorded is judged once more, by launch time', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    const gh = github({ body: 'All listed findings are fixed at this head.' });
+    // As GY-159's record was left on 2026-09-24: no threadsListed, and a settlement that named nothing.
+    await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, state: 'completed', verdict: verdict() as any,
+      threadResolution: { at: new Date().toISOString(), reviewId: 77, named: [], resolved: [], refused: [], attempts: 1 } }; });
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+    // Opened before the launch and before the approval: both pre-existing threads; the later one is refused.
+    assert.deepEqual(gh.resolved, ['PRRT_fixed0001', 'PRRT_unnamed01']);
+    assert.equal(settled.reviews[0].threadResolution?.implicit, true);
+    const before = gh.calls.length;
+    await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+    assert.equal(gh.calls.length, before, 'judged once');
   } finally { await cleanup(); }
 });

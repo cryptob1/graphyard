@@ -64,26 +64,43 @@ export function parseResolvedThreads(body: unknown): string[] {
   return [...new Set(line.replace(/^resolved threads:/i, '').split(/[\s,]+/).map(entry => entry.replace(/^[`'"]+|[`'".]+$/g, '')).filter(entry => /^[A-Za-z0-9_=-]{8,200}$/.test(entry)))];
 }
 
-export interface ThreadResolution { at: string; reviewId: number; named: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number }
+/** Whether a verdict carries a `Resolved threads:` line at all; `Resolved threads: none` names nothing, explicitly. */
+export const hasResolvedThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^resolved threads:/i.test(entry.trim()));
+
+/** `implicit`: the approval had no `Resolved threads:` line, so it vouches for every thread its launch prompt listed. */
+export interface ThreadResolution { at: string; reviewId: number; named: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; implicit?: boolean }
 
 /**
  * Resolve exactly the threads an approval named: each must be listed unresolved on the pull request
  * now, and must have been opened before the approval was submitted. A thread the reviewer did not
  * name is never resolved. Runs outside every coordination transaction.
+ *
+ * An approval with no `Resolved threads:` line still answers every thread its launch prompt listed,
+ * because that prompt made any unfixed or unverified thread a REQUEST_CHANGES: on 2026-09-24 GY-159's
+ * reviewer approved a head that fixed all eight listed threads but omitted the line, nothing was
+ * resolved, and the merge sat behind conversation resolution. `listed` names the prompt's threads;
+ * a record from before it was kept falls back to the threads opened before `launchedAt`. Neither is
+ * passed when the launch could not read the threads, so that prompt vouches for nothing.
  */
-export async function resolveNamedThreads(input: { repository: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: ThreadResolution }, run: ChildRun, now: Date): Promise<ThreadResolution> {
+export async function resolveNamedThreads(input: { repository: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: ThreadResolution; listed?: string[]; launchedAt?: string }, run: ChildRun, now: Date): Promise<ThreadResolution> {
   const attempts = (input.previous?.attempts ?? 0) + 1;
-  const base = { at: now.toISOString(), reviewId: input.reviewId, attempts };
+  const base = { at: now.toISOString(), reviewId: input.reviewId, attempts, implicit: false };
   let review: any;
   try { review = JSON.parse(String(await run('gh', ['api', `repos/${input.repository}/pulls/${input.pr}/reviews/${input.reviewId}`]))); }
   catch (error) { return { ...base, named: [], resolved: [], refused: [], failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
   if (review?.state !== 'APPROVED' || review?.commit_id !== input.sha || String(review?.user?.login).toLowerCase() !== input.reviewer.toLowerCase())
     return { ...base, named: [], resolved: [], refused: [], failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
-  const named = parseResolvedThreads(review.body);
-  if (!named.length) return { ...base, named, resolved: [], refused: [] };
+  const implicit = !hasResolvedThreadsLine(review.body) && (!!input.listed || !!input.launchedAt);
+  let named = parseResolvedThreads(review.body);
+  if (!named.length && !implicit) return { ...base, named, resolved: [], refused: [] };
   let open: LaunchThread[];
   try { open = await readUnresolvedThreads(input.repository, input.pr, run); }
-  catch (error) { return { ...base, named, resolved: [], refused: [], failure: `the review threads could not be read: ${firstLine(error)}` }; }
+  catch (error) { return { ...base, implicit, named, resolved: [], refused: [], failure: `the review threads could not be read: ${firstLine(error)}` }; }
+  if (implicit) {
+    const launched = Date.parse(input.launchedAt ?? '');
+    named = input.listed ? [...input.listed] : open.filter(thread => Date.parse(thread.createdAt ?? '') < launched).map(thread => thread.id);
+    if (!named.length) return { ...base, implicit, named, resolved: [], refused: [] };
+  }
   const submitted = Date.parse(String(review.submitted_at ?? ''));
   const resolved = input.previous?.resolved.filter(id => named.includes(id)) ?? [], refused: string[] = [];
   for (const id of named) {
@@ -99,5 +116,5 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
     } catch (error) { refused.push(`${id}: ${firstLine(error)}`.slice(0, 300)); }
   }
   const failed = refused.filter(entry => !/: not (an unresolved thread|opened before)/.test(entry));
-  return { ...base, named, resolved, refused, ...(failed.length ? { failure: `${failed.length} named thread(s) could not be resolved` } : {}) };
+  return { ...base, implicit, named, resolved, refused, ...(failed.length ? { failure: `${failed.length} named thread(s) could not be resolved` } : {}) };
 }

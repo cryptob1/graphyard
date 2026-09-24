@@ -71,9 +71,11 @@ export const reviewRecordSchema = z.object({
   launching: z.literal(true).optional(),
   /** Why the launch could not read the pull request's review threads for the prompt; surfaced in master status. */
   threadReadFailure: z.string().min(1).max(500).optional(),
+  /** The thread IDs the launch prompt listed; an approval without a `Resolved threads:` line vouches for exactly these. */
+  threadsListed: z.array(z.string().min(1).max(200)).max(100).optional(),
   /** The threads this session's approval named on its `Resolved threads:` line, and what the loop resolved (review-threads.ts). */
   threadResolution: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(100), resolved: z.array(z.string().min(1).max(200)).max(100),
-    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50) }).optional(),
+    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50), implicit: z.boolean().optional() }).optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
@@ -572,7 +574,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         record = await updateReviewLedger(root, ledger => {
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory, ...(threadReadFailure ? { threadReadFailure } : {}) });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: unresolved.slice(0, 100).map(thread => thread.id) }) });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
@@ -845,17 +847,20 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     const verdict = record.verdict;
     if (record.state !== 'completed' || verdict?.state !== 'APPROVED') continue;
     const previous: ThreadResolution | undefined = record.threadResolution?.reviewId === verdict.reviewId ? record.threadResolution : undefined;
-    if (previous && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
+    // A settlement from before implicit naming existed, which named nothing, is judged once more.
+    const predatesImplicit = !!previous && previous.implicit === undefined && !previous.named.length && !previous.failure;
+    if (previous && !predatesImplicit && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
     const item = work.find(entry => entry.key === record.key);
     if (!item?.candidate || item.stage === 'done' || item.observation?.merged || item.candidate.pr !== record.pr) continue;
     const carried = carriedApproval(item);
     const current = item.candidate.sha === record.sha || !!carried && carried.originalSha === record.sha && (carried.reviewId === undefined || carried.reviewId === verdict.reviewId);
     if (!current) continue;
-    const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous }, run, now);
+    const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
+      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : { launchedAt: record.requestedAt }) }, run, now);
     record.threadResolution = { ...outcome, refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
     const fresh = outcome.resolved.filter(id => !previous?.resolved.includes(id));
-    for (const id of fresh) events.push(`resolved review thread ${id} on ${record.key} PR #${record.pr}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
+    for (const id of fresh) events.push(`resolved review thread ${id} on ${record.key} PR #${record.pr}, ${outcome.implicit ? 'listed to the session whose approval' : 'named by approval'} ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
     for (const refusal of outcome.refused) events.push(`did not resolve review thread on ${record.key} PR #${record.pr} named by approval ${verdict.reviewId}: ${refusal}`);
     if (outcome.failure) events.push(`thread resolution for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);
   }
