@@ -20,6 +20,9 @@ export const sessionKinds = ['implementation', 'review', 'proof', 'coordination'
 export type SessionKind = typeof sessionKinds[number];
 export const sessionStates = ['running', 'finished'] as const;
 export type SessionState = typeof sessionStates[number];
+/** What the loop observed of a session: the runtime's reading, or its absence from the reports. */
+export const observedSessionStates = ['working', 'idle', 'ended', 'lost'] as const;
+export type ObservedSessionState = typeof observedSessionStates[number];
 
 export interface SessionHandle {
   /** Stable per session: the dispatch request id, or `principal:epoch` for an assignment. */
@@ -44,6 +47,8 @@ export interface SessionHandle {
   subject: string;
   startedAt: string; updatedAt: string; endedAt: string | null;
   state: SessionState; outcome: string | null;
+  /** The one session state every reader shares (GY-172, session-state.ts): what the loop last observed of it, when, and how many consecutive reports missed it. */
+  observed?: ObservedSessionState | null; observedAt?: string | null; missedReports?: number;
 }
 
 const line = (max: number) => z.string().trim().min(1).max(max).regex(/^[^\u0000-\u001f\u007f]+$/);
@@ -65,6 +70,10 @@ export const sessionHandleSchema = z.object({
   subject: z.string().trim().min(1).max(300),
   state: z.enum(sessionStates).default('running'),
   outcome: z.string().trim().min(1).max(500).optional(),
+  // The loop's observation (GY-172), written by the report `observeSessions` computes.
+  observed: z.enum(observedSessionStates).optional(),
+  observedAt: z.string().datetime().optional(),
+  missedReports: z.number().int().min(0).max(1000).optional(),
 }).strict();
 export type SessionHandleInput = z.infer<typeof sessionHandleSchema>;
 
@@ -105,15 +114,23 @@ export function attachCommand(handle: Pick<SessionHandle, 'state' | 'attach' | '
   return 'no attach command and no transcript were recorded for this session';
 }
 
+const observation = (input: SessionHandleInput, existing: SessionHandle | undefined) => {
+  const observed = input.observed ?? existing?.observed, observedAt = input.observedAt ?? existing?.observedAt, missed = input.missedReports ?? existing?.missedReports;
+  return { ...(observed ? { observed } : {}), ...(observedAt ? { observedAt } : {}), ...(missed ? { missedReports: missed } : {}) };
+};
+
 /** Record or update one handle on the item, newest last, bounded. */
 export function recordSession(work: Work, input: SessionHandleInput, principal: string, now: Date): SessionHandle {
   work.sessions ??= [];
   const at = now.toISOString();
   const existing = work.sessions.find(handle => handle.id === input.id);
+  const reopened = existing?.state === 'finished' && input.state === 'running';
   const handle: SessionHandle = {
     // The owner is fixed at the first record and never moves: a launcher names the session it
     // started, and an ordinary update cannot hand the handle to somebody else.
-    id: input.id, kind: input.kind, principal: existing?.principal ?? input.principal ?? principal,
+    // A handle recorded running again after it ended is a fresh session under the same id — a
+    // launch retried on another profile for one request — and belongs to whoever runs that one.
+    id: input.id, kind: input.kind, principal: (reopened ? input.principal : undefined) ?? existing?.principal ?? input.principal ?? principal,
     epoch: input.epoch ?? existing?.epoch ?? null,
     runtime: input.runtime, host: input.host,
     // The coordinates a launcher registered are kept when a later write omits them: the session
@@ -124,29 +141,23 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     attach: input.attach ?? existing?.attach ?? null,
     transcript: input.transcript ?? existing?.transcript ?? null,
     subject: input.subject,
-    startedAt: existing?.startedAt ?? at, updatedAt: at,
+    startedAt: reopened ? at : existing?.startedAt ?? at, updatedAt: at,
     endedAt: input.state === 'finished' ? existing?.endedAt ?? at : null,
     // A running session may carry an outcome too — "waiting on input" is a fact about a session
     // that has not ended — so the note is kept rather than dropped for want of an end.
-    state: input.state, outcome: input.outcome ?? existing?.outcome ?? null,
+    state: input.state, outcome: input.outcome ?? (reopened ? null : existing?.outcome ?? null),
+    // The observation is the loop's to write; a launcher or the session itself updating its
+    // coordinates keeps the last one rather than blanking what every reader goes by.
+    // A handle recorded running again after it ended is a new session under the same id (a retried
+    // launch for one request): what was observed of the one before says nothing about this one.
+    ...observation(input, reopened ? undefined : existing),
   };
   work.sessions = bounded([...work.sessions.filter(entry => entry.id !== input.id), handle], handle);
   return handle;
 }
 
-/** One line per session for a reader: what it is, what it works on, and how to watch or read it. */
-export function sessionSummary(work: Work, now: Date) {
-  return (work.sessions ?? []).map(handle => ({
-    ...handle, key: work.key, attach: attachCommand(handle),
-    runningMs: handle.state === 'running' ? Math.max(0, now.getTime() - Date.parse(handle.startedAt)) : Math.max(0, Date.parse(handle.endedAt ?? handle.updatedAt) - Date.parse(handle.startedAt)),
-  }));
-}
-
-/** Every running session across the graph, longest-running first. */
-export function runningSessions(all: Work[], now: Date) {
-  return all.flatMap(work => sessionSummary(work, now).filter(handle => handle.state === 'running'))
-    .sort((a, b) => b.runningMs - a.runningMs);
-}
+// One line per session for a reader, and the one reading of whether it is running: session-state.ts (GY-172).
+export { runningSessions, sessionSummary, unseenSessions } from './session-state.js';
 
 
 /**
@@ -170,7 +181,8 @@ export function runningSessions(all: Work[], now: Date) {
  */
 
 /** What a runtime reports about one session it is running: its own name for it, the pane it holds, and its state. */
-export interface RuntimeSession { name?: string; pane_id?: string; agent_status?: string }
+/** `agent` is the agent the runtime detects in the pane: `null` says the pane holds none (it exited to a shell); absent, the runtime does not say. */
+export interface RuntimeSession { name?: string; pane_id?: string; agent_status?: string; agent?: string | null }
 /**
  * The reported states that mean a session has ended rather than one still holding its place. Any
  * other state is live — `idle`, `done` and `blocked` all included.

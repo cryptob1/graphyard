@@ -1,5 +1,6 @@
 import type { Work } from '../src/model';
 import type { SessionHandle } from '../src/model/sessions';
+import { sessionObservationFreshMs, sessionView, type SessionView } from '../src/model/session-state';
 
 /**
  * The Workers tab (GY-116): every handle across the graph in one table, read for triage.
@@ -13,22 +14,22 @@ import type { SessionHandle } from '../src/model/sessions';
  */
 
 /**
- * How old a running handle's `updatedAt` may be before the tab stops presenting it as live. A
- * handle is written when its launcher records it, when the session fills in its own coordinates,
- * and when the liveness sweep or the session ends it — so a running handle nothing has touched for
- * a quarter of an hour is either working silently or gone, and the reader is told which is not
- * known rather than shown a live session. The sweep (GY-113) is what ends a dead one; this is only
- * the badge in the meantime. `docs/dashboard.md` states the threshold.
+ * How old a session's latest observation may be before the tab stops presenting it as live — the
+ * one freshness bound every reader applies (GY-172, src/model/session-state.ts). The loop observes
+ * every session it can see on each dispatch tick and refreshes the record well inside the bound, so
+ * an open session not seen for a quarter of an hour is one no observer is reporting, and the reader
+ * is told so rather than shown a live session. `docs/dashboard.md` states the threshold.
  */
-export const sessionStaleThresholdMs = 15 * 60_000;
+export const sessionStaleThresholdMs = sessionObservationFreshMs;
 
-/** Why a running handle is stale, or null while it was seen inside the threshold or has finished. */
-export function staleSession(handle: Pick<SessionHandle, 'state' | 'updatedAt'>, now: Date, thresholdMs = sessionStaleThresholdMs): { since: string; idleMs: number } | null {
+/**
+ * Why an open handle is not shown running, or null while it is (or has finished): 'seen' is its
+ * latest observation, and a session observed working or idle inside the threshold is running.
+ */
+export function staleSession(handle: Pick<SessionHandle, 'state' | 'updatedAt' | 'observed' | 'observedAt'>, now: Date, thresholdMs = sessionStaleThresholdMs): { since: string; idleMs: number } | null {
   if (handle.state !== 'running') return null;
-  const seen = Date.parse(handle.updatedAt);
-  if (!Number.isFinite(seen)) return { since: handle.updatedAt, idleMs: 0 };
-  const idleMs = now.getTime() - seen;
-  return idleMs > thresholdMs ? { since: handle.updatedAt, idleMs } : null;
+  const view = sessionView(handle, now, thresholdMs);
+  return view.live ? null : { since: view.seenAt ?? handle.updatedAt, idleMs: view.unseenMs ?? 0 };
 }
 
 /**
@@ -98,7 +99,7 @@ export function reconciledClosure(handle: Pick<SessionHandle, 'state' | 'outcome
   return null;
 }
 
-export interface WorkerRow extends SessionHandle {
+export interface WorkerRow extends Omit<SessionHandle, 'observed'>, SessionView {
   workId: string; key: string; roleKind: SessionRoleKind;
   /** Live for a running handle (now − startedAt) and fixed for a finished one (endedAt − startedAt). */
   spentMs: number;
@@ -121,7 +122,7 @@ const parsed = (iso: string | null) => { const at = Date.parse(iso ?? ''); retur
 export function workerRow(work: Pick<Work, 'id' | 'key'>, handle: SessionHandle, now: Date, thresholdMs = sessionStaleThresholdMs): WorkerRow {
   const startedAt = parsed(handle.startedAt) ?? now.getTime();
   const endedAt = handle.state === 'running' ? now.getTime() : parsed(handle.endedAt) ?? parsed(handle.updatedAt) ?? startedAt;
-  return { ...handle, workId: work.id, key: work.key, roleKind: sessionRoleKind(handle), spentMs: Math.max(0, endedAt - startedAt),
+  return { ...handle, ...sessionView(handle, now, thresholdMs), workId: work.id, key: work.key, roleKind: sessionRoleKind(handle), spentMs: Math.max(0, endedAt - startedAt),
     local: localAttachCommand(handle), remote: remoteAttachCommand(handle),
     stale: staleSession(handle, now, thresholdMs), reconciled: reconciledClosure(handle) };
 }

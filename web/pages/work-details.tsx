@@ -13,6 +13,7 @@ import PostDeployment from '../components/post-deployment';
 import StatusAge from '../components/status-age';
 import Term, { Explained } from '../components/term';
 import { age } from '../format';
+import { formatAge } from '../duration';
 import { plainReason, plainStatus } from '../plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepGate, stepHeld } from '../pr-steps';
@@ -59,7 +60,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // The inverted loop, as this item sees it: what the control plane says to do next, which
   // executor has it, who is waiting on a decision, and every session that can be watched or read.
   const sessions = sessionSummary(item, new Date(now));
-  const running = sessions.filter(handle => handle.state === 'running');
+  // Shown running only while its latest observation is working or idle, and fresh (GY-172).
+  const running = sessions.filter(handle => handle.live);
   const requests = openAgentRequests(item, new Date(now));
   // What this item needs from the operator themselves, from the same human-only rule table the
   // Needs you page renders: it is answered there, in this session, never on a command line.
@@ -77,7 +79,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // The Work page's own classification of this item, so its badge is the tile that led here.
   const group = groupWithin(item, work, now, status?.humanOnly, release);
   const steps = prSteps(item, now, release);
-  const actor = nextActor(item, group, now, release);
+  const actor = nextActor(item, group, now, release, work);
   // Work closed without merging has no step: no bar, nothing left, nobody acting (`prSteps`).
   const closed = isClosed(item);
   const showSteps = !closed && (group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog'));
@@ -158,7 +160,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {requests.length > 0 && <div className="notice"><strong>{requests.length === 1 ? 'An agent is waiting' : `${requests.length} agents are waiting`} on a decision</strong>
         <ul>{requests.map(r => <li key={r.id}>{r.requestedBy} recorded a {r.type} {age(r.at)} ago and released its lease: {r.reason} — decided by {r.decider.who}{r.decider.command ? <> (<code>{r.decider.command}</code>)</> : ''}</li>)}</ul></div>}
       {running.length > 0 && <><h3>Sessions running now</h3><ul className="sessions">{running.map(handle => <li key={handle.id}>
-        <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {handle.subject} · {age(handle.startedAt)}<br/><code>{handle.attach}</code></li>)}</ul></>}
+        <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {handle.subject} · {age(handle.startedAt)} · seen {formatAge(handle.seenAt ?? handle.updatedAt, now)} ago<br/><code>{handle.attach}</code></li>)}</ul></>}
       {item.stage !== 'done' && current >= 0 && <><h3>Gate steps</h3><ol className="steps">
         {item.gates.map((g, i) => i < current ? <li key={g.name} className="step done">✓ {gateLabel[g.name] ?? g.name}</li> : i === current && <li key={g.name} className="step current">○ {gateLabel[g.name] ?? g.name}
           {g.name === 'acceptance' ? <p>{g.reasons.length} {g.reasons.length === 1 ? 'thing' : 'things'} still to prove.</p> : <ul>{g.reasons.map(r => <li key={r}>{plainReason(r, g.name).text}</li>)}</ul>}</li>)}
@@ -184,9 +186,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <ul>{row.history.slice(-5).map((entry, index) => <li key={index}>{entry.event}{entry.executor ? ` by ${entry.executor}` : ''}: {entry.reason}</li>)}</ul></div>)}
       <h3>Sessions ({sessions.length})</h3>
       {sessions.length === 0 && <p className="muted">No session has recorded a handle on this item.</p>}
-      {sessions.map(handle => <div className="criterion" key={handle.id}><strong>{handle.state === 'running' ? '▶' : '■'} {handle.kind} · {handle.principal}</strong>
+      {sessions.map(handle => <div className="criterion" key={handle.id}><strong>{handle.live ? '▶' : handle.state === 'running' ? '?' : '■'} {handle.kind} · {handle.principal}</strong>
         <p>{handle.runtime} on {handle.host}{handle.workspace ? ` · workspace ${handle.workspace}` : ''}{handle.tab ? ` · tab ${handle.tab}` : ''}{handle.pane ? ` · pane ${handle.pane}` : ''} · {handle.subject}</p>
-        <p>{handle.state === 'running' ? `Running for ${age(handle.startedAt)}` : `Finished ${age(handle.endedAt ?? handle.updatedAt)} ago${handle.outcome ? `: ${handle.outcome}` : ''}`}</p>
+        <p>{handle.live ? `Running for ${age(handle.startedAt)}` : handle.state === 'running' ? `Not seen for ${formatAge(handle.seenAt ?? handle.updatedAt, now)}` : `Finished ${age(handle.endedAt ?? handle.updatedAt)} ago${handle.outcome ? `: ${handle.outcome}` : ''}`}</p>
         <code>{handle.attach}</code></div>)}
       <h3>Agent requests ({(item.agentRequests ?? []).length})</h3>
       {(item.agentRequests ?? []).length === 0 && <p className="muted">No agent has recorded a typed request on this item.</p>}

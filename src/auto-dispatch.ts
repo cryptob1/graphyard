@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { childRunner, type ChildRun } from './child-runner.js';
 import type { Work } from './model.js';
+import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEntry } from './model/session-state.js';
 import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -355,7 +356,9 @@ export function launchedSessionHandle(kind: 'review' | 'proof', request: Dispatc
  * coordinator mutation, so one sweep answers a status reader and this loop alike.
  */
 export type ClosureCause = 'vanished' | 'ended' | 'superseded' | 'duplicate';
-export interface SessionClosure { workId: string; key: string; id: string; kind: SessionKind; role: string; runtime: string; host: string; subject: string; cause: ClosureCause; outcome: string }
+export interface SessionClosure { workId: string; key: string; id: string; kind: SessionKind; role: string; runtime: string; host: string; subject: string; cause: ClosureCause; outcome: string;
+  /** The session report entry that closed it, when the runtime's observation did rather than the item. */
+  report?: SessionReportEntry }
 /** How one handle is named between ticks: the item it sits on, and its own id. */
 export const sessionHandleKey = (workId: string, id: string) => `${workId}\u0000${id}`;
 /** Whose vocabulary a reported state is judged by, whose runtime answers for a handle, and how long a handle the runtime has stopped reporting is left alone. */
@@ -436,16 +439,36 @@ export function reconcileSessionLiveness(all: Work[], runtime: RuntimeSession[] 
   }
   return { closures, missing };
 }
-/** What a closure is written back as: the handle's own identity, ended, carrying why. */
+/** What a closure is written back as: the handle's own identity, ended, carrying why — and, for one the session report closed, the observation that closed it. */
 export function closureHandle(closure: SessionClosure): SessionHandleInput {
-  return { id: closure.id, kind: closure.kind, runtime: closure.runtime, host: closure.host, subject: closure.subject, state: 'finished', outcome: closure.outcome };
+  return { id: closure.id, kind: closure.kind, runtime: closure.runtime, host: closure.host, subject: closure.subject, state: 'finished', outcome: closure.outcome,
+    ...(closure.report ? reportedHandle(closure.report) : {}) };
 }
+/**
+ * A record the session report closed, as a closure: `ended` when the runtime reports the session
+ * over or its pane holds no agent, and `vanished` — the report's `lost` — when it was absent from
+ * consecutive reports.
+ */
+export function reportClosure(entry: SessionReportEntry): SessionClosure {
+  return { workId: entry.workId, key: entry.key, id: entry.id, kind: entry.kind, role: entry.role, runtime: entry.runtime, host: entry.host, subject: entry.subject,
+    cause: entry.closed === 'lost' ? 'vanished' : 'ended', outcome: (entry.outcome ?? '').slice(0, 500), report: entry };
+}
+
+/**
+ * Herdr's listing as the session report reads it. Herdr names the agent it detects in each pane
+ * and leaves the field out for a pane with none — a shell, where an agent that exited leaves its
+ * named pane behind, still reported `idle`. That absence is the fact the report needs (a dead
+ * worker otherwise stays "Builds code" for as long as its pane stays open), so it is made explicit.
+ */
+export const herdrSessionListing = (agents: HerdrAgent[]): HerdrAgent[] => agents.map(entry => ({ ...entry, agent: entry.agent || null }));
 
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean }
 export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
+  /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
+  sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
   /** Review threads this tick resolved on an approval's word, and the ones it named but could not resolve. */
   threads?: string[] }
 
@@ -501,12 +524,29 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
   // is made before anything launches, because the slot check below reads it.
-  const sweep = reconcileSessionLiveness(snapshot.work, herdr, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId, missing: cursor.sessionMisses });
-  const closures = sweep.closures;
-  // What the runtime did not report this tick, for the next one to measure the grace against. The
-  // map holds only handles currently missing, so it is bounded by the graph's live sessions; the
+  // The item's own facts first — a review or proof session bound to something the item moved past,
+  // or a second session in one slot. The runtime is not consulted here: what the runtime says is
+  // the session report below, the one observation every reader shares (GY-172).
+  const sweep = reconcileSessionLiveness(snapshot.work, null, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId });
+  const superseded = new Set(sweep.closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
+  const report = observeSessions(snapshot.work, herdr, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId, settled: superseded, firstMissed: cursor.sessionMisses });
+  const closures = [...sweep.closures, ...report.entries.filter(entry => entry.closed).map(reportClosure)];
+  // What the runtime did not report this tick, for the closing reason to say how long. The map
+  // holds only handles currently missing, so it is bounded by the graph's live sessions; the
   // ceiling is there because the cursor is a file, not a database.
-  cursor.sessionMisses = Object.fromEntries(Object.entries(sweep.missing).slice(0, sessionMissLimit));
+  // A tick that could not read the runtime reported nothing, so it leaves them as they were.
+  if (herdr) cursor.sessionMisses = Object.fromEntries(Object.entries(report.missing).slice(0, sessionMissLimit));
+  const byId = new Map(snapshot.work.map(item => [item.id, item]));
+  tick.sessions = { observed: report.entries.length, written: 0, failures: [] };
+  for (const entry of report.entries.filter(entry => !entry.closed && entry.changed)) {
+    const item = byId.get(entry.workId);
+    // A delivered item takes only a closure; the report's miss count is carried by the cursor there.
+    if (!item || !effects.recordSession || item.stage === 'done') continue;
+    // The observation is the record every reader shows; one that could not be written is
+    // retried by the next tick's report, which finds the stored record still behind.
+    try { await effects.recordSession(item, reportedHandle(entry)); tick.sessions.written++; }
+    catch (error) { tick.sessions.failures.push({ work: entry.key, id: entry.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
+  }
   for (const closure of closures) {
     // A closure that cannot be written back still stands as a judgment — the session is over
     // whichever way the record went — so the slot is freed either way and the tick says what failed.
@@ -525,6 +565,11 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const inventory = () => [...agents, ...started];
   const launchedName = (profile: { agentName: string; concurrency?: number }, request: DispatchRequest, result: unknown) =>
     typeof (result as { agentName?: unknown })?.agentName === 'string' ? (result as { agentName: string }).agentName : sessionAgentName(profile, { id: request.id, requestId: request.id });
+  // Registration (GY-172 AC-2): the recorder every launch below registers through, and the
+  // coordinates a launcher's result carries once its runtime has started.
+  const record = (item: Work) => effects.recordSession ? (handle: SessionHandleInput) => effects.recordSession!(item, handle) : undefined;
+  const coordinates = (profile: { agentName: string; concurrency?: number }, request: DispatchRequest, result: unknown) => ({ pane: (result as { pane?: string | null } | undefined)?.pane ?? null, agentName: launchedName(profile, request, result) });
+  const attachTo = (pane: string) => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`;
   /**
    * The slots recorded sessions still hold. A handle is the durable record of a live session, so a
    * session this host has not listed yet — or one another host launched — holds its profile's slot
@@ -701,14 +746,15 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
       else {
         try {
-          const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
+          // The session is registered before its runtime starts and its coordinates written once it
+          // has (GY-172), where every Graphyard reader looks — so watching this reviewer never means
+          // reading this host's local ledger, and the session report observes it from the start.
+          const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => registeredLaunch(record(item),
+            launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace),
+            () => effects.launchReview(item, review, candidate, inventory(), observedAt), result => coordinates(candidate, review, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
           if (!launched) busy();
           else {
             delete cursor.failures[review.id]; delete cursor.capacity.review;
-            // The session is running somewhere; put its coordinates where every Graphyard reader
-            // looks, so watching this reviewer never means reading this host's local ledger.
-            await effects.recordSession?.(item, launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, review, launched.result) }, launched.profile.kind, config.herdrWorkspace))
-              .catch(() => { /* the launch landed; a handle that could not be written is not a failed launch */ });
             tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
           }
         } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
@@ -741,12 +787,12 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
           : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
         if (!usable().length) { busy(); continue; }
         try {
-          const launched = await launchInTurns(request, usable(), profile => room(profile, producers).free > 0, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
+          const launched = await launchInTurns(request, usable(), profile => room(profile, producers).free > 0, candidate => registeredLaunch(record(item),
+            launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal),
+            () => effects.launchProducer(item, request, candidate, inventory(), observedAt), result => coordinates(candidate, request, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
           if (!launched) busy();
           else {
             delete cursor.failures[request.id]; delete cursor.capacity.producer;
-            await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
-              .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
             tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
           }
         } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
@@ -873,7 +919,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   });
   return {
     snapshot: deps.snapshot,
-    agents: () => listHerdrAgents(run).catch(() => null),
+    agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),

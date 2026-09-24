@@ -1381,8 +1381,12 @@ test('integration:session-handles-visible — the reviewer and producer launcher
   const next = await runDispatchTick(fleetConfig, cursor, effects);
   assert.deepEqual(next.launched.map(entry => entry.kind), ['review'], `the tick launched ${JSON.stringify(next.waiting)}`);
   assert.ok([...tick.launched, ...next.launched].every(entry => entry.work === item.key));
-  assert.equal(handles.length, 2, 'a handle was recorded for each launch');
-  assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session'], 'each one went to the control plane through the shipped mutation');
+  // Each launch registers its session before the runtime starts and then writes the pane the
+  // launcher returned (GY-172 AC-2): two writes to one handle per launch.
+  assert.equal(new Set(handles.map(entry => entry.handle.id)).size, 2, 'a handle was recorded for each launch');
+  assert.deepEqual(handles.map(entry => [entry.handle.kind, entry.handle.pane ?? null]), [['proof', null], ['proof', 'pane-13'], ['review', null], ['review', 'pane-12']],
+    'each registered before its runtime started, then given the pane it runs in');
+  assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session', 'session', 'session'], 'each one went to the control plane through the shipped mutation');
   // And a dispatcher built with nothing but a snapshot records them too: the mutation is derived
   // from the configuration the loop already runs on, so no caller can leave the handles out.
   assert.ok(dispatchEffects('/outside', () => fleetConfig, { snapshot: effects.snapshot }).recordSession, 'the handle recording is not a caller\'s option');
