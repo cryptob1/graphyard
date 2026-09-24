@@ -14,6 +14,7 @@ import { ProductionWatch, railwayProvider } from '../production-watch.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
 import { startDirectMerge } from '../direct-merge.js';
+import { GitHubCacheStore } from '../github-cache.js';
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
 export async function main() {
@@ -29,6 +30,9 @@ export async function main() {
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   mark('github'); const github = await githubFromEnv();
+  // GitHub answers persist across restarts, so a deploy starts warm instead of re-spending the budget.
+  const githubCache = github ? new GitHubCacheStore(store.pool, String(github.config.installationId)) : null;
+  if (github && githubCache) void github.attachCache(githubCache);
   // Startup preflight: a permission shortfall is announced before the first job can run
   // into it, and the jobs that need the missing permission are held rather than retried.
   // A passing preflight (startup or periodic) releases holds decided against a different
@@ -105,6 +109,6 @@ export async function main() {
     finally { running = false; }
   }, 2000);
   http.listen(Number(process.env.PORT ?? 4310), process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${process.env.PORT ?? 4310}; GitHub ${github ? 'connected' : 'not configured'}`));
-  const shutdown = () => { clearInterval(timer); http.close(() => { void store.close().then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
+  const shutdown = () => { clearInterval(timer); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }

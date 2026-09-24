@@ -10,6 +10,7 @@ import { productionTables } from './tables/production.js';
 import { flowTables } from './tables/flow.js';
 import { attributionTables } from './tables/attribution.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
+import { githubCacheTables } from './tables/github-cache.js';
 
 /**
  * Every table, in an order a restore can insert without violating references: a table
@@ -18,7 +19,7 @@ import { schemaGenerationTables } from './tables/schema-generation.js';
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
   ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...attributionTables,
-  ...schemaGenerationTables,
+  ...schemaGenerationTables, ...githubCacheTables,
 ];
 
 /** The additive startup migration: the append-only trigger function, then each table's DDL. */
@@ -30,9 +31,10 @@ ${tables.map(table => table.ddl).join('\n')}
 
 /**
  * Every table a logical backup carries, derived from the registry so a new table can never
- * be left out of a backup by omission. The order is the registry's restore order.
+ * be left out of a backup by omission. The order is the registry's restore order. A cache
+ * table is not ledger state and is left out.
  */
-export const ledgerTables = tables.map(table => table.name);
+export const ledgerTables = tables.filter(table => !table.cache).map(table => table.name);
 /** Stable export order per table, for backups and audits. */
 export const ledgerOrder: Record<string, string> = Object.fromEntries(tables.map(table => [table.name, table.orderBy]));
 /** The serial sequences a restore advances, one per table that has one. */
