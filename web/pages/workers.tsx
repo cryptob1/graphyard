@@ -154,8 +154,8 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
  */
 export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
-  const view = workersView(work, new Date(now));
   const release = releaseView(status);
+  const view = workersView(work, new Date(now), undefined, release);
   // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
   const stale = view.running.filter(row => row.stale).length;
   const open = view.running.length - stale;

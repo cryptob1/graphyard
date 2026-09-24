@@ -1035,6 +1035,8 @@ test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page 
     actionQueue: { actions: [{ id: 'a1', kind: 'review', state: 'pending', claim: null, requestedBy: 'graphyard', requestedAt: at(hour), attempts: 1, resolution: `reviewed ${base}`,
       history: [{ at: at(hour), event: 'requested', reason: `review ${head}`, result: null, executor: null, requester: 'graphyard' }] }], history: [] },
     queueEjection: { at: at(2 * hour), reason: `Speculative tip ${base} was stale` },
+    // Revoked evidence, whose recorded reason names the commit it no longer binds.
+    evidence: [{ ...board().flatMap(item => item.evidence)[0], id: 'e-revoked', sha: head, revocation: { actor: 'operator', at: at(hour), reason: `Proof run against ${base}, not ${head}` } }],
     agentRequests: [{ id: 'q1', type: 'scope', state: 'open', requestedBy: 'worker-1', reason: `Widen scope for ${head}`, paths: ['web/'], decider: { who: 'Master agent', command: null }, at: at(hour), releasedLease: false }],
     sessions: [
       { id: 'r22', kind: 'review', principal: 'reviewer-1', epoch: null, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: 'w1:r22', agentName: null, role: 'review', head,
@@ -1063,6 +1065,7 @@ test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page 
   assert.ok(askedText.includes(`The live proof of ${head.slice(0, 8)} needs a paid plan`) && askedText.includes(`A cloud account for ${base.slice(0, 8)}`), 'the Needs-you card shows the request in 8 characters');
   const itemText = text(markup(createElement(WorkDetails, { ...d, item: loaded })));
   for (const sha of [head, base]) assert.ok(itemText.includes(sha.slice(0, 8)), `${sha.slice(0, 8)} is shown`);
+  assert.ok(itemText.includes(`Proof run against ${base.slice(0, 8)}, not ${head.slice(0, 8)}`), 'a revocation reason shows its commits in 8 characters');
   assert.ok(!itemText.includes(head) && !itemText.includes(base));
   const mergePage = markup(createElement(WorkDetails, { ...d, item: smoked }));
   assert.ok(text(mergePage).includes(deployed.slice(0, 8)) && !text(mergePage).includes(deployed), 'the deployed commit is 8 characters too');
@@ -1167,6 +1170,19 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   const row = /data-session="d1"[\s\S]*?<\/tr>/.exec(html)![0];
   assert.match(row, /data-health="ended"[^>]*>.*Not seen for 3h 00m 00s · its item is delivered/);
   assert.doesNotMatch(row, /Copy local|Copy remote/, 'no attach command offered for a left-over session');
+  // Stage done is not delivered: a merge the production watch still reports pending, and a smoke-gated
+  // merge without its passing check, are still at Deploy, so their idle sessions stay open.
+  const pendingItem = { ...real[1], sessions: [running('p1', 'Watch GY-164 deploy', 3 * hour)] } as unknown as Work;
+  const smokeItem = { ...real[2], policy: { ...real[2].policy, deploySmoke: true }, sessions: [running('s1', 'Smoke GY-165', 3 * hour)] } as unknown as Work;
+  const deploying = [...work.filter(item => ![pendingItem.id, smokeItem.id].includes(item.id)), pendingItem, smokeItem];
+  const status = { ...boardStatus(), production: { observedAt: new Date(NOW).toISOString(), serving: 'f'.repeat(40), error: null, deployed: [], pending: [pendingItem.key], incidents: [] } };
+  const held = workersView(deploying, new Date(NOW), undefined, releaseView(status));
+  for (const id of ['p1', 's1']) { assert.ok(ids(held.running).includes(id), `${id} stays open while its item is at Deploy`); assert.equal(held.running.find(row => row.id === id)!.leftOn, null); }
+  assert.equal(held.finished.find(row => row.id === 'd1')!.leftOn, 'delivered', 'a merge that left the flow still files its session as ended');
+  assert.equal(held.principals.find(entry => entry.principal === 'worker-p1')!.current?.key, pendingItem.key);
+  const heldPage = markup(createElement(WorkersPage, dashboard({ work: deploying, status: status as any })));
+  const heldOpen = heldPage.slice(heldPage.indexOf('aria-label="Agent sessions"'), heldPage.indexOf('<details class="finished-sessions"'));
+  for (const id of ['p1', 's1']) assert.match(heldOpen, new RegExp(`data-session="${id}"`));
 });
 
 test('unit:ui-shipped-strip-latest — the shipped strip names the most recently merged item as latest, and its not-yet-live count comes from the production observation: zero when production serves the newest merge', () => {
