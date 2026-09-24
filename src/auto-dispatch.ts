@@ -214,7 +214,7 @@ export interface DispatchEffects {
   /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
   agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
-  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[] }>;
+  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; threads?: string[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
@@ -430,7 +430,9 @@ export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; req
 export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
-  closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[] }
+  closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
+  /** Review threads this tick resolved on an approval's word, and the ones it named but could not resolve. */
+  threads?: string[] }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math.max(0, attempts - 1), dispatchRetryMaxMs);
@@ -478,7 +480,8 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
   const herdr = await effects.agents();
-  const { reviews } = await effects.reconcileReviews(snapshot.work, herdr);
+  const { reviews, threads } = await effects.reconcileReviews(snapshot.work, herdr);
+  if (threads?.length) tick.threads = threads;
   const { producers } = await effects.reconcileProducers(snapshot.work, herdr);
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
@@ -700,6 +703,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       ticks.push(tick);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
+      for (const event of tick.threads ?? []) log(`[graphyard-dispatch] ${event}`);
       for (const closure of tick.closed) log(`[graphyard-dispatch] closed ${closure.role} session ${closure.id} on ${closure.key}: ${closure.outcome}`);
       // A closure that cannot be written back is retried every tick, so it is logged when it
       // starts and when it changes rather than once per tick for as long as it lasts; `master

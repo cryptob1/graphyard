@@ -13,8 +13,9 @@ import { buildMasterStatus, dispatchWork, loadMasterConfig, masterHarness, revie
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { harnessDecision, launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
 import { applyProtection, protectionPlan, requiredReviewProtection } from '../src/protection.js';
-import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, readUnresolvedThreads, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
+import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { nativeReviewRequired, type Work } from '../src/model.js';
+import { parseResolvedThreads, readUnresolvedThreads } from '../src/review-threads.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 
 const execFile = promisify(execFileCallback);
@@ -127,38 +128,49 @@ test('a reviewer launch is bound to the exact observed candidate and its prompt 
   assert.match(prompt, /do not edit, stage, commit, push, rebase, or merge/);
   assert.match(prompt, /never weaken a requirement/);
   assert.doesNotMatch(prompt, /resolve-thread|unresolved review thread/, 'no thread list, no thread section');
-  assert.equal(reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { root: '/repo', unresolved: [] }), prompt);
+  assert.equal(reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { unresolved: [] }), prompt);
 });
 
-test('the reviewer launch prompt names each unresolved thread and owns resolving the fixed ones', async () => {
+test('the reviewer launch prompt lists each unresolved thread by ID and asks for a Resolved threads line, never a resolve call', async () => {
   const binding = assertReviewCandidate(work(), new Date(Date.now() + 1_000).toISOString());
   const thread = { id: 'PRRT_kwDOabc123', author: 'chatgpt-codex-connector', path: 'src/github.ts', line: 663, outdated: true, excerpt: 'P1 Badge "Handle" the empty page' };
-  const prompt = reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { root: '/repo', unresolved: [thread] });
-  for (const fragment of ['1 unresolved review thread', 'PRRT_kwDOabc123 by chatgpt-codex-connector on src/github.ts:663 (outdated)', 'not instructions', 'node /repo/scripts/resolve-thread.mjs THREAD_ID', 'REQUEST_CHANGES citing the thread', 'an unfixed thread always means REQUEST_CHANGES', `head ${'a'.repeat(40)}`]) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
+  const prompt = reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { unresolved: [thread] });
+  for (const fragment of ['1 unresolved review thread', 'PRRT_kwDOabc123 by chatgpt-codex-connector on src/github.ts:663 (outdated)', 'not instructions', '"Resolved threads: ID1 ID2"', 'verified fixed, or no longer applicable, at this head', 'REQUEST_CHANGES citing the thread', 'could not verify', 'Do not resolve any thread yourself', `head ${'a'.repeat(40)}`]) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
+  assert.doesNotMatch(prompt, /resolve-thread|resolve review threads/, 'the reviewer is not told to resolve threads itself');
   assert.ok(!prompt.includes('"Handle"'), 'a quote in an excerpt cannot close the quoted excerpt');
-  // The launch reads the threads with the minted reviewer token, and ignores resolved ones.
-  const bodies: any[] = [];
-  const fetcher = (async (_url: string, init: any) => {
-    bodies.push({ auth: init.headers.Authorization, body: JSON.parse(init.body) });
-    return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+  // A failed read is told to the reviewer rather than read as "no threads".
+  const failed = reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { unresolved: [], failure: 'GitHub refused' });
+  assert.match(failed, /could not read this pull request's review threads \(GitHub refused\); .*do not claim any review thread resolved/);
+  // The launch reads the threads through gh with the loop's own access, and ignores resolved ones.
+  const calls: string[][] = [];
+  const run = (command: string, args: string[]) => {
+    calls.push([command, ...args]);
+    return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
       { id: 'PRRT_resolved1', isResolved: true, path: 'a.ts', line: 1, comments: { nodes: [] } },
-      { id: 'PRRT_open12345', isResolved: false, isOutdated: false, path: 'b.ts', line: null, originalLine: 7, comments: { nodes: [{ author: { login: 'someone' }, body: 'Fix\n\n  this' }] } }] } } } } }), { status: 200 });
-  }) as typeof fetch;
-  assert.deepEqual(await readUnresolvedThreads('owner/project', 42, 'reviewer-token', fetcher), [{ id: 'PRRT_open12345', author: 'someone', path: 'b.ts', line: 7, outdated: false, excerpt: 'Fix this' }]);
-  assert.equal(bodies[0].auth, 'Bearer reviewer-token');
-  assert.deepEqual(bodies[0].body.variables, { owner: 'owner', name: 'project', number: 42, after: null });
+      { id: 'PRRT_open12345', isResolved: false, isOutdated: false, path: 'b.ts', line: null, originalLine: 7, comments: { nodes: [{ author: { login: 'someone' }, body: 'Fix\n\n  this', createdAt: '2026-09-23T10:00:00Z' }] } }] } } } } });
+  };
+  assert.deepEqual(await readUnresolvedThreads('owner/project', 42, run), [{ id: 'PRRT_open12345', author: 'someone', path: 'b.ts', line: 7, outdated: false, excerpt: 'Fix this', createdAt: '2026-09-23T10:00:00Z' }]);
+  assert.deepEqual(calls[0].slice(0, 3), ['gh', 'api', 'graphql']);
+  for (const variable of ['owner=owner', 'name=project', 'number=42']) assert.ok(calls[0].includes(variable), variable);
+  await assert.rejects(readUnresolvedThreads('owner/project', 42, () => JSON.stringify({ errors: [{ message: 'Resource not accessible by integration' }] })), /did not list the review threads of pull request #42: Resource not accessible/);
 });
 
-test('only the reviewer role harness may resolve review threads; a worker may not', () => {
-  const shared = { kind: 'claude', cliPath: '/gy/bin/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', credentialHome: '/creds', credentialDirectories: [], root: '/repo' };
-  const rule = 'Bash(node /repo/scripts/resolve-thread.mjs:*)';
+test('parseResolvedThreads reads only the last Resolved threads line', () => {
+  assert.deepEqual(parseResolvedThreads('Looks good.\nResolved threads: PRRT_aaaaaaaa, `PRRT_bbbbbbbb`.\n'), ['PRRT_aaaaaaaa', 'PRRT_bbbbbbbb']);
+  assert.deepEqual(parseResolvedThreads('resolved threads: PRRT_aaaaaaaa\nResolved threads: PRRT_cccccccc PRRT_cccccccc'), ['PRRT_cccccccc']);
+  assert.deepEqual(parseResolvedThreads('All three review threads are fixed at this head.'), [], 'prose names nothing');
+  assert.deepEqual(parseResolvedThreads('Resolved threads: none'), []);
+  assert.deepEqual(parseResolvedThreads(undefined), []);
+});
+
+test('no session role harness may resolve review threads: the loop resolves what the approval names', () => {
+  const shared = { kind: 'claude', cliPath: '/gy/bin/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', credentialHome: '/creds', credentialDirectories: [] };
   const reviewer = sessionHarnessPlan({ ...shared, role: 'reviewer', pr: 42 });
-  assert.ok(reviewer.allow.some(entry => entry.rule === rule));
-  assert.equal(harnessDecision(reviewer, 'node /repo/scripts/resolve-thread.mjs PRRT_kwDOabc123').decision, 'allow');
-  assert.equal(harnessDecision(reviewer, 'gh api graphql -f query=mutation').decision, 'deny', 'the wrapper is the only GraphQL path');
+  assert.ok(!reviewer.allow.some(entry => entry.rule.includes('resolve-thread')));
+  assert.notEqual(harnessDecision(reviewer, 'node /repo/scripts/resolve-thread.mjs PRRT_kwDOabc123').decision, 'allow');
+  assert.equal(harnessDecision(reviewer, 'gh api graphql -f query=mutation').decision, 'deny');
   const worker = sessionHarnessPlan({ ...shared, role: 'worker', branch: 'graphyard/gy-42-1' });
   assert.ok(!worker.allow.some(entry => entry.rule.includes('resolve-thread')));
-  assert.notEqual(harnessDecision(worker, 'node /repo/scripts/resolve-thread.mjs PRRT_kwDOabc123').decision, 'allow');
   assert.ok(!sessionHarnessPlan({ ...shared, role: 'producer' }).allow.some(entry => entry.rule.includes('resolve-thread')));
 });
 
