@@ -150,11 +150,16 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
 
     // A refused lease heartbeat stops the install and fails the worktree command.
     await rm(join(worktree, 'node_modules'), { recursive: true, force: true });
-    let stoppedBy: unknown = null, renewals = 0;
-    const slow = (cwd: string, signal?: AbortSignal) => new Promise<void>((_, fail) => { signal!.addEventListener('abort', () => { stoppedBy = signal!.reason; fail(new Error('npm ci stopped')); }); });
-    await assert.rejects(installUnderLease(worktree, async () => { renewals++; throw new Error('Lease epoch is stale'); }, 'GY-1 epoch 1', { install: slow, intervalMs: 20 }),
+    let stoppedBy: unknown = null, renewals = 0, started = 0;
+    const slow = (cwd: string, signal?: AbortSignal) => new Promise<void>((_, fail) => { started++; signal!.addEventListener('abort', () => { stoppedBy = signal!.reason; fail(new Error('npm ci stopped')); }); });
+    await assert.rejects(installUnderLease(worktree, async () => { renewals++; if (renewals > 1) throw new Error('Lease epoch is stale'); }, 'GY-1 epoch 1', { install: slow, intervalMs: 20 }),
       /lease heartbeat for GY-1 epoch 1 was refused while installing dependencies, so the install was stopped: Lease epoch is stale/);
-    assert.equal(renewals, 1); assert.ok(stoppedBy instanceof Error, 'the installer was told to stop');
+    assert.equal(renewals, 2); assert.equal(started, 1); assert.ok(stoppedBy instanceof Error, 'the installer was told to stop');
+    // The lease is renewed before npm starts, not an interval later: a lease that has already lapsed installs nothing.
+    let first = 0; started = 0;
+    await assert.rejects(installUnderLease(worktree, async () => { first++; throw new Error('Lease epoch is expired'); }, 'GY-1 epoch 1', { install: slow, intervalMs: 60_000 }),
+      /lease heartbeat for GY-1 epoch 1 was refused while installing dependencies, so the install was stopped: Lease epoch is expired/);
+    assert.equal(first, 1, 'renewed once up front, not after a whole interval'); assert.equal(started, 0, 'npm never started under a refused lease');
     let kept = 0;
     const brief = (cwd: string) => new Promise<void>(done => setTimeout(done, 70));
     assert.equal((await installUnderLease(worktree, async () => { kept++; }, 'GY-1 epoch 1', { install: brief, intervalMs: 20 })).state, 'installed');
@@ -162,10 +167,10 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     // A heartbeat still in flight when the install finishes is awaited: refused, it fails the call.
     let late = 0;
     const quick = (cwd: string) => new Promise<void>(done => setTimeout(done, 30));
-    const refusedLate = () => { late++; return new Promise((_, fail) => setTimeout(() => fail(new Error('Lease epoch is superseded')), 60)); };
+    const refusedLate = () => { late++; return late === 1 ? Promise.resolve() : new Promise((_, fail) => setTimeout(() => fail(new Error('Lease epoch is superseded')), 60)); };
     await assert.rejects(installUnderLease(worktree, refusedLate, 'GY-1 epoch 1', { install: quick, intervalMs: 20 }),
       /lease heartbeat for GY-1 epoch 1 was refused while installing dependencies, so the install was stopped: Lease epoch is superseded/);
-    assert.equal(late, 1, 'renewals run one at a time: none starts while one is in flight');
+    assert.equal(late, 2, 'the up-front renewal, then one at a time: none starts while one is in flight');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -227,17 +232,20 @@ test('unit:proof-and-cli-self-sufficient graphyard evidence fills sha, baseSha a
   const request = { source: 'the producer request for GY-1', sha, baseSha, policyRevision: 4 }, checkout = { source: 'the checkout HEAD', sha };
   const bare = { proof: 'unit:x', result: 'pass', executed: 3, skipped: 0 };
   assert.deepEqual(bindEvidence(bare, work, request), { ...bare, sha, baseSha, policyRevision: 4 });
-  assert.deepEqual(bindEvidence(bare, work, checkout), { ...bare, sha, baseSha, policyRevision: 4 }, 'a checkout at the current head binds to it');
+  assert.deepEqual(bindEvidence({ ...bare, baseSha, policyRevision: 4 }, work, checkout), { ...bare, sha, baseSha, policyRevision: 4 }, 'a checkout at the current head binds its sha');
+  // A checkout records only its head: a base or policy that moved after the run cannot be detected there, so neither is defaulted.
+  assert.throws(() => bindEvidence(bare, work, checkout), /the checkout HEAD records only the head the run tested, not its baseSha or policyRevision, so the evidence file must name its baseSha, policyRevision/);
+  assert.throws(() => bindEvidence({ ...bare, baseSha }, { ...work, policyRevision: 5 }, checkout), /not its policyRevision, so the evidence file must name its policyRevision/);
   const explicit = { proof: 'unit:x', sha: 'c'.repeat(40), baseSha: 'd'.repeat(40), policyRevision: 2 };
   assert.deepEqual(bindEvidence(explicit, work, null), explicit, 'values the file carries are sent as written');
   assert.throws(() => bindEvidence({ proof: 'unit:x' }, { key: 'GY-1', candidate: null, policyRevision: 1 }, request), /GY-1 has no observed candidate yet/);
   // A candidate that moved after the run is never stamped onto the evidence.
   const moved = 'e'.repeat(40);
   assert.throws(() => bindEvidence(bare, { ...work, candidate: { sha: moved, baseSha } }, request), /current sha is e{40}, but the evidence was produced for a{40} \(the producer request for GY-1\); the candidate moved after the run/);
-  assert.throws(() => bindEvidence(bare, { ...work, candidate: { sha: moved, baseSha } }, checkout), /produced for a{40} \(the checkout HEAD\)/);
+  assert.throws(() => bindEvidence({ ...bare, baseSha, policyRevision: 4 }, { ...work, candidate: { sha: moved, baseSha } }, checkout), /produced for a{40} \(the checkout HEAD\)/);
   assert.throws(() => bindEvidence(bare, { ...work, candidate: { sha, baseSha: moved } }, request), /current baseSha is e{40}/);
   assert.throws(() => bindEvidence(bare, { ...work, policyRevision: 5 }, request), /current policyRevision is 5, but the evidence was produced for 4/);
-  assert.throws(() => bindEvidence({ ...bare, sha: moved }, work, checkout), /produced for e{40} \(the evidence file\)/, 'the others are not defaulted beside a sha the candidate no longer is');
+  assert.throws(() => bindEvidence({ ...bare, sha: moved }, work, request), /produced for e{40} \(the evidence file\)/, 'the others are not defaulted beside a sha the candidate no longer is');
   assert.throws(() => bindEvidence(bare, work, null), /Nothing records which head this evidence tested/);
   // The binding comes from the producer request the session was launched with, else the checkout's HEAD.
   assert.deepEqual(testedBinding('GY-1', { GRAPHYARD_PRODUCER_BINDING: `GY-1@${sha}@${baseSha}@4` }), request);
