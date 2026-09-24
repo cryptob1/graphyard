@@ -84,12 +84,13 @@ export interface ScopeDecision {
  */
 export const documentationScopes = ['docs/', 'AGENTS.md', 'README.md'] as const;
 /**
- * The surfaces that render or test the documentation: the web app that links to and embeds doc
- * pages, and the browser tests that pin their text. An item that plans the whole `docs/` tree
+ * The surfaces that render, test or point users at the documentation: the web app that links to
+ * and embeds doc pages, the browser tests that pin their text, and the integrations whose messages
+ * name a guide (e.g. integrations/herdr/ledger.mjs names docs/herdr.md). An item that plans the whole `docs/` tree
  * rewrites or moves pages these files consume, so a single file under them is implied scope.
  * A directory request is not: the implication covers the consumer a rewrite breaks, never a tree.
  */
-export const documentationConsumerScopes = ['web/', 'browser-tests/'] as const;
+export const documentationConsumerScopes = ['web/', 'browser-tests/', 'integrations/'] as const;
 
 const pathToken = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.*-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}/g;
 const wellFormed = (path: string) => {
