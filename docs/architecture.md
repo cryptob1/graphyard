@@ -5,7 +5,7 @@ The technical reference for Graphyard's invariants and storage. For a plain-lang
 
 ## Boundary
 
-Graphyard owns coordination decisions, Git source history, GitHub PR and merge facts; runtimes such as Herdr host sessions, and proof producers produce evidence. A gate is a deterministic evaluation, never an LLM judgment. Terms are in the [glossary](glossary.md).
+Graphyard owns coordination decisions, Git source history, GitHub PR and merge facts; runtimes such as Herdr host sessions, and proof producers produce evidence. A gate is a deterministic evaluation, never an LLM judgment.
 
 ![Graphyard control-plane components: callers, the coordination engine, Postgres, the reconciliation worker and GitHub.](diagrams/control-plane-components.svg)
 
@@ -14,11 +14,11 @@ Text equivalent of the diagram: agent sessions (violet), the dashboard (amber) a
 ## Storage
 
 - `work_items.document` is the current aggregate (intent, requirements, assignment, workspaces, candidate, evidence, gates, observed facts). Each mutation appends an event with the new snapshot in the same transaction; `events.seq` defines order.
-- `receipts` stores each command's result under `(principal, idempotency key)` and a fingerprint. Retries replay; a reused key with different input refuses. A replayed claim is not a renewed lease.
+- `receipts` stores each command's result under `(principal, idempotency key)` and a fingerprint for seven days; a renewal's receipt keeps only its lease. Retries replay; a reused key with different input refuses. A replayed claim is not a renewed lease.
 - `jobs` is the durable integration queue, created with PR submission and processed with `FOR UPDATE SKIP LOCKED`; GitHub calls happen outside coordination transactions.
 - Release, delivery and validation tables support [delivery](delivery.md) and [recovery](recovery.md); `flow_facts`, `deployment_observations` and the [attribution](attribution.md) tables feed analytics only and never gates.
 
-Triggers reject updates and deletes to the event ledger — an application audit guarantee, not tamper-proofing against a database administrator. A `github.observed` or `heartbeat` row that changes only a clock (observation time, lease deadline) stores `payload.delta` — the `base` full snapshot's seq and those clocks — instead of the whole document; every other kind keeps `payload.work`.
+Triggers reject updates and deletes to the event ledger — an application audit guarantee, not tamper-proofing against a database administrator. A `github.observed` or `heartbeat` row that changes only a clock stores `payload.delta` — the `base` full snapshot's seq and those clocks — instead of the whole document; every other kind keeps `payload.work`.
 
 ## Coordination transactions
 

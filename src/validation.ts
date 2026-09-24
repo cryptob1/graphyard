@@ -224,7 +224,11 @@ export class Validation {
         return receipt.result;
       }
       const result = await fn(db, now);
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result;
+      // A renewal's replay is checked against the request and its live attempt only, and its callers
+      // discard the answer, so its receipt keeps those rather than the whole request per renewal.
+      const stored = command === 'heartbeat' || command === 'collection-heartbeat'
+        ? (({ id, state, workId, proof, attempts }: ValidationRequest) => ({ id, state, workId, proof, attempts: attempts.slice(-1), compactReceipt: true }))(result as ValidationRequest) : result;
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(stored)]); return result;
     });
   }
   async define(actor: Principal, input: unknown, key: string) {

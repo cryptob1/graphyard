@@ -15,6 +15,7 @@ import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
 import { startDirectMerge } from '../direct-merge.js';
 import { GitHubCacheStore } from '../github-cache.js';
+import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
 export async function main() {
@@ -73,7 +74,7 @@ export async function main() {
   let running = false;
   // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
   // it runs once a minute rather than every tick.
-  let patternsAt = 0;
+  let patternsAt = 0, receiptsPrunedAt = 0;
   let tickStartedAt = 0, stallReportedAt = 0, tickStep = 'idle';
   const timer = setInterval(async () => {
     if (running) {
@@ -89,6 +90,8 @@ export async function main() {
       await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
       await step('engine.reconcile', () => engine.reconcile()); await step('delivery.sweep', () => delivery.sweep());
       await step('projectFlow', () => projectFlow(engine.store, { batches: 4 }));
+      // Bounded, on the pool, never under the coordination lock: receipts past the replay window go.
+      if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
       // The pattern scan's ledger query is quadratic in the events table and held the whole tick for
       // good once the table grew (2026-09-23): it runs only where an operator opts in until it is bounded.
       if (process.env.GRAPHYARD_INTERVENTION_PATTERNS === '1' && Date.now() - patternsAt >= 60_000) {

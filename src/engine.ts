@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Store, save, wakeJob, withLatestDelta } from './store.js';
+import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
@@ -949,7 +950,8 @@ export class Engine {
         : command === 'autoscope' ? { ...data, decision, before: { plannedFiles: before?.plannedFiles ?? [], blocker: before?.blocker ?? null } }
         : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}) } : data);
       if (work.submission && !postDeployment && !deliveredSessionClosure && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
+      // A renewal's replay needs only the lease, not a whole document per renewal.
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(command === 'heartbeat' ? compactHeartbeatReceipt(work) : work)]);
       return work;
     });
   }

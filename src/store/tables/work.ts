@@ -22,7 +22,10 @@ export const receipts = defineTable({
   ddl: `CREATE TABLE IF NOT EXISTS receipts (
   actor text NOT NULL, key text NOT NULL, fingerprint text NOT NULL, result jsonb NOT NULL,
   PRIMARY KEY(actor,key)
-);`,
+);
+-- Nullable so a restore of an older backup fills NULL; rows present when it is added read the migration's time.
+ALTER TABLE receipts ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+CREATE INDEX IF NOT EXISTS receipts_created ON receipts(created_at);`,
 });
 export const jobs = defineTable({
   name: 'jobs', orderBy: 'work_id',
