@@ -299,6 +299,9 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
       // on main, but not what production serves.
       { id: 5, sha: release, ref: 'main', environment: 'graphyard / staging' },
       { id: 4, sha: release, ref: release, environment: 'graphyard / staging' },
+      // Another Railway project deployed from the same repository: its environment is named
+      // production too, but it is not the managed installation's release.
+      { id: 7, sha: release, ref: release, environment: 'staging-copy / production' },
       { id: 2, sha: old, ref: old, environment: 'graphyard / production' },
       { id: 3, sha: old, ref: 'main', environment: 'graphyard-reporting' },
     ];
@@ -308,23 +311,29 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
       if (/\/deployments\/\d+\/statuses/.test(args[1])) return JSON.stringify([{ state: 'success' }]);
       throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
     };
+    // The production environment is compared as the provider's whole identity: unconfigured, the
+    // default `production` matches none of the Railway records and the reason names the ones seen.
+    const unconfigured = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    assert.equal(unconfigured.source, 'unavailable');
+    assert.match(unconfigured.reason!, /deployments to 'staging-copy \/ production', 'graphyard \/ production' are not the 'production' environment — set GRAPHYARD_PRODUCTION_ENVIRONMENT/);
+    process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT = 'graphyard / production';
     const observation = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(observation.source, 'github-deployment');
-    assert.equal(observation.sha, old, 'the production release, not the newer staging records of main or the reporting record on main');
+    assert.equal(observation.sha, old, 'the production release, not the newer staging records of main, another project\'s production, or the reporting record on main');
     // A production deployment that names the base branch is a release like one naming its commit.
     const byBranch = { id: 6, sha: release, ref: 'main', environment: 'graphyard / production' };
     listed.unshift(byBranch);
     assert.equal((await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout })).sha, release);
     listed.shift();
-    listed[3] = { id: 2, sha: release, ref: release, environment: 'graphyard / production' };
+    listed[4] = { id: 2, sha: release, ref: release, environment: 'graphyard / production' };
     const current = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(current.sha, release);
     assert.deepEqual(current.pending, []);
     // A SHA-ref deployment of a commit that is not on the base branch is not a release.
-    listed[3] = { id: 2, sha: 'c'.repeat(40), ref: 'c'.repeat(40), environment: 'graphyard / production' };
+    listed[4] = { id: 2, sha: 'c'.repeat(40), ref: 'c'.repeat(40), environment: 'graphyard / production' };
     const offBranch = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(offBranch.source, 'unavailable', 'nothing on the list is a release of the base branch');
-  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
+  } finally { delete process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT; await rm(fixture.directory, { recursive: true, force: true }); }
 });
 
 test('unit:deployment-source-is-a-release — records that are not releases never hide the release behind them: the listing is paged, and only release candidates cost a status read', async () => {
@@ -337,6 +346,7 @@ test('unit:deployment-source-is-a-release — records that are not releases neve
       ? { id: 1000 + index, sha: 'b'.repeat(40), ref: `graphyard/gy-${index}-1`, environment: 'graphyard / production' }
       : { id: 1000 + index, sha: release, ref: 'main', environment: 'graphyard-reporting' }),
       { id: 2, sha: release, ref: release, environment: 'graphyard / production' }];
+    process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT = 'graphyard / production';
     const pages: number[] = [], statuses: string[] = [];
     const run = (command: string, args: string[]) => {
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -352,5 +362,5 @@ test('unit:deployment-source-is-a-release — records that are not releases neve
     assert.deepEqual(pages, [1, 2]);
     assert.deepEqual(statuses, ['2'], 'no status is read for a record that is not a release');
     assert.ok(observation.requests! <= maxDeploymentRequests);
-  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
+  } finally { delete process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT; await rm(fixture.directory, { recursive: true, force: true }); }
 });

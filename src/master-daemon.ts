@@ -2425,11 +2425,13 @@ function localAncestry(root: string, baseBranch: string, run: ChildRun) {
  */
 /**
  * Whether a GitHub deployment's environment is the configured production environment
- * (GRAPHYARD_PRODUCTION_ENVIRONMENT, `production` by default). Railway names the GitHub
- * environment `<project> / <environment>`, so that form matches on its environment part.
+ * (GRAPHYARD_PRODUCTION_ENVIRONMENT, `production` by default), compared as the provider's whole
+ * identity. Railway names the GitHub environment `<project> / <environment>`, and one repository can
+ * deploy several Railway projects: `staging-copy / production` is not the managed installation's
+ * release, so a Railway installation configures the full name (`graphyard / production`), as the
+ * flow analytics' production phase already requires.
  */
-export const productionEnvironmentRecord = (environment: unknown, production: string) =>
-  typeof environment === 'string' && (environment === production || environment.endsWith(` / ${production}`));
+export const productionEnvironmentRecord = (environment: unknown, production: string) => environment === production;
 
 export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now(),
   options: { root: string; retained?: ContainmentRetention | null }): Promise<DeploymentObservation> {
@@ -2457,6 +2459,9 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     let production: string;
     try { production = productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
     let listed = 0, candidates = 0, exhausted = false;
+    // Environments named like production under another identity, reported when no release is found
+    // so an unconfigured Railway installation is told the name to configure rather than left pending.
+    const namesake = new Set<string>();
     for (let page = 1; page <= deploymentListingPages && !sha && !exhausted && candidates < deploymentListingSize; page++) {
       let deployments: any[];
       requests++;
@@ -2474,7 +2479,10 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
         // The base branch and its commits are deployed to staging and previews as readily as to
         // production, whether the ref names the branch or the commit; only the production
         // environment's record says what production serves.
-        if (!productionEnvironmentRecord(deployment?.environment, production)) continue;
+        if (!productionEnvironmentRecord(deployment?.environment, production)) {
+          if (typeof deployment?.environment === 'string' && deployment.environment.endsWith(` / ${production}`) && namesake.size < 5) namesake.add(deployment.environment);
+          continue;
+        }
         // A release is the base branch or a commit on it; another branch's deployment is not.
         const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
         if (ref && ref !== config.baseBranch) {
@@ -2491,7 +2499,9 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       }
     }
     if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
-    if (!sha) return unavailable(`No GitHub deployment of the managed base branch to the ${production} environment reports a successful status`);
+    if (!sha) return unavailable(`No GitHub deployment of the managed base branch to the ${production} environment reports a successful status${namesake.size
+      ? `; deployments to ${[...namesake].map(name => `'${name}'`).join(', ')} are not the '${production}' environment — set GRAPHYARD_PRODUCTION_ENVIRONMENT to the one production serves`
+      : ''}`);
   }
   const ancestry = localAncestry(options.root, config.baseBranch, run);
   // The retained set is carried forward whole, on one ancestry check, or dropped whole.

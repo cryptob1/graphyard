@@ -73,7 +73,23 @@ test('unit:healthz-select-bounded — a probe abandoned on an unanswered connect
   const context = { services, url: new URL('http://plane/healthz'), send: () => { throw new Error('not a 503'); } } as any;
   await assert.rejects(healthRoutes.routes[0].handle(context, []), /was not waiting for a pooled connection; the database is unreachable/);
   const started = Date.now();
-  await assert.rejects(healthRoutes.routes[0].handle(context, []), /1 earlier database probe is still waiting on a connection the database has not answered; the database is unreachable/);
+  await assert.rejects(healthRoutes.routes[0].handle(context, []), /an earlier database probe was not waiting for a pooled connection and is still waiting on the database; the database is unreachable/);
   assert.ok(Date.now() - started < 100);
   assert.equal(connects, 1);
+});
+
+test('unit:healthz-select-bounded — while a probe is still queued behind the saturated pool, later health requests join it rather than queueing another acquisition', async () => {
+  // Readiness and liveness calls every few seconds against a pool saturated for minutes must not
+  // grow the wait queue: abandoned probes would take the freed clients ahead of the plane's work.
+  let connects = 0, waiting = 0;
+  const pool = {
+    get waitingCount() { return waiting; }, idleCount: 0,
+    connect: () => { connects++; waiting++; return new Promise(() => {}); },
+  };
+  const services = { engine: { store: { pool } }, github: null, build: { commit: 'c'.repeat(40), protocol: 1 } } as any;
+  const context = { services, url: new URL('http://plane/healthz'), send: () => { throw new Error('the busy pool is not a 503'); } } as any;
+  const bodies = await Promise.all([healthRoutes.routes[0].handle(context, []), healthRoutes.routes[0].handle(context, [])]) as any[];
+  const later = await healthRoutes.routes[0].handle(context, []) as any;
+  for (const body of [...bodies, later]) assert.deepEqual(body.causes, [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`]);
+  assert.equal(connects, 1, 'one acquisition waits in the pool queue, however many requests asked');
 });
