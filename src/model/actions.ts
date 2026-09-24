@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { demand } from './refusal.js';
-import { actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
-import { nextAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
+import { actionRetryAt, actionSettleMs, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
+import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
 
 /**
@@ -99,9 +99,6 @@ export const actionRenewIntervalMs = 30_000;
 export const actionId = (kind: NextActionKind, workId: string, binding: string) =>
   createHash('sha256').update(['action', kind, workId, binding].join('\0')).digest('hex').slice(0, 32);
 
-
-
-
 const record = (row: ActionRow, entry: ActionRecord) => { row.history = [...row.history, entry].slice(-actionRecordLimit); };
 
 /** The queue as it stands, created on first use so legacy documents gain one at their next evaluation. */
@@ -183,9 +180,55 @@ export function reconcileActions(work: Work, all: Work[], now: Date, options: { 
   return transitions;
 }
 
-/** Every row an executor may take now, oldest request first, so the queue is served fairly. */
+/**
+ * Bring a delivered item's queue in line with what it still owes (GY-185).
+ *
+ * An item becomes done inside the transaction that observed its merge, after that transaction's
+ * evaluation named the merge it was about to need; nothing evaluated it again, so it kept that
+ * action, its merge and dispatch rows and its merge-queue entry, and executors retried them against
+ * a delivery that refuses every one. Every path that delivers an item calls this in the same
+ * transaction: the next action is recomputed — the deployment it owes, or nothing — every row that
+ * is not that action is retired, and the queue entry, which only an undelivered candidate holds, is
+ * cleared. A row an executor holds a live claim on is kept until it settles, as everywhere else,
+ * and the settlement calls this again. Returns whether anything changed.
+ */
+export function settleDelivered(work: Work, all: Work[], now: Date): boolean {
+  if (work.stage !== 'done') return false;
+  const computed = nextAction(work, all, now);
+  let changed = reconcileActions(work, all, now, { next: computed }).length > 0;
+  if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) { work.nextAction = computed; changed = true; }
+  if (work.queue) { work.queue = null; changed = true; }
+  return changed;
+}
+
+/**
+ * The ids of the items holding a row an executor may take now, found in SQL without loading a
+ * document: the SQL form of `openActions` (`claimable`, the delivered-item rule, the kinds and the
+ * item filter) over the stored rows, read at the database clock. An idle poll answers from this
+ * alone; a poll that finds candidates loads only those documents, and `claimAction` decides again
+ * under the lock, so a row that changed in between is simply not taken.
+ */
+export const claimCandidatesSql = `SELECT w.id FROM work_items w
+  WHERE ($1::text IS NULL OR w.id::text = $1 OR w.document->>'key' = $1)
+    AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(w.document->'actionQueue'->'actions') = 'array' THEN w.document->'actionQueue'->'actions' ELSE '[]'::jsonb END) AS a(entry)
+      WHERE (w.document->>'stage' IS DISTINCT FROM 'done' OR entry->>'kind' = 'verify-deployment')
+        AND ($2::text[] IS NULL OR entry->>'kind' = ANY($2::text[]))
+        AND (entry->>'retryAt' IS NULL OR (entry->>'retryAt')::timestamptz <= clock_timestamp())
+        AND NOT (entry->>'state' = 'done' AND entry->>'resolvedAt' IS NOT NULL AND (entry->>'resolvedAt')::timestamptz > clock_timestamp() - make_interval(secs => $3::double precision / 1000))
+        AND (entry->>'state' = 'pending' OR jsonb_typeof(entry->'claim') IS DISTINCT FROM 'object' OR (entry->'claim'->>'expiresAt')::timestamptz <= clock_timestamp()))
+  ORDER BY w.number`;
+export const claimCandidatesParams = (work: string | undefined, kinds: readonly NextActionKind[] | undefined) => [work ?? null, kinds ? [...kinds] : null, actionSettleMs];
+
+/**
+ * Every row an executor may take now, oldest request first, so the queue is served fairly.
+ *
+ * A delivered item owes nothing an executor can run but the deployment that carries it: whatever
+ * else it still holds is left over from before it was delivered, and running it is refused every
+ * time (GY-185). Only its `verify-deployment` row is offered; the rest wait to be retired.
+ */
 export function openActions(all: Work[], now: Date, kinds?: readonly NextActionKind[]): { work: Work; row: ActionRow }[] {
   return all.flatMap(work => (work.actionQueue?.actions ?? [])
+    .filter(row => work.stage !== 'done' || row.kind === 'verify-deployment')
     .filter(row => claimable(row, now) && (!kinds || kinds.includes(row.kind)))
     .map(row => ({ work, row })))
     .sort((a, b) => Date.parse(a.row.requestedAt) - Date.parse(b.row.requestedAt) || a.row.id.localeCompare(b.row.id));

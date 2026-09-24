@@ -8,9 +8,40 @@ import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 
 export * from './snapshot-delta.js';
 
+/**
+ * How long the store waits for a pooled connection, and how long any one statement may run —
+ * including the wait for the coordination lock, which is itself a statement (GY-185). Without them
+ * a saturated pool queued every request behind it indefinitely: callers timed out on their own
+ * clocks while the server kept working through requests nobody was waiting for any more. A bounded
+ * wait fails the one request with a reason, and the pool drains.
+ */
+export const storeConnectionTimeoutMs = 10_000, storeStatementTimeoutMs = 60_000;
+/** The history each coordination-view document keeps, applied in SQL (see `coordinationSnapshot`). */
+const coordinationTail = 20;
+const tail = (path: string) => `(SELECT COALESCE(jsonb_agg(entry ORDER BY position), '[]'::jsonb) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${path}) = 'array' THEN ${path} ELSE '[]'::jsonb END) WITH ORDINALITY AS t(entry, position) WHERE position > jsonb_array_length(CASE WHEN jsonb_typeof(${path}) = 'array' THEN ${path} ELSE '[]'::jsonb END) - ${coordinationTail})`;
+const length = (path: string) => `(CASE WHEN jsonb_typeof(${path}) = 'array' THEN jsonb_array_length(${path}) ELSE 0 END)`;
+const object = (path: string) => `jsonb_typeof(${path}) = 'object'`;
+/**
+ * One document as the coordination view reads it, built in SQL: the pipeline timeline dropped, the
+ * observation without its per-file scope comparison, each evidence record without its artifacts,
+ * scope digests and provenance, and the resolved dispatch requests, queue history and resolved
+ * action rows cut to their most recent entries. The action queue's history is the largest part of
+ * a long-lived document, and it never leaves the database whole.
+ */
+export const coordinationDocumentSql = `d.document - 'pipeline' - 'evidence' - 'observation' - 'queueHistory' - 'actionQueue' - 'autoDispatch'
+  || jsonb_build_object('evidence', (SELECT COALESCE(jsonb_agg(entry - 'artifacts' - 'scopeFiles' - 'provenance' ORDER BY position), '[]'::jsonb) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(d.document->'evidence') = 'array' THEN d.document->'evidence' ELSE '[]'::jsonb END) WITH ORDINALITY AS e(entry, position)))
+  || CASE WHEN d.document ? 'observation' THEN jsonb_build_object('observation', CASE WHEN ${object("d.document->'observation'")} THEN (d.document->'observation') - 'scopeFiles' ELSE d.document->'observation' END) ELSE '{}'::jsonb END
+  || CASE WHEN jsonb_typeof(d.document->'queueHistory') = 'array' THEN jsonb_build_object('queueHistory', ${tail("d.document->'queueHistory'")}) ELSE '{}'::jsonb END
+  || CASE WHEN ${object("d.document->'actionQueue'")} THEN jsonb_build_object('actionQueue', ((d.document->'actionQueue') - 'history') || jsonb_build_object('history', ${tail("d.document->'actionQueue'->'history'")})) ELSE '{}'::jsonb END
+  || CASE WHEN ${object("d.document->'autoDispatch'")} THEN jsonb_build_object('autoDispatch', ((d.document->'autoDispatch') - 'history') || jsonb_build_object('history', ${tail("d.document->'autoDispatch'->'history'")})) ELSE '{}'::jsonb END`;
+/** What the SQL cut from each history, per item, so the view still says how much it left out. */
+export interface CoordinationTrim { dispatchHistory: number; queueHistory: number; actionHistory: number }
+
 export class Store {
   pool: pg.Pool;
-  constructor(url: string) { this.pool = new pg.Pool({ connectionString: url, max: 12 }); }
+  constructor(url: string) {
+    this.pool = new pg.Pool({ connectionString: url, max: 12, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+  }
   /**
    * Apply the additive migration and record the schema generation it reached. Running
    * against a database a newer release already migrated refuses: rolling the application
@@ -46,6 +77,28 @@ export class Store {
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
+  }
+  /**
+   * The work snapshot as the coordination view reads it, trimmed in SQL (`coordinationDocumentSql`)
+   * rather than after every whole document was loaded, with how much each item's histories lost.
+   * The master loop, the dispatcher and every executor poll this; the full snapshot stays for the
+   * readers that derive reports from whole documents.
+   */
+  async coordinationSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[]; trimmed: Map<string, CoordinationTrim> }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const rows = (await client.query(`SELECT ${coordinationDocumentSql} AS document,
+        GREATEST(0, ${length("d.document->'autoDispatch'->'history'")} - ${coordinationTail}) AS dispatch_history,
+        GREATEST(0, ${length("d.document->'queueHistory'")} - ${coordinationTail}) AS queue_history,
+        GREATEST(0, ${length("d.document->'actionQueue'->'history'")} - ${coordinationTail}) AS action_history
+        FROM work_items d ORDER BY d.number`)).rows;
+      const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
+      await client.query('COMMIT');
+      const trimmed = new Map<string, CoordinationTrim>(rows.map(row => [row.document.id, { dispatchHistory: Number(row.dispatch_history), queueHistory: Number(row.queue_history), actionHistory: Number(row.action_history) }]));
+      return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs, trimmed };
+    } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+    finally { client.release(); }
   }
   async events(id?: string) {
     // A delta row reads as the full row it stands for (snapshot-delta.ts).

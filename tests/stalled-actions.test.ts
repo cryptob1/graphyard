@@ -9,9 +9,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import type { Principal, Work } from '../src/model.js';
-import { claimAction, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
-import { actionIdleMs, actionRetryDelay, actionRetryMaxMs, actionRetryMinMs, actionStall, actionStallLatencyMs, actionStallRecheckMs, actionStallThreshold, claimable, queueSnapshot, stalledActions } from '../src/model/action-progress.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import type { Observation, Principal, Work } from '../src/model.js';
+import { actionId, claimAction, openActions, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
+import { actionIdleMs, actionRetryDelay, actionRetryMaxMs, actionRetryMinMs, actionStall, actionStallDelay, actionStallLatencyMs, actionStallMaxMs, actionStallRecheckMs, actionStallThreshold, claimable, queueSnapshot, stalledActions } from '../src/model/action-progress.js';
+import { sweepDirectMerges, type DirectMergeWindow } from '../src/direct-merge.js';
+import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { assertDispatchable } from '../src/master.js';
 import { actionReport, stalledActionAttention } from '../src/cli/master-status.js';
 import { plainStatus, stalledStep } from '../web/plain-status.js';
@@ -35,6 +38,8 @@ import { readMasterGuide } from './helpers/master-guide.js';
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
 const executor: Principal = { id: 'executor-a', role: 'coordinator' };
+const coordinator: Principal = { id: 'master', role: 'coordinator' };
+const ci: Principal = { id: 'ci', role: 'producer', proofs: ['integration:claim-safety'] };
 const PROOF = 'integration:stalled-action-visible';
 const identity = { id: executor.id, host: 'host-1', principal: executor.id };
 
@@ -47,7 +52,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
-  engine.principals = [operator, worker, executor];
+  engine.principals = [operator, worker, executor, coordinator, ci];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
@@ -138,9 +143,10 @@ test('unit:stalled-action-classified — a row whose failures stop changing is c
   assert.deepEqual(open.map(entry => [entry.kind, entry.stall.reason, entry.stall.failures]), [['dispatch', busy, actionStallThreshold]]);
   assert.equal(open[0].openMs, now - clock, 'and how long the row has been open, from the request that opened it');
 
-  // A stall is a recheck, never a widening penalty: the row is offered again inside the fixed
-  // interval however many attempts it has made against the same condition.
+  // A stall starts from the recheck, not from the attempt count: the row is offered again inside
+  // the recheck interval however many attempts it made before it stalled.
   assert.equal(waited(stalled), Math.min(actionRetryDelay(actionStallThreshold), actionStallRecheckMs));
+  assert.equal(waited(stalled), actionStallDelay(actionStallThreshold));
   assert.ok(waited(stalled) <= actionStallRecheckMs);
   assert.equal(claimable(stalled, new Date(Date.parse(stalled.resolvedAt!) + actionStallRecheckMs + 1)), true);
 
@@ -234,14 +240,16 @@ test('integration:stall-raises-attention — a stalled row is raised as an atten
   const snapshot = await snapshotOf();
   const raised = stalledActionAttention(snapshot).filter(entry => entry.subject === item.key);
   assert.equal(raised.length, 1, 'the stall reaches somebody, once');
-  assert.match(raised[0].text, new RegExp(`^${item.key}'s dispatch action is stalled, not retrying`), 'naming the item and the action kind');
+  assert.match(raised[0].text, new RegExp(`^${item.key}'s dispatch action is stalled, retried only on a widening backoff`), 'naming the item and the action kind');
+  assert.doesNotMatch(raised[0].text, /not retrying/, 'never claiming a row is not retried while it is claimed again (GY-185)');
   assert.ok(raised[0].text.includes(busy), 'and the unchanged reason it keeps failing with');
   assert.match(raised[0].text, new RegExp(`${actionStallThreshold} attempts in a row`));
   assert.match(raised[0].text, /and it has been open \d+s over 3 attempt\(s\)/);
   assert.equal(raised[0].role, 'master', 'resolved by an agent, never left to a human to notice');
   assert.equal(raised[0].human, false);
   assert.match(raised[0].next, /Clear what that reason names/);
-  assert.match(raised[0].next, /claimed a minute after the condition clears/);
+  assert.match(raised[0].next, /claimed within one such interval of the condition clearing/);
+  assert.match(raised[0].next, new RegExp(`up to ${actionStallMaxMs / 60_000} minutes`));
 
   // The bound. The row has not waited anything like the idle bound — it has been attempted three
   // times — and it is already in front of somebody: a fleet that cannot make progress is
@@ -276,20 +284,24 @@ test('integration:cleared-condition-retries-promptly — a row starved against a
   assert.equal(last!.attempts, 6);
   assert.equal(actionStall(last!)!.reason, refusal);
   assert.equal(actionRetryDelay(last!.attempts), actionRetryMaxMs, 'the attempt count alone would hold it for ten minutes');
-  assert.equal(waited(last!), actionStallRecheckMs, 'the row it earned against an impossibility waits a recheck instead');
+  // GY-185: the stall's own schedule, which grows with the unchanged run from the recheck — so a
+  // condition that never clears is attempted less and less often — and is still shorter here than
+  // the attempt count would have made it.
+  assert.equal(waited(last!), actionStallDelay(6), 'the row waits on the stall schedule instead');
+  assert.ok(waited(last!) < actionRetryMaxMs);
 
   // The resource is freed. Nothing touches the starved row: the condition it failed on has simply
   // stopped standing, and its dispatch would now succeed.
   await engine.execute(worker, 'release', holder.id, { epoch: held.epoch }, randomUUID());
   assert.equal(dispatchRefusal(await reload(starved), await store.list()), null, 'the condition has cleared');
 
-  // One recheck interval later the row is claimed. The delay computed from attempts made while it
-  // could not have succeeded — still more than eight minutes of it left to run — never applies.
-  await elapse(starved, actionStallRecheckMs + 1000);
+  // Once the stall's wait runs out the row is claimed; the delay computed from attempts made while
+  // it could not have succeeded never applies.
+  await elapse(starved, waited(last!) + 1000);
   const claimed = await engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch'], work: starved.key }, randomUUID());
   assert.ok(claimed.action, 'claimed a recheck after the resource was freed');
   assert.equal(claimed.action!.attempts, 7);
-  assert.ok(actionRetryMaxMs > actionStallRecheckMs + 1000, 'while the attempt-count schedule would still have been holding it');
+  assert.ok(actionRetryMaxMs > waited(last!) + 1000, 'while the attempt-count schedule would still have been holding it');
   assert.equal(claimed.action!.stall!.reason, refusal, 'and the attempt is still recorded as one made against a standing stall');
 });
 
@@ -311,4 +323,189 @@ test('manual:stall-visibility-docs-review — docs state that a repeated identic
   assert.match(master, /on the item's own card/i, 'and on the dashboard');
   assert.match(master, /reads as idle and is not|looks idle/i, 'and that it is the signal for a fleet that looks idle but is not');
   assert.match(master, /read exactly like an item with nothing to do|no count and no list/i);
+});
+
+// ---- GY-185: delivered items owe nothing to retry, and an idle poll costs no lock ------------
+
+const head = 'a'.repeat(40), base = 'b'.repeat(40);
+let deliveries = 0;
+
+/** A pending row the item does not need, as production's delivered items still held them. */
+function leftover(item: Work, kind: 'dispatch' | 'merge', binding: string): ActionRow {
+  const at = new Date(Date.now() - 3_600_000).toISOString();
+  return { id: actionId(kind, item.id, binding), kind, work: item.id, key: item.key, binding, gate: kind === 'merge' ? 'merge' : 'build', refusal: null,
+    inputs: kind === 'merge' ? { kind: 'merge', sha: head, baseSha: base, policyRevision: 1 } as any : { kind: 'dispatch', target: 'implementation', epoch: 1, priority: 0, plannedFiles: ['src/'] },
+    reason: `${item.key} left over from before its delivery`, requestedBy: 'graphyard', requestedAt: at, state: 'pending', claim: null, attempts: 957,
+    history: [{ at, event: 'requested', requester: 'graphyard', executor: null, result: null, reason: 'left over' }] };
+}
+/** Write rows (and optionally a queue entry and a stale next action) onto a stored item without touching its revision. */
+async function seed(item: Work, rows: ActionRow[], extra: Record<string, unknown> = {}) {
+  const current = await reload(item);
+  const queue = { actions: [...(current.actionQueue?.actions ?? []), ...rows], history: current.actionQueue?.history ?? [] };
+  await store.pool.query("UPDATE work_items SET document=(jsonb_set(document,'{actionQueue}',$2::jsonb) || $3::jsonb) WHERE id=$1", [item.id, JSON.stringify(queue), JSON.stringify(extra)]);
+}
+const pendingRows = (item: Work) => (item.actionQueue?.actions ?? []).filter(row => row.state === 'pending');
+const queueEntry = (sequence: number) => ({ sequence, enqueuedAt: new Date().toISOString(), policyRevision: 1, speculation: null });
+
+/** A submitted item with a passing CI, an approval and trusted evidence: queued for the merge it is about to get. */
+async function queuedCandidate() {
+  const n = ++deliveries;
+  let w = await engine.execute(operator, 'create', null, { title: `Delivered ${n}`, plannedFiles: [`src/delivered-${n}.ts`], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/stalled-delivery-${n}`, branch: `graphyard/stalled-delivery-${n}` }, randomUUID());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, randomUUID());
+  // Only this candidate is in the queue, so it is at its head.
+  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
+  const observation = (): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: 900 + n, branch: `graphyard/stalled-delivery-${n}`, author: 'implementer' },
+    checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }],
+    protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString() });
+  w = await engine.observe(w.id, w.revision, observation());
+  w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
+  const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
+  w = await engine.observe(w.id, (await reload(w)).revision, observation());
+  return { work: w, observation };
+}
+
+/** What a delivered item must look like after any path delivered it: nothing left to retry. */
+function assertSettled(item: Work, path: string) {
+  assert.equal(item.stage, 'done', `${path}: delivered`);
+  assert.ok(item.nextAction === null || item.nextAction?.kind === 'verify-deployment', `${path}: the next action is the deployment it owes or nothing, not ${item.nextAction?.kind}`);
+  assert.deepEqual(pendingRows(item).map(row => row.kind), [], `${path}: no pending row is left to retry`);
+  assert.ok(item.actionQueue!.history.some(row => row.kind === 'dispatch' && /no longer needs this action|now needs/.test(row.resolution ?? '')), `${path}: the leftover row was retired with a reason`);
+  assert.equal(item.queue ?? null, null, `${path}: the merge-queue entry is cleared`);
+}
+
+test('integration:done-retires-actions — an item delivered by the gated merge observation or by the direct-merge sweep has its next action recomputed, its pending rows retired and its queue entry cleared in the same transaction', async () => {
+  // The gated path: an authorized, verified, committed merge, observed.
+  const { work: queued, observation } = await queuedCandidate();
+  assert.ok(queued.queue, 'the candidate holds a merge-queue entry');
+  assert.equal(queued.nextAction?.kind, 'merge', 'and its next action is the merge');
+  await seed(queued, [leftover(queued, 'dispatch', 'dispatch:0')]);
+  const granted = await engine.acquireMerge(coordinator, queued.id, { expectedRevision: (await reload(queued)).revision, sha: head, baseSha: base, policyRevision: queued.policyRevision }, randomUUID());
+  await engine.verifyMerge(coordinator, queued.id, { executionId: granted.execution.id }, { ...observation(), prState: 'open', draft: false }, randomUUID());
+  const committed = await engine.commitMerge(coordinator, queued.id, { executionId: granted.execution.id }, randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  const merged = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  assertSettled(merged, 'gated merge observation');
+  assertSettled(await reload(queued), 'gated merge observation, as stored');
+
+  // The direct-merge sweep: an item held for a merge no execution authorized, with a queue entry,
+  // a merge row and a dispatch row, delivered because the merge fell inside a window.
+  const { work: held, observation: heldObservation } = await queuedCandidate();
+  const heldMerge = await engine.observe(held.id, (await reload(held)).revision, { ...heldObservation(), merged: true, mergedAt: '2026-02-01T10:00:00Z', mergeSha: 'f'.repeat(40), prState: 'closed' });
+  assert.notEqual(heldMerge.stage, 'done', 'held with the unauthorized-merge violation');
+  await seed(held, [leftover(held, 'dispatch', 'dispatch:0'), leftover(held, 'merge', 'merge:stale')], { queue: queueEntry(9000) });
+  const window: DirectMergeWindow = { since: '2026-01-01T00:00:00.000Z', until: null, reason: 'merges straight into main', setBy: operator.id, enabledAt: new Date().toISOString(), source: 'setting', event: null };
+  const swept = await store.transaction(async (db, now) => sweepDirectMerges(db, (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document), [window], now));
+  assert.deepEqual(swept.map(item => item.key), [held.key]);
+  assertSettled(await reload(held), 'direct-merge sweep');
+  assert.ok((await reload(held)).actionQueue!.history.some(row => row.kind === 'merge' && row.id === actionId('merge', held.id, 'merge:stale')), 'the leftover merge row too');
+});
+
+test('integration:done-rows-never-claimed — a done item\'s pending dispatch and merge rows are never offered, reconcile retires them and its queue entry, and a row failing for one unchanged reason is not claimed again before a backoff that grows with each failure', async () => {
+  // A delivered item as production held 44 of them: a pending dispatch and a pending merge, a
+  // queue entry, and a next action from before its delivery.
+  const { work: queued, observation } = await queuedCandidate();
+  const granted = await engine.acquireMerge(coordinator, queued.id, { expectedRevision: (await reload(queued)).revision, sha: head, baseSha: base, policyRevision: queued.policyRevision }, randomUUID());
+  await engine.verifyMerge(coordinator, queued.id, { executionId: granted.execution.id }, { ...observation(), prState: 'open', draft: false }, randomUUID());
+  const committed = await engine.commitMerge(coordinator, queued.id, { executionId: granted.execution.id }, randomUUID());
+  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
+  const done = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'c'.repeat(40) });
+  assert.equal(done.stage, 'done');
+  const dispatch = leftover(done, 'dispatch', 'dispatch:0'), merge = leftover(done, 'merge', 'merge:stale');
+  await seed(done, [dispatch, merge], { queue: queueEntry(9001), nextAction: { kind: 'merge', work: done.id, key: done.key, gate: 'merge', refusal: null, reason: 'stale', inputs: merge.inputs, llmRole: null, binding: 'merge:stale' } });
+
+  // Never claimable: not through the model, not through the control plane, whoever asks.
+  const stored = await reload(done);
+  assert.deepEqual(pendingRows(stored).map(row => row.kind).sort(), ['dispatch', 'merge'], 'the rows are there to be offered');
+  assert.deepEqual(openActions(await store.list(), new Date()).filter(entry => entry.work.id === done.id), [], 'openActions offers none of them');
+  assert.equal(claimAction(await store.list(), identity, new Date(), { work: done.key }), null, 'claimAction takes none of them');
+  const polled = await engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch', 'merge'], work: done.key }, randomUUID());
+  assert.equal(polled.action, null, 'and an executor polling for them is given nothing');
+
+  // Reconcile retires them, and the queue entry and stale action with them.
+  await engine.reconcile();
+  const settled = await reload(done);
+  assert.deepEqual(pendingRows(settled), [], 'no pending row remains');
+  assert.equal(settled.actionQueue!.actions.length, 0);
+  for (const row of [dispatch, merge]) {
+    const retired = settled.actionQueue!.history.find(entry => entry.id === row.id);
+    assert.ok(retired, `the ${row.kind} row is retired to history`);
+    assert.equal(retired!.history.at(-1)!.event, 'cancelled');
+  }
+  assert.equal(settled.queue, null, 'the queue entry is cleared');
+  assert.equal(settled.nextAction, null, 'the next action is recomputed');
+  const revision = settled.revision;
+  await engine.reconcile();
+  assert.equal((await reload(done)).revision, revision, 'a settled delivery is not rewritten on every tick');
+
+  // A row on an open item that keeps failing for one unchanged reason: never claimed inside its
+  // backoff, and each identical failure past the threshold waits longer than the one before.
+  const item = await release(await created());
+  const reason = 'Dispatch blocked: the same condition every time';
+  const waits: number[] = [];
+  for (let failure = 1; failure <= actionStallThreshold + 3; failure++) {
+    const failed = await attempt(item, async () => reason);
+    waits.push(waited(failed));
+    const early = await engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch'], work: item.key }, randomUUID());
+    assert.equal(early.action, null, `failure ${failure}: not claimed again inside its backoff`);
+    await elapse(item, waited(failed) - 5_000);
+    assert.equal((await engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch'], work: item.key }, randomUUID())).action, null, `failure ${failure}: nor just before it runs out`);
+    await elapse(item, 5_000 + 1_000);
+  }
+  const stalledWaits = waits.slice(actionStallThreshold - 1);
+  assert.equal(stalledWaits[0], actionStallRecheckMs, 'a stall starts from the recheck');
+  for (let index = 1; index < stalledWaits.length; index++) assert.ok(stalledWaits[index] > stalledWaits[index - 1], `the wait grows with each identical failure: ${stalledWaits.join(', ')}`);
+  assert.deepEqual(stalledWaits, stalledWaits.map((_wait, index) => actionStallDelay(actionStallThreshold + index)));
+  assert.equal(actionStallDelay(1000), actionStallMaxMs, 'up to a ceiling, so a condition that clears is still answered');
+  assert.ok((await engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch'], work: item.key }, randomUUID())).action, 'and claimed once its backoff has run out');
+});
+
+/** Every statement the store runs while `run` does, from the pool and from every client it hands out. */
+async function spyQueries<T>(run: () => Promise<T>) {
+  const seen: { text: string; rows: any[] }[] = [];
+  const pool = store.pool as any, query = pool.query, connect = pool.connect;
+  const wrap = (target: any, original: any) => async (...args: any[]) => {
+    const result = await original.apply(target, args);
+    seen.push({ text: typeof args[0] === 'string' ? args[0] : args[0]?.text ?? '', rows: result?.rows ?? [] });
+    return result;
+  };
+  pool.query = wrap(pool, query);
+  const clients: [any, any][] = [];
+  // The pool's own query() checks a client out through connect() with a callback; those
+  // statements are already seen through the pool's query, so only checked-out clients are wrapped.
+  pool.connect = (...args: any[]) => {
+    if (typeof args[0] === 'function') return connect.apply(pool, args);
+    return connect.apply(pool, args).then((client: any) => { clients.push([client, client.query]); client.query = wrap(client, client.query); return client; });
+  };
+  try { return { result: await run(), seen }; }
+  finally { pool.query = query; pool.connect = connect; for (const [client, original] of clients) client.query = original; }
+}
+
+test('integration:idle-claim-lock-free — a claim poll with nothing claimable takes no advisory lock and reads no work_items document; one with a claimable row takes the lock and claims it', async () => {
+  const item = await release(await created());
+  await attempt(item, async () => 'the handler refused');
+  // Its only row is inside a backoff: nothing is claimable for this poll.
+  const { result: idle, seen } = await spyQueries(() => engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch'], work: item.key }, randomUUID()));
+  assert.equal(idle.action, null);
+  assert.ok(seen.length > 0, 'the poll was observed');
+  assert.deepEqual(seen.filter(entry => /pg_advisory/i.test(entry.text)).map(entry => entry.text), [], 'no advisory lock was taken');
+  assert.deepEqual(seen.filter(entry => /\bBEGIN\b/i.test(entry.text)).map(entry => entry.text), [], 'no coordination transaction was opened');
+  for (const entry of seen) {
+    assert.doesNotMatch(entry.text, /SELECT\s+(w\.)?document\b/i, `no statement selected a document: ${entry.text.slice(0, 80)}`);
+    for (const row of entry.rows) assert.equal(row.document, undefined, 'and no row carried one');
+  }
+  // With nothing narrowing it to one item, an idle fleet-wide poll for a kind nobody holds is the same.
+  const fleet = await spyQueries(() => engine.claimNextAction(executor, { host: identity.host, kinds: ['reclaim'] }, randomUUID()));
+  assert.equal(fleet.result.action, null);
+  assert.equal(fleet.seen.some(entry => /pg_advisory|SELECT\s+(w\.)?document\b/i.test(entry.text)), false);
+
+  // Once the backoff runs out the same poll finds the row, and only then takes the lock to claim it.
+  await elapse(item, actionRetryMaxMs);
+  const { result: busy, seen: claiming } = await spyQueries(() => engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch'], work: item.key }, randomUUID()));
+  assert.ok(busy.action, 'the claimable row is claimed');
+  assert.ok(claiming.some(entry => /pg_advisory_xact_lock/.test(entry.text)), 'under the coordination lock');
+  const loaded = claiming.filter(entry => /SELECT document FROM work_items/.test(entry.text)).flatMap(entry => entry.rows);
+  assert.deepEqual(loaded.map(row => row.document.id), [item.id], 'loading only the item that holds it');
 });
