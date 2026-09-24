@@ -6,7 +6,7 @@ import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { agentOwner, assertMergeCandidate, buildMasterStatus, mergeWork } from '../src/master.js';
 import { nameUnresolvedThreads, queueRef } from '../src/merge-queue.js';
-import { routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
+import { decisionReasonMax, fitDecisionReason, observedFrom, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
 
 // GY-139. Each test is named for the proof it produces: integration:unresolved-threads-fail-merge-gate,
 // unit:unresolved-threads-surfaced, integration:blocked-merge-refused-before-execution.
@@ -208,4 +208,20 @@ test('the loop requests thread rework only after the current head\'s review sett
   assert.equal(decide(item(approvedAt(60_000))), null, 'approved moments ago: the loop is still resolving the threads it named');
   assert.equal(decide(item(approvedAt(threadResolutionGraceMs + 1))), 'rework', 'approved and the threads still stand');
   assert.equal(decide({ ...item([]), policy: { checks: ['test'], review: false } } as Work), 'rework', 'no review policy: nothing else judges the threads');
+});
+
+test('a thread rework request stays within the control plane\'s reason bound however many threads, and however long their paths', () => {
+  const now = new Date('2026-09-24T06:00:00Z');
+  const threads = Array.from({ length: 40 }, (_, index) => ({ id: `PRRT_${index}`, author: reviewer, path: `src/${'deeply/nested/'.repeat(20)}file-${index}.ts`, line: index + 1, outdated: false }));
+  const work = { ...candidate(observation(threads, now)), policy: { checks: ['test'], review: false } } as unknown as Work;
+  const decision = routineDecision(work, { autoMerge: true }, now.getTime())!;
+  assert.equal(decision.action, 'rework');
+  assert.match(decision.reason, /40 review threads are unresolved/);
+  assert.match(decision.reason, /and 35 more on the pull request/);
+  assert.ok(threads.every(thread => decision.binding.includes(thread.id)), 'the binding still names every thread');
+  // What the requester sends: the observation it decided from and every refusal it answers, kept whole.
+  const answers = ` This rests on different grounds from refused rework decisions ${Array.from({ length: 8 }, (_, index) => `00000000-0000-4000-8000-00000000000${index}`).join(', ')}.`;
+  const reason = fitDecisionReason(`${observedFrom(work)} `, `${decision.reason} ${'x'.repeat(3000)}`, answers);
+  assert.ok(reason.length <= decisionReasonMax, `${reason.length} characters`);
+  assert.ok(reason.startsWith(observedFrom(work)) && reason.endsWith(answers));
 });

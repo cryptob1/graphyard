@@ -12,7 +12,7 @@ import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, s
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { baseRefreshConflict, blockingThreads, pendingBaseRefresh, unresolvedThreadRefusal } from './merge-queue.js';
+import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, type ReviewThread } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
@@ -732,11 +732,34 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   // The review of the current head judges those threads first: its approval names the ones fixed and
   // the loop resolves them, so a rework requested before it settles invalidated the review that
   // would have cleared them, and the same open threads carried to the next head — without end.
-  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? unresolvedThreadRefusal(work) : null;
-  if (threads) return { action: 'rework', reason: `${work.key}: ${threads}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
-    binding: `${work.candidate!.sha}:threads:${blockingThreads(work).map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
+  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? blockingThreads(work) : [];
+  if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
+    binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/** The control plane's bound on a decision's reason (`src/model/approval.ts`); a longer one is refused on every retry. */
+export const decisionReasonMax = 2000;
+/** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
+const reworkThreadsNamed = 5;
+/**
+ * The unresolved threads a rework request names, bounded: their authors and paths are contributor
+ * text of any length and count, and a reason past the control plane's bound is refused on every
+ * retry, so the item would never reach its approver or its rework worker.
+ */
+export function threadReworkSummary(sha: string, threads: ReviewThread[]): string {
+  const named = threads.slice(0, reworkThreadsNamed).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
+  const more = threads.length - named.length;
+  return `Branch protection requires conversation resolution and ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} unresolved on ${sha.slice(0, 12)}: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
+}
+/**
+ * A decision reason within the control plane's bound. What the requester adds around the loop's own
+ * grounds — the observation it decided from, the refusals it answers — is kept whole, because the
+ * server reads the cited refusals from it; the grounds are shortened to make room.
+ */
+export function fitDecisionReason(prefix: string, grounds: string, suffix: string): string {
+  const room = decisionReasonMax - prefix.length - suffix.length;
+  return prefix + (grounds.length <= room ? grounds : `${grounds.slice(0, Math.max(0, room - 1))}…`) + suffix;
 }
 /** How long after an approval of the current head the loop's thread resolution is waited for. */
 export const threadResolutionGraceMs = 300_000;
@@ -1981,7 +2004,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // refusal of this action on the item by citing it.
       const refused = decision.action === 'rework' ? history.filter(entry => entry.action === 'rework' && entry.state === 'refused').map(entry => entry.id) : [];
       const answers = refused.length ? ` This rests on different grounds from refused rework decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.` : '';
-      const reason = decision.action === 'rework' ? `${observedFrom(item)} ${decision.reason}${answers}` : decision.reason;
+      const reason = decision.action === 'rework' ? fitDecisionReason(`${observedFrom(item)} `, decision.reason, answers) : fitDecisionReason('', decision.reason, '');
       const requested = standing ?? await effects.decide!(item, decision.action, reason);
       const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [], observation: observed });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it

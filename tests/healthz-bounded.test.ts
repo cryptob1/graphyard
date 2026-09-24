@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { healthCheckWaitMs, healthRoutes } from '../src/server/routes/health.js';
+import { healthCheckQueryGraceMs, healthCheckWaitMs, healthRoutes } from '../src/server/routes/health.js';
 
 // On a fresh process the reconciliation step can hold every pooled connection for minutes; an
 // unbounded SELECT 1 then failed the deploy's health check. The probe is bounded like the resource checks.
@@ -53,4 +53,10 @@ test('unit:healthz-select-bounded — a probe queued behind the busy pool and ha
   const body = await probe(() => new Promise(() => {}), { queued: true, handedAt: healthCheckWaitMs - 100 }) as any;
   assert.equal(body.ok, true);
   assert.deepEqual(body.causes, [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`]);
+});
+
+test('unit:healthz-select-bounded — a probe that queued briefly, then held its client for most of the bound without an answer, fails as an unreachable database', async () => {
+  // Having queued once is not a pass: the probe owned a connection the database never answered on.
+  const handedAt = healthCheckWaitMs - healthCheckQueryGraceMs - 1000;
+  await assert.rejects(probe(() => new Promise(() => {}), { queued: true, handedAt }), /held its pooled connection for \d+ ms without an answer; the database is unreachable/);
 });

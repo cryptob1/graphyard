@@ -24,6 +24,8 @@ import { defineRoutes } from '../routes.js';
  */
 /** How long the health probe waits for its resource checks before answering alive without them. */
 export const healthCheckWaitMs = 3000;
+/** How long a probe handed its client from the pool's queue may hold it without an answer and still be the busy pool rather than an unreachable database. */
+export const healthCheckQueryGraceMs = 1000;
 export const healthRoutes = defineRoutes('health', [
   { method: '*', path: '/healthz', handle: async ({ services, send, url }) => {
     const pool = services.engine.store.pool;
@@ -32,19 +34,25 @@ export const healthRoutes = defineRoutes('health', [
     // Only a probe queued behind a full pool is that busy pool: one that held or was opening a
     // connection when the bound passed met a database that did not answer — a blackholed network
     // hangs rather than refusing — and that is a database the process cannot reach. Whether the probe
-    // queued is recorded when it asks for its client, not sampled at the deadline: a queued probe
-    // handed a client just before the bound has left the queue, and is still the busy pool.
+    // queued is recorded when it asks for its client, not sampled at the deadline, and so is when it
+    // was handed one: a queued probe still waiting at the bound, or handed its client too late for a
+    // SELECT 1 to have answered, is the busy pool; one that held its client for most of the bound
+    // without an answer met a database that did not answer, whatever queue it waited in first.
     const waiting = Number(pool.waitingCount) || 0, idle = Number(pool.idleCount) || 0;
+    const startedAt = Date.now();
     const connecting = pool.connect();
     const queued = idle === 0 && (Number(pool.waitingCount) || 0) > waiting;
+    let acquiredAt: number | null = null;
     const answered = connecting.then(async client => {
+      acquiredAt = Date.now();
       try { await client.query('SELECT 1'); client.release(); } catch (error) { client.release(error as Error); throw error; }
       return true as const;
     });
     // A probe that finishes after the bound has already been answered for; its failure is not unhandled.
     answered.catch(() => {});
     const reachable = await Promise.race([answered, new Promise<false>(resolve => setTimeout(() => resolve(false), healthCheckWaitMs).unref())]);
-    if (!reachable && !queued) throw new Error(`database probe did not finish within ${healthCheckWaitMs} ms and was not waiting for a pooled connection; the database is unreachable`);
+    const held = acquiredAt === null ? 0 : startedAt + healthCheckWaitMs - acquiredAt;
+    if (!reachable && !(queued && held < healthCheckQueryGraceMs)) throw new Error(`database probe did not finish within ${healthCheckWaitMs} ms ${queued ? `and held its pooled connection for ${held} ms without an answer` : 'and was not waiting for a pooled connection'}; the database is unreachable`);
     if (!reachable) return { ok: true, healthy: true, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued
