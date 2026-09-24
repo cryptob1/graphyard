@@ -1484,10 +1484,11 @@ export interface DaemonEffects {
    */
   snapshot: () => Promise<{ work: Work[]; now: string; jobs?: { work_id?: string; error?: string | null }[] }>;
   /**
-   * The review threads, per item key, that a standing approval named as follow-up (GY-166). The
-   * review loop files and resolves them, so the cycle requests no thread rework for them.
+   * The review threads, per item key, that a standing approval named as follow-up (GY-166), or that
+   * an approval of `work`'s current head was shown while the dispatcher has yet to file its
+   * follow-ups. The review loop files and resolves them, so the cycle requests no thread rework for them.
    */
-  followUpThreads?: () => Promise<Map<string, Set<string>>>;
+  followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
 }
 
@@ -1540,8 +1541,11 @@ async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEff
  */
 export async function runCycle(config: MasterConfig, state: DaemonState, effects: DaemonEffects, now: () => number = Date.now) {
   const startedAt = now();
-  const snapshot = setAsideFollowUpThreads(await effects.snapshot(), await effects.followUpThreads?.().catch(() => undefined));
+  const read = await effects.snapshot();
   const readAt = now();
+  // Filing runs in the dispatcher, beside this cycle: an approval it has not yet reconciled still
+  // sets its threads aside, so the cycle never sends a head back over what that review filed.
+  const snapshot = setAsideFollowUpThreads(read, await effects.followUpThreads?.(read.work, Number.isFinite(Date.parse(read.now)) ? Date.parse(read.now) : readAt).catch(() => undefined));
   const observedAt = Date.parse(snapshot.now), clock = Number.isFinite(observedAt) ? observedAt : startedAt;
   // The same bound `master status` uses, from the read that produced this snapshot: containment
   // settlement may only be proposed while the local clock can be compared with the control plane.
@@ -3005,7 +3009,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopSupervisor: async (orphan, signal) => { await stopWatchSupervisor(orphan, signal, run); },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     snapshot: deps.snapshot,
-    followUpThreads: async () => followUpThreadIds((await readReviewLedger(root)).reviews),
+    followUpThreads: async (work, at) => {
+      const reviewer = current().reviewer;
+      return followUpThreadIds((await readReviewLedger(root)).reviews, reviewer ? { work, reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
+    },
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),

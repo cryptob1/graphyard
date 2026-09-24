@@ -169,14 +169,34 @@ export interface FollowUpItem { title: string; description: string; type: 'chore
 export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ key: string }>;
 
 const replyMutation = 'mutation($thread:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread,body:$body}){comment{id}}}';
-const describeFollowUp = (thread: LaunchThread) => `${thread.id} — ${thread.path}${thread.line !== null ? `:${thread.line}` : ''} by ${thread.author}${thread.url ? ` (${thread.url})` : ''}: "${thread.excerpt.replace(/"/g, "'")}"`;
+/** The bound on a work item's description (`src/model/work.ts`). */
+const descriptionMax = 20000;
+const clipEnd = (text: string, max: number) => text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
+const clipStart = (text: string, max: number) => text.length <= max ? text : `…${text.slice(text.length - Math.max(0, max - 1))}`;
+/**
+ * One thread's entry within `budget` characters. The id, line and URL are kept whole; the author,
+ * path (its file end) and excerpt share what is left, so a long list shortens every entry rather
+ * than dropping the last ones: each thread the loop resolves stays listed in the item it names.
+ */
+function describeFollowUp(thread: LaunchThread, index: number, budget: number) {
+  const excerpt = thread.excerpt.replace(/"/g, "'"), url = thread.url ? ` (${thread.url})` : '', line = thread.line !== null ? `:${thread.line}` : '';
+  const fixed = `${index + 1}. ${thread.id} — ${line} by ${url}: ""`.length;
+  let left = Math.max(0, budget - fixed);
+  // Water-fill the three variable fields, shortest first: a short field keeps its whole text.
+  const fields = [{ name: 'author', text: thread.author }, { name: 'path', text: thread.path }, { name: 'excerpt', text: excerpt }].sort((a, b) => a.text.length - b.text.length);
+  const share: Record<string, number> = {};
+  fields.forEach((field, position) => { share[field.name] = Math.min(field.text.length, Math.floor(left / (fields.length - position))); left -= share[field.name]; });
+  // Only a URL longer than GitHub's own could still overrun the entry's share; the id leads it.
+  return clipEnd(`${index + 1}. ${thread.id} — ${clipStart(thread.path, share.path)}${line} by ${clipEnd(thread.author, share.author)}${url}: "${clipEnd(excerpt, share.excerpt)}"`, budget);
+}
 
 /** The one backlog item for an approval's follow-up threads: each thread's id, path:line, author, URL and excerpt. */
 export function followUpItem(input: { key: string; pr: number; sha: string; reviewId: number }, threads: LaunchThread[]): FollowUpItem {
+  const intro = `The independent reviewer approved ${input.key} at ${input.sha} (review ${input.reviewId}) with every acceptance criterion met, and judged these ${threads.length} review thread${threads.length === 1 ? '' : 's'} FOLLOW-UP: findings beyond the item's criteria. Graphyard filed them here and resolved each thread with a reply naming this item.`;
+  const budget = Math.floor((descriptionMax - intro.length - 1 - threads.length) / Math.max(1, threads.length));
   return {
     title: `Follow-ups from the approved review of ${input.key} (PR #${input.pr})`.slice(0, 200),
-    description: [`The independent reviewer approved ${input.key} at ${input.sha} (review ${input.reviewId}) with every acceptance criterion met, and judged these ${threads.length} review thread${threads.length === 1 ? '' : 's'} FOLLOW-UP: findings beyond the item's criteria. Graphyard filed them here and resolved each thread with a reply naming this item.`,
-      '', ...threads.map((thread, index) => `${index + 1}. ${describeFollowUp(thread)}`)].join('\n').slice(0, 20000),
+    description: [intro, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget))].join('\n'),
     type: 'chore', priority: 2,
     criteria: [{ id: 'AC-1', text: `Each follow-up thread listed in the description is addressed in code, or declined with a recorded reason.`, proofs: ['manual:review-followups-triaged'] }],
     plannedFiles: [...new Set(threads.map(thread => thread.path).filter(path => path !== '(no path)'))].slice(0, 100),

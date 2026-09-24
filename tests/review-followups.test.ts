@@ -8,8 +8,8 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
-import { bindReviewer, followUpThreadIds, launchReview, reconcileReviews, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
+import { followUpItem, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
+import { bindReviewer, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, threadResolutionAttempts } from '../src/reviewer.js';
 import { routineDecision, setAsideFollowUpThreads, threadResolutionGraceMs } from '../src/master-daemon.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -255,4 +255,69 @@ test('unit:review-followups-filed — the loop requests no thread rework for thr
   assert.equal(other?.binding, `${H}:threads:PRRT_later0001`);
   // Another item's follow-ups set nothing aside here.
   assert.equal(decide(item(['PRRT_follow001']), new Map([['GY-99', new Set(['PRRT_follow001'])]]))?.action, 'rework');
+});
+
+test('unit:review-followups-filed — the item lists every follow-up thread within the description bound, however many and however long', () => {
+  const long = (prefix: string, length: number) => prefix.padEnd(length, 'x');
+  const threads = Array.from({ length: 100 }, (_, index) => ({ id: `PRRT_${String(index).padStart(3, '0')}aaaaaaaaaaaaaaaaaa`, author: long(`author-${index}-`, 200), path: long(`src/${index}/`, 1000) + '/file.ts',
+    line: 1000 + index, outdated: false, excerpt: long(`finding ${index} `, 300), url: `https://github.com/owner/project/pull/64#discussion_r${4096215600 + index}` }));
+  const { description } = followUpItem({ key: 'GY-64', pr: 64, sha: H, reviewId: 77 }, threads);
+  assert.ok(description.length <= 20000, `description is ${description.length} characters`);
+  for (const [index, thread] of threads.entries()) {
+    const entry = description.split('\n').find(line => line.startsWith(`${index + 1}. ${thread.id} — `));
+    assert.ok(entry, `thread ${thread.id} is listed`);
+    for (const part of [`file.ts:${thread.line} by author-${index}-`, `(${thread.url}): "finding ${index} `]) assert.ok(entry.includes(part), `${thread.id}: ${part}`);
+  }
+  // A short list keeps every field whole.
+  const [one] = threads;
+  const whole = followUpItem({ key: 'GY-64', pr: 64, sha: H, reviewId: 77 }, [one]).description;
+  for (const part of [one.id, one.path, one.author, one.url, one.excerpt]) assert.ok(whole.includes(part));
+});
+
+test('unit:review-followups-filed — follow-up threads return to rework once filing has failed on every retry', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    const gh = github(approvalBody), config = await loadMasterConfig(root);
+    const refusing = async () => { throw new Error('Graphyard refused the follow-up item (503): unavailable'); };
+    let reviews = (await readReviewLedger(root)).reviews;
+    for (let attempt = 1; attempt <= threadResolutionAttempts; attempt++) {
+      reviews = (await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: refusing })).reviews;
+      assert.equal(reviews[0].followUps?.attempts, attempt);
+      // Still being retried: the threads stay set aside.
+      if (attempt < threadResolutionAttempts) assert.ok(followUpThreadIds(reviews).get('GY-64')?.has('PRRT_follow001'), `attempt ${attempt}`);
+    }
+    // Exhausted: nothing is set aside, so the cycle's thread rework surfaces the stuck item.
+    assert.equal(followUpThreadIds(reviews).get('GY-64'), undefined);
+    const at = Date.parse(submittedAt) + threadResolutionGraceMs;
+    const item = work({}, { at: new Date(at).toISOString(), reviews: [{ reviewer, sha: H, state: 'APPROVED', id: 77, submittedAt }], conversations: { required: true, unresolved: [{ id: 'PRRT_follow001', author: 'codex', path: 'src/b.ts', line: 3, outdated: false }] } } as Partial<Observation>);
+    assert.equal(routineDecision(setAsideFollowUpThreads({ work: [item] }, followUpThreadIds(reviews)).work[0], { autoMerge: true }, at)?.action, 'rework');
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — an approval the dispatcher has not yet filed sets its listed threads aside, within a bound', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    const listed = ['PRRT_follow001', 'PRRT_follow002'].map(id => ({ id, author: 'codex', path: 'src/a.ts', line: 3, outdated: false, excerpt: 'finding', createdAt: '2026-09-24T11:00:00Z' }));
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => listed });
+    // The daemon's snapshot already shows the approval; the dispatcher has not reconciled it yet.
+    const { reviews } = await readReviewLedger(root);
+    assert.equal(reviews[0].followUps, undefined);
+    const approved = (state = 'APPROVED', by = reviewer) => work({}, { reviews: [{ reviewer: by, sha: H, state, id: 77, submittedAt }] } as Partial<Observation>);
+    const approvedAt = Date.parse(submittedAt);
+    const pending = (entry: Work, now: number) => followUpThreadIds(reviews, { work: [entry], reviewer, now }).get('GY-64');
+    assert.deepEqual([...pending(approved(), approvedAt + threadResolutionGraceMs) ?? []].sort(), ['PRRT_follow001', 'PRRT_follow002']);
+    const at = approvedAt + threadResolutionGraceMs;
+    const item = work({}, { at: new Date(at).toISOString(), reviews: [{ reviewer, sha: H, state: 'APPROVED', id: 77, submittedAt }], conversations: { required: true, unresolved: listed.map(({ excerpt: _excerpt, createdAt: _createdAt, ...thread }) => thread) } } as Partial<Observation>);
+    assert.equal(routineDecision(setAsideFollowUpThreads({ work: [item] }, followUpThreadIds(reviews, { work: [item], reviewer, now: at })).work[0], { autoMerge: true }, at), null, 'no rework while the approval is being filed');
+    // Past the bound, from another reviewer, a change request, or another head: nothing is set aside.
+    assert.equal(pending(approved(), approvedAt + followUpFilingBoundMs), undefined);
+    assert.equal(pending(approved('APPROVED', 'somebody-else'), approvedAt + 60_000), undefined);
+    assert.equal(pending(approved('CHANGES_REQUESTED'), approvedAt + 60_000), undefined);
+    assert.equal(pending(work({ candidate: { sha: 'c1'.padEnd(40, 'f'), baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' } } as Partial<Work>, { reviews: [{ reviewer, sha: 'c1'.padEnd(40, 'f'), state: 'APPROVED', id: 78, submittedAt }] } as Partial<Observation>), approvedAt + 60_000), undefined);
+    // Once filed, the recorded filing decides instead.
+    const gh = github('Criteria met.\nResolved threads: none\nFollow-up threads: PRRT_follow001'), items = creator();
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.deepEqual([...followUpThreadIds(settled.reviews, { work: [approved()], reviewer, now: approvedAt + 60_000 }).get('GY-64') ?? []], ['PRRT_follow001']);
+  } finally { await cleanup(); }
 });

@@ -898,18 +898,39 @@ async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, 
 }
 
 /**
- * The review threads a standing approval of `key` named as follow-up (GY-166): the loop files and
- * resolves them, so no thread-rework decision is requested for them meanwhile.
+ * How long after an approval of the current head the loop holds back thread rework for the threads
+ * that review was shown while its follow-ups are not yet filed: the dispatcher files them on its own
+ * schedule, beside the cycle. Past the bound the threads return to rework so a stalled filing shows.
  */
-export function followUpThreadIds(records: ReviewRecord[]): Map<string, Set<string>> {
+export const followUpFilingBoundMs = 30 * 60_000;
+
+/**
+ * The review threads, per item key, that the loop files and resolves as follow-up (GY-166), so no
+ * thread-rework decision is requested for them meanwhile: those a standing approval named on its
+ * `Follow-up threads:` line, until filing them has failed on every retry — then they return to
+ * rework, where the stuck item shows. With `pending`, also the threads listed to a review whose
+ * approval of the current head GitHub already shows but whose filing the loop has not yet recorded,
+ * for `followUpFilingBoundMs` after that approval: that approval judged each of them fixed or
+ * follow-up, and none BLOCKING.
+ */
+export function followUpThreadIds(records: ReviewRecord[], pending?: { work: Work[]; reviewer: string; now: number }): Map<string, Set<string>> {
   const ids = new Map<string, Set<string>>();
+  const add = (key: string, threads: string[]) => { const set = ids.get(key) ?? new Set<string>(); for (const id of threads) set.add(id); ids.set(key, set); };
   for (const record of records) {
-    if (record.state !== 'completed' || record.verdict?.state !== 'APPROVED' || record.followUps?.reviewId !== record.verdict.reviewId) continue;
-    const set = ids.get(record.key) ?? new Set<string>();
-    // Every thread the approval named, but one it could not have judged: opened after it, or not open then.
-    const refused = record.followUps.refused.map(entry => entry.slice(0, entry.indexOf(':')));
-    for (const id of [...record.followUps.named, ...record.followUps.threads.map(thread => thread.id)]) if (!refused.includes(id)) set.add(id);
-    ids.set(record.key, set);
+    const filing = record.followUps;
+    if (record.state === 'completed' && record.verdict?.state === 'APPROVED' && filing?.reviewId === record.verdict.reviewId) {
+      if (filing.failure && filing.attempts >= threadResolutionAttempts) continue;
+      // Every thread the approval named, but one it could not have judged: opened after it, or not open then.
+      const refused = filing.refused.map(entry => entry.slice(0, entry.indexOf(':')));
+      add(record.key, [...filing.named, ...filing.threads.map(thread => thread.id)].filter(id => !refused.includes(id)));
+      continue;
+    }
+    if (!pending || !record.threadsListed?.length || record.verdict && record.verdict.state !== 'APPROVED' || filing && filing.reviewId === record.verdict?.reviewId) continue;
+    const item = pending.work.find(entry => entry.key === record.key);
+    if (!item?.candidate || item.candidate.sha !== record.sha || item.candidate.pr !== record.pr) continue;
+    const approvedAt = Math.max(...(item.observation?.reviews ?? []).filter(review => review.sha === record.sha && review.state === 'APPROVED' && review.reviewer.toLowerCase() === pending.reviewer.toLowerCase())
+      .map(review => Date.parse(review.submittedAt ?? '')).filter(Number.isFinite));
+    if (Number.isFinite(approvedAt) && pending.now - approvedAt < followUpFilingBoundMs) add(record.key, record.threadsListed);
   }
   return ids;
 }

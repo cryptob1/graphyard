@@ -65,6 +65,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` merges only under a current authorization for the exact head, base and policy, rechecking every gate under a single-use execution and never using an administrative merge bypass. A server on another merge protocol refuses with `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
+`master merge GY-N|--all` merges only under a current authorization for the exact head, base and policy, rechecking every gate under a single-use execution, never an administrative bypass. A server on another merge protocol refuses with `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
 
-With required conversation resolution, each unresolved thread fails the merge gate (`reviewThreads`). An unresolved review thread is a finding to fix: the loop resolves those its reviewer verified; route others to `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.
+With required conversation resolution, unresolved threads fail the merge gate (`reviewThreads`). The loop resolves threads an approval names fixed or follow-up (filed as one item). Any other thread is a finding to fix via `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.
