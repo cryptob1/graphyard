@@ -63,12 +63,12 @@ export function dispatchOverlap(work: Work, all: Work[], now: number): OverlapAh
 /**
  * Whether `other`, in flight, would hold `work` from dispatch, and on which paths: the one pairwise
  * rule `dispatchOverlap` and `effectiveConcurrency` share. Work never waits behind lower-priority
- * work, and an item whose pull request is open is not held by a directory another item merely
- * declared: its changed files are concrete and the directory is a guess. On 2026-09-24 the
- * priority-0 GY-164, mid-review with PR #155 open, sat held behind the priority-1 GY-161, claimed
- * later over the whole tests/ directory. A named file, or another candidate's changed file, still
- * excludes. A directory is any spelling pathScope reads as one: tests/, tests/* or tests/**.
+ * work, and an item whose pull request is open is never held, whatever the other item's state or
+ * paths. A fresh item — no pull request, or one that was closed — is held behind equal- or
+ * higher-priority in-flight work on the paths both name or changed (`exclusionPaths`).
  */
+/** The item's pull request is observed open and unmerged; a candidate whose pull request was closed no longer counts. */
+const openPullRequest = (work: Work) => !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
 function overlapHolds(work: Work, other: Work): { paths: string[]; theirs: string[] } | null {
   if (other.priority > work.priority) return null;
   // A hold keeps a fresh item from starting on files another item is changing. An item whose pull
@@ -76,7 +76,7 @@ function overlapHolds(work: Work, other: Work): { paths: string[]; theirs: strin
   // changes exist either way; the merge queue lands them in order and base refresh re-integrates
   // the second), it only idles workers. On 2026-09-24 ten workers sat idle while the rework rounds
   // of GY-168, GY-175 and GY-176 were held behind other open pull requests changing the same files.
-  if (work.candidate) return null;
+  if (openPullRequest(work)) return null;
   const mine = exclusionPaths(work), theirs = exclusionPaths(other);
   const paths = mine.filter(path => theirs.some(entry => pathScopesOverlap(path, entry)));
   if (!paths.length) return null;
