@@ -88,14 +88,14 @@ export function findingScope(paths: readonly string[], findings: readonly Review
     if (pathScope(path).prefix || path.endsWith('*')) return { refusal: `${path} is a directory scope; a review finding grants only the files it names` };
     const naming = findings.find(entry => namesPath(entry.text, path));
     if (!naming) return { refusal: `no unresolved review finding on the head names ${path}` };
-    if (!exists(path)) return { refusal: `${path} does not exist on the base branch; a review finding grants only existing files, and a new file is the master's to decide` };
+    if (!exists(path)) return { refusal: `${path} does not exist on the base branch as a file; a review finding grants only existing files, never a directory, and a new file is the master's to decide` };
     grounds.push({ path, ground: naming.ground });
   }
   return { grounds };
 }
 
 /**
- * Which of `paths` exist on the base branch as the remote has it now. The base is fetched once per
+ * Which of `paths` exist as files on the base branch as the remote has it now; a directory is not a file. The base is fetched once per
  * decision and its commit pinned, so every path is judged against one tree and a request of many
  * paths costs one network fetch: the daemon's other base fetch is lazy, so a local
  * `origin/<baseBranch>` can be stale by any amount and would judge a file added since absent, and a
@@ -108,6 +108,9 @@ export async function basePaths(root: string, baseBranch: string, paths: readonl
   const ref = `origin/${baseBranch}`;
   await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/${ref}`]);
   const commit = String(await run('git', ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`])).trim();
-  const listed = new Set(String(await run('git', ['-C', root, 'ls-tree', '-z', '--name-only', commit, '--', ...paths])).split('\0'));
-  return new Set(paths.filter(path => listed.has(path)));
+  // `<mode> <type> <object>\t<path>`: a directory named as a pathspec is listed as its own tree entry, so
+  // only blobs (files and symlinks) count as present; a tree or a submodule is never a file to grant.
+  const entries = String(await run('git', ['-C', root, 'ls-tree', '-z', commit, '--', ...paths])).split('\0');
+  const files = new Set(entries.flatMap(entry => { const tab = entry.indexOf('\t'); return tab > 0 && entry.slice(0, tab).split(' ')[1] === 'blob' ? [entry.slice(tab + 1)] : []; }));
+  return new Set(paths.filter(path => files.has(path)));
 }

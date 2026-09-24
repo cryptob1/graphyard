@@ -599,6 +599,9 @@ test('unit:review-finding-scope — only a file on the base that a finding names
     'a file added to the base since the last fetch exists; one deleted since, one never there, and a directory are absent');
   assert.equal(calls.filter(args => args.includes('fetch')).length, 1, `one fetch per decision: ${JSON.stringify(calls)}`);
   assert.equal(calls.length, 3, `fetch, pin the commit, one ls-tree for every path: ${JSON.stringify(calls)}`);
+  // Asked about alone, ls-tree lists a directory as its own tree entry: it is still not a file.
+  assert.deepEqual([...await basePaths(checkout, 'main', ['src'], gitRun)], [], 'a bare directory on its own is not a file on the base');
+  assert.match((findingScope(['src'], [{ ground: 'review 14', text: 'see src for the pattern' }], path => path !== 'src') as { refusal: string }).refusal, /src does not exist on the base branch as a file/);
   assert.deepEqual([...await basePaths(checkout, 'main', [], () => { throw new Error('no git for no paths'); })], []);
   await assert.rejects(basePaths(checkout, 'gone', ['src/added.ts'], gitRun), 'a missing base branch is a failure, not an absent file');
   await assert.rejects(basePaths(checkout, 'main', ['src/added.ts'], () => { throw new Error('git timed out'); }), /timed out/);
