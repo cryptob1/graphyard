@@ -25,15 +25,22 @@ type TerminalState = 'stale' | 'withdrawn';
  * any of it; a second narrowing, a replacement claim, a new candidate head, or the incident's
  * own clearing or replacement moves exactly one field. `raiseEscalation` never records a
  * repeat of a standing trigger, so the raised set — not the trigger slot — is what tells the
- * incident the requester saw from whatever stands there later.
+ * incident the requester saw from whatever stands there later. `lease` is the epoch whose lease
+ * is held, or null: a lease-loss resolve may rest on a newer attempt holding the item, and when
+ * that lease lapses unexplained its own lease-loss is a suppressed repeat, so only the pin sees
+ * it go. A heartbeat extends the lease without moving the held epoch.
  */
-export interface ResolvePin { policyRevision: number; sha: string | null; baseSha: string | null; epoch: number; escalations: { trigger: string; at: string }[] }
-export const resolvePin = (work: Work): ResolvePin => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
+export interface ResolvePin { policyRevision: number; sha: string | null; baseSha: string | null; epoch: number; lease?: number | null; escalations: { trigger: string; at: string }[] }
+export const resolvePin = (work: Work): ResolvePin => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, lease: work.lease?.epoch ?? null, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
 // jsonb does not keep object key order, so the recorded pin compares in a canonical form.
 export const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : 1).map(([key, entry]) => [key, canonical(entry)]))
   : value;
-export const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) => !!pinned && JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
+// A pin recorded before it named the held lease cannot show the lease still stands, so it never
+// matches: a replacement lease that lapsed since is invisible to its other fields, and approving it
+// would clear the incident after that loss had gone unrecorded. The requester asks again.
+export const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) =>
+  !!pinned && 'lease' in pinned && JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
 export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | null };
 
 /** The fold itself, over one item's decision entries in ledger order. */

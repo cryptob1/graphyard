@@ -9,7 +9,7 @@ A criterion states an outcome and its proofs:
 {"id":"AC-1","text":"Retrying a confirmed booking produces exactly one SMS request","proofs":["integration:sms-idempotency"]}
 ```
 
-`unit:` and `integration:` proofs are producer-runnable: a producer session runs them on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless the item lists it in `producerProofs`, which makes it producer-runnable too. `e2e:` proofs run through the [validation runner](validation.md).
+`unit:` and `integration:` proofs are producer-runnable: a producer runs them on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless listed in `producerProofs`, which makes it producer-runnable. `e2e:` proofs run through the [validation runner](validation.md).
 
 ## Revise requirements explicitly
 
@@ -17,7 +17,7 @@ A criterion states an outcome and its proofs:
 
 ## Schedule by overlap, smallest scope first
 
-`plannedFiles` holds paths or directory prefixes ending in `/`. Overlap holds *dispatch* against items in flight, comparing `plannedFiles` until a candidate exists and then its changed files. The hold lapses into attention after two hours; `master dispatch GY-N PROFILE --allow-overlap` overrides it. Ready items dispatch smallest planned scope first. Name files, not directories: a root-level directory is flagged `highConflict` and refused without `--allow-broad-scope`. `master status` lists open candidates `git merge-tree` cannot merge together.
+`plannedFiles` holds paths or directory prefixes ending in `/`. Overlap holds *dispatch* behind in-flight items of equal or higher priority, comparing `plannedFiles` until a candidate exists, then its changed files; another item's declared directory never holds an open candidate. The hold lapses into attention after two hours; `master dispatch GY-N PROFILE --allow-overlap` overrides it. Ready items dispatch smallest planned scope first. Name files, not directories: a root-level directory is flagged `highConflict` and refused without `--allow-broad-scope`. `master status` lists open candidates `git merge-tree` cannot merge together.
 
 `exclusiveResources` are reserved atomically at claim.
 
@@ -27,15 +27,15 @@ A criterion states an outcome and its proofs:
 
 ### Keep current with `graphyard sync`
 
-`graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates generated files, commits, and prints the same classification before any push. Restore an out-of-scope file with `git checkout BASE_TIP -- PATH`.
+`graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification before any push. Restore an out-of-scope file with `git checkout BASE_TIP -- PATH`.
 
 ### Generated files never conflict
 
-`docs/README.md` and `docs/protocol.md` are generated in full ([development](development.md)), and the managed `AGENTS.md` blocks are rendered by `init`; `sync` regenerates them after a merge. The regression guard classifies paths in `GRAPHYARD_GENERATED_FILES` (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.
+`docs/README.md` and `docs/protocol.md` are generated in full ([development](development.md)), and the managed `AGENTS.md` blocks are rendered by `init`; `sync` regenerates them after merging. The regression guard classifies paths in `GRAPHYARD_GENERATED_FILES` (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.
 
 ## Ship in under thirty minutes
 
-The [routine target](master-agent-reference.md#pipeline-speed) is reached through `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never by weakening a gate.
+The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never by weakening a gate.
 
 ## Explain stalls
 

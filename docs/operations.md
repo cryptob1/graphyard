@@ -12,7 +12,7 @@ Every procedure in full is in the [operations reference](operations-reference.md
 ## Incident decision tree
 
 - **Item not moving**: read the refusal and fix its cause. Never weaken requirements.
-  - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can, except that any `admin` settles an explained `lease-loss` with `--attestation`.
+  - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`. No AI principal can alone, except an `admin` settling an explained `lease-loss` with `--attestation`.
   - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Needs another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
 - **Merge refused**: wait or repair the cause; never bypass.
 - **Merged outside Graphyard**: [merge bypass](operations-reference.md#merge-bypass).
