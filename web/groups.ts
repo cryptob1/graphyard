@@ -2,18 +2,19 @@ import { deliveryState, isClosed, type Work } from '../src/model';
 import { parkedOnHuman, type HumanRequestRow } from '../src/model/human-request';
 import { phaseOf, plainReason, plainStatus } from './plain-status';
 import { prSteps } from './pr-steps';
-import { deliveredAt, servedAt } from '../src/flow-analytics';
+import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
 import { stalledCards } from './pages/actionless';
 
 /**
  * The one classification the dashboard uses (GY-161). Every open item is in exactly one group,
  * and every count, tile, list, badge and phone chip is drawn from `classify`, so a number on the
- * page is always the number of rows it filters. Delivered work is `shipped` (`deliveredAt`): a
+ * page is always the number of rows it filters. Delivered work is `shipped` (`leftFlowAt`): a
  * per-item deployment record is written only for policies that ask for a post-deployment check, so
- * its absence never holds work back; only work whose check is still outstanding is moving at
- * Deploy, and a failed check is blocked. Within Shipped, an item is live only once the release is
- * observed serving it (`servedAt`); until then it reads "Merged" and is not counted as shipped this
- * week. Closed work is in none.
+ * its absence never holds work back. Merged work is moving at Deploy while its check is outstanding
+ * or while the production watch observes that production does not serve it yet (web/release.ts),
+ * and blocked when the check or the deployment failed. Within Shipped, an item is live only once
+ * the release is observed serving it (`servedAt`, under the configured production environment);
+ * until then it reads "Merged" and is not counted as shipped this week. Closed work is in none.
  *
  * - `needs-you`: waits on a decision only the human operator may make (a parked item, or an
  *   approval no agent identity can give). Listed here and nowhere else — never also as Blocked.
@@ -42,8 +43,8 @@ export function humanOnlyIds(work: Work[], rows: HumanRequestRow[] | null | unde
 }
 
 /** When the release was observed serving a delivered item (`servedAt`); null while it has only merged. */
-export function releasedAt(work: Work): number | null {
-  const at = servedAt(work);
+export function releasedAt(work: Work, release: ReleaseView = noRelease): number | null {
+  const at = servedFor(work, release);
   return at === null || Number.isNaN(Date.parse(at)) ? null : Date.parse(at);
 }
 
@@ -53,13 +54,14 @@ export function mergedAt(work: Work): number {
 }
 
 /** The group of one item. `humanOnly` is the set from `humanOnlyIds`; `stalled` the ids nothing is moving. */
-export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set()): Group | null {
+export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set(), release: ReleaseView = noRelease): Group | null {
   if (isClosed(work)) return null;
   if (work.stage === 'done') {
     // Shipped whether or not a per-item deployment record exists; only an outstanding
-    // post-deployment check keeps it at Deploy. Work merged before delivery records existed has nothing left to wait on.
-    if (!work.delivery || deliveredAt(work)) return 'shipped';
-    return deliveryState(work) === 'delivered-with-failure' ? 'blocked' : 'moving';
+    // post-deployment check, or production observed not serving it yet, keeps it at Deploy.
+    // Work merged before delivery records existed has nothing left to wait on.
+    if (!work.delivery || leftFlowAt(work, release)) return 'shipped';
+    return deliveryState(work) === 'delivered-with-failure' || release.failed.has(work.key) ? 'blocked' : 'moving';
   }
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);
@@ -79,13 +81,13 @@ export interface Classification {
  * Every open item into its one group. The counts a page draws are `byGroup[g].length` of this
  * same result, so a tile can never disagree with the list it filters.
  */
-export function classify(work: Work[], now: number, humanRows?: HumanRequestRow[] | null): Classification {
+export function classify(work: Work[], now: number, humanRows?: HumanRequestRow[] | null, release: ReleaseView = noRelease): Classification {
   const humanOnly = humanOnlyIds(work, humanRows);
-  const open = work.filter(item => !isClosed(item) && (item.stage !== 'done' || groupOf(item, now) !== 'shipped'));
+  const open = work.filter(item => !isClosed(item) && (item.stage !== 'done' || groupOf(item, now, undefined, undefined, release) !== 'shipped'));
   const stalled = new Set(stalledCards(open, now).map(card => card.item.id));
   const byGroup = Object.fromEntries(groups.map(group => [group, [] as Work[]])) as Record<OpenGroup, Work[]>;
   for (const item of open) {
-    const group = groupOf(item, now, humanOnly, stalled);
+    const group = groupOf(item, now, humanOnly, stalled, release);
     if (group && group !== 'shipped') byGroup[group].push(item);
   }
   // The longest wait first within a group; priority breaks ties.
@@ -97,9 +99,9 @@ export function classify(work: Work[], now: number, humanRows?: HumanRequestRow[
  * The group of one item as the Work page classifies it among all of `work`, so the item page
  * shows the badge of the tile that led to it (the stalled reading needs the whole board).
  */
-export function groupWithin(item: Work, work: Work[], now: number, humanRows?: HumanRequestRow[] | null): Group | null {
-  const { byGroup } = classify(work.some(entry => entry.id === item.id) ? work : [...work, item], now, humanRows);
-  return groups.find(group => byGroup[group].some(entry => entry.id === item.id)) ?? groupOf(item, now, humanOnlyIds(work, humanRows));
+export function groupWithin(item: Work, work: Work[], now: number, humanRows?: HumanRequestRow[] | null, release: ReleaseView = noRelease): Group | null {
+  const { byGroup } = classify(work.some(entry => entry.id === item.id) ? work : [...work, item], now, humanRows, release);
+  return groups.find(group => byGroup[group].some(entry => entry.id === item.id)) ?? groupOf(item, now, humanOnlyIds(work, humanRows), undefined, release);
 }
 
 /** "1 item needs you. 2 are moving. Nothing is blocked." — the page's one summary sentence, from the same counts. */
@@ -122,7 +124,7 @@ export const timedGroups: ReadonlySet<Group> = new Set(['moving', 'blocked']);
  * Who acts next on an item, as a role a newcomer recognises (never a worker's code name), and
  * what they do, in plain words.
  */
-export function nextActor(work: Work, group: Group | null, now: number): { who: string; does: string } {
+export function nextActor(work: Work, group: Group | null, now: number, release: ReleaseView = noRelease): { who: string; does: string } {
   if (group === 'needs-you') return { who: 'You', does: work.humanRequest?.needed ?? 'Answer the decision it is waiting on' };
   if (group === 'backlog') {
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
@@ -130,11 +132,11 @@ export function nextActor(work: Work, group: Group | null, now: number): { who: 
   }
   // Blocked means the step's own actor cannot clear it (a recorded blocker, a stall, a violation,
   // a refusal no retry fixes, a failed check after deploying): the master agent acts next.
-  if (group === 'blocked') return { who: 'Master agent', does: 'Clear what blocks it, or hand the decision to an approver agent' };
+  if (group === 'blocked') return { who: 'Master agent', does: release.failed.has(work.key) && work.stage === 'done' ? 'Find out why production has not deployed it, and record the cause' : 'Clear what blocks it, or hand the decision to an approver agent' };
   if (group === 'up-next') {
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
     return dependency ? { who: 'Nobody yet', does: plainReason(dependency, 'ready').text } : { who: 'Graphyard (assigns a builder)', does: 'Hands it to the next free builder agent' };
   }
-  const steps = prSteps(work, now);
+  const steps = prSteps(work, now, release);
   return { who: steps.who, does: steps.label };
 }

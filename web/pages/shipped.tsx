@@ -2,6 +2,7 @@ import { isClosed, isDelivered, type Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
 import { plainStatus } from '../plain-status';
 import { releasedAt } from '../groups';
+import { releaseView } from '../release';
 import { Explained } from '../components/term';
 import type { Dashboard } from './dashboard';
 
@@ -12,6 +13,8 @@ import type { Dashboard } from './dashboard';
  */
 export default function ShippedPage({ work, status, observedAt, setSelected }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
+  const release = releaseView(status);
+  const live = (w: Work) => releasedAt(w, release) !== null;
   const shippedAt = (w: Work) => w.observation?.mergedAt ?? w.stageEnteredAt;
   const closed = work.filter(isClosed).sort((a, b) => b.closure!.at.localeCompare(a.closure!.at));
   const shipped = work.filter(isDelivered).sort((a, b) => shippedAt(b).localeCompare(shippedAt(a)));
@@ -22,7 +25,7 @@ export default function ShippedPage({ work, status, observedAt, setSelected }: D
         <button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>
         {w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}
         <span className="muted">{new Date(shippedAt(w)).toLocaleDateString()}</span>
-        <span className={releasedAt(w) === null ? 'muted' : undefined} data-live={releasedAt(w) !== null}>{releasedAt(w) === null ? 'Merged, not yet seen live' : 'Live'}</span>
+        <span className={live(w) ? undefined : 'muted'} data-live={live(w)}>{live(w) ? 'Live' : 'Merged, not yet seen live'}</span>
         {plain.blocking && <span className={plain.tone === 'stuck' ? 'danger-text' : 'amber'}><Explained sentence={plain.blocking}/></span>}
       </li>; })}</ul>}
     {closed.length > 0 && <details className="work-list closed-history"><summary>Closed without shipping <span className="count">{closed.length}</span></summary>

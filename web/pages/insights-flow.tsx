@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { classify } from '../groups';
+import { releaseView } from '../release';
 import { prSteps, stepIds, stepLabel, type StepId } from '../pr-steps';
 import { positionsAt, replayFrames, replaySeconds, replayWindowMs, transitionsFromRows, type ReplayFrame } from '../flow-replay';
 import { formatDuration } from '../duration';
@@ -75,10 +76,11 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing]);
 
-  const { byGroup } = classify(work, now, status?.humanOnly);
+  const release = releaseView(status);
+  const { byGroup } = classify(work, now, status?.humanOnly, release);
   // Merged work still waiting on its release is in Moving (or Blocked) at Deploy, like the Work page.
   const inFlow = [...byGroup.moving, ...byGroup.blocked];
-  const now7 = inFlow.map(item => ({ item, steps: prSteps(item, now) })).filter(entry => entry.steps.current);
+  const now7 = inFlow.map(item => ({ item, steps: prSteps(item, now, release) })).filter(entry => entry.steps.current);
   // Each dot stands in its step's column, one row per item already there, so no two dots overlap.
   const row = new Map<string, number>(); const perStep = new Map<StepId, number>();
   for (const { item, steps } of now7) { const n = perStep.get(steps.current!) ?? 0; row.set(item.id, n); perStep.set(steps.current!, n + 1); }

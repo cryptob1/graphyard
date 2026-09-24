@@ -1,6 +1,6 @@
 import { deliveryState, type Gate, type Work } from '../src/model';
 import { latestCheck } from '../src/merge-queue';
-import { deliveredAt, servedAt } from '../src/flow-analytics';
+import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
 import type { PipelineTimeline } from '../src/pipeline-speed';
 import { assignment } from './assignment';
 import { statusDuration, type StatusDuration } from './duration';
@@ -47,8 +47,30 @@ const pendingCheck = new Set(['', 'pending', 'queued', 'in_progress', 'waiting',
 /** True while the review gate refuses on a reviewer's request for changes. */
 export const changesRequested = (work: Work) => !!work.gates.find(gate => gate.name === 'review')?.reasons.some(reason => reason.startsWith('Outstanding change requests'));
 
+export type CheckState = 'passed' | 'failed' | 'running';
+/**
+ * Each required CI check as the test gate reads it. The gate counts only runs from the trusted CI
+ * Apps, which the dashboard is not told, so its own reasons decide which checks have not passed: a
+ * check it does not name has passed, and no run from another App with the same name can make a
+ * named one read passed. A named check reads failed once every App's latest run of it has finished
+ * and one of them did not succeed; while any is still running it is running. Only each App's latest
+ * run counts, as in the test gate: a re-run replaces an old failure or success. The Test step and
+ * the item page's Checks line both read this.
+ */
+export function checkStates(work: Work): { name: string; state: CheckState }[] {
+  const gate = work.gates.find(entry => entry.name === 'test');
+  const reasons = gate?.reasons ?? [];
+  const named = (name: string) => !gate || reasons.includes(`Required CI check ${name} has not passed on the current candidate`);
+  return (work.policy.checks ?? []).map(name => {
+    if (!named(name)) return { name, state: 'passed' };
+    const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
+    const latest = [...new Set(runs.map(check => check.appId))].map(app => latestCheck(runs.filter(check => check.appId === app))?.result ?? '');
+    return { name, state: latest.length > 0 && latest.every(result => !pendingCheck.has(result)) && latest.some(result => result !== 'success') ? 'failed' : 'running' };
+  });
+}
+
 /** What the current step waits on, and who acts next, in plain words. */
-function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number): { detail: string; who: string } {
+function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, release: ReleaseView): { detail: string; who: string } {
   const reasons = gate?.reasons ?? [];
   switch (step) {
     case 'build':
@@ -62,22 +84,10 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number):
       return { detail: 'checking which files it changes', who: 'Graphyard (automatic)' };
     }
     case 'test': {
-      const required = work.policy.checks ?? [];
-      // The test gate counts only runs from the trusted CI Apps, which the dashboard is not told. So
-      // its own reasons decide which checks have not passed: a check it does not name has passed, and
-      // no run from another App with the same name can make a named one read done.
-      const named = (name: string) => reasons.includes(`Required CI check ${name} has not passed on the current candidate`);
-      const unpassed = gate ? required.filter(named) : required;
-      // A named check reads failed once every App's latest run of it has finished and one of them did
-      // not succeed; while any is still running it stays pending. Only each App's latest run counts,
-      // as in the test gate: a re-run replaces an old failure or success.
-      const failed = unpassed.filter(name => {
-        const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
-        const latest = [...new Set(runs.map(check => check.appId))].map(app => latestCheck(runs.filter(check => check.appId === app))?.result ?? '');
-        return latest.length > 0 && latest.every(result => !pendingCheck.has(result)) && latest.some(result => result !== 'success');
-      });
+      const checks = checkStates(work);
+      const failed = checks.filter(check => check.state === 'failed').map(check => check.name);
       if (failed.length) return { detail: `the check ${failed.join(', ')} failed`, who: 'Builder agent' };
-      return { detail: `${required.length - unpassed.length} of ${required.length} checks done`, who: 'Automated checks' };
+      return { detail: `${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
     }
     case 'review':
       return { detail: 'waiting for the reviewer', who: 'Reviewer agent' };
@@ -102,6 +112,7 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number):
     case 'deploy': {
       const state = deliveryState(work);
       return state === 'delivered-with-failure' ? { detail: 'the check after deploying failed', who: 'Master agent' }
+        : release.failed.has(work.key) ? { detail: 'production has not deployed it', who: 'Master agent' }
         : state === 'awaiting-smoke' ? { detail: 'checking the live release', who: 'Prover agent' }
           : { detail: 'waiting for the live release to serve it', who: 'Graphyard (automatic)' };
     }
@@ -113,32 +124,33 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number):
  * it, each step's own gate decides done, and the first step whose gate refuses is current; when
  * every gate passes the item is merging. A merged item has every step done — reading "Live" where
  * production was observed serving it — unless its policy asks for a post-deployment check that has
- * not passed, which keeps it at Deploy.
+ * not passed, or the production watch observes production not serving it yet (web/release.ts),
+ * which keeps it at Deploy.
  */
-export function prSteps(work: Work, now: number): PrSteps {
+export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
   const make = (state: (id: StepId) => StepState, current: StepId | null, detail: string, who: string): PrSteps => ({
     steps: stepIds.map(id => ({ id, label: stepLabel[id], state: state(id) })), current,
     label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who,
   });
   if (work.stage === 'done') {
-    // Delivered once merged, unless its policy asks for a post-deployment check that has not passed
-    // (web/groups.ts reads the same `deliveredAt`). "Live" only once the release is observed serving it.
-    if (!work.delivery || deliveredAt(work)) return servedAt(work) ? make(() => 'done', null, 'Live', 'Nobody — it is live')
+    // Delivered once merged, unless a post-deployment check or the production watch holds it at
+    // Deploy (web/groups.ts reads the same `leftFlowAt`). "Live" only once the release is observed serving it.
+    if (!work.delivery || leftFlowAt(work, release)) return servedFor(work, release) ? make(() => 'done', null, 'Live', 'Nobody — it is live')
       : make(() => 'done', null, 'Merged', 'Nobody — it has merged');
-    const { detail, who } = waitsOn('deploy', undefined, work, now);
+    const { detail, who } = waitsOn('deploy', undefined, work, now, release);
     return make(id => id === 'deploy' ? 'current' : 'done', 'deploy', detail, who);
   }
   // A change request sends the work back to its builder, so it waits at Build, not at Review.
   const handedIn = !!work.submission && !work.reworkRequested && !changesRequested(work);
   if (!handedIn) {
-    const { detail, who } = waitsOn('build', undefined, work, now);
+    const { detail, who } = waitsOn('build', undefined, work, now, release);
     return make(id => id === 'build' ? 'current' : 'pending', 'build', detail, who);
   }
   const byName = new Map(work.gates.map(gate => [gate.name, gate]));
   // A gate the item does not carry has nothing to refuse, so its step reads done.
   const passed = (id: StepId) => id === 'build' || (id !== 'merge' && id !== 'deploy' && byName.get(stepGate[id]!)?.passed !== false);
   const current = stepIds.find(id => id !== 'deploy' && !passed(id)) ?? 'merge';
-  const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now);
+  const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now, release);
   return make(id => id === current ? 'current' : passed(id) ? 'done' : 'pending', current, detail, who);
 }
 
@@ -152,8 +164,8 @@ export function prSteps(work: Work, now: number): PrSteps {
  * Build restarted), Validate starts at the hand-in, Deploy at the merge, and a later step at the
  * latest move the item recorded (`statusSince`).
  */
-export function stepSince(work: Work, now: number, moves?: readonly StepTransition[] | null): string {
-  const current = prSteps(work, now).current;
+export function stepSince(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): string {
+  const current = prSteps(work, now, release).current;
   const own = statusSince(work, now);
   if (!current || current === 'build') return own;
   const at = (value: string | null | undefined) => value && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now ? Date.parse(value) : null;
@@ -172,6 +184,6 @@ export function stepSince(work: Work, now: number, moves?: readonly StepTransiti
  * How long the item has held its current step, and whether that is past the one threshold
  * (web/duration.ts). Merged work has arrived, as in `statusHeld`: it is never overdue.
  */
-export function stepHeld(work: Work, now: number, moves?: readonly StepTransition[] | null): StatusDuration {
-  return statusDuration(stepSince(work, now, moves), now, work.stage === 'done');
+export function stepHeld(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): StatusDuration {
+  return statusDuration(stepSince(work, now, moves, release), now, work.stage === 'done');
 }

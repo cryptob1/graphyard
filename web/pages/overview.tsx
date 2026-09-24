@@ -4,6 +4,7 @@ import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../duration';
 import { classify, groupLabel, groupOf, mergedAt, releasedAt, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
+import { releaseView } from '../release';
 import { stalledCards } from './actionless';
 import type { Dashboard } from './dashboard';
 
@@ -22,16 +23,17 @@ const week = 7 * 24 * 60 * 60 * 1000;
 export default function OverviewPage({ work, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, stepMoves }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const match = (w: Work) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
-  const { byGroup } = classify(work.filter(match), now, status?.humanOnly);
+  const release = releaseView(status);
+  const { byGroup } = classify(work.filter(match), now, status?.humanOnly, release);
   const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   const humanOnly = humanOnlyIds(work, status?.humanOnly);
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
-  const delivered = work.filter(w => groupOf(w, now) === 'shipped');
-  const recent = delivered.filter(w => releasedAt(w) !== null && now - releasedAt(w)! <= week).sort((a, b) => releasedAt(b)! - releasedAt(a)!);
+  const delivered = work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped');
+  const recent = delivered.filter(w => releasedAt(w, release) !== null && now - releasedAt(w, release)! <= week).sort((a, b) => releasedAt(b, release)! - releasedAt(a, release)!);
   // Merged this week but not yet seen live: delivered, still waiting for the release to serve it.
-  const unreleased = delivered.filter(w => releasedAt(w) === null && now - mergedAt(w) <= week).length;
-  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves}/>;
+  const unreleased = delivered.filter(w => releasedAt(w, release) === null && now - mergedAt(w) <= week).length;
+  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>

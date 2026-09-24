@@ -6,6 +6,7 @@ import { phaseLabel, phaseOf, plainStatus } from '../plain-status';
 import { prSteps, stepHeld } from '../pr-steps';
 import type { StepTransition } from '../flow-replay';
 import type { ActionlessCard } from '../pages/actionless';
+import type { ReleaseView } from '../release';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
 import { Explained } from './term';
@@ -20,13 +21,13 @@ const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replac
  * threshold. On a phone the same element lays out as a card. The pull request is linked once, on the row's second line; the open
  * control and that link are siblings, never nested, so each stays a separate keyboard stop.
  */
-export default function WorkCard({ item, repository, now, onOpen, group: given, stall, stepMoves }: { item: Work; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; stepMoves?: readonly StepTransition[] | null }) {
-  const group = given ?? groupOf(item, now) ?? 'shipped';
+export default function WorkCard({ item, repository, now, onOpen, group: given, stall, stepMoves, release }: { item: Work; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; stepMoves?: readonly StepTransition[] | null; release?: ReleaseView }) {
+  const group = given ?? groupOf(item, now, undefined, undefined, release) ?? 'shipped';
   const status = plainStatus(item, now);
-  const held = stepHeld(item, now, stepMoves);
+  const held = stepHeld(item, now, stepMoves, release);
   const timed = timedGroups.has(group);
-  const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now) : null;
-  const actor = nextActor(item, group, now);
+  const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now, release) : null;
+  const actor = nextActor(item, group, now, release);
   const pr = item.candidate && <CandidatePr repository={repository} candidate={item.candidate} workKey={item.key}/>;
   const why = group === 'needs-you' ? actor.does
     : stall ? `Nothing is happening: ${stall.missing} — stuck at “${phaseLabel[phaseOf(item, now)]}” for ${formatDuration((now - Date.parse(stall.heldSince)) / 60000)} with nothing to do next`

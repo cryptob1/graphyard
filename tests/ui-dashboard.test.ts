@@ -10,7 +10,9 @@ import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../bro
 // @ts-expect-error Dependency-free fixture script.
 import { flowApi, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
-import { prSteps, stepHeld, stepIds, stepSince } from '../web/pr-steps.js';
+import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../web/pr-steps.js';
+import { releaseView } from '../web/release.js';
+import ShippedPage from '../web/pages/shipped.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
 import { jargon } from '../web/plain-status.js';
 import { primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
@@ -724,3 +726,63 @@ test('unit:ui-workers-finish — agent names and roles never break mid-word, Hea
   // The browser suite measures both at 1440px and 390px: each name and role on one line.
   assert.match(await read('browser-tests/screenshots.spec.ts'), /\.sessions-table \.agent-name, \.sessions-table td\[data-label=Role\][\s\S]*getClientRects[\s\S]*toEqual\(\[\]\)/);
 });
+
+test('GY-161 review: where the production watch observes production, a merge waits at Deploy until it is served (a failed deployment is Blocked); the configured production environment decides Live; the item page reads its checks from the test gate', () => {
+  const real = realDeliveredWork() as unknown as Work[];
+  const [waiting, failing, deployed] = real;
+  const status = (production: unknown, productionEnvironment?: string) => ({ ...boardStatus('admin'), production, ...(productionEnvironment ? { productionEnvironment } : {}) });
+  const observed = { observedAt: new Date(NOW - 60_000).toISOString(), serving: 'a'.repeat(40), servingSource: 'provider', error: null,
+    deployed: [deployed.key], pending: [waiting.key, failing.key], incidents: [{ id: 'i1', workId: failing.id, key: failing.key, status: 'missing', reason: 'no deployment observed' }] };
+  const release = releaseView(status(observed));
+  // Production observed not serving it yet: Moving, at Deploy, waiting for the release.
+  assert.equal(groupOf(waiting, NOW, undefined, undefined, release), 'moving');
+  const steps = prSteps(waiting, NOW, release);
+  assert.equal(steps.current, 'deploy'); assert.equal(steps.label, 'Deploying · waiting for the live release to serve it'); assert.equal(steps.who, 'Graphyard (automatic)');
+  // An open deployment incident: Blocked at Deploy, for the master agent.
+  assert.equal(groupOf(failing, NOW, undefined, undefined, release), 'blocked');
+  assert.equal(prSteps(failing, NOW, release).label, 'Deploying · production has not deployed it');
+  assert.equal(nextActor(failing, 'blocked', NOW, release).who, 'Master agent');
+  // Served: Shipped.
+  assert.equal(groupOf(deployed, NOW, undefined, undefined, release), 'shipped');
+  // The Work page and Insights read the same view from status.
+  const work = [...board(), ...real];
+  const { byGroup } = classify(work, NOW, undefined, release);
+  const page = home(dashboard({ work, status: status(observed) }));
+  assert.ok(rowsOf(page, 'moving').includes(waiting.key)); assert.ok(rowsOf(page, 'blocked').includes(failing.key));
+  assert.equal(tileCount(page, 'moving'), byGroup.moving.length); assert.equal(tileCount(page, 'blocked'), byGroup.blocked.length);
+  assert.match(markup(createElement(InsightsFlow, dashboard({ work, status: status(observed) }))), new RegExp(`class="now-dot[^"]*"[^>]*data-key="${waiting.key}"`));
+  // No observation of what production serves (none configured, an unknown serving commit, a failed
+  // provider read) holds nothing back: every real-shaped merge stays Shipped (AC-11).
+  for (const unknown of [null, { ...observed, serving: null }, { ...observed, error: 'Railway API answered 500' }, { ...observed, observedAt: null }]) {
+    const none = releaseView(status(unknown));
+    for (const item of real) assert.equal(groupOf(item, NOW, undefined, undefined, none), 'shipped', `${item.key} with ${JSON.stringify(unknown)?.slice(0, 40)}`);
+  }
+  // The installation's configured production environment is the one a verified release is read under.
+  const verified = (environment: string) => ({ environment, policyRevision: 1, releaseId: 'r', releaseRevision: 1, generation: 1, verifiedAt: new Date(NOW - hour).toISOString(), interval: { from: new Date(NOW - hour).toISOString(), to: new Date(NOW).toISOString() } });
+  const live = { ...waiting, releaseDeliveries: [verified('graphyard / production')] } as Work;
+  const named = releaseView(status(observed, 'graphyard / production'));
+  assert.equal(named.environment, 'graphyard / production');
+  assert.equal(releasedAt(live, named), NOW - hour); assert.equal(prSteps(live, NOW, named).label, 'Live');
+  assert.equal(groupOf(live, NOW, undefined, undefined, named), 'shipped', 'a verified release outranks a pending watch entry');
+  assert.equal(releasedAt(live), null, 'under the default name it is not live');
+  const namedStatus = status(null, 'graphyard / production');
+  assert.match(markup(createElement(ShippedPage, dashboard({ work: [live], status: namedStatus }))), /data-live="true">Live</);
+  const before = Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(home(dashboard({ work: [...board(), waiting], status: namedStatus })))?.[1]);
+  assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(home(dashboard({ work: [...board(), live], status: namedStatus })))?.[1]), before + 1);
+  // The item page's Checks line reads each check as the test gate does: only the trusted App's runs
+  // count, so a newer untrusted run of the same name neither passes nor fails a check.
+  const handedIn = find('GY-22');
+  const withChecks = (checks: unknown[], test: string[]) => ({ ...handedIn, observation: { ...handedIn.observation!, checks }, gates: handedIn.gates.map(gate => gate.name === 'test' ? { ...gate, passed: test.length === 0, reasons: test } : gate) }) as Work;
+  const ci = 'Required CI check test has not passed on the current candidate';
+  const cases: [Work, string][] = [
+    [withChecks([{ id: 1, name: 'test', result: 'in_progress', appId: 1 }, { id: 2, name: 'test', result: 'success', appId: 99 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], [ci]), 'test running · typecheck passed'],
+    [withChecks([{ id: 1, name: 'test', result: 'success', appId: 1 }, { id: 2, name: 'test', result: 'failure', appId: 99 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], []), 'test passed · typecheck passed'],
+    [withChecks([{ id: 1, name: 'test', result: 'failure', appId: 1 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], [ci]), 'test failed · typecheck passed'],
+  ];
+  for (const [item, line] of cases) {
+    assert.equal(checkStates(item).map(check => `${check.name} ${check.state}`).join(' · '), line);
+    const detail = markup(createElement(WorkDetails, { ...dashboard({ work: [item] }), item }));
+    assert.match(detail, new RegExp(`<dt>Checks</dt><dd>${line}</dd>`));
+  }
+});
+
