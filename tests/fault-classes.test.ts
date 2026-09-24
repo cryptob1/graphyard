@@ -14,6 +14,8 @@ import { controlPlaneAttention, installationSources, masterConfigSchema, workAtt
 import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, fileRecurringFaultClasses, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, reconcilePendingActions, runCycle, storeAction, type DaemonEffects } from '../src/master-daemon.js';
 import { faulted } from '../src/master-status.js';
 import { predictQueue } from '../src/merge-queue.js';
+import { describeHumanRequest } from '../src/model/human-request.js';
+import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import OverviewPage from '../web/pages/overview.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
@@ -353,4 +355,66 @@ test('unit:recurring-class-item — derived and status-level faults reach recurr
   // An item's own fault and the same fault derived again for it are one observation, not two.
   const both = cycleFaults(state, [blocked('GY-9')], clock, { config: config() });
   assert.equal(both.filter(fault => fault.subject === 'GY-9').length, 1, `one blocker is one fault: ${JSON.stringify(both)}`);
+});
+
+test('unit:recurring-class-item — a typed wait is one fault, not also a generic blocker', () => {
+  const parked = item('GY-11', { blocker: describeHumanRequest({ kind: 'money-or-accounts', needed: 'a paid Railway plan' }),
+    humanRequest: { id: 'h1', kind: 'money-or-accounts', reason: 'the deploy needs a paid plan', needed: 'a paid Railway plan', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) } } as Partial<Work>);
+  assert.deepEqual(workFaults(parked, clock).map(fault => fault.kind), ['human-request'], 'the park is one human-decision fault');
+  const refused = item('GY-12', { blocker: `${scopeRefusalBlocker}: docs/ is outside the implied scope`,
+    scopeRequest: { paths: ['docs/'], reason: 'docs', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) } } as Partial<Work>);
+  assert.deepEqual(workFaults(refused, clock).map(fault => fault.kind), ['scope-request'], 'the refused scope request is one scope fault');
+  // A blocker that is not a typed wait's restatement still counts.
+  assert.deepEqual(workFaults(item('GY-13', { blocker: 'npm test fails on a missing fixture', scopeRequest: parked.scopeRequest } as Partial<Work>), clock).map(fault => fault.kind), ['blocker']);
+  // Three parked items count toward human-decision only, so they can file at most one item.
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  trackFaults(record, cycleFaults(emptyDaemonState(config()), ['GY-21', 'GY-22', 'GY-23'].map(key => ({ ...parked, id: `work-${key}`, key })), clock), iso(0));
+  assert.deepEqual([...new Set(record.instances.map(entry => entry.faultClass))], ['human-decision']);
+  assert.deepEqual(recurringClasses(record.instances, [], policy, clock).filter(entry => entry.file).map(entry => entry.faultClass), ['human-decision']);
+});
+
+test('unit:recurring-class-item — a recurring human-decision class keeps the decision with the human', () => {
+  const recent = [instance('human-decision', 'GY-1', -3 * hour), instance('human-decision', 'GY-2', -2 * hour), instance('human-decision', 'GY-3', -hour)];
+  const filed = faultClassItem({ faultClass: 'human-decision', recent }, policy, clock);
+  assert.match(filed.criteria[0].text, /judged necessary .* or avoidable/);
+  assert.match(filed.criteria[0].text, /every necessary decision is still refused to every agent and answered only in the human's own session/);
+  assert.doesNotMatch(filed.criteria[0].text, /shared cause .* removed/);
+  assert.match(filed.description, /does not move any of them to an agent or weaken that boundary/);
+  assert.doesNotMatch(filed.description, /so the product handles the case itself/);
+  assert.equal(filed.origin.faultClass.class, 'human-decision', 'the item still records the class it closes');
+  // Every other class keeps the remove-the-cause requirement.
+  assert.match(faultClassItem({ faultClass: 'scope', recent }, policy, clock).criteria[0].text, /shared cause of the recurring scope faults is found and removed/);
+});
+
+test('unit:recurring-class-item — attention master status adds after buildMasterStatus reaches recurrence tracking', async () => {
+  const filed: any[] = [];
+  let reported: { subject: string; text: string }[] = [];
+  const seen: unknown[] = [];
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {}, controlPlane: async () => ({ github: true }),
+    reportedAttention: async (_work: Work[], coordinator: unknown, observed: unknown) => { seen.push({ coordinator, observed }); return reported; },
+    fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${100 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
+  } as unknown as DaemonEffects;
+  let now = clock;
+  const state = emptyDaemonState(config());
+  // An escalation context over budget is appended by master status after buildMasterStatus (GY-138).
+  const overflow = (key: string) => ({ subject: key, text: `The escalation context for ${key} assembled to 40,000 bytes, over its 32,000-byte budget` });
+  for (const [round, key] of ['GY-1', 'GY-2', 'GY-3'].entries()) {
+    reported = [overflow(key)];
+    now = clock + round * 60_000; await runCycle(config(), state, effects, () => now);
+  }
+  assert.ok(seen.length >= 3, 'the loop reads the report-only attention every cycle, with the control plane status');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'decision').map(entry => [entry.kind, entry.faultClass, entry.subject]),
+    [['context-overflow', 'decision', 'GY-1'], ['context-overflow', 'decision', 'GY-2'], ['context-overflow', 'decision', 'GY-3']]);
+  assert.deepEqual(filed.map(input => input.origin.faultClass.class), ['decision'], 'the recurring report-only class files its item');
+  // A failing read is itself a loop fault, and the cycle goes on.
+  (effects as any).reportedAttention = async () => { throw new Error('status read refused'); };
+  now = clock + 10 * 60_000; await runCycle(config(), state, effects, () => now);
+  assert.ok(state.faults.instances.some(entry => entry.kind === 'loop-failures' && /status read refused/.test(entry.text)));
+  // The loop's wiring reads it only with the operator-agent identity, as it files.
+  const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' } };
+  assert.equal(daemonEffects('/nonexistent', config(), deps).reportedAttention, undefined);
+  assert.equal(typeof daemonEffects('/nonexistent', { ...config(), operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/operator.token' } } as MasterConfig, deps).reportedAttention, 'function');
 });

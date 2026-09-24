@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isClosed } from './closure.js';
 import { standingCapacity } from './capacity.js';
+import { scopeRefusalBlocker } from './scope.js';
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
 import type { EscalationTrigger, Work } from './work.js';
@@ -163,7 +164,8 @@ export function workFaults(work: Work, now: number): FaultObservation[] {
   if (work.proofGaps?.length) found.push(observe('proof-gap', work.key, `No principal is authorized to produce ${work.proofGaps.join(', ')}`));
   if (standingCapacity(work).length) found.push(observe('role-capacity', work.key, `${work.key} waits on a provider account out of quota`));
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));
-  if (work.blocker) found.push(observe(/sandbox|refused path|--add-dir|Operation not permitted/i.test(work.blocker) ? 'sandbox-blocker' : 'blocker', work.key, work.blocker));
+  const restated = /* a blocker restating a typed fault is that fault: a human-only park's wait, a refused scope request */ (work.humanRequest && !work.humanRequest.answer) || (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker));
+  if (work.blocker && !restated) found.push(observe(/sandbox|refused path|--add-dir|Operation not permitted/i.test(work.blocker) ? 'sandbox-blocker' : 'blocker', work.key, work.blocker));
   return found;
 }
 
@@ -299,16 +301,18 @@ export function faultClassItem(recurrence: Pick<ClassRecurrence, 'faultClass' | 
   const subjects = [...new Set(recent.map(entry => entry.subject))];
   const origin: FaultClassOrigin = { class: faultClass, threshold: policy.threshold, windowHours: policy.windowHours, count: recent.length, detectedAt: at,
     instances: recent.slice(0, 100).map(({ id, kind, subject, at: seen }) => ({ id, kind, subject, at: seen })) };
+  // Goals, spending and credentials stay a human's however often asked: this class removes only the avoidable waits.
+  const human = faultClass === 'human-decision';
   const description = [
     `The master loop filed this item itself: ${recent.length} ${faultClass} faults in ${policy.windowHours} hours (threshold ${policy.threshold}). The class means ${faultClassMeaning[faultClass]}.`,
-    `Fixing these one instance at a time is what this item replaces: find the cause the instances share and remove it, so the product handles the case itself. Later instances of the class are linked to this item rather than filed again. Whether the class stays quiet after this ships is not evidence this item can carry: the loop keeps counting it, and a recurrence past the threshold after delivery files a new item.`,
+    human ? `These waits are on decisions only a human may make (goals and priorities, money or accounts, credentials for people), and this item does not move any of them to an agent or weaken that boundary. What it replaces is handling each wait by hand: find the waits that were avoidable — asked again for something already decided, asked for a decision the item did not need, or left unanswered because nobody was told — and remove those, so each human decision is asked for once, when it is needed, with what the human needs to make it. Later instances of the class are linked to this item rather than filed again.` : `Fixing these one instance at a time is what this item replaces: find the cause the instances share and remove it, so the product handles the case itself. Later instances of the class are linked to this item rather than filed again. Whether the class stays quiet after this ships is not evidence this item can carry: the loop keeps counting it, and a recurrence past the threshold after delivery files a new item.`,
     `Subjects affected: ${subjects.join(', ')}.`,
     'Instances (the evidence):',
     ...recent.slice(0, 100).map(entry => `- ${entry.at} ${entry.kind} on ${entry.subject}: ${entry.text}`),
   ].join('\n\n');
   return {
-    title: `Recurring ${faultClass} faults: ${recent.length} in ${policy.windowHours} hours`.slice(0, 200), description: description.slice(0, 20000), type: 'bug' as const, priority: 1,
-    criteria: [{ id: 'AC-1', text: `The shared cause of the recurring ${faultClass} faults is found and removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate, by a test the change adds`, proofs: [`manual:fault-class-${faultClass}`] }],
+    title: `Recurring ${faultClass} faults: ${recent.length} in ${policy.windowHours} hours`.slice(0, 200), description: description.slice(0, 20000), type: 'bug' as const, priority: human ? 2 : 1,
+    criteria: [{ id: 'AC-1', text: human ? 'Each instance listed on this item is judged necessary (a goals, money or credentials decision the item needed) or avoidable, with the reason; every avoidable wait is reproduced against the base and shown not to recur against the candidate, by a test the change adds; and a test shows every necessary decision is still refused to every agent and answered only in the human\'s own session' : `The shared cause of the recurring ${faultClass} faults is found and removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate, by a test the change adds`, proofs: [`manual:fault-class-${faultClass}`] }],
     origin: { faultClass: origin },
     reason: `The ${faultClass} fault class recurred past its threshold (${recent.length} ≥ ${policy.threshold} in ${policy.windowHours} hours) and no open item names it`,
   };

@@ -1508,6 +1508,12 @@ export interface DaemonEffects {
    * Absent without that identity; a read that fails leaves the cycle to the faults it has.
    */
   controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
+  /**
+   * The attention `master status` adds after `buildMasterStatus` (generated-file drift, context
+   * overflows, intervention patterns, executors behind the release, terminal decisions, throughput,
+   * resources), read with the control plane's status so the loop tracks every class the report shows.
+   */
+  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness'] }) => Promise<AttentionItem[]>;
 }
 
 /**
@@ -1541,6 +1547,8 @@ export interface FaultSources {
   containment?: Record<string, ContainmentAssessment>;
   /** The control plane's status as the loop read it, and the integration jobs on the coordination read. */
   status?: (ControlPlaneStatus & Record<string, unknown>) | null; jobs?: { work_id?: string; error?: string | null }[];
+  /** What `master status` adds after `buildMasterStatus`, as the loop read it this cycle (see DaemonEffects.reportedAttention). */
+  reported?: AttentionItem[];
 }
 /**
  * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
@@ -1566,6 +1574,7 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     } catch (error) {
       derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
     }
+    for (const item of classifyAttention(sources.reported ?? [])) if (item.kind !== 'gate') derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
@@ -2603,7 +2612,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => null) : null;
-  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs }), new Date(clock).toISOString());
+  const summary = controlPlane && effects.reportedAttention ? daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId) : null;
+  const reported = summary ? await effects.reportedAttention!(snapshot.work, controlPlane!, { agents, approvals: summary.approvals, loop: summary.liveness })
+    .catch(error => [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem]) : [];
+  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported }), new Date(clock).toISOString());
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
 
   spent('deployment');
@@ -3182,6 +3194,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get decisions() { return current().operatorAgent ? decisions : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173).
     get controlPlane() { return current().operatorAgent ? () => asOperatorAgent('GET', 'status') : undefined; },
+    get reportedAttention() {
+      return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness'] }) =>
+        // Imported when first read: the status report imports this module, so a static import would be a cycle.
+        (await (await import('./cli/master-status.js')).reportedAttention(root, current(), path => asOperatorAgent('GET', path), coordinator, { work }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
+          runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop })).items : undefined;
+    },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,

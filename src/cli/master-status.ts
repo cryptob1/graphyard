@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
-import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { executorFleet } from './executor-report.js';
@@ -18,21 +17,21 @@ import { unansweredRequestAttention, unobtainableReviewAttention } from './unans
 import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
-import { ledgerRefusalAttention } from '../master-status.js';
-import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { githubBudgetAttention } from './github-budget-attention.js';
 import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
-import { throughputStatus } from '../throughput.js';
-import { interventionSummary } from './intervention-status.js';
 import { setupHealth } from './master-setup.js';
 import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
-import { contextOverflows } from '../model/escalation-context.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
+import { attributeAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
+import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
+import { contextOverflows } from '../model/escalation-context.js';
+import { interventionSummary } from './intervention-status.js';
 import { terminalDecisions } from './decision-report.js';
-import { attributeAttention, faulted, resourceStatus } from '../master-status.js';
+import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
+import { throughputStatus } from '../throughput.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
@@ -164,37 +163,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  // The generated-files variable the installers set beside GRAPHYARD_PRINCIPALS, compared with
-  // the managed repository's manifest: a deployment that does not exempt the manifest's paths
-  // sends every docs-touching item into the out-of-scope refusal, so the drift is raised here
-  // with the exact command that fixes the deployment.
-  const generatedFiles: AttentionItem[] = [];
-  try {
-    const manifest = generatedFilesAssignment(root);
-    const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
-    for (const text of generatedFilesDrift(deployed, manifest)) generatedFiles.push({ subject: 'installation', text, ...installationOwner('delegation-limits', text) });
-  } catch (error) {
-    generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
-      ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
-  }
-  // An escalation context over its budget (GY-138), named before a handler declines on it.
-  const overflow = await contextOverflows(masterApi, snapshot.work);
-  attentionItems.push(...generatedFiles, ...overflow);
-  // What the product made people do by hand this week (GY-98).
-  const interventions = await interventionSummary(masterApi);
-  attentionItems.push(...interventions.attentionItems);
-  // The fleet against the release this CLI runs (GY-126): every executor registered on this host
-  // with the commit it loaded beside the coordinator's, and one item naming each that has stood
-  // down, or will at its next claim, because the checkout moved on under it.
-  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: cli.commit ?? readCommit(root) }, { hostId: master.hostId });
-  attentionItems.push(...releases.attention);
-  const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: cycling?.approvals ?? [], runtime, now: Date.now() });
-  // GY-87's throughput claim against the release now serving: verified, or unverified with what
-  // missed. Delivered is not proven, and nothing else on this report would say which this is.
-  const throughput = await throughputStatus(root, coordinator, snapshot.work);
-  if (throughput.attention) attentionItems.push(throughput.attention);
-  // Every registered resource against its bound (GY-132); a symptom of one at its bound names it.
-  const resources = await resourceStatus(root, master, { reviews: reviewRecords, producers: producerRecords, agents: runtime.available ? runtime.agents : null, work: snapshot.work, loop: cycling?.liveness ?? null });
+  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+    { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null });
+  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane will take from the operator's own credential alone, derived by
   // the server from the human-only rule table and answered where it is listed — the dashboard's
@@ -237,6 +208,27 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
     disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
     runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } };
+}
+
+/** What the report adds after buildMasterStatus; the loop reads it too, to track every class (GY-173). */
+export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[] },
+  observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & { commit: string | null }) {
+  const generatedFiles: AttentionItem[] = [];
+  try {
+    const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
+    for (const text of generatedFilesDrift(deployed, generatedFilesAssignment(root))) generatedFiles.push({ subject: 'installation', text, ...installationOwner('delegation-limits', text) });
+  } catch (error) {
+    generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
+      ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
+  }
+  const overflow = await contextOverflows(masterApi, snapshot.work);
+  const interventions = await interventionSummary(masterApi);
+  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) }, { hostId: master.hostId });
+  const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() });
+  const throughput = await throughputStatus(root, coordinator, snapshot.work);
+  const resources = await resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop });
+  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems];
+  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, items };
 }
 
 /**
