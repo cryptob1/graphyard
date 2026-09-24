@@ -11,7 +11,7 @@ const url = process.env.GRAPHYARD_URL || config.url;
 const token = process.env.GRAPHYARD_TOKEN || config.token;
 const hostId = process.env.GRAPHYARD_HOST_ID ?? config.hostId;
 const cliPath = process.env.GRAPHYARD_CLI || config.cliPath || fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
-if (!url || !token) { console.error('Configure Graphyard URL and an individual worker/reader token in the Herdr plugin config.json. See docs/herdr.md.'); process.exit(1); }
+if (!url || !token) { console.error('Configure Graphyard URL and an individual worker/reader token in the Herdr plugin config.json. See docs/onboarding.md#2-add-machines.'); process.exit(1); }
 // Treat server content as text, never terminal control sequences.
 const clean = value => String(value).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 async function request(path, data) {
