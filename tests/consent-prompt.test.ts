@@ -14,6 +14,7 @@ import { consentHoldItems } from '../src/cli/consent-holds.js';
 import { assignmentSurrender, consentHoldProbe, supervise } from '../src/supervisor.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
+import { autonomyContract } from '../src/autonomy.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 
 // GY-130: a runtime that stops on a first-run consent prompt is not a started session. The
@@ -141,7 +142,7 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     assert.equal(pasteHeld.delivery, 'paste'); assert.equal(pasteHeld.started.state, 'awaiting consent');
     assert.equal(pastePane.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
     assert.equal(pasteHeld.awaiting!.request, join(directory, '.graphyard/launch/eng-paste.request'));
-    assert.equal(await readFile(pasteHeld.awaiting!.request!, 'utf8'), 'Implement GY-130');
+    assert.equal(await readFile(pasteHeld.awaiting!.request!, 'utf8'), `${autonomyContract} Implement GY-130`, 'the pending request carries the autonomy contract ahead of the task (GY-184)');
     assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-paste', 'w1V:pC1', pasteHeld.awaiting!, clock).request, pasteHeld.awaiting!.request);
     assert.equal(held.awaiting!.request, null, 'a runtime that read its request from the command line has nothing pending');
     assert.equal(held.awaiting!.named, true);

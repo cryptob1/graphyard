@@ -19,7 +19,40 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
     tradeoff: 'cursor-agent runs every command it proposes in the assigned worktree and trusts that worktree without asking.' },
   opencode: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, prompts: 'edit, bash, and webfetch permission prompts',
     tradeoff: 'opencode edits files, runs shell commands, and fetches URLs without asking.' },
+  // Pi has no approval or trust prompt to suppress: every tool it has runs without asking.
+  pi: { args: [], environment: {}, prompts: 'none: pi has no approval or workspace-trust prompts',
+    tradeoff: 'pi runs every tool it proposes in the assigned worktree; it has no approval step to turn off.' },
+  gemini: { args: ['--yolo'], environment: {}, prompts: 'per-tool approval prompts',
+    tradeoff: 'Gemini CLI approves every tool call it proposes (YOLO mode) without asking.' },
+  qwen: { args: ['--yolo'], environment: {}, prompts: 'per-tool approval prompts',
+    tradeoff: 'Qwen Code approves every tool call it proposes (YOLO mode) without asking.' },
+  copilot: { args: ['--allow-all-tools', '--allow-all-paths'], environment: {}, prompts: 'per-tool approval and path-access prompts',
+    tradeoff: 'Copilot CLI runs every tool and reaches every path it proposes without asking.' },
+  kimi: { args: ['--yolo'], environment: {}, prompts: 'per-action approval prompts',
+    tradeoff: 'Kimi CLI approves every action it proposes without asking.' },
+  amp: { args: ['--dangerously-allow-all'], environment: {}, prompts: 'per-command approval prompts',
+    tradeoff: 'Amp runs every command it proposes without asking.' },
+  muse: { args: ['--approval-mode', 'never', '--trust-workspace'], environment: {}, prompts: 'approval and workspace-trust prompts',
+    tradeoff: 'Muse never asks for approval and trusts the assigned worktree without asking.' },
 };
+
+/**
+ * Runtimes Graphyard accepts in a profile but cannot yet start without their own prompts: none
+ * has a known flag or variable that suppresses its approval and trust prompts for an interactive
+ * session. Each is refused before launch, naming the runtime, rather than started into a session
+ * that waits for a keypress no one sends (GY-184). A runtime moves out of this list by gaining a
+ * recipe above.
+ */
+export const refusedLaunchKinds = ['devin', 'agy', 'cline', 'omp', 'mastracode', 'kiro', 'droid', 'grok', 'hermes', 'kilo', 'qodercli', 'maki'] as const;
+export class LaunchRefusedError extends Error { constructor(readonly kind: string) {
+  super(`Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind}, so the session would stop at its own approval or trust prompt. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
+} }
+/** The runtime's launch recipe, or a refusal naming the runtime when there is none. */
+export function assertLaunchRecipe(kind: string): LaunchRecipe {
+  const recipe = nonInteractiveLaunch[kind];
+  if (!recipe) throw new LaunchRefusedError(kind);
+  return recipe;
+}
 
 /**
  * What each runtime's own session listing calls a session that has ended.
@@ -43,7 +76,7 @@ export const runtimeEndedStates: RuntimeStates = runtime => runtimeEndedSessionS
 export function launchPlan(kind: string | undefined, approvals: ApprovalMode = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
   const recipe = kind ? nonInteractiveLaunch[kind] : undefined;
   const base = { approvals, args: [...agentArgs], environment: {} as Record<string, string>, applied: false, prompts: recipe?.prompts ?? null, tradeoff: recipe?.tradeoff ?? null };
-  if (!recipe) return { ...base, reason: kind ? `Graphyard has no non-interactive launch contract for ${kind}; the session may block on its own approval prompt` : 'A launched session requires an agent kind' };
+  if (!recipe) return { ...base, reason: kind ? `Graphyard has no non-interactive launch contract for ${kind}; a session of it is refused at launch rather than left at its own approval prompt` : 'A launched session requires an agent kind' };
   if (approvals === 'prompt') return { ...base, reason: 'This profile opted out; a human must answer the runtime approval prompts in the session tab' };
   // An operator who already configured the runtime's approval flags keeps exactly those arguments.
   const overridden = recipe.args.some(argument => argument.startsWith('-') && agentArgs.includes(argument)) || Object.keys(recipe.environment).some(name => name in environment);

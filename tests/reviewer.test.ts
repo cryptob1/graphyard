@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
 import { buildMasterStatus, dispatchWork, loadMasterConfig, masterHarness, reviewerProfileSchema, sessionHarnessPlan, setupMaster, workerProfileSchema } from '../src/master.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
+import { autonomyContract } from '../src/autonomy.js';
 import { harnessDecision, launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
 import { applyProtection, protectionPlan, requiredReviewProtection } from '../src/protection.js';
 import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
@@ -196,7 +197,9 @@ test('master review mints a private session credential, records the request, and
     // GY-93: the request is the session's own first message, the positional prompt after the
     // approval flag; nothing is pasted into the session afterwards. GY-121: the shell reads it
     // from the request file in the session checkout that the short typed line references.
-    assert.deepEqual(typed.args.slice(-3, -1), ['--permission-mode', 'bypassPermissions']);
+    assert.deepEqual(typed.args.slice(0, 2), ['--permission-mode', 'bypassPermissions']);
+    // GY-184: a Claude Code session loads the autonomy contract from its role file, just before the request.
+    assert.deepEqual(typed.args.slice(-3, -1), ['--append-system-prompt-file', `${typed.stem}.role`]); assert.equal(roleOf(typed.args), autonomyContract);
     assert.match(typed.args.at(-1)!, /pull request #42 at head a{40} against base b{40}/); assert.equal(typed.stem, join(launched.checkout, '.graphyard/launch/review-claude-1'));
     assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readReviewLedger(root);
@@ -271,7 +274,9 @@ test('launched profiles carry each runtime non-interactive contract and honour a
   assert.deepEqual(configured.args, ['--ask-for-approval', 'on-request']); assert.match(configured.reason!, /already configures/);
   const presetEnvironment = launchPlan('opencode', 'auto', [], { OPENCODE_PERMISSION: '{"edit":"ask"}' });
   assert.deepEqual(presetEnvironment.environment, {}); assert.match(presetEnvironment.reason!, /already configures/);
-  assert.match(launchPlan('gemini', 'auto').reason!, /no non-interactive launch contract/);
+  // GY-184: Gemini has a recipe now; a runtime without one is refused at launch, and the plan says so.
+  assert.deepEqual(launchPlan('gemini', 'auto').args, ['--yolo']);
+  assert.match(launchPlan('droid', 'auto').reason!, /no non-interactive launch contract/);
   assert.equal(Object.keys(nonInteractiveLaunch).every(kind => workerProfileSchema.shape.kind.safeParse(kind).success), true);
 });
 
@@ -304,11 +309,11 @@ test('dispatch starts a supervised worker with its runtime approval contract, or
     assert.equal(dispatched.launch.applied, true);
     // GY-93: the instruction follows the flags as the runtime's positional prompt.
     assert.match(calls[1][3], / -- cursor --force --trust "\$\(cat "\$GY\.request"\)"$/, 'the supervised command carries the runtime non-interactive flags, then the request');
-    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, /^Implement GY-42: /);
+    assert.ok(expandTypedCommand(calls[1][3]).args.at(-1)!.startsWith(`${autonomyContract} Implement GY-42: `), 'Cursor loads no role file, so the autonomy contract leads the request (GY-184)');
     const optOutCalls: string[][] = [];
     await dispatchWork(root, ready(), { ...profile, approvals: 'prompt', agentName: 'eng-cursor-2' }, [], (_command, args) => { optOutCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 5, path: join(root, 'assigned-2'), base: 'd'.repeat(40) }));
     assert.match(optOutCalls[1][3], / -- cursor "\$\(cat "\$GY\.request"\)"$/, 'an opted-out profile starts exactly as the operator configured it, plus the request');
-    assert.match(expandTypedCommand(optOutCalls[1][3]).args.at(-1)!, /^Implement GY-42: /);
+    assert.ok(expandTypedCommand(optOutCalls[1][3]).args.at(-1)!.startsWith(`${autonomyContract} Implement GY-42: `), 'an opted-out profile still carries the autonomy contract (GY-184)');
     const opencodeCalls: string[][] = [];
     await dispatchWork(root, ready(), { ...profile, kind: 'opencode', agentName: 'eng-opencode-1' }, [], (_command, args) => { opencodeCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 6, path: join(root, 'assigned-3'), base: 'e'.repeat(40) }));
     assert.ok(opencodeCalls[0].some(value => value.startsWith('OPENCODE_PERMISSION=')), 'runtimes configured by environment get their contract in the tab environment');

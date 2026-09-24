@@ -13,6 +13,7 @@ import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/p
 import { dispatchSummary, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { atomicPrivateWrite } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
+import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 
@@ -295,7 +296,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.equal(produceStart.kind, 'codex', 'the session runs the account\'s runtime, not the profile\'s');
     const produceTail = produceStart.args;
     assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', await sharedGitDirectory(root)]);
-    assert.match(produceTail.at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
+    assert.ok(produceTail.at(-1)!.startsWith(`${autonomyContract} You are an independent Graphyard proof producer`), 'the request is the positional prompt (GY-93), led by the autonomy contract since Codex loads no role file (GY-184)');
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
     const review = { id: 'request-review', kind: 'review', provider: 'github', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;

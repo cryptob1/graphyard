@@ -14,7 +14,8 @@ import type { GitHub } from '../src/github.js';
 import { Refusal, standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { assembleEscalationContext, canonical, contextFingerprint, contextLadder, contextOverflowAttention, contextOverflows, contextSqueeze, defaultContextBudget, followPrecedent, handleEscalation, type ContextInputs, type EscalationContext } from '../src/model/escalation-context.js';
 import { launchEscalationHandler, masterConfigSchema, runAutonomyCommand, type AutonomyDependencies, type MasterConfig } from '../src/master.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
+import { autonomyContract } from '../src/autonomy.js';
 import { Store } from '../src/store.js';
 
 // GY-90: the control plane assembles an escalation's context from the project — the repository's
@@ -343,7 +344,8 @@ console.log(JSON.stringify({ result, reads }));
   assert.equal(start.kind, 'claude'); assert.equal(start.stem, join(masterRoot, '.graphyard/launch', launched.agentName));
   assert.deepEqual(herdrCalls.find(call => call[0] === 'agent' && call[1] === 'rename')?.slice(2), ['pane-escalation', launched.agentName], 'the started runtime takes the session name');
   const request = start.args.at(-1)!;
-  assert.ok(start.args.length > 1 && start.args.slice(0, -1).every(word => word.startsWith('--') || word === 'bypassPermissions'), 'the request follows the runtime arguments');
+  assert.ok(start.args.length > 1 && start.args.slice(0, -1).every(word => word.startsWith('--') || word === 'bypassPermissions' || word === `${start.stem}.role`), 'the request follows the runtime arguments');
+  assert.equal(roleOf(start.args), autonomyContract, 'the handler\'s role file holds the autonomy contract (GY-184)');
   assert.match(request, new RegExp(`^You are a Graphyard escalation handler spawned for the requirement-weakening escalation on ${work.key}`));
   assert.ok(request.includes(launched.context) && request.includes(`--context ${before.fingerprint}`), 'the prompt names the context file and its fingerprint');
   assert.equal(herdrCalls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0, 'nothing is typed into the session');

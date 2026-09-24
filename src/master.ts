@@ -15,7 +15,8 @@ import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, d
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
-import { harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { assertLaunchRecipe, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { withAutonomyContract } from './autonomy.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
@@ -1329,8 +1330,15 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
 export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
   assertSessionName(name, options.retry);
+  // A runtime Graphyard cannot start without its own approval prompts is refused here, before
+  // anything is typed, rather than launched into a session that waits for a keypress (GY-184).
+  assertLaunchRecipe(kind);
   const delivery = launchDelivery(kind);
-  const files = writeLaunchFiles(options.directory, name, { role: options.role, request: delivery === 'request' ? text : null });
+  // Every session carries the autonomy contract: in its role file when the runtime loads one,
+  // otherwise at the start of its first request, pasted or not (GY-184).
+  const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
+  text = carried.request;
+  const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: delivery === 'request' ? text : null });
   const command = launchCommand(kind, args, files, options.prefix);
   await herdrRun(['pane', 'run', pane, command], run);
   const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });

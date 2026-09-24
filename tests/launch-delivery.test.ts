@@ -13,6 +13,7 @@ import { summarizeReviews } from '../src/reviewer.js';
 import { launchProducer, producerPrompt, readProducerLedger, summarizeProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { autonomyContract } from '../src/autonomy.js';
 
 // GY-121: a session launch types a short, constant-size command line that references the
 // request and role files in the session's own checkout; the start bound reads the pane and tells
@@ -163,7 +164,7 @@ test('unit:launch-command-bounded — the typed launch command line is short and
     const pasted = new FakePane(() => ({ agent: { agent: 'muse', agent_status: 'idle' } }));
     const paste = await startAgentSession('muse-1', 'muse', 'w1V:pR6', [], request, pasted.run, { directory, ...pasted.bounds(), attempts: 1 });
     assert.equal(paste.delivery, 'paste'); assert.equal(pasted.typed, 'muse'); assert.deepEqual(paste.files, { stem: join(directory, '.graphyard/launch/muse-1'), role: null, request: null });
-    assert.ok(pasted.calls.some(call => call[0] === 'agent' && call[1] === 'prompt' && call[3] === request), 'a runtime without a contract is prompted after it starts, as before');
+    assert.ok(pasted.calls.some(call => call[0] === 'agent' && call[1] === 'prompt' && call[3] === `${autonomyContract} ${request}`), 'a runtime without a contract is prompted after it starts, as before, its request led by the autonomy contract (GY-184)');
 
     // A supervised worker: the same references after `node CLI watch KEY EPOCH -- KIND`; still bounded with the longest runtime path seen in practice.
     const worker = launchCommand('claude', producerArgs, writeLaunchFiles(directory, 'claude-primary', { role, request }), ['/home/operator/.local/share/mise/installs/cursor-agent/2026.09.18-9a7762b/dist-package/node', '/home/operator/code/project/bin/graphyard.mjs', 'watch', 'GY-121', '1', '--']);
