@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mechanicalProof } from '../model/dispatch.js';
 import type { CliCommand } from './registry.js';
+import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from './test-isolation.js';
 
 /**
  * `graphyard verify GY-N`: the worker's own mechanical check before `complete` (GY-115).
@@ -57,26 +58,35 @@ async function proofFiles(root: string, proof: string) {
 }
 
 /**
- * The project's own tests run with this session's credentials withheld: every GRAPHYARD_* and
- * HERDR_* variable is dropped except the test-port choices a worker sets to avoid collisions. So is
- * NODE_TEST_CONTEXT, which a surrounding test runner sets and which turns the child's TAP stream off.
+ * Run one proof's cases in `root` and count what the TAP stream says about them. The proof's test
+ * files run whole, and its cases are the ones whose title begins with the proof name: narrowing the
+ * run with --test-name-pattern would report every other case of the file as skipped, which a
+ * producer then has to explain away. The run gets the suite's isolation (test-isolation.ts): this
+ * session's credentials withheld and a window of free ports held for it alone.
  */
-const testEnvironment = () => Object.fromEntries(Object.entries(process.env)
-  .filter(([name]) => name !== 'NODE_TEST_CONTEXT' && (!/^(GRAPHYARD|HERDR)_/.test(name) || /^GRAPHYARD_(\w+_)?TEST_PORT$/.test(name))));
-
-/** Run one proof's cases in `root` and count what the TAP stream says about them. */
-export function runProof(root: string, proof: string, files: string[]): Pick<ProofRun, 'result' | 'executed' | 'failed' | 'skipped' | 'files'> {
+export async function runProof(root: string, proof: string, files: string[], ports: ReserveOptions = {}): Promise<Pick<ProofRun, 'result' | 'executed' | 'failed' | 'skipped' | 'files'>> {
   if (!files.length) return { result: 'fail', executed: 0, failed: 0, skipped: 0, files };
+  const reservation = await reserveTestPorts(ports);
+  let run: ReturnType<typeof spawnSync>;
+  try {
+    run = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=tap', ...files],
+      { cwd: root, encoding: 'utf8', env: isolatedTestEnvironment(process.env, testPortEnvironment(reservation.base)), maxBuffer: 64 * 1024 * 1024 });
+  } finally { reservation.release(); }
+  const { executed, failed, skipped } = countProofCases(String(run.stdout ?? ''), proof);
+  // The file's other cases are the ordinary suite's business: only the proof's own decide its result.
+  return { result: executed > 0 && failed === 0 && skipped === 0 ? 'pass' : 'fail', executed, failed, skipped, files };
+}
+
+/** The proof's cases in a TAP stream, attributed by title prefix. */
+export function countProofCases(tap: string, proof: string) {
   const title = proofTitle(proof);
-  const run = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=tap', '--test-name-pattern', title.source, ...files],
-    { cwd: root, encoding: 'utf8', env: testEnvironment(), maxBuffer: 64 * 1024 * 1024 });
   let executed = 0, failed = 0, skipped = 0;
-  for (const line of (run.stdout ?? '').split('\n')) {
+  for (const line of tap.split('\n')) {
     const match = line.match(/^\s*(not ok|ok) \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$/);
     if (!match || !title.test(match[2])) continue;
     if (match[3]) skipped++; else { executed++; if (match[1] === 'not ok') failed++; }
   }
-  return { result: run.status === 0 && executed > 0 && failed === 0 && skipped === 0 ? 'pass' : 'fail', executed, failed, skipped, files };
+  return { executed, failed, skipped };
 }
 
 export async function verifyWorkingTree(work: { key: string; criteria: Criterion[] }, root: string, now = () => new Date()): Promise<VerifyRecord> {
@@ -84,7 +94,7 @@ export async function verifyWorkingTree(work: { key: string; criteria: Criterion
   const head = git(root, ['rev-parse', 'HEAD']);
   const clean = git(root, ['status', '--porcelain']) === '';
   const ran: ProofRun[] = [];
-  for (const entry of runnable) ran.push({ proof: entry.proof, criteria: entry.criteria, ...runProof(root, entry.proof, await proofFiles(root, entry.proof)) });
+  for (const entry of runnable) ran.push({ proof: entry.proof, criteria: entry.criteria, ...await runProof(root, entry.proof, await proofFiles(root, entry.proof)) });
   const record: VerifyRecord = { key: work.key, head, clean, at: now().toISOString(), ran, outstanding };
   await mkdir(join(root, '.graphyard', 'verify'), { recursive: true });
   await writeFile(recordPath(root, work.key), JSON.stringify(record, null, 2));

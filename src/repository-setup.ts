@@ -1,5 +1,5 @@
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -519,4 +519,70 @@ export async function executorSupervisionStatus(root: string, run: SystemctlRunn
     : declaration.count ? `every declared slot is active here (${units.map(entry => entry.unit).join(', ')}); node scripts/graphyard-executor.mjs --install --count ${declaration.count + 1} adds one`
     : 'node scripts/graphyard-executor.mjs --install --count 1 declares the first slot';
   return { declaration, error, supervised: manager.available, reason: manager.reason, units, start };
+}
+
+/**
+ * A managed worktree must build against dependencies installed from its own lockfile. The worker
+ * launcher shares the coordinator checkout's install when the lockfiles match byte for byte
+ * (master.ts shareDependencies) and otherwise used to leave the worktree resolving that install by
+ * the runtime's upward lookup — the wrong versions, discovered only as a failing test run. What an
+ * install actually holds is npm's hidden lockfile, `node_modules/.package-lock.json`: every
+ * installed package with its version and integrity. The install answers for a checkout when every
+ * package it holds is the one the checkout's lockfile names and every package the lockfile requires
+ * (all but platform-optional ones) is installed.
+ */
+export function installMatchesLockfile(lockfile: { packages?: Record<string, any> }, installed: { packages?: Record<string, any> } | null): true | string {
+  if (!installed?.packages) return 'the install records no hidden lockfile (node_modules/.package-lock.json)';
+  const wanted = lockfile.packages ?? {}, held = installed.packages;
+  for (const [name, entry] of Object.entries(held)) {
+    const want = wanted[name];
+    if (!want) return `${name} is installed but package-lock.json no longer names it`;
+    if (want.version !== entry.version) return `${name} is installed at ${entry.version ?? 'no version'}, package-lock.json names ${want.version ?? 'no version'}`;
+    if (want.integrity && entry.integrity && want.integrity !== entry.integrity) return `${name} is installed from a different tarball than package-lock.json names`;
+  }
+  for (const [name, entry] of Object.entries(wanted)) if (name && !entry.optional && !held[name]) return `${name} is named by package-lock.json but not installed`;
+  return true;
+}
+
+/** The dependency tree the runtime resolves from `worktree`: its own, the install its mirror links to, or the nearest one above it. */
+async function resolvedInstall(worktree: string): Promise<string | null> {
+  const own = resolve(worktree, 'node_modules');
+  if (await lstat(own).catch(() => null)) {
+    const mirrored = (await readFile(resolve(own, '.graphyard-shared'), 'utf8').catch(() => '')).trim();
+    return mirrored || own;
+  }
+  for (let directory = dirname(worktree), parent = dirname(directory); ; directory = parent, parent = dirname(directory)) {
+    const candidate = resolve(directory, 'node_modules');
+    if ((await lstat(candidate).catch(() => null))?.isDirectory()) return candidate;
+    if (parent === directory) return null;
+  }
+}
+
+export type DependencyInstaller = (cwd: string) => Promise<void>;
+/** `npm ci` in the worktree, its output on stderr so a caller's JSON on stdout stays whole. */
+export const npmCi: DependencyInstaller = cwd => new Promise((done, fail) => {
+  const child = spawn('npm', ['ci', '--no-audit', '--no-fund'], { cwd, stdio: ['ignore', 2, 2] });
+  child.once('error', fail);
+  child.once('close', code => code === 0 ? done() : fail(new Error(`npm ci exited with ${code}`)));
+});
+export interface WorktreeDependencyReport { state: 'current' | 'installed' | 'failed' | 'none'; install: string | null; reason: string }
+
+/**
+ * Make `worktree` resolve dependencies installed from its own package-lock.json: nothing is done
+ * when the install it resolves already matches, and `install` (npm ci) runs in the worktree when it
+ * does not — a changed lockfile, or no install at all. A failed install is reported, never thrown:
+ * the worktree still exists for the session, which sees the reason.
+ */
+export async function ensureWorktreeDependencies(worktree: string, install: DependencyInstaller = npmCi): Promise<WorktreeDependencyReport> {
+  const text = await readFile(resolve(worktree, 'package-lock.json'), 'utf8').catch(() => null);
+  if (text === null) return { state: 'none', install: null, reason: 'The checkout has no package-lock.json; nothing is installed for it' };
+  const lockfile = JSON.parse(text);
+  const current = await resolvedInstall(worktree);
+  const installed = current ? JSON.parse(await readFile(resolve(current, '.package-lock.json'), 'utf8').catch(() => 'null')) : null;
+  const matches = current ? installMatchesLockfile(lockfile, installed) : `no node_modules is reachable from ${worktree}`;
+  if (matches === true) return { state: 'current', install: current, reason: `${current} was installed from this package-lock.json` };
+  const own = resolve(worktree, 'node_modules');
+  try { await install(worktree); }
+  catch (error) { return { state: 'failed', install: current, reason: `package-lock.json differs from the install (${matches}), and installing it failed: ${error instanceof Error ? error.message : String(error)}` }; }
+  return { state: 'installed', install: own, reason: `package-lock.json differs from the install it resolved (${matches}); installed its own` };
 }

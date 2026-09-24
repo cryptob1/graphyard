@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
-import { managedInstructions } from '../repository-setup.js';
+import { ensureWorktreeDependencies, managedInstructions } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
@@ -218,7 +218,13 @@ export const workspaceCommands = defineCommands([
         if (work.submission) execFileSync('git', ['-C', path, 'reset', '--hard', startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
       }
       catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
-      return print({ path, branch, epoch });
+      // A checkout whose lockfile the reachable install does not match gets its own install now,
+      // so the session never starts on the wrong dependency versions. The lease is kept alive
+      // while npm runs; the session's supervisor takes over heartbeats once it starts.
+      const keepalive = setInterval(() => { mutate('heartbeat', { epoch }).catch(() => {}); }, 30_000);
+      let dependencies;
+      try { dependencies = await ensureWorktreeDependencies(path); } finally { clearInterval(keepalive); }
+      return print({ path, branch, epoch, dependencies });
     },
   },
   {

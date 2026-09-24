@@ -19,7 +19,7 @@
 npm ci && npm run build && npm test
 ```
 
-Tests run disposable Postgres from port 15438 (`GRAPHYARD_TEST_PORT` moves it).
+`npm test` hides `GRAPHYARD_*`/`HERDR_*` variables and reserves free Postgres ports.
 
 ## Documentation
 

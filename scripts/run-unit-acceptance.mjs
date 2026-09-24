@@ -30,16 +30,16 @@ try {
   await mkdir(dirname(join(candidate, selected.file)), { recursive: true });
   await copyFile(join(harness, selected.file), join(candidate, selected.file));
   if (!protectedInventory.equals(await readFile(join(candidate, selected.file)))) throw new Error(`${selected.file} in the candidate checkout does not match the protected inventory`);
-  // Only the inventory's own titles run; the rest of the file is the ordinary CI suite's business.
-  // The TAP stream is judged from stdout; a failing test fails the process, which is reported
-  // through the inventory rather than by throwing here.
-  const patterns = Object.values(selected.titles).flatMap(title => ['--test-name-pattern', `^${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`]);
-  const run = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=tap', ...patterns, selected.file],
+  // The inventory file runs whole and its cases are judged by title: narrowing the run with
+  // --test-name-pattern would report the file's other cases as skipped. Those other cases are the
+  // ordinary CI suite's business, so the verdict is the required cases' alone, read from the TAP
+  // stream on stdout.
+  const run = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=tap', selected.file],
     { cwd: candidate, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (run.error) throw run.error;
   process.stderr.write(run.stderr ?? '');
   cases = judgeUnitCases(selected, run.stdout ?? '');
-  passed = run.status === 0 && cases.every(entry => entry.result === 'pass');
+  passed = cases.every(entry => entry.result === 'pass');
   console.log(`Trusted unit acceptance completed: ${cases.filter(entry => entry.result === 'pass').length}/${cases.length} ${proof} cases passed.`);
 } catch (error) { console.error(`Trusted unit acceptance failed: ${error.message}. No passing evidence was produced.`); }
 finally {

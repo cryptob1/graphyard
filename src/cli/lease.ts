@@ -3,6 +3,28 @@ import { defineCommands, workMutation } from './registry.js';
 import { verifyCommand } from './verify.js';
 import { completeCommand } from './complete.js';
 
+/**
+ * Evidence names the candidate it was produced for. A file that leaves out `sha`, `baseSha` or
+ * `policyRevision` is bound to the item's current candidate and policy revision as the CLI reads
+ * them now, so a producer never has to look them up; a value the file carries is sent as written,
+ * and the control plane still refuses evidence for anything but the current candidate.
+ */
+export function bindEvidence(input: unknown, work: { key: string; candidate?: { sha?: string | null; baseSha?: string | null } | null; policyRevision?: number }) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Evidence must be a JSON object');
+  const evidence = { ...input as Record<string, unknown> };
+  const missing = (name: string) => evidence[name] === undefined || evidence[name] === null || evidence[name] === '';
+  if (missing('sha') || missing('baseSha')) {
+    if (!work.candidate?.sha || !work.candidate.baseSha) throw new Error(`${work.key} has no observed candidate yet, so the evidence file must name its sha and baseSha`);
+    if (missing('sha')) evidence.sha = work.candidate.sha;
+    if (missing('baseSha')) evidence.baseSha = work.candidate.baseSha;
+  }
+  if (missing('policyRevision')) {
+    if (typeof work.policyRevision !== 'number') throw new Error(`${work.key} reports no policy revision, so the evidence file must name its policyRevision`);
+    evidence.policyRevision = work.policyRevision;
+  }
+  return evidence;
+}
+
 /** The worker protocol on one claimed item: lease, blockers, submission and evidence. */
 export const leaseCommands = defineCommands([
   {
@@ -40,8 +62,9 @@ export const leaseCommands = defineCommands([
   {
     name: 'evidence',
     scope: 'work',
-    help: ['  evidence GY-N file.json       Submit evidence (trust follows credential)'],
-    run: async (context, work) => context.print(await workMutation(context, work)('evidence', JSON.parse(await readFile(context.args[0], 'utf8')))),
+    help: ['  evidence GY-N file.json       Submit evidence (trust follows credential); sha, baseSha and',
+      '                                policyRevision default to the current candidate and policy'],
+    run: async (context, work) => context.print(await workMutation(context, work)('evidence', bindEvidence(JSON.parse(await readFile(context.args[0], 'utf8')), work))),
   },
   {
     name: 'revoke',
