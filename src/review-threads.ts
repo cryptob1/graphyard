@@ -110,8 +110,9 @@ export const followUpFindingLimit = 50, followUpFindingMax = 500;
 /**
  * The findings a verdict writes on its `Follow-up finding: PATH:LINE — text` lines (GY-166): a
  * FOLLOW-UP with no thread is filed in the same item as the Follow-up threads, never left in free
- * text nobody files. A line without a leading PATH[:LINE] is kept whole, with no path. Every line is
- * read: none is dropped past a count.
+ * text nobody files. A line without a leading PATH[:LINE] is kept whole, with no path; PATH is any
+ * token that is not a bare number, so a root-level file such as `Dockerfile:10` is scoped too. Every
+ * line is read, and whole: none is dropped past a count or cut to the ledger's bound.
  */
 export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
   if (typeof body !== 'string') return [];
@@ -121,8 +122,8 @@ export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
     const text = match?.[1]!.replace(/\s+/g, ' ').trim();
     if (!text || /^none\.?$/i.test(text)) continue;
     const located = /^`?([^\s`:]+)(?::(\d+))?`?\s+[—–-]+\s+\S/.exec(text);
-    const path = located && /[/.]/.test(located[1]!) ? located[1]! : null;
-    findings.push({ path, line: path && located![2] ? Number(located![2]) : null, text: text.slice(0, followUpFindingMax) });
+    const path = located && !/^\d+$/.test(located[1]!) ? located[1]! : null;
+    findings.push({ path, line: path && located![2] ? Number(located![2]) : null, text });
   }
   return findings;
 }

@@ -114,6 +114,12 @@ test('unit:review-criteria-only-prompt — the Follow-up line is parsed exactly 
     { path: null, line: null, text: 'naming could be clearer' },
   ]);
   assert.deepEqual(parseFollowUpFindings(undefined), []);
+  // A root-level file is a path too; a bare number is not.
+  assert.deepEqual(parseFollowUpFindings('Follow-up finding: Dockerfile:10 — no HEALTHCHECK\nFollow-up finding: `Makefile` - stale target\nFollow-up finding: 42 — the answer'), [
+    { path: 'Dockerfile', line: 10, text: 'Dockerfile:10 — no HEALTHCHECK' },
+    { path: 'Makefile', line: null, text: '`Makefile` - stale target' },
+    { path: null, line: null, text: '42 — the answer' },
+  ]);
 });
 
 /** GitHub as the loop's own gh sees it: the approval, the PR's threads, replies and resolves. */
@@ -520,6 +526,25 @@ test('unit:review-followups-filed — every finding is filed however many the ap
     for (let index = 0; index < 80; index++) assert.ok(item.description.includes(`src/f${index}.ts:${index + 1}`), `finding ${index}`);
     assert.equal(item.plannedFiles.length, 80);
     assert.equal(settled.reviews[0].followUps?.item, 'GY-201', 'the ledger keeps its bounded record and the save succeeds');
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a long root-level finding is filed whole and in scope, while the ledger keeps its bounded copy', async () => {
+  const tail = 'UNLESS-THE-CONDITION-AT-THE-END';
+  const text = `Dockerfile:10 — ${'the image runs as root and '.repeat(40)}${tail}`;
+  assert.ok(text.length > 1000);
+  assert.equal(parseFollowUpFindings(`Follow-up finding: ${text}`)[0]!.text, text);
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github(`AC-1 met.\nFollow-up finding: ${text}\nResolved threads: none\nFollow-up threads: none`), items = creator();
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    const { item } = items.created[0];
+    assert.ok(item.description.includes(tail), 'the filed item keeps the finding whole');
+    assert.deepEqual(item.plannedFiles, ['Dockerfile']);
+    const recorded = settled.reviews[0].followUps?.findings?.[0];
+    assert.equal(recorded?.path, 'Dockerfile');
+    assert.ok(recorded && recorded.text.length <= 500, 'the ledger record is bounded and saves');
   } finally { await cleanup(); }
 });
 
