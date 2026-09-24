@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
-import { criteriaRuleSection, fileFollowUpThreads, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, type CreateFollowUpItem, type FollowUpFiling, type LaunchThread, type ThreadResolution } from './review-threads.js';
+import { criteriaRuleSection, fileFollowUpThreads, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, type CreateFollowUpItem, type FollowUpFiling, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -883,13 +883,19 @@ function approvesCurrentHead(record: ReviewRecord, work: Work[]): boolean {
 }
 
 /**
+ * A thread path within the ledger's bound: the path itself, or else its longest containing directory
+ * that fits, never a clipped suffix. A filing retried before its item was created derives the item's
+ * plannedFiles from this record, so it must still name a real scope that contains the file.
+ */
+const ledgerPath = (path: string) => path.length <= 1000 ? path : plannedScope(path) ?? path.slice(0, 1000);
+/**
  * A filed thread within the ledger schema's bounds. The record is saved after the item, replies and
  * resolutions have happened on GitHub, so a field past its bound must never refuse the save: that
  * would lose the retry record of actions already taken.
  */
 function ledgerThread(thread: LaunchThread): LaunchThread {
   const { url, createdAt, ...rest } = thread;
-  return { ...rest, author: thread.author.slice(0, 200), path: thread.path.length <= 1000 ? thread.path : `…${thread.path.slice(-999)}`, excerpt: thread.excerpt.slice(0, 300),
+  return { ...rest, author: thread.author.slice(0, 200), path: ledgerPath(thread.path), excerpt: thread.excerpt.slice(0, 300),
     ...(createdAt && createdAt.length <= 40 ? { createdAt } : {}), ...(url && url.length <= 1000 ? { url } : {}) };
 }
 
@@ -908,11 +914,15 @@ async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, 
       if (event) { changed++; events.push(event); }
       continue;
     }
-    if (previous && previous.attempts >= threadResolutionAttempts) continue;
+    // Past its retries a filing that created its item stops: each thread it could not answer is still
+    // open on GitHub and returns to rework. One that created no item keeps retrying, at a slower pace,
+    // for as long as the approval stands: a finding with no thread has nothing else holding the
+    // merge, and would otherwise be lost while the approved candidate lands.
+    if (previous && previous.attempts >= threadResolutionAttempts && (previous.item || now.getTime() - Date.parse(previous.at) < followUpExhaustedRetryMs)) continue;
     const outcome = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
       ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, create, now);
     // The observation the loop held when it resolved: a later one showing a resolved thread open is checked on GitHub.
-    record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}), ...(observedAt ? { observedAt } : {}) };
+    record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), ...(outcome.findings ? { findings: outcome.findings.slice(0, followUpFindingLimit).map(finding => ({ ...finding, path: finding.path && ledgerPath(finding.path) })) } : {}), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}), ...(observedAt ? { observedAt } : {}) };
     changed++;
     if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} as ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
     for (const id of outcome.resolved.filter(id => !previous?.resolved.includes(id))) events.push(`resolved follow-up review thread ${id} on ${record.key} PR #${record.pr} with a reply naming ${outcome.item}`);
@@ -985,6 +995,8 @@ export function followUpThreadIds(records: ReviewRecord[], work: Work[], pending
   return ids;
 }
 
+/** How often a follow-up filing that created no item is retried once its first retries are spent. */
+export const followUpExhaustedRetryMs = 10 * 60_000;
 /** How many times a thread resolution that failed on a GitHub read or write is retried. */
 export const threadResolutionAttempts = 3;
 /** The approved records whose named threads the loop resolves on this pass; each outcome is kept on the record. */

@@ -8,8 +8,8 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { followUpItem, parseFollowUpFindings, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
-import { bindReviewer, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts } from '../src/reviewer.js';
+import { coalescedScope, followUpItem, parseFollowUpFindings, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
+import { bindReviewer, followUpExhaustedRetryMs, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts } from '../src/reviewer.js';
 import { routineDecision, setAsideFollowUpThreads, threadResolutionGraceMs } from '../src/master-daemon.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -253,7 +253,7 @@ test('unit:review-followups-filed — a thread path past the ledger bound is rec
     assert.equal(filing.item, 'GY-201');
     assert.deepEqual(filing.resolved, ['PRRT_follow001', 'PRRT_follow002']);
     const recorded = filing.threads.find(thread => thread.id === 'PRRT_follow001')!.path;
-    assert.ok(recorded.length <= 1000 && recorded.endsWith('file.ts'), `${recorded.length} characters`);
+    assert.ok(recorded.length <= 1000 && recorded.endsWith('/') && path.startsWith(recorded), `${recorded.length} characters: a containing directory, never a clipped suffix`);
     assert.ok(items.created[0].item.description.includes('file.ts:3'));
     assert.equal(settled.reviews[0].followUps?.item, 'GY-201');
     // The next cycle reads the record and files, replies and resolves nothing again.
@@ -490,5 +490,70 @@ test('unit:review-followups-filed — an approval the dispatcher has not yet fil
     const gh = github('Criteria met.\nResolved threads: none\nFollow-up threads: PRRT_follow001'), items = creator();
     const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
     assert.deepEqual([...followUpThreadIds(settled.reviews, [approved()], { reviewer, now: approvedAt + 60_000 }).get('GY-64') ?? []], ['PRRT_follow001']);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a long thread path whose first filing failed is retried with a real containing directory as its scope', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const path = `src/${'deep/'.repeat(300)}file.ts`;
+    const gh = github(approvalBody, { paths: { PRRT_follow001: path } }), config = await loadMasterConfig(root);
+    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: async () => { throw new Error('Graphyard refused the follow-up item (503): unavailable'); } });
+    const items = creator();
+    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.equal(items.created.length, 1);
+    const scope = items.created[0].item.plannedFiles.find((entry: string) => entry.startsWith('src/deep/'));
+    assert.ok(scope && scope.length <= 500 && scope.endsWith('/') && path.startsWith(scope), `retry scope ${scope}`);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — every finding is filed however many the approval wrote', async () => {
+  const lines = Array.from({ length: 80 }, (_, index) => `Follow-up finding: src/f${index}.ts:${index + 1} — finding number ${index}`);
+  assert.equal(parseFollowUpFindings(lines.join('\n')).length, 80);
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github(`AC-1 met.\n${lines.join('\n')}\nResolved threads: none\nFollow-up threads: none`), items = creator();
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    const { item } = items.created[0];
+    for (let index = 0; index < 80; index++) assert.ok(item.description.includes(`src/f${index}.ts:${index + 1}`), `finding ${index}`);
+    assert.equal(item.plannedFiles.length, 80);
+    assert.equal(settled.reviews[0].followUps?.item, 'GY-201', 'the ledger keeps its bounded record and the save succeeds');
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — follow-ups in more than 100 files are coalesced into directories that still cover every file', () => {
+  const threads = Array.from({ length: 100 }, (_, index) => ({ id: `PRRT_${String(index).padStart(3, '0')}aaaaaaaa`, author: 'codex', path: `src/area${index % 7}/mod${index}/file.ts`, line: 1, outdated: false, excerpt: 'finding' }));
+  const findings = [{ path: 'docs/guide.md', line: 4, text: 'docs/guide.md:4 — stale' }];
+  const item = followUpItem({ key: 'GY-64', workId: 'work-64', pr: 64, sha: H, reviewId: 77 }, threads, findings);
+  assert.ok(item.plannedFiles.length <= 100, `${item.plannedFiles.length} entries`);
+  for (const path of [...threads.map(thread => thread.path), 'docs/guide.md'])
+    assert.ok(item.plannedFiles.some(scope => scope === path || scope.endsWith('/') && path.startsWith(scope)), `${path} is covered`);
+  assert.ok(!item.plannedFiles.includes('src/'), 'widened only as far as the bound needs');
+  assert.deepEqual(coalescedScope(['a.ts', 'src/b.ts']), ['a.ts', 'src/b.ts'], 'within the bound nothing changes');
+});
+
+test('unit:review-followups-filed — an approval with findings only keeps retrying its filing past the retry count, since no thread holds the merge', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github('AC-1 met.\nFollow-up finding: src/c.ts:12 — the retry is unbounded\nResolved threads: none\nFollow-up threads: none'), config = await loadMasterConfig(root);
+    const refusing = async () => { throw new Error('Graphyard refused the follow-up item (503): unavailable'); };
+    let clock = Date.parse('2026-09-24T13:00:00Z');
+    const now = () => new Date(clock);
+    for (let attempt = 1; attempt <= threadResolutionAttempts; attempt++, clock += 60_000)
+      await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: refusing, now });
+    const items = creator();
+    // Within the slower pace, nothing is retried yet.
+    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create, now });
+    assert.equal(items.created.length, 0);
+    // Past it, the filing is retried and the finding is filed.
+    clock += followUpExhaustedRetryMs;
+    const settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create, now });
+    assert.equal(items.created.length, 1);
+    assert.ok(items.created[0].item.description.includes('src/c.ts:12 — the retry is unbounded'));
+    assert.equal(settled.reviews[0].followUps?.item, 'GY-201');
+    assert.equal(settled.reviews[0].followUps?.failure, undefined);
   } finally { await cleanup(); }
 });

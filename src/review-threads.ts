@@ -101,12 +101,17 @@ export const parseFollowUpThreads = (body: unknown) => parseThreadLine(body, 'fo
 
 /** A FOLLOW-UP the reviewer found in the diff, with no review thread: one `Follow-up finding:` line of its verdict. */
 export interface FollowUpFinding { path: string | null; line: number | null; text: string }
-/** The most `Follow-up finding:` lines one verdict files, and the most characters kept of each. */
+/**
+ * The most `Follow-up finding:` lines the review ledger records of one filing, and the most characters
+ * kept of each. The ledger's copy is only a record: every finding is parsed again from the review on
+ * each attempt, so all of them reach the item however many the verdict wrote.
+ */
 export const followUpFindingLimit = 50, followUpFindingMax = 500;
 /**
  * The findings a verdict writes on its `Follow-up finding: PATH:LINE — text` lines (GY-166): a
  * FOLLOW-UP with no thread is filed in the same item as the Follow-up threads, never left in free
- * text nobody files. A line without a leading PATH[:LINE] is kept whole, with no path.
+ * text nobody files. A line without a leading PATH[:LINE] is kept whole, with no path. Every line is
+ * read: none is dropped past a count.
  */
 export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
   if (typeof body !== 'string') return [];
@@ -118,7 +123,6 @@ export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
     const located = /^`?([^\s`:]+)(?::(\d+))?`?\s+[—–-]+\s+\S/.exec(text);
     const path = located && /[/.]/.test(located[1]!) ? located[1]! : null;
     findings.push({ path, line: path && located![2] ? Number(located![2]) : null, text: text.slice(0, followUpFindingMax) });
-    if (findings.length === followUpFindingLimit) break;
   }
   return findings;
 }
@@ -227,6 +231,27 @@ export function plannedScope(path: string): string | null {
   return cut > 0 ? path.slice(0, cut + 1) : null;
 }
 
+/** The most plannedFiles entries one work item carries (the work schema's bound). */
+const plannedFilesMax = 100;
+/**
+ * Scopes for every follow-up path within the plannedFiles count: while there are more than the bound,
+ * the deepest entries are replaced by their containing directory, so each path stays covered by some
+ * entry and none is dropped. Only root-level entries are never widened further; past the bound there,
+ * the create is refused and the failure recorded, never a scope that silently misses a file.
+ */
+export function coalescedScope(paths: string[]): string[] {
+  const depth = (scope: string) => scope.split('/').filter(Boolean).length;
+  let scopes = [...new Set(paths)];
+  while (scopes.length > plannedFilesMax) {
+    const deepest = Math.max(...scopes.map(depth));
+    if (deepest <= 1) break;
+    const lifted = scopes.map(scope => depth(scope) < deepest ? scope : `${scope.split('/').filter(Boolean).slice(0, deepest - 1).join('/')}/`);
+    // A directory entry covers every entry under it.
+    scopes = [...new Set(lifted)].filter((scope, _, all) => !all.some(other => other !== scope && other.endsWith('/') && scope.startsWith(other)));
+  }
+  return scopes;
+}
+
 /**
  * The one backlog item for an approval's follow-ups: each thread's id, path:line, author, URL and
  * excerpt, then each finding the reviewer wrote with no thread. It depends on the approved source
@@ -244,8 +269,8 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
       ...findings.map((finding, index) => clipEnd(`${threads.length + index + 1}. Finding with no thread: ${finding.text}`, budget))].join('\n'),
     type: 'chore', priority: 2, dependencies: [input.workId],
     criteria: [{ id: 'AC-1', text: `Each follow-up listed in the description is addressed in code, or declined with a recorded reason.`, proofs: ['manual:review-followups-triaged'] }],
-    plannedFiles: [...new Set([...threads.map(thread => thread.path).filter(path => path !== '(no path)'), ...findings.map(finding => finding.path).filter((path): path is string => !!path)]
-      .map(plannedScope).filter((path): path is string => !!path))].slice(0, 100),
+    plannedFiles: coalescedScope([...threads.map(thread => thread.path).filter(path => path !== '(no path)'), ...findings.map(finding => finding.path).filter((path): path is string => !!path)]
+      .map(plannedScope).filter((path): path is string => !!path)),
     reason: `Follow-ups named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,
   };
 }
@@ -271,7 +296,8 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
     return { ...base, ...carried, failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
   const resolvedLine = parseResolvedThreads(review.body);
   const named = parseFollowUpThreads(review.body).filter(id => !resolvedLine.includes(id)).slice(0, listedThreadLimit);
-  // Kept from the first pass, so a retry files exactly the item it began.
+  // Read from the review itself until the item is created, never from the ledger's bounded record
+  // of them; once created, the item holds every one and the record is kept as it was.
   const findings = previous?.item ? carried.findings : parseFollowUpFindings(review.body);
   if (!named.length && !findings.length) return { ...base, named, threads: [], findings, replied: [], resolved: [], refused: [] };
   let open: LaunchThread[] = [];
