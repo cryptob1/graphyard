@@ -11,12 +11,12 @@ The master acts without asking. Only three decisions are human-only: goals and p
 
 Keep cycling: status, dispatch ready work, shepherd review and proof collection, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is live-verified against the exact deployed release or awaits delivery behind a deployment blocker recorded as a follow-up.
 
-1. `master status` at startup and after every material event.
+1. `master status` at startup and after events.
 2. `master dispatch GY-N PROFILE` in `schedule.order`.
 3. Route findings and failed proofs to rework.
 4. Merge only when the exact candidate passes every gate.
-5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)).
-6. Close finished agent sessions, then return to status.
+5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
+6. Close finished agent sessions; return to status.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` says when main is ahead of production.
 
@@ -67,4 +67,4 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 `master merge GY-N|--all` merges only under a current authorization for the exact head, base and policy, rechecking every gate under a single-use execution and never using an administrative merge bypass. A server on another merge protocol refuses with `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
 
-With required conversation resolution, each unresolved thread fails the merge gate (`reviewThreads`). An unresolved review thread is a finding to fix: the head's reviewer resolves those fixed there; route others like `CHANGES_REQUESTED`, with `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.
+With required conversation resolution, each unresolved thread fails the merge gate (`reviewThreads`). An unresolved review thread is a finding to fix: the loop resolves those its reviewer verified; route others to `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.

@@ -61,7 +61,7 @@ export async function requestDecision(services: Services, caller: Principal, id:
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
     const history = await readDecisions(db, work!);
     // A refused decision is answered, never retried unchanged (GY-141).
-    const repeated = unansweredRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)));
+    const repeated = unansweredRefusal(history, data.action, input, data.reason, (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b)), data.precedent ?? []);
     demand(!repeated, repeated!, 409);
     const pending = history.find(decision => decision.action === data.action && (decision.state === 'requested' || decision.state === 'approved'));
     const cited = data.precedent ? [...new Set(data.precedent)].sort() : null;

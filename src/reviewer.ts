@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
-import { readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, type LaunchThread, type ThreadResolution } from './review-threads.js';
+import { listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -71,9 +71,11 @@ export const reviewRecordSchema = z.object({
   launching: z.literal(true).optional(),
   /** Why the launch could not read the pull request's review threads for the prompt; surfaced in master status. */
   threadReadFailure: z.string().min(1).max(500).optional(),
+  /** The thread IDs the launch prompt listed; an approval without a `Resolved threads:` line vouches for exactly these. */
+  threadsListed: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
   /** The threads this session's approval named on its `Resolved threads:` line, and what the loop resolved (review-threads.ts). */
-  threadResolution: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(100), resolved: z.array(z.string().min(1).max(200)).max(100),
-    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50) }).optional(),
+  threadResolution: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(listedThreadLimit), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
+    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50), implicit: z.boolean().optional() }).optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
@@ -409,10 +411,10 @@ export function assertReviewCandidate(work: Work, observedAt: string) {
 export type ReviewBinding = ReturnType<typeof assertReviewCandidate>;
 
 /** `checkout` is the session directory a launch allocated under the managed worktree root, when it allocated one. */
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string }) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }) {
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
-    + (threads?.failure ? threadReadFailureSection(threads.failure) : threads?.unresolved.length ? threadSection(binding.sha, threads.unresolved) : '')
+    + (threads?.failure ? threadReadFailureSection(threads.failure) : threads?.unresolved.length ? threadSection(binding.sha, threads.unresolved, threads.total) : '')
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
     + `Post exactly one verdict, bound to that exact commit: gh api --method POST repos/${config.repository}/pulls/${binding.pr}/reviews -f commit_id=${binding.sha} -f event=APPROVE -f body=YOUR_JUSTIFICATION (use event=REQUEST_CHANGES instead when the change is not acceptable). `
@@ -541,6 +543,8 @@ export async function launchReview(root: string, work: Work, profileName: string
       let unresolved: LaunchThread[] = [], threadReadFailure: string | undefined;
       try { unresolved = await readThreads(config.repository, binding.pr); }
       catch (error) { threadReadFailure = `the review threads of pull request #${binding.pr} could not be read: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500); }
+      // The prompt lists, and the record keeps, one bounded set: an approval resolves only threads its reviewer was shown.
+      const listed = unresolved.slice(0, listedThreadLimit);
       const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
       try {
@@ -554,7 +558,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         pane = created.pane; tabId = created.tab;
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved, failure: threadReadFailure }), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -572,7 +576,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         record = await updateReviewLedger(root, ledger => {
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory, ...(threadReadFailure ? { threadReadFailure } : {}) });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id) }) });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
@@ -845,17 +849,21 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     const verdict = record.verdict;
     if (record.state !== 'completed' || verdict?.state !== 'APPROVED') continue;
     const previous: ThreadResolution | undefined = record.threadResolution?.reviewId === verdict.reviewId ? record.threadResolution : undefined;
-    if (previous && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
+    // A settlement from before implicit naming existed, which named nothing, is judged once more, by
+    // what its launch recorded: without a recorded listing its approval vouches for no thread.
+    const predatesImplicit = !!previous && previous.implicit === undefined && !previous.named.length && !previous.failure;
+    if (previous && !predatesImplicit && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
     const item = work.find(entry => entry.key === record.key);
     if (!item?.candidate || item.stage === 'done' || item.observation?.merged || item.candidate.pr !== record.pr) continue;
     const carried = carriedApproval(item);
     const current = item.candidate.sha === record.sha || !!carried && carried.originalSha === record.sha && (carried.reviewId === undefined || carried.reviewId === verdict.reviewId);
     if (!current) continue;
-    const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous }, run, now);
+    const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
+      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, now);
     record.threadResolution = { ...outcome, refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
     const fresh = outcome.resolved.filter(id => !previous?.resolved.includes(id));
-    for (const id of fresh) events.push(`resolved review thread ${id} on ${record.key} PR #${record.pr}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
+    for (const id of fresh) events.push(`resolved review thread ${id} on ${record.key} PR #${record.pr}, ${outcome.implicit ? 'listed to the session whose approval' : 'named by approval'} ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
     for (const refusal of outcome.refused) events.push(`did not resolve review thread on ${record.key} PR #${record.pr} named by approval ${verdict.reviewId}: ${refusal}`);
     if (outcome.failure) events.push(`thread resolution for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);
   }

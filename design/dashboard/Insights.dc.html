@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Insights</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;font-family:'IBM Plex Sans',system-ui,sans-serif;background:#0f1411;color:#e3eae2}
+a{color:#c5e69b;text-decoration:none}a:hover{color:#dff2c4;text-decoration:underline}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace}
+.kpi{display:flex;flex-direction:column;gap:6px;flex:1;padding:16px 18px;border:1px solid #2a352d;border-radius:12px;background:#121915}
+.chip{min-height:36px;padding:0 14px;border-radius:999px;border:1px solid #2a352d;background:transparent;color:#a3b0a5;font:inherit;font-size:13px;cursor:pointer}
+@keyframes flow{from{transform:translateX(-20px)}to{transform:translateX(1320px)}}
+.flow{position:absolute;left:0;width:10px;height:10px;border-radius:50%;box-shadow:0 0 10px currentColor;animation:flow linear infinite}
+@keyframes grow{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+.grow{transform-origin:bottom;animation:grow .8s cubic-bezier(.2,.8,.2,1) both}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes rA{0%{transform:translateX(91px);opacity:0}3%{opacity:1}10%{transform:translateX(91px)}14%{transform:translateX(283px)}20%{transform:translateX(475px)}30%{transform:translateX(475px)}34%{transform:translateX(667px)}70%{transform:translateX(667px)}75%{transform:translateX(859px)}82%{transform:translateX(1051px)}90%{transform:translateX(1243px);opacity:1}96%,100%{transform:translateX(1303px);opacity:0}}
+@keyframes rB{0%{transform:translateX(91px);opacity:0}3%{opacity:1}25%{transform:translateX(91px)}30%{transform:translateX(475px)}40%{transform:translateX(667px)}50%{transform:translateX(667px)}55%{transform:translateX(1051px)}62%{transform:translateX(1243px);opacity:1}68%,100%{transform:translateX(1303px);opacity:0}}
+@keyframes rC{0%{transform:translateX(91px);opacity:0;background:#7fb8f0}3%{opacity:1}12%{transform:translateX(91px)}20%{transform:translateX(475px)}32%{transform:translateX(667px);background:#7fb8f0}44%{transform:translateX(667px);background:#ef8a6b}52%{transform:translateX(91px);background:#ef8a6b}64%{transform:translateX(91px);background:#7fb8f0}72%{transform:translateX(475px)}80%{transform:translateX(667px)}88%{transform:translateX(1051px)}94%{transform:translateX(1243px);opacity:1}100%{transform:translateX(1303px);opacity:0}}
+@keyframes sweep{from{width:0}to{width:100%}}
+@keyframes glide{from{transform:translateX(859px)}to{transform:translateX(1051px)}}
+@keyframes halo{0%{box-shadow:0 0 0 0 rgba(127,184,240,.55)}100%{box-shadow:0 0 0 14px rgba(127,184,240,0)}}
+.rd{position:absolute;left:0;width:10px;height:10px;border-radius:50%;background:#7fb8f0}.pA{animation:rA 20s ease-in-out infinite}.pB{animation:rB 20s ease-in-out infinite}.pC{animation:rC 20s ease-in-out infinite}.sw{animation:sweep 20s linear infinite}.bl{animation:blink 1.6s ease-in-out infinite}
+.now{position:absolute;left:0;width:14px;height:14px;border-radius:50%;background:#7fb8f0;transform:translateX(1051px);animation:halo 1.8s ease-out infinite}
+@media (prefers-reduced-motion: reduce){.pA,.pB,.pC,.now,.sw,.bl{animation:none}}
+@media (prefers-reduced-motion: reduce){.fl<section aria-label="Flow" style="display: flex; flex-direction: column; border: 1px solid #2a352d; border-radius: 12px; background: #0c110e; overflow: hidden">
+<div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #222c25"><h2 style="margin: 0; font-size: 15px; font-weight: 600">Flow</h2><span style="font-size: 13px; color: #a3b0a5">Build to live, one column per step.</span></div>
+<div style="display: grid; grid-template-columns: repeat(7, minmax(0, 1fr))">
+<div style="display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-left: 1px solid #222c25; ">
+<span style="font-size: 13px; font-weight: 600; ">Build</span>
+<span style="font-size: 12px; color: #a3b0a5">1 now · median [time]</span>
+
+</div>
+<div style="display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-left: 1px solid #222c25; ">
+<span style="font-size: 13px; font-weight: 600; ">Validate</span>
+<span style="font-size: 12px; color: #a3b0a5">0 now · median [time]</span>
+
+</div>
+<div style="display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-left: 1px solid #222c25; ">
+<span style="font-size: 13px; font-weight: 600; ">Test</span>
+<span style="font-size: 12px; color: #a3b0a5">0 now · median [time]</span>
+
+</div>
+<div style="display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-left: 1px solid #222c25; background: #1d1a10;">
+<span style="font-size: 13px; font-weight: 600; color: #e8b45a;">Review</span>
+<span style="font-size: 12px; color: #a3b0a5">0 now · median [time]</span>
+<span style="font-size: 11px; color: #e8b45a">slowest step: dots pile up here</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-left: 1px solid #222c25; ">
+<span style="font-size: 13px; font-weight: 600; ">Prove</span>
+<span style="font-size: 12px; color: #a3b0a5">0 now · median [time]</span>
+
+</div>
+<div style="display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-left: 1px solid #222c25; ">
+<span style="font-size: 13px; font-weight: 600; ">Merge</span>
+<span style="font-size: 12px; color: #a3b0a5">1 now · median [time]</span>
+
+</div>
+<div style="display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-left: 1px solid #222c25; ">
+<span style="font-size: 13px; font-weight: 600; ">Deploy</span>
+<span style="font-size: 12px; color: #a3b0a5">0 now · median [time]</span>
+
+</div>
+</div>
+<div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-top: 1px solid #222c25"><span class="bl" style="width: 8px; height: 8px; border-radius: 50%; background: #8fcf8a"></span><h3 style="margin: 0; font-size: 14px; font-weight: 600">Now</h3><span style="font-size: 13px; color: #a3b0a5">Real time. A dot moves only when its item changes step; the ring pulses while it waits.</span></div>
+<div style="position: relative; height: 150px; overflow: hidden; background: repeating-linear-gradient(90deg, transparent 0, transparent 191px, #1d2520 191px, #1d2520 192px)">
+<span class="now" style="top: 56px" aria-hidden="true"></span>
+<span style="position: absolute; left: 1011px; top: 80px; width: 110px; text-align: center; font-size: 12px; color: #9fcaf3"><span class="mono">GY-159</span><br>Merge · 1 min</span>
+<span style="position: absolute; left: 667px; top: 62px; width: 376px; height: 2px; background: linear-gradient(90deg, transparent, #7fb8f0)" aria-hidden="true"></span>
+<span style="position: absolute; left: 637px; top: 36px; font-size: 11px; color: #7f8c82">left Review 7 min ago</span>
+<span style="position: absolute; left: 16px; bottom: 12px; font-size: 12px; color: #7f8c82">Waiting outside the flow: <span class="mono">GY-73</span> needs you · 3 in backlog</span>
+</div>
+<div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-top: 1px solid #222c25"><h3 style="margin: 0; font-size: 14px; font-weight: 600">Last 24 hours, replayed</h3><span style="font-size: 13px; color: #a3b0a5">Real step changes played back in 20 s. Dots pile up where work waits; red ones went back for rework.</span></div>
+<div aria-hidden="true" style="position: relative; height: 190px; overflow: hidden; background: repeating-linear-gradient(90deg, transparent 0, transparent 191px, #1d2520 191px, #1d2520 192px)">
+<span class="rd pB" style="top: 20px; animation-delay: -19.0s"></span>
+<span class="rd pB" style="top: 33px; animation-delay: -13.0s"></span>
+<span class="rd pA" style="top: 46px; animation-delay: -16.4s"></span>
+<span class="rd pA" style="top: 59px; animation-delay: -7.3s"></span>
+<span class="rd pA" style="top: 72px; animation-delay: -18.2s"></span>
+<span class="rd pA" style="top: 85px; animation-delay: -0.7s"></span>
+<span class="rd pB" style="top: 98px; animation-delay: -8.4s"></span>
+<span class="rd pA" style="top: 111px; animation-delay: -1.8s"></span>
+<span class="rd pB" style="top: 124px; animation-delay: -1.2s"></span>
+<span class="rd pC" style="top: 137px; animation-delay: -2.5s"></span>
+<span class="rd pA" style="top: 150px; animation-delay: -12.6s"></span>
+<span class="rd pC" style="top: 163px; animation-delay: -19.0s"></span>
+</div>
+<div style="display: flex; align-items: center; gap: 12px; padding: 10px 16px 14px; font-size: 12px; color: #7f8c82">
+<span>24 h ago</span>
+<span style="position: relative; flex-grow: 1; height: 4px; border-radius: 2px; background: #1d2520; overflow: hidden"><span class="sw" style="position: absolute; left: 0; top: 0; height: 4px; background: #c5e69b"></span></span>
+<span>now</span>
+</div>
+</section>nd: #7fb8f0; animation-duration: 13s; animation-delay: -1.2s"></span>
+<span class="flow" style="top: 120px; background: #7fb8f0; animation-duration: 15s; animation-delay: -12.0s"></span>
+<span class="flow" style="top: 74px; background: #9fcaf3; animation-duration: 15s; animation-delay: -4.2s"></span>
+<span class="flow" style="top: 45px; background: #7fb8f0; animation-duration: 15s; animation-delay: -3.2s"></span>
+<span class="flow" style="top: 84px; background: #c5e69b; animation-duration: 15s; animation-delay: -2.9s"></span>
+<span class="flow" style="top: 92px; background: #c5e69b; animation-duration: 15s; animation-delay: -1.3s"></span>
+<span class="flow" style="top: 117px; background: #8fcf8a; animation-duration: 13s; animation-delay: -2.3s"></span>
+<span class="flow" style="top: 89px; background: #c5e69b; animation-duration: 11s; animation-delay: -10.4s"></span>
+<span class="flow" style="top: 19px; background: #c5e69b; animation-duration: 15s; animation-delay: -8.6s"></span>
+<span class="flow" style="top: 148px; background: #c5e69b; animation-duration: 13s; animation-delay: -5.4s"></span>
+<span class="flow" style="top: 128px; background: #c5e69b; animation-duration: 17s; animation-delay: -2.7s"></span>
+<span class="flow" style="top: 84px; background: #8fcf8a; animation-duration: 11s; animation-delay: -0.9s"></span>
+<span class="flow" style="top: 89px; background: #9fcaf3; animation-duration: 17s; animation-delay: -11.9s"></span>
+<span class="flow" style="top: 68px; background: #9fcaf3; animation-duration: 11s; animation-delay: -4.5s"></span>
+<span class="flow" style="top: 130px; background: #8fcf8a; animation-duration: 15s; animation-delay: -2.8s"></span>
+<span class="flow" style="top: 168px; background: #9fcaf3; animation-duration: 15s; animation-delay: -9.5s"></span>
+<span class="flow" style="top: 100px; background: #9fcaf3; animation-duration: 11s; animation-delay: -9.2s"></span>
+</div>
+</section>
+
+<div style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 24px">
+<section aria-label="Landed per day" style="display: flex; flex-direction: column; gap: 16px; padding: 16px 18px; border: 1px solid #2a352d; border-radius: 12px; background: #121915">
+<div style="display: flex; align-items: baseline; justify-content: space-between"><h2 style="margin: 0; font-size: 15px; font-weight: 600">Landed on main per day</h2><span style="font-size: 12px; color: #7f8c82">commits to main, Sep 13 – 23</span></div>
+<div style="display: grid; grid-template-columns: repeat(11, minmax(0, 1fr)); gap: 10px; align-items: end">
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">4</span>
+<span class="grow" style="width: 100%; height: 11px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.00s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 13</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">11</span>
+<span class="grow" style="width: 100%; height: 31px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.07s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 14</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">3</span>
+<span class="grow" style="width: 100%; height: 8px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.14s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 15</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">4</span>
+<span class="grow" style="width: 100%; height: 11px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.21s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 16</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">6</span>
+<span class="grow" style="width: 100%; height: 17px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.28s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 17</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">26</span>
+<span class="grow" style="width: 100%; height: 72px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.35s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 18</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">23</span>
+<span class="grow" style="width: 100%; height: 64px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.42s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 19</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">13</span>
+<span class="grow" style="width: 100%; height: 36px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.49s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 20</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">8</span>
+<span class="grow" style="width: 100%; height: 22px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.56s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 21</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">7</span>
+<span class="grow" style="width: 100%; height: 19px; border-radius: 4px 4px 0 0; background: #4f7a45; animation-delay: 0.63s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 22</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 250px">
+<span style="font-size: 12px; color: #a3b0a5">72</span>
+<span class="grow" style="width: 100%; height: 200px; border-radius: 4px 4px 0 0; background: #c5e69b; animation-delay: 0.70s"></span>
+<span style="font-size: 12px; color: #7f8c82">Sep 23</span></div>
+</div>
+</section>
+<section aria-label="Where time goes" style="display: flex; flex-direction: column; gap: 16px; padding: 16px 18px; border: 1px solid #2a352d; border-radius: 12px; background: #121915">
+<h2 style="margin: 0; font-size: 15px; font-weight: 600">Where the time goes</h2>
+<div style="display: flex; height: 18px; border-radius: 9px; overflow: hidden">
+<span class="grow" style="flex: 3; background: #7fb8f0"></span><span class="grow" style="flex: 1; background: #5f8fbf"></span><span class="grow" style="flex: 2; background: #4a7aa8"></span><span class="grow" style="flex: 4; background: #e8b45a"></span><span class="grow" style="flex: 1; background: #8fcf8a"></span><span class="grow" style="flex: 1; background: #c5e69b"></span>
+</div>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 20px; font-size: 13px">
+<span style="display: flex; gap: 8px; align-items: center"><span style="width: 10px; height: 10px; border-radius: 2px; background: #7fb8f0"></span>Build [share]</span>
+<span style="display: flex; gap: 8px; align-items: center"><span style="width: 10px; height: 10px; border-radius: 2px; background: #5f8fbf"></span>Validate [share]</span>
+<span style="display: flex; gap: 8px; align-items: center"><span style="width: 10px; height: 10px; border-radius: 2px; background: #4a7aa8"></span>Test [share]</span>
+<span style="display: flex; gap: 8px; align-items: center; color: #e8b45a"><span style="width: 10px; height: 10px; border-radius: 2px; background: #e8b45a"></span>Review [share], slowest</span>
+<span style="display: flex; gap: 8px; align-items: center"><span style="width: 10px; height: 10px; border-radius: 2px; background: #8fcf8a"></span>Prove [share]</span>
+<span style="display: flex; gap: 8px; align-items: center"><span style="width: 10px; height: 10px; border-radius: 2px; background: #c5e69b"></span>Merge + deploy [share]</span>
+</div>
+<p style="margin: 0; font-size: 13px; color: #a3b0a5; line-height: 1.6">Click a step to see the items that spent longest there and why.</p>
+</section>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1300}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

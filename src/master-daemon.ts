@@ -4,13 +4,17 @@ import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { ciReportingEnvironment } from './install/ci-proofs.js';
+import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
+import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
+import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
+export { threadResolutionGraceMs, threadsAwaitReview } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
@@ -718,11 +722,63 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   // and the engine's `rework` does not clear it: once the round is requested the item needs a
   // worker, not a second decision, even when that round's worker dies before pushing.
   const conflict = work.reworkRequested ? null : baseRefreshConflict(work);
-  if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: work.candidate!.sha };
+  // A rework binding names its grounds as well as the head: a refused request on one ground (the
+  // approver judged it premature) must not bar the same head's rework on another. On 2026-09-24
+  // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
+  // requested changes, and the loop never asked again because both keyed on the head alone.
+  if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
   const verdict = standingVerdict(work);
-  if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: work.candidate!.sha };
+  if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
+  // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
+  // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a human.
+  // The review of the current head judges those threads first: its approval names the ones fixed and
+  // the loop resolves them, so a rework requested before it settles invalidated the review that
+  // would have cleared them, and the same open threads carried to the next head — without end.
+  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? blockingThreads(work) : [];
+  if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
+    binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/** The control plane's bound on a decision's reason (`src/model/approval.ts`); a longer one is refused on every retry. */
+export const decisionReasonMax = 2000;
+/** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
+const reworkThreadsNamed = 5;
+/**
+ * The unresolved threads a rework request names, bounded: their authors and paths are contributor
+ * text of any length and count, and a reason past the control plane's bound is refused on every
+ * retry, so the item would never reach its approver or its rework worker.
+ */
+export function threadReworkSummary(sha: string, threads: ReviewThread[]): string {
+  const named = threads.slice(0, reworkThreadsNamed).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
+  const more = threads.length - named.length;
+  return `Branch protection requires conversation resolution and ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} unresolved on ${sha.slice(0, 12)}: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
+}
+/**
+ * A decision reason within the control plane's bound. What the requester adds around the loop's own
+ * grounds — the observation it decided from, the refusals it answers — is kept whole, because the
+ * server reads the cited refusals from it; the grounds are shortened to make room.
+ */
+export function fitDecisionReason(prefix: string, grounds: string, suffix: string): string {
+  const room = decisionReasonMax - prefix.length - suffix.length;
+  return prefix + (grounds.length <= room ? grounds : `${grounds.slice(0, Math.max(0, room - 1))}…`) + suffix;
+}
+/** The least of its own grounds a rework request keeps beside the refusals it cites; below it the request would not say why. */
+export const reworkGroundsMin = 160;
+/**
+ * A rework reason that cites every refused rework decision on the item — the server refuses a
+ * request of the same input unless its reason names each one by id — within the control plane's
+ * bound. The citations are written out in prose while they leave the grounds room, then as a bare
+ * id list; when even that leaves the grounds less than `reworkGroundsMin`, no reason can satisfy
+ * both the bound and the server's check, and this is null: the loop escalates rather than sending a
+ * request the server refuses on every retry.
+ */
+export function reworkDecisionReason(prefix: string, grounds: string, refused: string[]): string | null {
+  if (!refused.length) return fitDecisionReason(prefix, grounds, '');
+  const prose = ` This rests on different grounds from refused rework decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.`;
+  const bare = ` Answers refused rework decisions ${refused.join(' ')}.`;
+  const suffix = [prose, bare].find(text => decisionReasonMax - prefix.length - text.length >= Math.min(reworkGroundsMin, grounds.length));
+  return suffix === undefined ? null : fitDecisionReason(prefix, grounds, suffix);
 }
 /**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
@@ -1246,7 +1302,7 @@ export interface DaemonEffects {
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
    */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null; outcome?: string | null; refusal?: { approver: string; reason: string } | null }[] }>;
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; reason?: string; precedent?: string[]; approvedBy: string | null; outcome?: string | null; refusal?: { approver: string; reason: string } | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -1942,9 +1998,30 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // A rework request names the observation it was decided from (GY-144), so its approver sees
       // at once whether the item has moved since; the watch keeps the same pair.
       const observed = decision.action === 'rework' && item.observation ? { at: item.observation.at, sha: item.observation.candidate.sha } : null;
-      const reason = decision.action === 'rework' ? `${observedFrom(item)} ${decision.reason}` : decision.reason;
+      // The server refuses a request identical to a refused one unless it cites that refusal. The loop
+      // reaches this point only on grounds no refused request of its own rested on (a rework binding
+      // names its grounds, and a refused binding is never requested again), so it answers the prior
+      // refusals of this action on the item by citing them. A refusal an earlier refused request
+      // already cited is answered through it, so only the uncited ones are named: however many
+      // refusals the item gathers, the citation stays the newest one or few (GY-163).
+      const refused = decision.action === 'rework' ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), 'rework', decisionInput('rework', item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b)) : [];
+      const reason = decision.action === 'rework' ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, refused) : fitDecisionReason('', decision.reason, '');
+      if (reason === null) {
+        // Retrying would be refused every time; the request is not sent, and the master is told once.
+        const escalation = `escalation:rework-refusals:${item.key}:${refused.length}`;
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Did not request the rework decision for ${item.key}: its ${refused.length} uncited refused rework decisions no longer fit, cited, within the reason bound`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused rework decisions that no later refused request cited, and a rework request must cite each by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then request it with graphyard master decide ${item.key} rework --precedent ID[,ID] REASON citing them, or act on the item yourself`);
+        return;
+      }
       const requested = standing ?? await effects.decide!(item, decision.action, reason);
-      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [], observation: observed });
+      // A standing request another watch holds is the same decision under a binding that has since
+      // changed (a rework's unresolved-thread set moved while it was requested). That watch is
+      // retired here, its sessions and counts carried over, so the cleanup below does not withdraw
+      // the decision this watch just adopted and close its approver — on every cycle the set moves.
+      const [retired, prior] = standing ? Object.entries(state.approvals).find(([other, entry]) => other !== key && entry.decision === requested.id && !entry.settledAt) ?? [] : [];
+      if (retired) delete state.approvals[retired];
+      const kept = prior ? { launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt, exhaustedAt: prior.exhaustedAt } : {};
+      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: prior?.requestedAt ?? stamp, ...kept, requests: prior ? prior.requests : (carried?.requests ?? 0) + 1, ended: (prior ?? carried)?.ended ?? [], observation: observed });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it
       // needs. A base conflict has no verdict behind it, so it is not part of that measurement. It
       // is sampled with the request, before the launch: a request whose first launch throws is
@@ -1955,7 +2032,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // The request alone changes nothing; the approver session is what applies it. A launch that
       // fails leaves the watch behind, so the next cycle sees a decision with no session and
       // launches again, inside the same bound.
-      const how = await launch(item, watch, true);
+      // A retired watch's approver is judging this decision already; supervision relaunches it if it ends.
+      const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding` : await launch(item, watch, true);
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
@@ -2054,6 +2132,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // action: left `requested`, it would be adopted for some later round on a reason that describes
     // an older head. One the item still calls for stays, and is adopted when it can be attested.
     let withdrawn = true;
+    // Another current watch holds this decision: the request is not moved past, only re-keyed.
+    if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) { delete state.approvals[key]; continue; }
     if (item && !watch.settledAt && !unattestable.has(key) && effects.withdraw && effects.decisions) {
       try {
         const standing = (await effects.decisions(item)).decisions.find(entry => entry.id === watch.decision);
@@ -2278,14 +2358,21 @@ function deploymentDetail(observation: DeploymentObservation) {
 }
 
 /**
- * How many deployments of the base branch the observation reads, and therefore how many GitHub
- * requests one observation may make: the listing itself, plus at most one status listing for each
- * deployment in it. Nothing below this bound scales with how much has been delivered — containment
- * is derived locally — so the cycle's deployment step costs the same on the first delivery as on
- * the five hundredth. A configured `--deployment-url` costs zero GitHub requests.
+ * How many listing pages of `deploymentPageSize` the observation reads to find the release, and
+ * therefore how many GitHub requests one observation may make: per page, the listing and at most
+ * one batched read of its release candidates' latest statuses. Records that are not releases (the
+ * CI reporting environment, other branches) are never asked about: on 2026-09-24 a single 20-entry
+ * page could be filled by reporting records, hiding the release behind them. The statuses are read
+ * a page at a time rather than one attempt at a time, so failed and pending production attempts
+ * newer than the release production serves cost nothing extra and never stop the read short of it
+ * (a per-attempt read bound left deliveries pending behind 20 failed attempts). Nothing below this
+ * bound scales with how much has been delivered — containment is derived locally — so the cycle's
+ * deployment step costs the same on the first delivery as on the five hundredth. A configured
+ * `--deployment-url` costs zero GitHub requests.
  */
-export const deploymentListingSize = 20;
-export const maxDeploymentRequests = 1 + deploymentListingSize;
+export const deploymentPageSize = 100;
+export const deploymentListingPages = 5;
+export const maxDeploymentRequests = deploymentListingPages * 2;
 
 /**
  * Local ancestry over this checkout's own object store, which is what "does the release contain
@@ -2332,6 +2419,45 @@ function localAncestry(root: string, baseBranch: string, run: ChildRun) {
  * A release that does not descend from the retained one (a rollback, an unrelated commit) drops
  * the retention and every delivery is derived again.
  */
+/**
+ * Whether a GitHub deployment's environment is the configured production environment (the master
+ * run's `productionEnvironment`, else GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`), compared as the provider's whole
+ * identity. Railway names the GitHub environment `<project> / <environment>`, and one repository can
+ * deploy several Railway projects: `staging-copy / production` is not the managed installation's
+ * release, so a Railway installation configures the full name (`graphyard / production`), as the
+ * flow analytics' production phase already requires.
+ */
+export const productionEnvironmentRecord = (environment: unknown, production: string) => environment === production;
+
+/** GitHub's node ids are opaque base64-like tokens; anything else is not sent inside a query. */
+const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
+/**
+ * The latest status of each listed deployment, in listing order, in one GraphQL read: the REST API
+ * has only a per-deployment status listing. A deployment whose status could not be read has no
+ * entry (`undefined`); one with no status yet is `pending`.
+ */
+async function deploymentStates(repository: string, deployments: any[], run: ChildRun): Promise<{ states: (string | undefined)[]; failure: string | null }> {
+  const ids = deployments.map(deployment => typeof deployment?.node_id === 'string' && deploymentNodeId.test(deployment.node_id) ? deployment.node_id : null);
+  const readable = ids.filter((id): id is string => id !== null);
+  if (!readable.length) return { states: [], failure: 'GitHub listed it without a node id' };
+  let nodes: any[];
+  try {
+    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } } } }`;
+    const answer = JSON.parse(await run('gh', ['api', 'graphql', '-f', `query=${query}`]));
+    nodes = Array.isArray(answer?.data?.nodes) ? answer.data.nodes : [];
+  } catch (error) { return { states: [], failure: message(error) }; }
+  const byId = new Map(readable.map((id, index) => [id, nodes[index]]));
+  return {
+    failure: null,
+    states: deployments.map((deployment, index) => {
+      const node = ids[index] === null ? undefined : byId.get(ids[index]!);
+      // A node that answers for another deployment is not this one's status.
+      if (!node || (node.databaseId !== undefined && node.databaseId !== deployment.id)) return undefined;
+      return typeof node.latestStatus?.state === 'string' ? node.latestStatus.state.toLowerCase() : 'pending';
+    }),
+  };
+}
+
 export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now(),
   options: { root: string; retained?: ContainmentRetention | null }): Promise<DeploymentObservation> {
   const at = new Date(now()).toISOString();
@@ -2350,19 +2476,66 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     if (typeof value !== 'string' || !/^[0-9a-f]{7,40}$/i.test(value)) return unavailable(`Deployment endpoint did not report a commit at ${config.run.deploymentShaField}`);
     sha = value.toLowerCase(); source = 'endpoint';
   } else {
-    let deployments: any[];
-    requests++;
-    try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentListingSize}&ref=${encodeURIComponent(config.baseBranch)}`])); }
-    catch (error) { return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`); }
-    if (!Array.isArray(deployments) || !deployments.length) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
-    for (const deployment of deployments.slice(0, deploymentListingSize)) {
-      let statuses: any[];
+    // Not filtered by ref: a platform that deploys the base branch (Railway) records each release
+    // with its commit SHA as the ref, so `ref=main` saw only the CI reporting environment's records,
+    // and on 2026-09-24 GY-159 stayed pending behind a release production had already served. The
+    // listing is read page by page, newest first, until a release answers or a bound is reached.
+    const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
+    let production: string;
+    try { production = config.run.productionEnvironment ?? productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
+    let listed = 0, exhausted = false;
+    // Environments named like production under another identity, reported when no release is found
+    // so an unconfigured Railway installation is told the name to configure rather than left pending.
+    const namesake = new Set<string>();
+    for (let page = 1; page <= deploymentListingPages && !sha && !exhausted; page++) {
+      let deployments: any[];
       requests++;
-      try { statuses = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
-      catch { continue; }
-      if (Array.isArray(statuses) && statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
+      try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentPageSize}&page=${page}`])); }
+      catch (error) {
+        if (page === 1) return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`);
+        return unavailable(`No release was found in the first ${listed} GitHub deployment(s), and page ${page} of the listing could not be read: ${message(error)}`);
+      }
+      if (!Array.isArray(deployments)) deployments = [];
+      listed += deployments.length;
+      exhausted = deployments.length < deploymentPageSize;
+      const candidates: any[] = [];
+      for (const deployment of deployments) {
+        // CI proof reporting records deployments too; it is never a release.
+        if (deployment?.environment === ciReportingEnvironment) continue;
+        // The base branch and its commits are deployed to staging and previews as readily as to
+        // production, whether the ref names the branch or the commit; only the production
+        // environment's record says what production serves.
+        if (!productionEnvironmentRecord(deployment?.environment, production)) {
+          if (typeof deployment?.environment === 'string' && deployment.environment.endsWith(` / ${production}`) && namesake.size < 5) namesake.add(deployment.environment);
+          continue;
+        }
+        // A release is the base branch or a commit on it; another branch's deployment is not.
+        const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
+        if (ref && ref !== config.baseBranch) {
+          if (typeof deployment.sha !== 'string' || ref.toLowerCase() !== deployment.sha.toLowerCase()) continue;
+          if (await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) !== true) continue;
+        }
+        candidates.push(deployment);
+      }
+      if (!candidates.length) continue;
+      requests++;
+      const states = await deploymentStates(config.repository, candidates, run);
+      // Newest first: the first success is the release. An attempt whose status cannot be read may
+      // be the newest success, so no older release is taken past it: the observation is
+      // unavailable, and every delivery stays pending.
+      for (const [index, deployment] of candidates.entries()) {
+        const state = states.states[index];
+        if (state === undefined) return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves${states.failure ? `: ${states.failure}` : ''}`);
+        if (state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
+      }
     }
-    if (!sha) return unavailable('No GitHub deployment for the managed base branch reports a successful status');
+    if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
+    // What lies past the listing bound is unread — a rollback to an older release included — so no
+    // release is asserted, the last one observed neither: the observation is unavailable and says why.
+    if (!sha && !exhausted) return unavailable(`None of the newest ${listed} GitHub deployment(s) is a successful ${production} release of the managed base branch, and older ones are past the ${deploymentListingPages}-page read bound, so the release production serves is not known`);
+    if (!sha) return unavailable(`No GitHub deployment of the managed base branch to the ${production} environment reports a successful status${namesake.size
+      ? `; deployments to ${[...namesake].map(name => `'${name}'`).join(', ')} are not the '${production}' environment — name the one production serves with graphyard master config productionEnvironment='${[...namesake][0]}' (or GRAPHYARD_PRODUCTION_ENVIRONMENT)`
+      : ''}`);
   }
   const ancestry = localAncestry(options.root, config.baseBranch, run);
   // The retained set is carried forward whole, on one ancestry check, or dropped whole.

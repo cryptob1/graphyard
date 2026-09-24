@@ -6,6 +6,8 @@ import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { agentOwner, assertMergeCandidate, buildMasterStatus, mergeWork } from '../src/master.js';
 import { nameUnresolvedThreads, queueRef } from '../src/merge-queue.js';
+import { unansweredRefusal, uncitedRefusals } from '../src/model/approval.js';
+import { decisionReasonMax, fitDecisionReason, observedFrom, reworkDecisionReason, reworkGroundsMin, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
 
 // GY-139. Each test is named for the proof it produces: integration:unresolved-threads-fail-merge-gate,
 // unit:unresolved-threads-surfaced, integration:blocked-merge-refused-before-execution.
@@ -192,4 +194,99 @@ test('integration:blocked-merge-refused-before-execution — master merge refuse
     assert.equal(record.mergeExecution, null, 'no merge execution is recorded');
     assert.throws(() => assertMergeCandidate(record, new Date().toISOString(), 'graphyard-master#interactive'), /conversation resolution and 1 review thread is unresolved/);
   }
+});
+
+test('the loop requests thread rework only after the current head\'s review settled without resolving the threads', () => {
+  const now = new Date('2026-09-24T06:00:00Z');
+  const thread = { author: reviewer, path: 'src/claims.ts', line: 42, outdated: false };
+  const item = (reviews: Observation['reviews'], sessions: unknown[] = []) => ({ ...candidate({ ...observation([thread], now), reviews }), sessions } as unknown as Work);
+  const decide = (work: Work) => routineDecision(work, { autoMerge: true }, now.getTime())?.action ?? null;
+  const approvedAt = (ms: number) => [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 7, submittedAt: new Date(now.getTime() - ms).toISOString() }];
+  const running = { id: 'r-1', kind: 'review', state: 'running', head, principal: 'reviewer', runtime: 'claude', host: 'h', subject: 'review', startedAt: now.toISOString(), updatedAt: now.toISOString(), endedAt: null, outcome: null };
+  assert.equal(decide(item([])), null, 'no review of this head yet: the reviewer judges the threads first');
+  assert.equal(decide(item([{ reviewer: 'chatgpt-codex-connector[bot]', sha: head, state: 'COMMENTED', id: 8 }])), null, 'a bot comment is not the review');
+  assert.equal(decide(item(approvedAt(threadResolutionGraceMs * 2), [running])), null, 'a review session for this head is still running');
+  assert.equal(decide(item(approvedAt(60_000))), null, 'approved moments ago: the loop is still resolving the threads it named');
+  assert.equal(decide(item(approvedAt(threadResolutionGraceMs + 1))), 'rework', 'approved and the threads still stand');
+  assert.equal(decide({ ...item([]), policy: { checks: ['test'], review: false } } as Work), 'rework', 'no review policy: nothing else judges the threads');
+});
+
+test('master status names the wait, not a rework command, while the threads wait on the current head\'s review', () => {
+  const now = new Date('2026-09-24T06:00:00Z');
+  const thread = { author: reviewer, path: 'src/claims.ts', line: 42, outdated: false };
+  const item = (reviews: Observation['reviews'], sessions: unknown[] = []) => ({ ...authorized({ ...observation([thread], now), reviews }, now), sessions } as unknown as Work);
+  const approvedAt = (ms: number) => [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 7, submittedAt: new Date(now.getTime() - ms).toISOString() }];
+  const running = { id: 'r-1', kind: 'review', state: 'running', head, principal: 'reviewer', runtime: 'claude', host: 'h', subject: 'review', startedAt: now.toISOString(), updatedAt: now.toISOString(), endedAt: null, outcome: null };
+  const waiting = [item([]), item([{ reviewer: 'chatgpt-codex-connector[bot]', sha: head, state: 'COMMENTED', id: 8 }]), item(approvedAt(threadResolutionGraceMs * 2), [running]), item(approvedAt(60_000))];
+  for (const work of waiting) {
+    assert.equal(routineDecision(work, { autoMerge: true }, now.getTime()), null, 'the loop defers the rework');
+    const report = status(work, now), row = report.work[0];
+    assert.equal(row.mergeable, false, 'the threads still block the merge');
+    assert.deepEqual(row.reviewThreads, [thread]);
+    assert.doesNotMatch(row.attentionOwner!.next!, /master decide/, 'status offers no rework the loop deferred');
+    assert.match(row.attentionOwner!.next!, new RegExp(`Request no rework yet: the review of ${head.slice(0, 12)} judges these threads first`));
+    assert.equal(row.attentionOwner!.approvedBy, null);
+    assert.equal(report.attentionItems.find(entry => entry.subject === 'GY-130')?.next, row.attentionOwner!.next, 'the attention item says the same');
+  }
+  // Once the review settled without resolving them, the loop and the status name the same rework.
+  const settled = item(approvedAt(threadResolutionGraceMs + 1));
+  assert.equal(routineDecision(settled, { autoMerge: true }, now.getTime())?.action, 'rework');
+  assert.match(status(settled, now).work[0].attentionOwner!.next!, /^graphyard master decide GY-130 rework /);
+});
+
+test('a thread rework request stays within the control plane\'s reason bound however many threads, and however long their paths', () => {
+  const now = new Date('2026-09-24T06:00:00Z');
+  const threads = Array.from({ length: 40 }, (_, index) => ({ id: `PRRT_${index}`, author: reviewer, path: `src/${'deeply/nested/'.repeat(20)}file-${index}.ts`, line: index + 1, outdated: false }));
+  const work = { ...candidate(observation(threads, now)), policy: { checks: ['test'], review: false } } as unknown as Work;
+  const decision = routineDecision(work, { autoMerge: true }, now.getTime())!;
+  assert.equal(decision.action, 'rework');
+  assert.match(decision.reason, /40 review threads are unresolved/);
+  assert.match(decision.reason, /and 35 more on the pull request/);
+  assert.ok(threads.every(thread => decision.binding.includes(thread.id)), 'the binding still names every thread');
+  // What the requester sends: the observation it decided from and every refusal it answers, kept whole.
+  const answers = ` This rests on different grounds from refused rework decisions ${Array.from({ length: 8 }, (_, index) => `00000000-0000-4000-8000-00000000000${index}`).join(', ')}.`;
+  const reason = fitDecisionReason(`${observedFrom(work)} `, `${decision.reason} ${'x'.repeat(3000)}`, answers);
+  assert.ok(reason.length <= decisionReasonMax, `${reason.length} characters`);
+  assert.ok(reason.startsWith(observedFrom(work)) && reason.endsWith(answers));
+});
+
+test('a rework request cites every refused rework decision by id within the reason bound, and is not sent once they cannot fit', () => {
+  const now = new Date('2026-09-24T06:00:00Z');
+  const threads = [{ id: 'PRRT_1', author: reviewer, path: 'src/a.ts', line: 1, outdated: false }];
+  const work = { ...candidate(observation(threads, now)), policy: { checks: ['test'], review: false } } as unknown as Work;
+  const decision = routineDecision(work, { autoMerge: true }, now.getTime())!;
+  const prefix = `${observedFrom(work)} `;
+  const ids = (count: number) => Array.from({ length: count }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+  for (const count of [1, 8, 30, 40]) {
+    const reason = reworkDecisionReason(prefix, `${decision.reason} ${'x'.repeat(3000)}`, ids(count));
+    assert.ok(reason !== null, `${count} refusals still fit`);
+    assert.ok(reason.length <= decisionReasonMax, `${count} refusals: ${reason.length} characters`);
+    assert.ok(reason.startsWith(observedFrom(work)), 'the observation is kept whole');
+    assert.ok(ids(count).every(id => reason.includes(id)), `${count} refusals: every refusal is cited, as the server requires`);
+    assert.ok(reason.slice(prefix.length).length - ids(count).join(' ').length >= reworkGroundsMin, 'the grounds keep their room');
+  }
+  // Past what the bound can hold beside the grounds, no reason satisfies the server: the loop escalates instead of retrying a refused request.
+  assert.equal(reworkDecisionReason(prefix, decision.reason, ids(60)), null);
+  assert.equal(reworkDecisionReason(prefix, decision.reason, []), fitDecisionReason(prefix, decision.reason, ''));
+});
+
+test('a refusal chain never outgrows the reason bound: answering the newest refusal answers every one it cited, and a precedent list cites like the reason', () => {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const input = { previousWorkerStopped: true };
+  const id = (index: number) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+  // Sixty refusals, each request having cited the one before it (as the server required): newest first.
+  const history = Array.from({ length: 60 }, (_, index) => 59 - index).map(index => ({ id: id(index), action: 'rework' as const, state: 'refused', input,
+    reason: index ? `Grounds ${index}. Answers refused rework decisions ${id(index - 1)}.` : 'Grounds 0.', refusal: { approver: 'approver', reason: 'not yet', at: '2026-09-24T06:00:00Z' } }));
+  assert.deepEqual(uncitedRefusals(history, 'rework', input, same), [id(59)], 'only the newest refusal is left for the request to cite');
+  assert.equal(unansweredRefusal(history, 'rework', input, `New grounds. Answers refused rework decisions ${id(59)}.`, same), null, 'citing the newest answers the chain');
+  assert.match(unansweredRefusal(history, 'rework', input, 'New grounds.', same)!, new RegExp(id(59)), 'citing nothing answers nothing');
+  assert.equal(unansweredRefusal(history, 'rework', input, 'New grounds, cited structurally.', same, [id(59)]), null, 'a precedent citation answers like a reason citation');
+  assert.match(unansweredRefusal(history, 'rework', input, `Grounds 59. Answers refused rework decisions ${id(58)}.`, same, [id(59)])!, new RegExp(id(59)), 'repeating a refused reason is not an answer, however it cites');
+  // A refusal nobody in the chain cited (a legacy request) must still be cited itself.
+  const legacy = [...history, { id: id(99), action: 'rework' as const, state: 'refused', input, reason: 'Legacy grounds.', refusal: null }];
+  assert.deepEqual(uncitedRefusals(legacy, 'rework', input, same), [id(59), id(99)]);
+  assert.match(unansweredRefusal(legacy, 'rework', input, `New grounds. Answers ${id(59)}.`, same)!, new RegExp(id(99)));
+  assert.equal(unansweredRefusal(legacy, 'rework', input, `New grounds. Answers ${id(59)} ${id(99)}.`, same), null);
+  const reason = reworkDecisionReason('', 'New grounds', uncitedRefusals(legacy, 'rework', input, same));
+  assert.ok(reason && unansweredRefusal(legacy, 'rework', input, reason, same) === null, 'the loop\'s own reason answers every refusal');
 });

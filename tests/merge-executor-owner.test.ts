@@ -111,6 +111,7 @@ const github = (calls: string[][] = []) => (_command: string, args: string[]) =>
   if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ headRefOid: head, baseRefName: 'main', state: 'OPEN', isDraft: false });
   if (args[1]?.includes('/git/ref/heads/')) return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: base } });
   if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
+  if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
   if (args[1] === '--method') return JSON.stringify({ merged: true, sha: mergeSha });
   return JSON.stringify(validProtection);
 };

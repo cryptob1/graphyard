@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Design system</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;font-family:'IBM Plex Sans',system-ui,sans-serif;background:#0f1411;color:#e3eae2}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace}
+.sw{display:flex;flex-direction:column;gap:8px;font-size:13px}
+.sw span:first-child{height:56px;border-radius:8px;border:1px solid #2a352d}
+h2{margin:0;font-size:13px;font-weight:600;color:#a3b0a5;letter-spacing:.06em;text-transform:uppercase}
+</style>
+</helmet>
+<div style="width: 1280px; height: 900px; box-sizing: border-box; padding: 40px 48px; display: flex; flex-direction: column; gap: 32px; background: #0f1411">
+<h1 style="margin: 0; font-size: 28px; font-weight: 600">One design system</h1>
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<h2>Status: the only five groups an open item can be in</h2>
+<div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px">
+<div class="sw"><span style="background: #e8b45a"></span><strong>Needs you</strong><span style="color: #a3b0a5">Human-only decision</span></div>
+<div class="sw"><span style="background: #ef8a6b"></span><strong>Blocked</strong><span style="color: #a3b0a5">Agents fixing a fault</span></div>
+<div class="sw"><span style="background: #7fb8f0"></span><strong>Moving</strong><span style="color: #a3b0a5">Building → live</span></div>
+<div class="sw"><span style="background: #c5e69b"></span><strong>Up next</strong><span style="color: #a3b0a5">Waiting for a worker</span></div>
+<div class="sw"><span style="background: transparent; border: 1.5px dashed #a3b0a5"></span><strong>Backlog</strong><span style="color: #a3b0a5">No clock runs</span></div>
+<div class="sw"><span style="background: #8fcf8a"></span><strong>Shipped</strong><span style="color: #a3b0a5">Merged and live</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 14px">
+<h2>Surfaces and text</h2>
+<div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px">
+<div class="sw"><span style="background: #0f1411"></span><span class="mono">bg #0f1411</span></div>
+<div class="sw"><span style="background: #121915"></span><span class="mono">surface #121915</span></div>
+<div class="sw"><span style="background: #161d18"></span><span class="mono">raised #161d18</span></div>
+<div class="sw"><span style="background: #2a352d"></span><span class="mono">border #2a352d</span></div>
+<div class="sw"><span style="background: #e3eae2"></span><span class="mono">text #e3eae2</span></div>
+<div class="sw"><span style="background: #a3b0a5"></span><span class="mono">text-2 #a3b0a5</span></div>
+</div>
+</div>
+
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 48px">
+<div style="display: flex; flex-direction: column; gap: 14px">
+<h2>Type · IBM Plex Sans, Plex Mono for keys and commits</h2>
+<span style="font-size: 28px; font-weight: 600">Page title 28</span>
+<span style="font-size: 18px; font-weight: 500">Status sentence 18</span>
+<span style="font-size: 15px; font-weight: 500">Item title 15</span>
+<span style="font-size: 14px">Body 14 — plain words, no internal jargon</span>
+<span style="font-size: 13px; color: #a3b0a5">Secondary 13</span>
+<span class="mono" style="font-size: 13px; color: #a3b0a5">GY-159 · 74b9be5e</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 14px">
+<h2>Controls</h2>
+<div style="display: flex; gap: 12px; align-items: center">
+<button type="button" style="min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #c5e69b; background: #c5e69b; color: #18230f; font: inherit; font-weight: 600; font-size: 14px">Primary</button>
+<button type="button" style="min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #2a352d; background: transparent; color: #e3eae2; font: inherit; font-weight: 500; font-size: 14px">Secondary</button>
+<button type="button" style="min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid #e8b45a; background: #e8b45a; color: #241a06; font: inherit; font-weight: 600; font-size: 14px">Decide</button>
+</div>
+<div style="display: flex; gap: 8px; align-items: center">
+<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: #152534; color: #9fcaf3; font-size: 12px; font-weight: 500"><span style="width: 7px; height: 7px; border-radius: 50%; background: #7fb8f0"></span>Moving</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: #2b2210; color: #f0c77a; font-size: 12px; font-weight: 500"><span style="width: 7px; height: 7px; border-radius: 50%; background: #e8b45a"></span>Needs you</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: #2e1a14; color: #f3a58c; font-size: 12px; font-weight: 500"><span style="width: 7px; height: 7px; border-radius: 50%; background: #ef8a6b"></span>Blocked</span>
+</div>
+<div style="display: flex; gap: 3px; width: 240px"><span style="flex: 1; height: 4px; border-radius: 2px; background: #8fcf8a"></span><span style="flex: 1; height: 4px; border-radius: 2px; background: #7fb8f0"></span><span style="flex: 1; height: 4px; border-radius: 2px; background: #2a352d"></span><span style="flex: 1; height: 4px; border-radius: 2px; background: #2a352d"></span><span style="flex: 1; height: 4px; border-radius: 2px; background: #2a352d"></span><span style="flex: 1; height: 4px; border-radius: 2px; background: #2a352d"></span></div>
+<span style="font-size: 13px; color: #a3b0a5">Progress: Planned · Built · Reviewed · Tests pass · Merged · Live</span>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; font-size: 14px; color: #a3b0a5; line-height: 1.6">
+<h2>Rules</h2>
+<span>Every count on a page equals the rows it filters. One navigation. Timers only on items that are moving. Each fact appears once per screen. Every row answers what, why, and who acts next.</span>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

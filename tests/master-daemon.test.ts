@@ -437,8 +437,8 @@ test('deployment verification reports the served commit and which delivered item
     const run = (command: string, args: string[]) => {
       calls.push(`${command} ${args.join(' ')}`);
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      if (args[1].includes('/deployments/9/statuses')) return JSON.stringify([{ state: 'success' }]);
-      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, sha: head }]);
+      if (args[1] === 'graphql') { assert.match(args[3], /nodes\(ids: \["DE_9"\]\)/); return JSON.stringify({ data: { nodes: [{ databaseId: 9, latestStatus: { state: 'SUCCESS' } }] } }); }
+      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, node_id: 'DE_9', sha: head, ref: 'main', environment: 'production' }]);
       throw new Error(`unexpected ${args.join(' ')}`);
     };
     const fromProvider = await observeDeployment(config(token), delivered, run, fetch, () => clock, { root: checkout });

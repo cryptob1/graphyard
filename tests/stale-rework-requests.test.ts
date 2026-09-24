@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { GitHub } from '../src/github.js';
-import { decisionKey, emptyDaemonState, githubPause, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, githubPause, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -116,7 +116,64 @@ test('unit:rework-records-its-observation — a rework request carries the time 
   assert.ok(decided[0].reason.includes(observedAt), `the decision carries the observation time: ${decided[0].reason}`);
   assert.ok(decided[0].reason.includes(reviewed), `the decision carries the observed candidate SHA: ${decided[0].reason}`);
   assert.match(decided[0].reason, /Decided from the GitHub observation taken at/);
-  const watch = state.approvals[decisionKey(item, { action: 'rework', binding: reviewed })];
+  // The watch is keyed by the head and the verdict it answers.
+  const watch = Object.entries(state.approvals).find(([key]) => key.includes(`:${reviewed}:verdict:`))![1];
   assert.deepEqual(watch.observation, { at: observedAt, sha: reviewed }, 'the loop keeps the same pair with the request');
   assert.ok(result.actions.some(action => action.kind === 'decision' && action.detail.includes(observedAt) && action.detail.includes(reviewed)));
+});
+
+test('unit:rework-answers-earlier-refusal — a rework on new grounds cites each refused rework of the item, which the server otherwise refuses as a repeat', async () => {
+  const observedAt = iso(-30_000), item = verdictItem(observedAt), decided: { action: string; reason: string }[] = [];
+  const refused = '6ee09885-03ee-419b-9e67-a05e42e03afb';
+  const withHistory: DaemonEffects = { ...effects({ work: [item], now: iso(0), jobs: [] }, decided),
+    decisions: async () => ({ decisions: [{ id: refused, action: 'rework', state: 'refused', input: { previousWorkerStopped: true }, approvedBy: null, refusal: { approver: 'graphyard-approver-graphyard', reason: 'Premature' } }] }) };
+  await runCycle(config(), emptyDaemonState(config()), withHistory, () => clock);
+  assert.equal(decided.length, 1, 'the verdict is decided on despite the earlier refusal');
+  assert.ok(decided[0].reason.includes(refused), `the request cites the refused decision: ${decided[0].reason}`);
+  assert.match(decided[0].reason, /different grounds/);
+});
+
+test('a thread rework whose unresolved-thread set changes while it is requested is re-keyed, not withdrawn and requested again', async () => {
+  const observedAt = iso(-30_000);
+  const thread = (id: string) => ({ id, author: 'chatgpt-codex-connector', path: 'src/loop.ts', line: 3, outdated: false });
+  const threaded = (ids: string[]): Work => {
+    const item = verdictItem(observedAt);
+    return { ...item, observation: { ...item.observation!, reviews: [{ reviewer: 'independent-reviewer', sha: reviewed, state: 'APPROVED', submittedAt: iso(-2 * 60 * minute) }],
+      conversations: { required: true, unresolved: ids.map(thread) } } as Observation };
+  };
+  const decided: { action: string; reason: string }[] = [], withdrawn: string[] = [], closed: string[] = [], launched: string[] = [];
+  const decision = '5d8a8b9e-0000-4000-8000-000000000001';
+  let work = threaded(['PRRT_one', 'PRRT_two']), standing: { id: string; action: string; state: string }[] = [];
+  const base = effects({ work: [work], now: iso(0), jobs: [] }, decided);
+  const loop: DaemonEffects = { ...base,
+    snapshot: async () => ({ work: [work], now: iso(0), jobs: [] }),
+    herdr: () => ({ agents: launched.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
+    decide: async (item, action, reason) => { const made = await base.decide!(item, action, reason); standing = [{ id: made.id, action, state: 'requested' }]; return made; },
+    decisions: async () => ({ decisions: standing as never }),
+    withdraw: async (_item, id) => { withdrawn.push(id); },
+    closeSession: pane => { closed.push(pane); },
+    approver: async () => { launched.push(`graphyard-approver-${launched.length}`); return { agentName: launched.at(-1)!, pane: `pane-${launched.length - 1}` }; },
+  };
+  const state = emptyDaemonState(config());
+  await runCycle(config(), state, loop, () => clock);
+  assert.equal(decided.length, 1);
+  assert.ok(state.approvals[Object.keys(state.approvals).find(key => key.includes(':threads:PRRT_one,PRRT_two'))!]);
+
+  // One thread is resolved while the request stands: the binding changes, the decision does not.
+  work = threaded(['PRRT_two']);
+  await runCycle(config(), state, loop, () => clock);
+  assert.equal(decided.length, 1, 'the standing request is adopted, not made again');
+  assert.deepEqual(withdrawn, [], 'the adopted decision is not withdrawn by the cleanup of its old key');
+  assert.deepEqual(closed, [], 'its approver session is kept');
+  assert.equal(launched.length, 1, 'no second approver is launched for the same decision');
+  const keys = Object.keys(state.approvals);
+  assert.equal(keys.length, 1);
+  assert.match(keys[0], /:threads:PRRT_two:/);
+  assert.equal(state.approvals[keys[0]].decision, decision);
+  assert.equal(state.approvals[keys[0]].launches, 1, 'the launch count is carried with the watch');
+
+  // A further cycle on the same set leaves it standing.
+  await runCycle(config(), state, loop, () => clock);
+  assert.equal(decided.length, 1);
+  assert.deepEqual(withdrawn, []);
 });
