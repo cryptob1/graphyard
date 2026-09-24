@@ -8,7 +8,7 @@ import { ciReportingEnvironment } from './install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
-import { classified, faultClasses, faultClassItem, faultClassPolicyFromEnv, faultInstanceSchema, noteFault, recurringClasses, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from './model/fault-classes.js';
+import { classified, faultClasses, faultClassItem, faultClassPolicyFromEnv, faultInstanceSchema, noteActionOutcome, noteFault, recurringClasses, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from './model/fault-classes.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
@@ -313,10 +313,12 @@ export const daemonStateSchema = z.object({
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
   /**
    * Every fault instance the loop recorded, each with its class (GY-173), and per standing fault
-   * (`kind|subject`) the instance it is. A class that recurs files one item; later instances link to it.
+   * (`kind|subject`) the instance it is, and per action key in a run of failures the instance that run
+   * is. A class that recurs files one item; later instances link to it.
    * The default is a factory: zod 4 hands a literal default out by reference, which would share one record between states.
    */
-  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}) }).strict().default(() => ({ instances: [], open: {} })),
+  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}) }).strict()
+    .default(() => ({ instances: [], open: {}, failing: {} })),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -461,7 +463,7 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = 'indeterminate';
       next.detail = `Resumed: the ${action.kind} request was interrupted and its effect is unknown`;
     }
-    state.actions[key] = next; resumed.push(next);
+    resumed.push(storeAction(state, key, next));
   }
   return resumed;
 }
@@ -1493,23 +1495,36 @@ export interface DaemonEffects {
   faultClassPolicy?: FaultClassPolicy;
 }
 
+/**
+ * Every write of an action goes through here (GY-173): a failed or indeterminate action carries
+ * the class of its fault kind, anything else carries none, and the outcome is noted against the
+ * fault record — a failure opening one instance per run of failures, a success ending the run.
+ */
+export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind = daemonActionFaultKind(action.kind)): DaemonAction {
+  const { faultClass: _, ...rest } = action;
+  const failed = rest.state === 'failed' || rest.state === 'indeterminate';
+  const fault = classified(faultKind);
+  const entry = daemonActionSchema.parse({ ...rest, ...(failed ? { faultClass: fault.faultClass } : {}) });
+  noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
+  state.actions[key] = entry;
+  return entry;
+}
+
 async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist']) {
-  const failed = action.state === 'failed' || action.state === 'indeterminate';
-  const entry = daemonActionSchema.parse({ ...action, at: action.at ?? new Date(now).toISOString(), ...(failed ? { faultClass: classified(daemonActionFaultKind(action.kind)).faultClass } : {}) });
-  state.actions[key] = entry; await persist(state);
+  const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() });
+  await persist(state);
   return entry;
 }
 
 /**
- * What this cycle saw wrong, classified (GY-173): every open item's own faults (escalations,
- * fences, parks, scope requests, proof gaps, spent accounts, violations, blockers) and every
- * action standing failed. A fault that keeps standing is one instance; one that clears and returns
- * is another.
+ * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
+ * (escalations, fences, parks, scope requests, proof gaps, spent accounts, violations, blockers).
+ * A fault that keeps standing is one instance; one that clears and returns is another. Failed
+ * actions are not read here: the action history retains failures long after they stopped
+ * mattering, so each is noted once, as it happens, by storeAction.
  */
-export function cycleFaults(state: DaemonState, work: Work[], now: number): FaultObservation[] {
-  const actions = Object.entries(state.actions).filter(([, action]) => action.state === 'failed' || action.state === 'indeterminate')
-    .map(([key, action]) => ({ ...classified(daemonActionFaultKind(action.kind)), subject: action.work ?? key, text: action.detail.slice(0, 500) }));
-  return [...work.flatMap(item => workFaults(item, now)), ...actions];
+export function cycleFaults(_state: DaemonState, work: Work[], now: number): FaultObservation[] {
+  return work.flatMap(item => workFaults(item, now));
 }
 export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
 /**
@@ -2839,12 +2854,11 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
   state.config = { at: reload.at, changed: reload.changed.slice(0, 100), refused: reload.refused?.slice(0, 1000) ?? null };
   const noted: DaemonAction[] = [];
   if (reload.refused && previous?.refused !== state.config.refused) {
-    const entry = daemonActionSchema.parse({ kind: 'escalation', work: null, principal: null, state: 'failed', detail: state.config.refused, attempts: 1, cycle: state.cycle, at: reload.at });
-    state.actions[`escalation:config:${reload.at}`] = entry; noted.push(entry);
+    // A refused reload is a configuration fault, whatever kind of action reports it.
+    noted.push(storeAction(state, `escalation:config:${reload.at}`, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }, 'action:config'));
   }
   if (reload.changed.length) {
-    const entry = daemonActionSchema.parse({ kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`.slice(0, 2000), attempts: 1, cycle: state.cycle, at: reload.at });
-    state.actions[`config:${reload.at}`] = entry; noted.push(entry);
+    noted.push(storeAction(state, `config:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`.slice(0, 2000), attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
   }
   if (noted.length || previous?.refused !== state.config.refused) await persist(state);
   return noted;
@@ -2855,8 +2869,8 @@ export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof w
   if (!plan.refusal) return [];
   const key = `escalation:watchdog:${plan.windowMs}`;
   if (state.actions[key]) return [];
-  const entry = daemonActionSchema.parse({ kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, cycle: state.cycle, at });
-  state.actions[key] = entry; await persist(state);
+  const entry = storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at }, 'action:config');
+  await persist(state);
   return [entry];
 }
 

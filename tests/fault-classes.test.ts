@@ -7,11 +7,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteFault, recurringClasses, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteFault, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
 import { controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, fileRecurringFaultClasses, loopAttention, loopLiveness, noteCycleFailure, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, fileRecurringFaultClasses, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, reconcilePendingActions, runCycle, storeAction, type DaemonEffects } from '../src/master-daemon.js';
 import { faulted } from '../src/master-status.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
@@ -93,9 +93,23 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
   // Escalations on an item, one class per trigger.
   const escalated = item('GY-7', { escalations: escalationTriggers.map(trigger => ({ trigger, reason: `${trigger} raised`, actor: 'graphyard', at: iso(0) })) } as Partial<Work>);
   assert.deepEqual(workFaults(escalated, clock).map(entry => entry.faultClass), ['session-liveness', 'proof', 'review-convergence', 'scope']);
-  // A failed loop action is a pipeline fault with its class, on the action and in the cycle's faults.
-  state.actions['dispatch:work-8:0'] = { kind: 'dispatch', work: 'GY-8', principal: 'worker', state: 'failed', detail: 'Herdr refused the launch', attempts: 1, epoch: 0, cycle: 0, at: iso(0) };
-  assert.deepEqual(cycleFaults(state, [], clock).map(entry => [entry.subject, entry.kind, entry.faultClass]), [['GY-8', 'action:dispatch', 'session-liveness']]);
+  // A failed loop action is a pipeline fault with its class, on the action and as a recorded instance.
+  const dispatched = storeAction(state, 'dispatch:work-8:0', { kind: 'dispatch', work: 'GY-8', principal: 'worker', state: 'failed', detail: 'Herdr refused the launch', attempts: 1, epoch: 0, cycle: 0, at: iso(0) });
+  assert.equal(dispatched.faultClass, 'session-liveness');
+  assert.deepEqual(state.faults.instances.map(entry => [entry.subject, entry.kind, entry.faultClass]), [['GY-8', 'action:dispatch', 'session-liveness']]);
+  // Failures written outside the cycle's own steps carry their class too: an action a restart
+  // interrupted, a refused configuration reload and a refused watchdog window.
+  const restarted = emptyDaemonState(config());
+  storeAction(restarted, 'session:work-9:1', { kind: 'session', work: 'GY-9', principal: 'worker', state: 'started', detail: 'Launching', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
+  storeAction(restarted, 'merge:work-9:1', { kind: 'merge', work: 'GY-9', principal: null, state: 'started', detail: 'Merging', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
+  const resumed = reconcilePendingActions(restarted, [item('GY-9')], clock);
+  assert.deepEqual(resumed.map(entry => [entry.kind, entry.state, entry.faultClass]), [['session', 'indeterminate', 'session-liveness'], ['merge', 'failed', 'merge']]);
+  const [refused] = await noteConfigReload(restarted, { at: iso(1000), changed: [], refused: 'workers[0].agentName is stale' } as any, async () => {});
+  assert.equal(refused.faultClass, 'configuration', 'a refused reload is a configuration fault');
+  const [watchdog] = await noteWatchdog(restarted, { windowMs: 1000, refusal: 'The watchdog window is shorter than the interval' } as any, iso(2000), async () => {});
+  assert.equal(watchdog.faultClass, 'configuration');
+  assert.deepEqual(restarted.faults.instances.map(entry => entry.faultClass), ['session-liveness', 'merge', 'configuration', 'configuration'], 'each is a recorded instance');
+  assert.ok(Object.values(restarted.actions).every(action => (action.state === 'failed' || action.state === 'indeterminate') === !!action.faultClass), 'every failed action, and only a failed one, carries a class');
   let persisted = 0;
   const failing = { snapshot: async () => ({ work: [], now: iso(0) }), persist: async () => { persisted++; } } as unknown as DaemonEffects;
   await runCycle(config(), state, { ...failing, agents: () => [], credentials: async () => ({}), observeDeployment: async () => { throw new Error('the deployment endpoint timed out'); } } as unknown as DaemonEffects, () => clock);
@@ -129,8 +143,8 @@ test('unit:fault-classes — master status and the dashboard group open problems
   open[1].scopeRequest = { epoch: 1, paths: ['docs/y.md'], reason: 'docs', requestedBy: 'graphyard-claude-2', at: new Date(NOW).toISOString() } as Work['scopeRequest'];
   const expected = groupFaults(open.flatMap(entry => workFaults(entry, NOW)));
   const noop = () => {};
-  const render = (work: Work[]) => renderToStaticMarkup(createElement(OverviewPage, {
-    token: 'fixture', work, status: boardStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
+  const render = (work: Work[], status: object = boardStatus('admin')) => renderToStaticMarkup(createElement(OverviewPage, {
+    token: 'fixture', work, status, error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: { validation: null, releases: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
     codexAvailable: false, queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, 'admin'), refresh: async () => {},
@@ -147,6 +161,12 @@ test('unit:fault-classes — master status and the dashboard group open problems
   const single = fixture.filter(entry => entry === one || !workFaults(entry, NOW).length);
   assert.equal(single.flatMap(entry => workFaults(entry, NOW)).length, 1, 'the fixture keeps exactly one open problem');
   assert.doesNotMatch(render(single), /Problems by class/);
+  // Problems the control plane's status reports beside no item are grouped too: with no item-level
+  // problem at all, two App permission lines and an unserved executor still draw the grouping.
+  const quiet = fixture.filter(entry => !workFaults(entry, NOW).length);
+  const troubled = { ...boardStatus('admin'), appPermissions: { attention: ['The App lacks Checks: write', 'The App lacks Contents: write'] }, executors: { live: 1, attention: [{ kind: 'merge', text: 'No executor serves merge' }] } };
+  assert.deepEqual(groupFaults(statusFaults(troubled)).map(group => [group.faultClass, group.count]), [['configuration', 3]]);
+  assert.match(render(quiet, troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'the status-level problems are counted under their class');
 });
 
 test('unit:recurring-class-item — below the threshold nothing is filed', async () => {
@@ -255,8 +275,31 @@ test('unit:recurring-class-item — the loop files through the master operator-a
   }
 });
 
+test('unit:recurring-class-item — retained action history is not a standing fault: each run of failures is one instance', async () => {
+  // Upgrading onto a cursor that already holds old failures records nothing from them and files nothing.
+  const state = emptyDaemonState(config());
+  for (const [index, key] of ['escalation:config:a', 'escalation:config:b', 'escalation:config:c', 'escalation:watchdog:1000'].entries())
+    state.actions[key] = { kind: 'escalation', work: null, principal: null, state: 'failed', detail: `old refusal ${index}`, attempts: 1, epoch: null, cycle: 0, at: iso(-hour) };
+  const filed: unknown[] = [];
+  const effects = { fileFaultClass: async (input: unknown) => { filed.push(input); return item('GY-99'); }, faultClassPolicy: policy, persist: async () => {} } as unknown as DaemonEffects;
+  for (let cycle = 0; cycle < 3; cycle++) { trackFaults(state.faults, cycleFaults(state, [], clock + cycle * 60_000), iso(cycle * 60_000)); await fileRecurringFaultClasses(state, effects, [], clock + cycle * 60_000, () => clock, []); }
+  assert.equal(state.faults.instances.length, 0, 'the history is not re-observed');
+  assert.equal(filed.length, 0);
+  // One action failing on every retry is one instance; a success ends it, and a later failure is a new one.
+  const attempt = (outcome: 'started' | 'failed' | 'done', offset: number) => storeAction(state, 'deployment:work-1:x', { kind: 'deployment', work: 'GY-1', principal: null, state: outcome, detail: outcome, attempts: 1, epoch: null, cycle: 0, at: iso(offset) });
+  for (let retry = 0; retry < 4; retry++) { attempt('started', retry * 1000); attempt('failed', retry * 1000 + 500); }
+  assert.equal(state.faults.instances.length, 1, 'four failed retries of one action are one instance');
+  assert.equal(state.faults.instances[0].lastSeenAt, iso(3500));
+  attempt('started', 5000); attempt('done', 5500);
+  assert.equal(attempt('done', 5500).faultClass, undefined, 'a successful action carries no class');
+  attempt('started', 6000); attempt('failed', 6500);
+  assert.equal(state.faults.instances.length, 2, 'failing again after a success is a new instance');
+  await fileRecurringFaultClasses(state, effects, [], clock + 7000, () => clock, []);
+  assert.equal(filed.length, 0, 'two deployment instances stay below the threshold');
+});
+
 test('unit:recurring-class-item — a fault that clears and returns is a new instance', () => {
-  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string> };
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
   const observation = { kind: 'scope-request' as const, faultClass: 'scope' as const, subject: 'GY-1', text: 'needs files' };
   assert.equal(trackFaults(record, [observation], iso(0)).length, 1);
   assert.equal(trackFaults(record, [observation], iso(60_000)).length, 0, 'still standing: the same instance');

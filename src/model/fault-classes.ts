@@ -55,7 +55,7 @@ export const faultCatalogue = {
     'action:decision', 'action:escalation'],
   'scope': ['scope-request', 'scope-violation', 'escalation:requirement-weakening', 'action:scope'],
   'overlap-hold': ['hold-overdue'],
-  'observation': ['github-budget', 'action:refresh'],
+  'observation': ['github-budget', 'integration-job', 'action:refresh'],
   'deployment': ['production', 'throughput', 'action:deployment', 'action:smoke'],
   'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'action:config'],
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],
@@ -226,14 +226,37 @@ export function recurringClasses(instances: readonly FaultInstance[], work: read
   });
 }
 
-/** The loop's record of fault instances: every instance it retains, and the one each standing fault is. */
-export interface FaultRecord { instances: FaultInstance[]; open: Record<string, string> }
+/**
+ * The problems the control plane's own status reports, beside no single item: App permissions,
+ * held and failed integration jobs, a GitHub pause, unserved executors, capacity limits and a
+ * missing GitHub connection. The dashboard groups them with the items' faults, so a page whose
+ * items are all fine still counts what its notices show.
+ */
+export function statusFaults(status: any): FaultObservation[] {
+  if (!status) return [];
+  const lines = (value: unknown): string[] => Array.isArray(value) ? value.filter((line): line is string => typeof line === 'string') : [];
+  const found: FaultObservation[] = [];
+  if (!status.github) found.push(observe('setup', 'github', 'GitHub is not connected, so nothing can merge'));
+  for (const line of lines(status.appPermissions?.attention)) found.push(observe('app-permissions', 'installation', line));
+  if (status.heldJobs > 0) found.push(observe('held-jobs', 'installation', `${status.heldJobs} integration job(s) held on a permission shortfall`));
+  for (const line of lines(status.delegationLimits?.attention)) found.push(observe('delegation-limits', 'installation', line));
+  if (status.githubBudget?.paused) found.push(observe('github-budget', 'github', `GitHub requests are paused until ${status.githubBudget.paused.until}`));
+  else for (const job of Array.isArray(status.jobs) ? status.jobs : []) found.push(observe('integration-job', job?.work_id ?? 'github', `A GitHub update failed: ${job?.error ?? 'no reason recorded'}`));
+  for (const entry of Array.isArray(status.executors?.attention) ? status.executors.attention : []) found.push(observe('executor', 'executors', String(entry?.text ?? entry?.kind ?? 'an action no executor serves')));
+  return found;
+}
+
+/**
+ * The loop's record of fault instances: every instance it retains, the one each standing fault is,
+ * and per loop action in a run of failures the instance that run is.
+ */
+export interface FaultRecord { instances: FaultInstance[]; open: Record<string, string>; failing: Record<string, string> }
 export const retainedFaultInstances = 1000;
 const instanceOf = (observation: FaultObservation, at: string): FaultInstance => ({ id: `${observation.kind}|${observation.subject.slice(0, 200)}|${at}`, kind: observation.kind, faultClass: observation.faultClass,
   subject: observation.subject.slice(0, 200), text: observation.text.slice(0, 500), at, lastSeenAt: at, linkedTo: null });
 function retain(record: FaultRecord) {
   const dropped = record.instances.splice(0, Math.max(0, record.instances.length - retainedFaultInstances));
-  for (const entry of dropped) for (const [key, id] of Object.entries(record.open)) if (id === entry.id) delete record.open[key];
+  for (const entry of dropped) for (const map of [record.open, record.failing]) for (const [key, id] of Object.entries(map)) if (id === entry.id) delete map[key];
 }
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
@@ -260,6 +283,22 @@ export function noteFault(record: FaultRecord, observation: FaultObservation, at
   const instance = instanceOf(observation, at);
   record.instances.push(instance);
   retain(record);
+  return instance;
+}
+
+/**
+ * A loop action's outcome against the record. The action history keeps every failure it ever saw,
+ * so failures are never read back from it: an action becoming failed (or indeterminate) is one
+ * instance, further failures of the same action before it succeeds are that same instance, and a
+ * success ends the run. An old failure that nothing retries is therefore never counted again.
+ */
+export function noteActionOutcome(record: FaultRecord, action: string, outcome: 'started' | 'done' | 'failed' | 'indeterminate', observation: FaultObservation, at: string): FaultInstance | null {
+  if (outcome === 'done') { delete record.failing[action]; return null; }
+  if (outcome === 'started') return null;
+  const standing = record.failing[action] ? record.instances.find(entry => entry.id === record.failing[action]) : undefined;
+  if (standing) { standing.lastSeenAt = at; return null; }
+  const instance = noteFault(record, observation, at);
+  if (record.instances.includes(instance)) record.failing[action] = instance.id;
   return instance;
 }
 

@@ -6,7 +6,7 @@ import { formatAge } from '../duration';
 import { classify, groupLabel, groupOf, mergedAt, releasedAt, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
 import { releaseView } from '../release';
 import { stalledCards } from './actionless';
-import { groupFaults, workFaults } from '../../src/model/fault-classes';
+import { groupFaults, statusFaults, workFaults } from '../../src/model/fault-classes';
 import type { Dashboard } from './dashboard';
 
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -30,9 +30,11 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   const humanOnly = humanOnlyIds(work, status?.humanOnly);
   // Open problems by fault class (GY-173): one count per shared cause, read from each open item's
-  // own record the same way the master loop reads it, so a cause behind several items reads as one.
-  // A single problem is already its own row, so the grouping is drawn once there are two to group.
-  const problems = work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now));
+  // own record the same way the master loop reads it, and from the control plane's status — the
+  // App permissions, integration jobs, GitHub pause and unserved executors its notices show — so a
+  // cause behind several items or notices reads as one. A single problem is already its own row
+  // or notice, so the grouping is drawn once there are two to group.
+  const problems = [...work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now)), ...statusFaults(status)];
   const faults = problems.length > 1 ? groupFaults(problems) : [];
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const delivered = work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped');
