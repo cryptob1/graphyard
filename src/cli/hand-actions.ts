@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { actionClaimMs, claimable, claimLive, settling, waitingToRetry, type ActionRow } from '../model/actions.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { liveReviewRequest } from '../model/dispatch.js';
@@ -57,12 +56,6 @@ export function handDecision(work: Work, action: string | undefined, input: unkn
   if (typeof proof !== 'string' || !proof.startsWith('manual:')) return owned;
   return !automatableProof(work, proof) || producerRecovery(work, proof, loop) ? null : owned;
 }
-/** The JSON a `master decide` names, inline or as `@FILE`; unreadable input is no input. */
-export async function decisionPayload(argument: string | undefined): Promise<unknown> {
-  if (!argument || !/^[{@]/.test(argument)) return null;
-  try { return JSON.parse(argument.startsWith('@') ? await readFile(argument.slice(1), 'utf8') : argument); } catch { return null; }
-}
-
 /**
  * Why a hand merge decision is the one the loop sends the master to, or null while the loop
  * requests it itself. Two cases: a merge GitHub already made without a valid execution, which

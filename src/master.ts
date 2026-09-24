@@ -1925,7 +1925,7 @@ export function workAttentionOwner(work: Work, cause: 'human-request' | 'contain
   const manual = first?.name === 'acceptance' ? /(manual:[\w./-]+)/.exec(first.reasons.join(' '))?.[1] : undefined;
   if (manual && driven && automatableProof(work, manual)) return agentOwner('control plane', `The loop's producer session produces ${manual} on the exact head; once the loop stops relaunching its request, graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`);
   if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
-  if (first?.name === 'review') return agentOwner('reviewer', `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
+  if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
   if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', driven ? `Nothing to run by hand: the loop's merge step performs the guarded merge of ${key} once its authorization is current` : `graphyard master merge ${key}`);
   if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
@@ -3967,6 +3967,11 @@ export interface AutonomyDependencies {
   fetcher?: typeof fetch;
   /** Runs the roster applier; the default is the asynchronous runner with the applier's output passed through. */
   run?: (command: string, args: string[], options?: ChildRunOptions) => string | Buffer | Promise<string | Buffer>;
+  /**
+   * Refuses a `decide` the caller does not own (GY-175), judged on the exact work document and
+   * snapshot clock the decision is then built from, so a later read cannot move the item under it.
+   */
+  assertDecision?: (work: Work, action: string, input: unknown, now: number) => void | Promise<void>;
 }
 const words = (args: string[]) => args.join(' ').trim();
 async function jsonArgument(value: string) { return JSON.parse(value.startsWith('@') ? await readFile(value.slice(1), 'utf8') : value); }
@@ -3983,11 +3988,12 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
   };
   const operator = () => agentToken(root, config, 'operatorAgent');
-  const item = async (key: string | undefined) => {
+  const snapshotItem = async (key: string | undefined) => {
     if (!key) throw new Error(`Use master ${id} GY-N …`);
-    const found = (await deps.coordinator('work-snapshot')).work.find((work: Work) => work.id === key || work.key === key);
-    if (!found) throw new Error(`Unknown work item ${key}`); return found as Work;
+    const snapshot = await deps.coordinator('work-snapshot'), found = snapshot.work.find((work: Work) => work.id === key || work.key === key);
+    if (!found) throw new Error(`Unknown work item ${key}`); return { work: found as Work, now: Date.parse(snapshot.now) };
   };
+  const item = async (key: string | undefined) => (await snapshotItem(key)).work;
   const reason = (rest: string[]) => { const text = words(rest); if (!text) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`); return text; };
   if (id === 'environments') {
     // The agent accounts sessions run on: discover or create them, report login and quota, and
@@ -4028,7 +4034,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     return call(await operator(), `work/${work.id}/requirements`, { ...input, reason: guardBroadScope({ ...input, title: work.title, description: work.description }, reason(args.slice(2)), { allow: allowBroad, command: 'master requirements', existing: work.plannedFiles }) });
   }
   if (id === 'decide') {
-    const work = await item(args[0]); const action = args[1];
+    const { work, now } = await snapshotItem(args[0]); const action = args[1];
     if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON');
     // A handler cites the decisions it followed and the fingerprint of the context it judged from.
     const flags: Record<string, string> = {}; const rest: string[] = [];
@@ -4038,6 +4044,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     }
     const explicit = rest[0] && /^[{@]/.test(rest[0]);
     const input = explicit ? await jsonArgument(rest[0]) : {};
+    await deps.assertDecision?.(work, action, input, now);
     return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(rest.slice(explicit ? 1 : 0)),
       ...(flags.precedent ? { precedent: flags.precedent.split(',').map(value => value.trim()).filter(Boolean) } : {}), ...(flags.context ? { context: flags.context } : {}) });
   }

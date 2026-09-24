@@ -25,7 +25,7 @@ import { reviewerCommand } from './master-reviewer.js';
 import { registryCommand, registryHelp } from './master-registry.js';
 import { executorsCommand, executorsHelp } from './master-executors.js';
 import { closeHelp, closeRequest } from './master-close.js';
-import { assertHandAction, assertHandDispatch, assertHandReview, decisionPayload, handDecision, systemDriven } from './hand-actions.js';
+import { assertHandAction, assertHandDispatch, assertHandReview, handDecision, systemDriven } from './hand-actions.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -115,14 +115,14 @@ export const masterCommands = defineCommands([
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
       if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
-      // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175).
-      if (id === 'decide' && ['attest', 'merge'].includes(args[1])) {
-        const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-        const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now: Date.parse(snapshot.now), requestsDecisions: !!master.operatorAgent };
-        const owned = work ? handDecision(work, args[1], await decisionPayload(args[2]), loop) : null; if (owned) assertHandAction(work, owned);
-      }
+      // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175),
+      // judged on the same work document the decision is built from.
+      const assertDecision = async (work: any, action: string, input: unknown, now: number) => {
+        const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now, requestsDecisions: !!master.operatorAgent };
+        const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
+      };
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
-        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
+        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision }));
       if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
       if (id === 'start') {
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');

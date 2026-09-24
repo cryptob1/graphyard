@@ -12,7 +12,7 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { actionClaimMs, actionId, type ActionRow } from '../src/model/actions.js';
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
-import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
+import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, runAutonomyCommand, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { assertHandDispatch, dispatchRaceRefusal, handDecision, mergeDecisionRecovery, handDispatchClaimMarginMs, handDispatchClaimTimeoutMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
 
@@ -378,4 +378,27 @@ test('unit:system-driven-items the master\'s own next steps name the loop step f
   assert.match(block, /a hand `graphyard master decide GY-N merge` is only for an opted-out item the loop has not requested it for/);
   assert.doesNotMatch(workAttentionOwner(item({ systemDriven: true }), 'launch-review').next, /then graphyard master review GY-7$/);
   assert.equal(workAttentionOwner(item({ systemDriven: false }), 'launch-review').next, 'Fix the refusal reason, then graphyard master review GY-7');
+  // An ordinary pending review names the loop's relaunch too, not a `master review` the CLI refuses.
+  const atReview = (systemDriven: boolean) => item({ systemDriven, stage: 'review', gates: [{ name: 'review', passed: false, reasons: ['A new independent GitHub approval is required'] }] as any });
+  assert.match(workAttentionOwner(atReview(true), 'gate').next, /the loop relaunches the review on its own; graphyard master review GY-7 only once the loop has stopped relaunching its request/);
+  assert.doesNotMatch(workAttentionOwner(atReview(true), 'gate').next, /relaunches a refused review/);
+  assert.match(workAttentionOwner(atReview(false), 'gate').next, /graphyard master review GY-7 relaunches a refused review/);
+});
+
+test('unit:system-driven-items master decide judges the exact work document the decision is built from', async () => {
+  // The guard runs on the one snapshot the decision is built from: a newer read never replaces the document it judged.
+  const exhausted = underProof(), live = { ...underProof(), revision: 2 };
+  const snapshots = [exhausted, live]; const judged: Work[] = []; const posted: string[] = [];
+  const deps = { coordinator: async (path: string) => { assert.equal(path, 'work-snapshot'); return { now: iso(), work: [snapshots.shift() ?? live] }; }, readSecret: async () => '', agents: () => [], daemonLock: async () => null,
+    fetcher: (async (url: string) => { posted.push(url); return new Response('{}'); }) as unknown as typeof fetch,
+    assertDecision: (work: Work) => { judged.push(work); throw new Error(`${work.key} is system-driven: refused at revision ${work.revision}`); } };
+  const config = masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:9', credentialFile: '/nonexistent', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  await assert.rejects(runAutonomyCommand('/nonexistent', config, 'decide', ['GY-7', 'attest', '{"proof":"manual:produced-review"}', 'hand'], deps), /refused at revision 1/);
+  assert.deepEqual(judged.map(work => work.revision), [1]); assert.equal(snapshots.length, 1, 'decide reads one work snapshot'); assert.deepEqual(posted, []);
+  // Through the shipped CLI, on a decision the guard lets through: one work-snapshot read, so the guard and the decision share it.
+  const master = await masterHarness({ work: [underReview()] });
+  try {
+    await master.refusal(['decide', 'GY-7', 'attest', '{"proof":"manual:docs-review"}', 'hand']);
+    assert.equal(master.reads.filter(url => url.startsWith('/api/work-snapshot')).length, 1, 'master decide reads one work snapshot');
+  } finally { await master.close(); }
 });
