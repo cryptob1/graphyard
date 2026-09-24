@@ -125,6 +125,8 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   const who = builder(work, now);
   const link = pr(work);
   const make = (sentence: string, tone: Tone, blocking: string | null = null, person: string | null = null): PlainStatus => ({ sentence, tone, phase, who: person, blocking });
+  // Closed without delivery (src/model/closure.ts): terminal, never "shipped".
+  if (work.closure) return make(`Closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''}: ${work.closure.reason}`, 'shipped');
   if (phase === 'shipped') {
     const state = deliveryState(work);
     const merged = link ? `Shipped in ${link}` : 'Shipped';

@@ -55,7 +55,7 @@ export function classifyScope(plannedFiles: string[], files: ScopeFile[], genera
  * provider reports merged shipped its files whether or not its delivery is recorded yet.
  */
 export function shippedBy(path: string, all: Work[]): string[] {
-  return all.filter(item => (item.stage === 'done' || !!item.observation?.merged) && (inPlannedScope(item.plannedFiles ?? [], path) || (item.observation?.files ?? []).includes(path))).map(item => item.key);
+  return all.filter(item => ((item.stage === 'done' && !item.closure) || !!item.observation?.merged) && (inPlannedScope(item.plannedFiles ?? [], path) || (item.observation?.files ?? []).includes(path))).map(item => item.key);
 }
 
 export function describeRefusal(finding: ScopeFinding, all: Work[]) {

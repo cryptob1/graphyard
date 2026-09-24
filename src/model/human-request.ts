@@ -39,7 +39,8 @@ export const humanAnswerSchema = z.object({
   answer: z.string().trim().min(1).max(4000),
 }).strict();
 
-export interface HumanAnswer { by: string; at: string; outcome: 'provided' | 'declined'; text: string; waitedMs: number }
+/** `withdrawn`: nobody answered; the item was closed and the question no longer stands (model/closure.ts). */
+export interface HumanAnswer { by: string; at: string; outcome: 'provided' | 'declined' | 'withdrawn'; text: string; waitedMs: number }
 /**
  * The fields every request only a human may answer carries, whatever raised it: the exact thing
  * needed, why, who asked, and when. A `park` request is one; an approval the server will take

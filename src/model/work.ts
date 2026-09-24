@@ -13,6 +13,7 @@ import type { SessionHandle } from './sessions.js';
 import { namedPaths, pathScope, pathScopeContains, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
+import type { Closure } from './closure.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema } from './interventions.js';
@@ -153,6 +154,8 @@ export interface Work extends Create {
    */
   humanRequest?: HumanRequest | null;
   humanRequests?: HumanRequest[];
+  /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
+  closure?: Closure | null;
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];

@@ -180,7 +180,8 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
       pr: observation.candidate.pr, sha: observation.candidate.sha, mergeSha: observation.mergeSha,
       timestampSource: time(observation.mergedAt) === null ? 'graphyard' : 'github',
     });
-  if (work.stage === 'done' && !state.delivered)
+  // A closed item (model/closure.ts) is terminal but was never delivered.
+  if (work.stage === 'done' && !work.closure && !state.delivered)
     push('delivered', work.delivery?.mergedAt ?? recordedAt, work.delivery?.mergedAt ? 'github' : 'graphyard', 'once', {
       mergeSha: work.delivery?.mergeSha ?? null, pr: work.candidate?.pr ?? null,
       leadTimeMs: time(work.delivery?.mergedAt ?? recordedAt)! - (time(work.createdAt) ?? time(work.delivery?.mergedAt ?? recordedAt)!),
@@ -235,7 +236,7 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   state.agentReview = agentKey || state.agentReview;
   state.authorized = authorizationKey;
   state.merged = state.merged || !!observation?.merged;
-  state.delivered = state.delivered || work.stage === 'done';
+  state.delivered = state.delivered || (work.stage === 'done' && !work.closure);
   state.gateKey = gateKey;
   state.dependencies = dependencies;
   return facts;

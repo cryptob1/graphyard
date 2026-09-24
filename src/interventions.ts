@@ -272,7 +272,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
 }
 
 const day = 86_400_000;
-const deliveredAt = (item: Work) => item.stage === 'done' ? item.delivery?.mergedAt ?? item.observation?.mergedAt ?? item.stageEnteredAt : null;
+const deliveredAt = (item: Work) => item.stage === 'done' && !item.closure ? item.delivery?.mergedAt ?? item.observation?.mergedAt ?? item.stageEnteredAt : null;
 const stageKey = (stage: Stage | null): Stage | 'none' => stage ?? 'none';
 
 /** The report over a window ending now (AC-2): what the product made people do by hand, and where. */

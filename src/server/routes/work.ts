@@ -8,6 +8,7 @@ import { listDecisions } from '../decision-ledger.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
+import { closeWork } from '../close.js';
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
 // ledger entry. Routing order decides which handler matches first; it must never
@@ -45,6 +46,14 @@ export const workRoutes = defineRoutes('work', [
       return action === 'park' ? requestHumanDecision(context.services, context.actor, target, data, key)
         : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key)
         : recordCapacity(context.services, context.actor, target, data, key);
+    },
+  },
+  // Closing an item that will never be delivered: the master's or an admin's, never a worker's.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/close$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'close');
+      return closeWork(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // A closed-question proof (GY-109): the control plane asks the configured responder against the

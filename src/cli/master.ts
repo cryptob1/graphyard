@@ -23,6 +23,7 @@ import { readSecretFromStdin } from './context.js';
 import { reviewerCommand } from './master-reviewer.js';
 import { registryCommand, registryHelp } from './master-registry.js';
 import { executorsCommand, executorsHelp } from './master-executors.js';
+import { closeHelp, closeRequest } from './master-close.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -70,6 +71,7 @@ export const masterCommands = defineCommands([
       '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
       '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE [--allow-broad-scope] REASON',
       '                                Own intent; a root-level directory scope needs the flag',
+      ...closeHelp,
       '  master scope GY-N [--allow-broad-scope] [REASON]',
       '                                Apply a scope request the loop refused, widening plannedFiles',
       '                                while the attempt keeps its lease',
@@ -200,6 +202,11 @@ export const masterCommands = defineCommands([
         const mergeOne = mergeExecutor(master, () => masterApi('work-snapshot'), masterMutation, { principal: coordinator.actor.id, instance: outerRequest }, outerRequest);
         const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
         return print({ requestId: outerRequest, results });
+      }
+      if (id === 'close') {
+        // The master's own operator-agent identity when provisioned, else its coordinator credential.
+        const { key, body } = closeRequest(args);
+        return print(await masterMutation(`work/${encodeURIComponent(key)}/close`, body, randomUUID(), master.operatorAgent ? await agentToken(root, master, 'operatorAgent') : masterToken));
       }
       if (id === 'withdraw') {
         // Runs under the operator-agent identity that made the request; the server resolves GY-N.

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Work } from '../../src/model';
+import { isClosed, isDelivered, type Work } from '../../src/model';
 import SessionBadge from '../components/session-badge';
 import Term, { Explained } from '../components/term';
 import StatusAge from '../components/status-age';
@@ -42,7 +42,9 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
   const waiting = moving.filter(w => phaseOf(w, now) === 'needs-worker');
   const notStarted = moving.filter(w => phaseOf(w, now) === 'not-started');
   const shippedAt = (w: Work) => Date.parse(w.observation?.mergedAt ?? w.stageEnteredAt);
-  const recent = work.filter(w => w.stage === 'done' && now - shippedAt(w) <= week && match(w)).sort((a, b) => shippedAt(b) - shippedAt(a));
+  const recent = work.filter(w => isDelivered(w) && now - shippedAt(w) <= week && match(w)).sort((a, b) => shippedAt(b) - shippedAt(a));
+  // Closed without delivery (src/model/closure.ts): one small count here, the history on the Shipped page.
+  const closedCount = work.filter(isClosed).length;
   const card = (w: Work) => <WorkCard key={w.id} item={w} repository={status?.repository} now={now} onOpen={setSelected}/>;
   const list = (title: string, items: Work[], note?: string, attention = false) => items.length > 0 && <section className={attention ? 'work-list attention' : 'work-list'} aria-label={title}><h2>{attention ? <>{title} <span className="count">{items.length}</span></> : title}{note && <small> {note}</small>}</h2><div className="cards">{items.map(card)}</div></section>;
   const slices = (status?.delegation?.slices ?? []).filter((slice: any) => slice.lead);
@@ -91,7 +93,8 @@ export default function OverviewPage({ work, status, filter, setFilter, query, s
     {queue.length > 0 && <section className="graph-section" aria-label="Merge queue"><h2><Term term="merge queue">Merge queue</Term> <span className="count">{queue.length}</span></h2>{queue.map(entry => { const item = work.find(w => w.id === entry.id); const held = item && statusHeld(item, now); return <button className={`card${held?.overdue ? ' overdue' : ''}`} key={entry.id} onClick={() => setSelected(entry.id)}><div className="card-top"><span>{entry.position + 1}. {entry.key}</span>{held && <StatusAge held={held}/>}</div><p className="reason">{entry.predecessors.length ? `Behind ${entry.predecessors.join(', ')}` : 'Next to merge'} · {entry.current ? 'tested with the changes ahead of it' : 'being re-tested'} · queued {formatAge(entry.enqueuedAt, now)} ago</p></button>; })}</section>}
     <section className="work-list shipped-recently" aria-label="Shipped this week"><h2>Shipped this week <span className="count">{numbers.shippedThisWeek}</span></h2>
       {recent.length ? <ul className="shipped-list">{recent.slice(0, 5).map(w => <li key={w.id}><button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>{w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}{plainStatus(w, now).tone === 'stuck' && <span className="danger-text"><Explained sentence={plainStatus(w, now).blocking!}/></span>}</li>)}</ul> : <p className="muted">Nothing shipped in the last seven days.</p>}
-      {work.some(w => w.stage === 'done') && <button className="text-button" onClick={() => setView('shipped')}>See everything shipped →</button>}
+      {work.some(isDelivered) && <button className="text-button" onClick={() => setView('shipped')}>See everything shipped →</button>}
+      {closedCount > 0 && <p className="muted closed-count">Closed without shipping <span className="count">{closedCount}</span> · <button className="text-button" onClick={() => setView('shipped')}>History →</button></p>}
     </section>
     </aside></div>
   </>;
