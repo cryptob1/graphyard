@@ -69,7 +69,7 @@ test('unit:deployment-check-bounded-requests — deployment observation derives 
       calls.push(`${command} ${args.join(' ')}`);
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       if (command !== 'gh') throw new Error(`the observation ran ${command}, which is neither git nor the GitHub CLI`);
-      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, sha: release }]);
+      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, sha: release, ref: 'main', environment: 'production' }]);
       if (args[1].includes('/deployments/9/statuses')) return JSON.stringify([{ state: 'success' }]);
       throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
     };
@@ -121,7 +121,7 @@ test('unit:deployment-containment-retained — a delivery the release was shown 
     const run = (command: string, args: string[]) => {
       calls.push(`${command} ${args.join(' ')}`);
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, sha: release }]);
+      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, sha: release, ref: 'main', environment: 'production' }]);
       if (args[1].includes('/deployments/9/statuses')) return JSON.stringify([{ state: 'success' }]);
       throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
     };
@@ -295,7 +295,9 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
     // CI proof reporting records deployments on branches and on main; neither is a release.
     const listed = [
       { id: 1, sha: 'b'.repeat(40), ref: 'graphyard/gy-9-1', environment: 'graphyard-reporting' },
-      // A newer staging deployment of a base-branch commit: on main, but not what production serves.
+      // Newer staging and preview deployments of the base branch, by commit and by branch name:
+      // on main, but not what production serves.
+      { id: 5, sha: release, ref: 'main', environment: 'graphyard / staging' },
       { id: 4, sha: release, ref: release, environment: 'graphyard / staging' },
       { id: 2, sha: old, ref: old, environment: 'graphyard / production' },
       { id: 3, sha: old, ref: 'main', environment: 'graphyard-reporting' },
@@ -308,13 +310,18 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
     };
     const observation = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(observation.source, 'github-deployment');
-    assert.equal(observation.sha, old, 'the production release, not the newer staging record or the reporting record on main');
-    listed[2] = { id: 2, sha: release, ref: release, environment: 'graphyard / production' };
+    assert.equal(observation.sha, old, 'the production release, not the newer staging records of main or the reporting record on main');
+    // A production deployment that names the base branch is a release like one naming its commit.
+    const byBranch = { id: 6, sha: release, ref: 'main', environment: 'graphyard / production' };
+    listed.unshift(byBranch);
+    assert.equal((await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout })).sha, release);
+    listed.shift();
+    listed[3] = { id: 2, sha: release, ref: release, environment: 'graphyard / production' };
     const current = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(current.sha, release);
     assert.deepEqual(current.pending, []);
     // A SHA-ref deployment of a commit that is not on the base branch is not a release.
-    listed[2] = { id: 2, sha: 'c'.repeat(40), ref: 'c'.repeat(40), environment: 'graphyard / production' };
+    listed[3] = { id: 2, sha: 'c'.repeat(40), ref: 'c'.repeat(40), environment: 'graphyard / production' };
     const offBranch = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(offBranch.source, 'unavailable', 'nothing on the list is a release of the base branch');
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }

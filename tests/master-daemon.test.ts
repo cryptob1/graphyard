@@ -438,7 +438,7 @@ test('deployment verification reports the served commit and which delivered item
       calls.push(`${command} ${args.join(' ')}`);
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       if (args[1].includes('/deployments/9/statuses')) return JSON.stringify([{ state: 'success' }]);
-      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, sha: head }]);
+      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, sha: head, ref: 'main', environment: 'production' }]);
       throw new Error(`unexpected ${args.join(' ')}`);
     };
     const fromProvider = await observeDeployment(config(token), delivered, run, fetch, () => clock, { root: checkout });

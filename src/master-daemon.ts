@@ -2425,13 +2425,14 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       for (const deployment of deployments) {
         // CI proof reporting records deployments too; it is never a release.
         if (deployment?.environment === ciReportingEnvironment) continue;
+        // The base branch and its commits are deployed to staging and previews as readily as to
+        // production, whether the ref names the branch or the commit; only the production
+        // environment's record says what production serves.
+        if (!productionEnvironmentRecord(deployment?.environment, production)) continue;
         // A release is the base branch or a commit on it; another branch's deployment is not.
         const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
         if (ref && ref !== config.baseBranch) {
           if (typeof deployment.sha !== 'string' || ref.toLowerCase() !== deployment.sha.toLowerCase()) continue;
-          // A commit of the base branch is deployed to staging and previews as readily as to
-          // production; only the production environment's record says what production serves.
-          if (!productionEnvironmentRecord(deployment?.environment, production)) continue;
           if (await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) !== true) continue;
         }
         if (candidates >= deploymentListingSize) break;
@@ -2444,7 +2445,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       }
     }
     if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
-    if (!sha) return unavailable('No GitHub deployment for the managed base branch reports a successful status');
+    if (!sha) return unavailable(`No GitHub deployment of the managed base branch to the ${production} environment reports a successful status`);
   }
   const ancestry = localAncestry(options.root, config.baseBranch, run);
   // The retained set is carried forward whole, on one ancestry check, or dropped whole.
