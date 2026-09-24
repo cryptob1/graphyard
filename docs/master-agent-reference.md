@@ -12,7 +12,7 @@
 | `master dispatch GY-N PROFILE [--allow-overlap]` | Invite a worker to claim ready work |
 | `master create FILE REASON`, `master release GY-N REASON`, `master unblock GY-N REASON`, `master requirements GY-N FILE REASON` | Non-weakening intent, as the operator-agent identity |
 | `master scope GY-N [--allow-broad-scope] REASON` | Apply a scope request the loop refused |
-| `master close GY-N REASON --duplicate-of GY-M\|--superseded-by COMMIT\|GY-M\|--obsolete` | Close work that will never ship: cancels its requests, withdraws its human request; refused under a live lease or merge. Superseded needs a landed commit or delivered item. Closed items count apart, never as delivered |
+| `master close GY-N REASON --duplicate-of GY-M\|--superseded-by COMMIT\|GY-M\|--obsolete` | End work that will never ship; refused under a live lease or merge. Never counted as delivered |
 | `master decide GY-N ACTION [JSON\|@FILE] REASON` | Request a two-party decision: `requirements`, `resolve`, `attest`, `merge`, `rework`, `recover`, `grant`, … |
 | `master approver GY-N DECISION [KIND]` | Launch the independent approver for one decision |
 | `master approve\|refuse GY-N DECISION REASON` | The approver's verdict, from its own session only |
