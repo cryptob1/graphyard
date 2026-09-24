@@ -676,23 +676,32 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       // The selected profile answers; the other reviewer profiles are its failover when none of
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.
-      const order = profile ? [profile, ...config.reviewers.filter(other => other.name !== profile.name)].filter(candidate => room(candidate, reviews).free > 0) : [];
+      const candidates = profile ? [profile, ...config.reviewers.filter(other => other.name !== profile.name)] : [];
+      const withRoom = () => candidates.filter(candidate => room(candidate, reviews).free > 0);
+      const busy = () => wait('review', item, review, `every reviewer profile is busy: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
       if (!profile) wait('review', item, review, reason!);
-      else if (!order.length) wait('review', item, review, `every reviewer profile is busy: ${[profile, ...config.reviewers.filter(other => other.name !== profile.name)].map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
+      else if (!withRoom().length) busy();
       else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
       else {
         try {
-          const launched = await reserveNames(order, async () => {
+          // Room is read again once the names are this launch's: the launch it waited on may have
+          // just taken the last slot of a name they share, which is a capacity wait, not a failure.
+          const launched = await reserveNames(candidates, async () => {
+            const order = withRoom();
+            if (!order.length) return null;
             const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
             started.push({ name: launchedName(launched.profile, review, launched.result) });
             return launched;
           });
-          delete cursor.failures[review.id]; delete cursor.capacity.review;
-          // The session is running somewhere; put its coordinates where every Graphyard reader
-          // looks, so watching this reviewer never means reading this host's local ledger.
-          await effects.recordSession?.(item, launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, review, launched.result) }, launched.profile.kind, config.herdrWorkspace))
-            .catch(() => { /* the launch landed; a handle that could not be written is not a failed launch */ });
-          tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
+          if (!launched) busy();
+          else {
+            delete cursor.failures[review.id]; delete cursor.capacity.review;
+            // The session is running somewhere; put its coordinates where every Graphyard reader
+            // looks, so watching this reviewer never means reading this host's local ledger.
+            await effects.recordSession?.(item, launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, review, launched.result) }, launched.profile.kind, config.herdrWorkspace))
+              .catch(() => { /* the launch landed; a handle that could not be written is not a failed launch */ });
+            tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
+          }
         } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
         await persist();
       }
@@ -716,23 +725,28 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
         // on this item is skipped for this item however many slots it has, and the launcher selects
         // among the rest up to each one's concurrency.
         const independent = independentProducerProfiles(item, config.producers);
-        const usable = independent.filter(profile => credentials[profile.name]?.available !== false && room(profile, producers).free > 0);
-        if (!usable.length) {
-          wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
-            : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
-            : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
-          continue;
-        }
+        const available = independent.filter(profile => credentials[profile.name]?.available !== false);
+        const usable = () => available.filter(profile => room(profile, producers).free > 0);
+        const busy = () => wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
+          : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
+          : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
+        if (!usable().length) { busy(); continue; }
         try {
-          const launched = await reserveNames(usable, async () => {
-            const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
+          // As for a reviewer: room is read again once the names are this launch's.
+          const launched = await reserveNames(available, async () => {
+            const order = usable();
+            if (!order.length) return null;
+            const launched = await launchWithFailover(order, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
             started.push({ name: launchedName(launched.profile, request, launched.result) });
             return launched;
           });
-          delete cursor.failures[request.id]; delete cursor.capacity.producer;
-          await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
-            .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
-          tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
+          if (!launched) busy();
+          else {
+            delete cursor.failures[request.id]; delete cursor.capacity.producer;
+            await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
+              .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
+            tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
+          }
         } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
         await persist();
       }

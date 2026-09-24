@@ -64,8 +64,10 @@ export async function readReviewFindings(input: { repository: string; pr: number
   }
   if (input.reviewer) {
     const reviews: any[] = JSON.parse(String(await run('gh', ['api', '--paginate', '--slurp', `repos/${input.repository}/pulls/${input.pr}/reviews?per_page=100`]))).flat();
-    const latest = reviews.filter(review => String(review?.user?.login).toLowerCase() === input.reviewer!.toLowerCase() && review?.commit_id === input.sha && typeof review?.body === 'string').at(-1);
-    if (latest?.state === 'CHANGES_REQUESTED') findings.push({ ground: `review ${latest.id}`, text: latest.body });
+    // The reviewer's standing verdict, as the observer reads it (src/github.ts): a COMMENTED review
+    // — a thread reply, a blocked note — withdraws nothing, so it never hides a change request.
+    const latest = reviews.filter(review => String(review?.user?.login).toLowerCase() === input.reviewer!.toLowerCase() && review?.commit_id === input.sha && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review?.state)).at(-1);
+    if (latest?.state === 'CHANGES_REQUESTED' && typeof latest.body === 'string' && latest.body) findings.push({ ground: `review ${latest.id}`, text: latest.body });
   }
   return findings;
 }

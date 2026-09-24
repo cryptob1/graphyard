@@ -576,7 +576,9 @@ test('unit:review-finding-scope — only a file on the base that a finding names
       { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts', author: { login: 'graphyard-reviewer' } }] } },
       { id: 'PRRT_long', isResolved: false, comments: { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [{ body: 'first', author: { login: 'graphyard-reviewer' } }] } }] } } } } });
     return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
-      { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' }]]);
+      { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' },
+      // A thread reply is a COMMENTED review on the head: it withdraws no verdict, so review 1 still stands.
+      { id: 3, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'COMMENTED', body: '' }]]);
   };
   // Existence on the base: only a genuine absence is false; a missing base ref or failing git throws, so the loop retries.
   const repo = await mkdtemp(join(tmpdir(), 'gy-finding-base-'));
@@ -606,4 +608,9 @@ test('unit:review-finding-scope — only a file on the base that a finding names
   assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', ...Array(3).fill('review thread PRRT_long'), 'review 1'], 'one finding per trusted comment');
   assert.ok(read.some(entry => entry.ground === 'review thread PRRT_long' && namesPath(entry.text, 'src/g.ts')), 'a trusted comment past the first page of a long thread is a finding');
   assert.equal(read[0].text, 'fix src/a.ts', 'a comment by an untrusted author in a trusted thread is not a finding');
+  // A later verdict does replace it: an approval of the head leaves no change request standing.
+  const approved = (command: string, args: string[]) => args[1] === 'graphql' ? run(command, args)
+    : JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
+      { id: 4, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'APPROVED', body: 'ok' }]]);
+  assert.ok(!(await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: [] }, approved)).some(entry => entry.ground.startsWith('review ') && !entry.ground.startsWith('review thread')), 'an approval after the change request withdraws it');
 });

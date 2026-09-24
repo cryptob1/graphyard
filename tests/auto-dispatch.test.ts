@@ -924,7 +924,7 @@ test('producers launch before any reviewer waits on a bot read: an unanswered re
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('a reviewer launching beside the producer pass takes turns with a producer launch over a shared Herdr agent name, so the later launch sees the earlier name', async () => {
+test('a reviewer launching beside the producer pass takes turns with a producer launch over a shared Herdr agent name, and reads its room again after the turn: a slot taken meanwhile is a capacity wait, not a refusal', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-names-'));
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -937,10 +937,13 @@ test('a reviewer launching beside the producer pass takes turns with a producer 
     });
     // Profiles added out of order can share a name: the reviewer took producer-a's.
     const config = masterConfig(token); config.reviewers[0].agentName = config.producers[0].agentName;
-    await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000);
-    const review = seen.findIndex(entry => entry.kind === 'review'), producer = seen.findIndex(entry => entry.kind === 'producer:producer-a');
-    assert.ok(review >= 0 && producer >= 0, `both launch: ${JSON.stringify(seen)}`);
-    const later = seen[Math.max(review, producer)];
-    assert.ok(later.names.includes(config.producers[0].agentName), `the later launch sees the shared name taken: ${JSON.stringify(seen)}`);
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000);
+    const producer = seen.findIndex(entry => entry.kind === 'producer:producer-a');
+    assert.ok(producer >= 0, `the producer launches first, its read never waited on: ${JSON.stringify(seen)}`);
+    // The reviewer's room is read again once the name is its turn: the producer took the one slot
+    // of the name they share, so the review waits on capacity rather than launching into a refusal.
+    assert.ok(!seen.some(entry => entry.kind === 'review'), `the reviewer never launches into the taken name: ${JSON.stringify(seen)}`);
+    assert.deepEqual(tick.refused, [], 'a slot taken during the reservation wait is not a failed launch');
+    assert.ok(tick.waiting.some(entry => entry.kind === 'review' && /every reviewer profile is busy/.test(entry.reason)), `the review waits on capacity: ${JSON.stringify(tick.waiting)}`);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
