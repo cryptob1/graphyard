@@ -1,8 +1,7 @@
 <!-- page: Agent protocol | 10 | recording deployment-provider observations that feed flow analytics without moving a gate. -->
 # Deployment observations
 
-`POST /api/deployments` records one deployment-provider observation. It requires a `producer`
-credential or the human operator's `admin` credential; workers cannot record one.
+`POST /api/deployments` (`producer` or `admin`) records one provider observation:
 
 ```json
 {
@@ -17,10 +16,4 @@ credential or the human operator's `admin` credential; workers cannot record one
 }
 ```
 
-`state` is `succeeded`, `failed`, or `rolled_back`. `sha` is the provider's exact deployed
-artifact identity and `containedMergeShas` lists the independently verified merge commits it
-contains; the artifact need not equal any single merge commit. Records are append-only and
-unique per provider, external ID, and state; a repeat that replays every immutable field
-returns `duplicate`, and one that differs is refused. Deployment observations feed deployment
-frequency, latency, failure, and rollback in [flow analytics](../flow-analytics.md). They are
-not a lifecycle-state endpoint: they never move a gate.
+`state` is `succeeded`, `failed` or `rolled_back`. Records are append-only and unique per provider, external ID and state; an identical repeat returns `duplicate`, a differing one is refused. They feed [flow analytics](../flow-analytics.md) and never move a gate.
