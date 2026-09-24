@@ -154,44 +154,40 @@ test('unit:threads-listed-resolution — an approval without a Resolved threads 
   }
 });
 
-test('unit:threads-listed-resolution — a settlement that named nothing before listed threads were recorded is judged once more, by launch time', async () => {
-  const { root, cleanup } = await boundMaster();
-  try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
-    const gh = github({ body: 'All listed findings are fixed at this head.' });
-    // As GY-159's record was left on 2026-09-24: launched while prompts listed threads but before the
-    // listing was recorded, so no threadsListed, and a settlement that named nothing.
-    await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, requestedAt: '2026-09-24T05:00:00.000Z', state: 'completed', verdict: verdict() as any,
-      threadResolution: { at: new Date().toISOString(), reviewId: 77, named: [], resolved: [], refused: [], attempts: 1 } }; });
-    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
-    // Opened before the launch and before the approval: both pre-existing threads; the later one is refused.
-    assert.deepEqual(gh.resolved, ['PRRT_fixed0001', 'PRRT_unnamed01']);
-    assert.equal(settled.reviews[0].threadResolution?.implicit, true);
-    const before = gh.calls.length;
-    await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
-    assert.equal(gh.calls.length, before, 'judged once');
-  } finally { await cleanup(); }
-});
-
-test('unit:threads-listed-resolution — a session with no recorded listing launched outside the legacy span, or never settled as legacy, vouches for none of them', async () => {
+test('unit:threads-listed-resolution — a settlement that named nothing before listings were recorded is judged once more, by what its launch recorded: no listing vouches for no thread', async () => {
   for (const scenario of [
+    // As GY-159's record was left on 2026-09-24: launched while prompts listed threads but before the
+    // listing was recorded. Nothing on the record says which prompt its reviewer got.
+    { name: 'thread-aware binary, unrecorded listing', requestedAt: '2026-09-24T05:00:00.000Z' },
     // Launched before dabdf14e: the reviewer was never shown the thread IDs or findings.
-    { name: 'before the span', requestedAt: '2026-09-24T04:00:00.000Z', legacy: true },
-    // Launched after listings were recorded, by a binary that recorded none (an older binary still
-    // running): nothing on the record says its prompt showed the threads.
-    { name: 'after the span', requestedAt: '2026-09-24T09:00:00.000Z', legacy: true },
-    // Inside the span, but with no legacy settlement: only a settlement that named nothing is judged again.
-    { name: 'no legacy settlement', requestedAt: '2026-09-24T05:00:00.000Z', legacy: false },
+    { name: 'before thread-aware prompts', requestedAt: '2026-09-24T04:00:00.000Z' },
+    // A pre-dabdf14e binary still running later writes a record that looks the same, then an upgrade settles it.
+    { name: 'older binary after an upgrade', requestedAt: '2026-09-24T09:00:00.000Z' },
   ]) {
     const { root, cleanup } = await boundMaster();
     try {
       await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
       const gh = github({ body: 'All listed findings are fixed at this head.' });
       await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, requestedAt: scenario.requestedAt, state: 'completed', verdict: verdict() as any,
-        ...(scenario.legacy ? { threadResolution: { at: new Date().toISOString(), reviewId: 77, named: [], resolved: [], refused: [], attempts: 1 } } : {}) }; });
+        threadResolution: { at: new Date().toISOString(), reviewId: 77, named: [], resolved: [], refused: [], attempts: 1 } }; });
       const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
       assert.deepEqual(gh.resolved, [], scenario.name);
-      assert.equal(settled.reviews[0].threadResolution?.implicit, false, scenario.name);
+      assert.equal(settled.reviews[0].threadResolution?.implicit, false, `${scenario.name}: judged once more, with no listing to vouch for`);
+      const before = gh.calls.length;
+      await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+      assert.equal(gh.calls.length, before, `${scenario.name}: judged once`);
     } finally { await cleanup(); }
   }
+});
+
+test('unit:threads-listed-resolution — a session with no recorded listing and no legacy settlement vouches for none of the threads', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    const gh = github({ body: 'All listed findings are fixed at this head.' });
+    await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, requestedAt: '2026-09-24T05:00:00.000Z', state: 'completed', verdict: verdict() as any }; });
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+    assert.deepEqual(gh.resolved, []);
+    assert.equal(settled.reviews[0].threadResolution?.implicit, false);
+  } finally { await cleanup(); }
 });

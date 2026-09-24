@@ -67,15 +67,6 @@ export function parseResolvedThreads(body: unknown): string[] {
 /** Whether a verdict carries a `Resolved threads:` line at all; `Resolved threads: none` names nothing, explicitly. */
 export const hasResolvedThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^resolved threads:/i.test(entry.trim()));
 
-/**
- * The one span whose launches were shown the threads without recording which: from when launch
- * prompts began listing thread IDs (dabdf14e) to when every launch began recording its listing on
- * the session (37676502, `threadsListed`). A record launched outside it without a listing names no
- * prompt that showed it the threads — an earlier binary, or one still running without 37676502 —
- * so its approval vouches for none of them. The span is closed, so no later launch falls into it.
- */
-export const legacyThreadPromptSpan = { from: Date.parse('2026-09-24T04:32:57Z'), until: Date.parse('2026-09-24T05:21:24Z') };
-
 /** `implicit`: the approval had no `Resolved threads:` line, so it vouches for every thread its launch prompt listed. */
 export interface ThreadResolution { at: string; reviewId: number; named: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; implicit?: boolean }
 
@@ -88,12 +79,13 @@ export interface ThreadResolution { at: string; reviewId: number; named: string[
  * because that prompt made any unfixed or unverified thread a REQUEST_CHANGES: on 2026-09-24 GY-159's
  * reviewer approved a head that fixed all eight listed threads but omitted the line, nothing was
  * resolved, and the merge sat behind conversation resolution. `listed` names the prompt's threads,
- * recorded on the session at launch. A record from before listings were kept (`launchedAt`, passed
- * only for a legacy settlement that named nothing) falls back to the threads opened before its
- * launch, and only when that launch lies inside `legacyThreadPromptSpan`. Neither is passed when the
- * launch could not read the threads, so that prompt vouches for nothing.
+ * recorded on the session at launch, and is the only proof that a launch showed its reviewer the
+ * threads. A record without it vouches for none: neither its launch time nor any date span says which
+ * binary launched it, and a binary from before thread-aware prompts, still running past any cutoff,
+ * writes records that look the same while its reviewers saw no threads. `listed` is not passed when
+ * the launch could not read the threads, so that prompt vouches for nothing either.
  */
-export async function resolveNamedThreads(input: { repository: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: ThreadResolution; listed?: string[]; launchedAt?: string }, run: ChildRun, now: Date): Promise<ThreadResolution> {
+export async function resolveNamedThreads(input: { repository: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: ThreadResolution; listed?: string[] }, run: ChildRun, now: Date): Promise<ThreadResolution> {
   const attempts = (input.previous?.attempts ?? 0) + 1;
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts, implicit: false };
   let review: any;
@@ -101,15 +93,14 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
   catch (error) { return { ...base, named: [], resolved: [], refused: [], failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
   if (review?.state !== 'APPROVED' || review?.commit_id !== input.sha || String(review?.user?.login).toLowerCase() !== input.reviewer.toLowerCase())
     return { ...base, named: [], resolved: [], refused: [], failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
-  const launched = Date.parse(input.launchedAt ?? '');
-  const implicit = !hasResolvedThreadsLine(review.body) && (!!input.listed || launched >= legacyThreadPromptSpan.from && launched < legacyThreadPromptSpan.until);
+  const implicit = !hasResolvedThreadsLine(review.body) && !!input.listed;
   let named = parseResolvedThreads(review.body);
   if (!named.length && !implicit) return { ...base, named, resolved: [], refused: [] };
   let open: LaunchThread[];
   try { open = await readUnresolvedThreads(input.repository, input.pr, run); }
   catch (error) { return { ...base, implicit, named, resolved: [], refused: [], failure: `the review threads could not be read: ${firstLine(error)}` }; }
   if (implicit) {
-    named = input.listed ? [...input.listed] : open.filter(thread => Date.parse(thread.createdAt ?? '') < launched).map(thread => thread.id);
+    named = [...input.listed!];
     if (!named.length) return { ...base, implicit, named, resolved: [], refused: [] };
   }
   const submitted = Date.parse(String(review.submitted_at ?? ''));

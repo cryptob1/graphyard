@@ -847,7 +847,8 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     const verdict = record.verdict;
     if (record.state !== 'completed' || verdict?.state !== 'APPROVED') continue;
     const previous: ThreadResolution | undefined = record.threadResolution?.reviewId === verdict.reviewId ? record.threadResolution : undefined;
-    // A settlement from before implicit naming existed, which named nothing, is judged once more.
+    // A settlement from before implicit naming existed, which named nothing, is judged once more, by
+    // what its launch recorded: without a recorded listing its approval vouches for no thread.
     const predatesImplicit = !!previous && previous.implicit === undefined && !previous.named.length && !previous.failure;
     if (previous && !predatesImplicit && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
     const item = work.find(entry => entry.key === record.key);
@@ -856,7 +857,7 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     const current = item.candidate.sha === record.sha || !!carried && carried.originalSha === record.sha && (carried.reviewId === undefined || carried.reviewId === verdict.reviewId);
     if (!current) continue;
     const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
-      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : predatesImplicit ? { launchedAt: record.requestedAt } : {}) }, run, now);
+      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, now);
     record.threadResolution = { ...outcome, refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
     const fresh = outcome.resolved.filter(id => !previous?.resolved.includes(id));

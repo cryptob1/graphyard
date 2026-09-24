@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { ciReportingEnvironment } from './install/ci-proofs.js';
+import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
@@ -2376,6 +2377,14 @@ function localAncestry(root: string, baseBranch: string, run: ChildRun) {
  * A release that does not descend from the retained one (a rollback, an unrelated commit) drops
  * the retention and every delivery is derived again.
  */
+/**
+ * Whether a GitHub deployment's environment is the configured production environment
+ * (GRAPHYARD_PRODUCTION_ENVIRONMENT, `production` by default). Railway names the GitHub
+ * environment `<project> / <environment>`, so that form matches on its environment part.
+ */
+export const productionEnvironmentRecord = (environment: unknown, production: string) =>
+  typeof environment === 'string' && (environment === production || environment.endsWith(` / ${production}`));
+
 export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now(),
   options: { root: string; retained?: ContainmentRetention | null }): Promise<DeploymentObservation> {
   const at = new Date(now()).toISOString();
@@ -2399,6 +2408,8 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     // and on 2026-09-24 GY-159 stayed pending behind a release production had already served. The
     // listing is read page by page, newest first, until a release answers or a bound is reached.
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
+    let production: string;
+    try { production = productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
     let listed = 0, candidates = 0, exhausted = false;
     for (let page = 1; page <= deploymentListingPages && !sha && !exhausted && candidates < deploymentListingSize; page++) {
       let deployments: any[];
@@ -2418,6 +2429,9 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
         const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
         if (ref && ref !== config.baseBranch) {
           if (typeof deployment.sha !== 'string' || ref.toLowerCase() !== deployment.sha.toLowerCase()) continue;
+          // A commit of the base branch is deployed to staging and previews as readily as to
+          // production; only the production environment's record says what production serves.
+          if (!productionEnvironmentRecord(deployment?.environment, production)) continue;
           if (await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) !== true) continue;
         }
         if (candidates >= deploymentListingSize) break;

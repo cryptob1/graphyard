@@ -286,7 +286,7 @@ test('integration:cycle-time-attributed — the cycle reports where its time wen
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('unit:deployment-source-is-a-release — the observation takes the newest successful base-branch release, never the CI reporting environment or another branch', async () => {
+test('unit:deployment-source-is-a-release — the observation takes the newest successful base-branch release, never the CI reporting environment, another branch, or another environment\'s deployment of a base-branch commit', async () => {
   const fixture = await deliveredHistory(3);
   try {
     await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -295,7 +295,9 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
     // CI proof reporting records deployments on branches and on main; neither is a release.
     const listed = [
       { id: 1, sha: 'b'.repeat(40), ref: 'graphyard/gy-9-1', environment: 'graphyard-reporting' },
-      { id: 2, sha: release, ref: release, environment: 'graphyard / production' },
+      // A newer staging deployment of a base-branch commit: on main, but not what production serves.
+      { id: 4, sha: release, ref: release, environment: 'graphyard / staging' },
+      { id: 2, sha: old, ref: old, environment: 'graphyard / production' },
       { id: 3, sha: old, ref: 'main', environment: 'graphyard-reporting' },
     ];
     const run = (command: string, args: string[]) => {
@@ -306,10 +308,13 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
     };
     const observation = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(observation.source, 'github-deployment');
-    assert.equal(observation.sha, release, 'the Railway release, not the reporting record on main');
-    assert.deepEqual(observation.pending, []);
+    assert.equal(observation.sha, old, 'the production release, not the newer staging record or the reporting record on main');
+    listed[2] = { id: 2, sha: release, ref: release, environment: 'graphyard / production' };
+    const current = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    assert.equal(current.sha, release);
+    assert.deepEqual(current.pending, []);
     // A SHA-ref deployment of a commit that is not on the base branch is not a release.
-    listed[1] = { id: 2, sha: 'c'.repeat(40), ref: 'c'.repeat(40), environment: 'graphyard / production' };
+    listed[2] = { id: 2, sha: 'c'.repeat(40), ref: 'c'.repeat(40), environment: 'graphyard / production' };
     const offBranch = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
     assert.equal(offBranch.source, 'unavailable', 'nothing on the list is a release of the base branch');
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
