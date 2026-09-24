@@ -12,6 +12,8 @@ export interface TableDefinition {
   orderBy: string;
   /** The serial column whose sequence a restore must advance, when the table has one. */
   serial?: string;
+  /** A disposable cache the migration creates but a backup neither carries nor a restore requires empty. */
+  cache?: boolean;
 }
 
 export const defineTable = (definition: TableDefinition) => definition;

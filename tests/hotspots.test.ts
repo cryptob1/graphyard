@@ -96,7 +96,8 @@ test('unit:hotspot-registry — every route module is registered and the route t
 
 test('unit:hotspot-registry — the ledger backup table list is derived from the store registry', async () => {
   const created = [...migration.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map(match => match[1]);
-  assert.deepEqual(ledgerTables, created, 'every table the migration creates is a ledger table, in migration order');
+  const caches = tables.filter(table => table.cache).map(table => table.name);
+  assert.deepEqual(ledgerTables, created.filter(name => !caches.includes(name)), 'every table the migration creates is a ledger table or a declared cache, in migration order');
   assert.equal(new Set(ledgerTables).size, ledgerTables.length, 'table names are unique');
   for (const table of tables) assert.ok(ledgerOrder[table.name], `${table.name} declares an export order`);
   for (const { table, column } of ledgerSequences) assert.match(migration, new RegExp(`${table}[\\s\\S]*${column} bigserial`), `${table}.${column} is a serial column`);

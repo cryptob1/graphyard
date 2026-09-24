@@ -8,6 +8,7 @@ import type { Engine } from './engine.js';
 import { mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
+import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 export { CHECK_NAME };
 import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeBaseDismissalPattern, ownHeads, pendingRestore, queuePlacement, queueRef, treeIdenticalPrediction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
@@ -296,6 +297,24 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
+  /** The persisted cold layer under the four maps above (src/github-cache.ts), when attached. */
+  private persisted: GitHubCacheStore | null = null;
+  private warming: Promise<void> | null = null;
+  /** Load the persisted caches into the maps and write new entries behind. Resolves once loaded; never rejects. */
+  attachCache(store: GitHubCacheStore) {
+    this.persisted = store;
+    const warming = store.load({ etag: this.cache, ancestry: this.ancestry, blob: this.blobs, history: this.histories },
+      { etag: etagCacheEntries, ancestry: ancestryEntries, blob: ancestryEntries, history: historyEntries }).then(() => { if (this.warming === warming) this.warming = null; });
+    this.warming = warming;
+    return warming;
+  }
+  /** A request made while the persisted cache is still loading waits for it, at most two seconds. */
+  private async warm() {
+    if (!this.warming) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([this.warming, new Promise<void>(resolve => { timer = setTimeout(resolve, 2_000); timer.unref?.(); })]);
+    clearTimeout(timer);
+  }
   private preflightState: AppPermissionReport | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
@@ -538,6 +557,7 @@ export class GitHub {
   }
   private async apiRequest(path: string, method = 'GET', body?: unknown): Promise<any> {
     await this.authenticate();
+    if (method === 'GET') await this.warm();
     const cached = method === 'GET' ? this.cache.get(path) : undefined;
     const started = Date.now();
     let response: Response;
@@ -555,7 +575,7 @@ export class GitHub {
     this.meter(method, path, response);
     this.record(path, response, true);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
-    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); return structuredClone(cached.value); }
+    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); this.persisted?.touch('etag', path); return structuredClone(cached.value); }
     const refused = await this.refusal(response, `${method} ${path}`);
     if (refused) throw refused;
     this.rateFailures = 0;
@@ -565,6 +585,7 @@ export class GitHub {
       this.cache.delete(path);
       if (etag) {
         this.cache.set(path, { etag, value: structuredClone(value) });
+        this.persisted?.put('etag', path, value, etag);
         if (this.cache.size > etagCacheEntries) this.cache.delete(this.cache.keys().next().value!);
       }
     }
@@ -675,13 +696,15 @@ export class GitHub {
   async contains(base: string, head: string): Promise<boolean> {
     if (base === head) return true;
     const key = `${base}...${head}`;
+    await this.warm();
     const known = /^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key) ? this.ancestry.get(key) : undefined;
-    if (known !== undefined) return known;
+    if (known !== undefined) { this.persisted?.touch('ancestry', key); return known; }
     const comparison = await this.request(`/compare/${base}...${head}?per_page=1`);
     demand(typeof comparison?.status === 'string', `GitHub did not compare ${base.slice(0, 12)} with ${head.slice(0, 12)}`, 502);
     const contained = comparison.status === 'ahead' || comparison.status === 'identical';
     if (/^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key)) {
       this.ancestry.set(key, contained);
+      this.persisted?.put('ancestry', key, contained);
       if (this.ancestry.size > ancestryEntries) this.ancestry.delete(this.ancestry.keys().next().value!);
     }
     return contained;
@@ -693,7 +716,8 @@ export class GitHub {
   async historySince(base: string, head: string): Promise<Set<string> | null> {
     const key = `${base}...${head}`;
     const pinned = /^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key);
-    if (pinned && this.histories.has(key)) return this.histories.get(key)!;
+    if (pinned) await this.warm();
+    if (pinned && this.histories.has(key)) { this.persisted?.touch('history', key); return this.histories.get(key)!; }
     const shas = new Set<string>(); let total = 0;
     for (let page = 1; page <= 3; page++) {
       const comparison = await this.request(`/compare/${base}...${head}?per_page=100&page=${page}`);
@@ -704,7 +728,7 @@ export class GitHub {
       if (comparison.commits.length < 100 || shas.size >= total) break;
     }
     const result = shas.size >= total ? shas : null;
-    if (pinned) { this.histories.set(key, result); if (this.histories.size > 2048) this.histories.delete(this.histories.keys().next().value!); }
+    if (pinned) { this.histories.set(key, result); this.persisted?.put('history', key, result); if (this.histories.size > historyEntries) this.histories.delete(this.histories.keys().next().value!); }
     return result;
   }
   /** The base a published speculative tip was built on, when the head is that tip; otherwise null. */
@@ -958,9 +982,10 @@ export class GitHub {
   async blobAt(path: string, ref: string): Promise<string | null> {
     // A path's blob at a commit SHA never changes, so it is asked of GitHub once.
     const pinned = /^[a-f0-9]{40}$/.test(ref) ? `${ref}:${path}` : null;
-    if (pinned && this.blobs.has(pinned)) return this.blobs.get(pinned)!;
+    if (pinned) await this.warm();
+    if (pinned && this.blobs.has(pinned)) { this.persisted?.touch('blob', pinned); return this.blobs.get(pinned)!; }
     const found = await this.readBlob(path, ref);
-    if (pinned) { this.blobs.set(pinned, found); if (this.blobs.size > ancestryEntries) this.blobs.delete(this.blobs.keys().next().value!); }
+    if (pinned) { this.blobs.set(pinned, found); this.persisted?.put('blob', pinned, found); if (this.blobs.size > ancestryEntries) this.blobs.delete(this.blobs.keys().next().value!); }
     return found;
   }
   private async readBlob(path: string, ref: string): Promise<string | null> {
@@ -1413,6 +1438,8 @@ export const permissionHoldMs = 30 * 60_000;
 export const etagCacheEntries = 4096;
 /** Commit-pair ancestry answers kept; each is immutable, so the bound only limits memory. */
 export const ancestryEntries = 16384;
+/** Commit-pair histories kept; each is immutable. */
+export const historyEntries = 2048;
 /** Peer containment compares one observation keeps in flight. */
 export const peerContainmentConcurrency = 8;
 async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
