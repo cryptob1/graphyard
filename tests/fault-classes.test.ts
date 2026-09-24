@@ -129,17 +129,24 @@ test('unit:fault-classes — master status and the dashboard group open problems
   open[1].scopeRequest = { epoch: 1, paths: ['docs/y.md'], reason: 'docs', requestedBy: 'graphyard-claude-2', at: new Date(NOW).toISOString() } as Work['scopeRequest'];
   const expected = groupFaults(open.flatMap(entry => workFaults(entry, NOW)));
   const noop = () => {};
-  const page = renderToStaticMarkup(createElement(OverviewPage, {
+  const render = (work: Work[]) => renderToStaticMarkup(createElement(OverviewPage, {
     token: 'fixture', work, status: boardStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: { validation: null, releases: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
     codexAvailable: false, queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, 'admin'), refresh: async () => {},
     action: async () => {}, setError: noop, signOut: noop,
   } as unknown as Dashboard));
+  const page = render(work);
   assert.match(page, /aria-label="Problems by class"/);
   const scope = expected.find(group => group.faultClass === 'scope')!;
   assert.ok(scope.count >= 2, 'both scope requests are counted');
   for (const group of expected) assert.match(page, new RegExp(`data-fault-class="${group.faultClass}"[^>]*>(?:(?!</li>)[\\s\\S])*<strong>${group.count}</strong>`), `${group.faultClass} shows its count`);
+  // One open problem is its own row already: there is nothing to group.
+  const fixture = boardWork() as unknown as Work[];
+  const one = fixture.find(entry => workFaults(entry, NOW).length === 1)!;
+  const single = fixture.filter(entry => entry === one || !workFaults(entry, NOW).length);
+  assert.equal(single.flatMap(entry => workFaults(entry, NOW)).length, 1, 'the fixture keeps exactly one open problem');
+  assert.doesNotMatch(render(single), /Problems by class/);
 });
 
 test('unit:recurring-class-item — below the threshold nothing is filed', async () => {

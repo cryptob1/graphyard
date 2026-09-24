@@ -31,7 +31,9 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   const humanOnly = humanOnlyIds(work, status?.humanOnly);
   // Open problems by fault class (GY-173): one count per shared cause, read from each open item's
   // own record the same way the master loop reads it, so a cause behind several items reads as one.
-  const faults = groupFaults(work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now)));
+  // A single problem is already its own row, so the grouping is drawn once there are two to group.
+  const problems = work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now));
+  const faults = problems.length > 1 ? groupFaults(problems) : [];
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const delivered = work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped');
   const recent = delivered.filter(w => releasedAt(w, release) !== null && now - releasedAt(w, release)! <= week).sort((a, b) => releasedAt(b, release)! - releasedAt(a, release)!);
