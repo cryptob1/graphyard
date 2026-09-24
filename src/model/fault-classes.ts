@@ -301,14 +301,14 @@ export function faultClassItem(recurrence: Pick<ClassRecurrence, 'faultClass' | 
     instances: recent.slice(0, 100).map(({ id, kind, subject, at: seen }) => ({ id, kind, subject, at: seen })) };
   const description = [
     `The master loop filed this item itself: ${recent.length} ${faultClass} faults in ${policy.windowHours} hours (threshold ${policy.threshold}). The class means ${faultClassMeaning[faultClass]}.`,
-    `Fixing these one instance at a time is what this item replaces: find the cause the instances share and remove it, so the product handles the case itself. Later instances of the class are linked to this item rather than filed again.`,
+    `Fixing these one instance at a time is what this item replaces: find the cause the instances share and remove it, so the product handles the case itself. Later instances of the class are linked to this item rather than filed again. Whether the class stays quiet after this ships is not evidence this item can carry: the loop keeps counting it, and a recurrence past the threshold after delivery files a new item.`,
     `Subjects affected: ${subjects.join(', ')}.`,
     'Instances (the evidence):',
     ...recent.slice(0, 100).map(entry => `- ${entry.at} ${entry.kind} on ${entry.subject}: ${entry.text}`),
   ].join('\n\n');
   return {
     title: `Recurring ${faultClass} faults: ${recent.length} in ${policy.windowHours} hours`.slice(0, 200), description: description.slice(0, 20000), type: 'bug' as const, priority: 1,
-    criteria: [{ id: 'AC-1', text: `The shared cause of the recurring ${faultClass} faults is found and removed: the instances listed on this item could not recur, and after the change ships the loop records fewer than ${policy.threshold} ${faultClass} faults in any ${policy.windowHours} hours`, proofs: [`manual:fault-class-${faultClass}`] }],
+    criteria: [{ id: 'AC-1', text: `The shared cause of the recurring ${faultClass} faults is found and removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate, by a test the change adds`, proofs: [`manual:fault-class-${faultClass}`] }],
     origin: { faultClass: origin },
     reason: `The ${faultClass} fault class recurred past its threshold (${recent.length} ≥ ${policy.threshold} in ${policy.windowHours} hours) and no open item names it`,
   };

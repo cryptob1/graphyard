@@ -75,7 +75,7 @@ A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator`
 
 ## Fault classes
 
-Faults carry `faultClass`, grouped under `master status` `faults`; a class past `GRAPHYARD_FAULT_CLASS_*` (3/24h) files one item later instances link to.
+All faults carry `faultClass` (`master status` `faults`); a class past `GRAPHYARD_FAULT_CLASS_*` (3/24h) files one item later instances link to.
 
 ## Pipeline speed
 

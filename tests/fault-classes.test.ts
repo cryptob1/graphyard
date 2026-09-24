@@ -309,3 +309,48 @@ test('unit:recurring-class-item — a fault that clears and returns is a new ins
   noteFault(record, { kind: 'loop-failures', faultClass: 'loop', subject: 'loop', text: 'failed' }, iso(200_000));
   assert.deepEqual(record.instances.map(entry => entry.faultClass), ['scope', 'scope', 'loop']);
 });
+
+test('unit:recurring-class-item — derived and status-level faults reach recurrence tracking and file their class', async () => {
+  const filed: any[] = [];
+  let backlog: Work[] = [];
+  let status: Record<string, unknown> = { github: true };
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: backlog.map(entry => ({ ...entry })), now: new Date(now).toISOString() }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {}, controlPlane: async () => status,
+    fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${100 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
+  } as unknown as DaemonEffects;
+  let now = clock;
+  const state = emptyDaemonState(config());
+  const classesFiled = () => filed.map(input => input.origin.faultClass.class as string);
+  // Derived attention: a leased item whose worker session Herdr does not show is a session-liveness fault,
+  // which no item's own record carries. One standing session stays one instance however many cycles see it.
+  const leased = (key: string) => item(key, { stage: 'build', lease: { owner: 'graphyard-worker-1', epoch: 1, expiresAt: iso(10 * hour) } } as Partial<Work>);
+  backlog = [leased('GY-1')];
+  for (let minute = 0; minute < 3; minute++) { now = clock + minute * 60_000; await runCycle(config(), state, effects, () => now); }
+  assert.equal(state.faults.instances.filter(entry => entry.faultClass === 'session-liveness').length, 1, `one standing session fault is one instance: ${JSON.stringify(state.faults.instances)}`);
+  assert.deepEqual(classesFiled(), [], 'below the threshold nothing is filed');
+  backlog = [leased('GY-1'), leased('GY-2'), leased('GY-3')];
+  now = clock + 5 * 60_000;
+  await runCycle(config(), state, effects, () => now);
+  assert.deepEqual(classesFiled(), ['session-liveness'], 'the third session-liveness fault files its class');
+  assert.deepEqual(filed[0].origin.faultClass.instances.map((entry: { kind: string }) => entry.kind), ['session', 'session', 'session']);
+  // Its criterion is one the candidate can prove before merge; the post-ship quiet is the loop's own count, never merge evidence.
+  assert.match(filed[0].criteria[0].text, /removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate/);
+  assert.doesNotMatch(filed[0].criteria[0].text, /ships|after/);
+
+  // Status-level: an App permission shortfall the control plane reports, cleared and raised again three times.
+  for (let round = 0; round < 3; round++) {
+    status = { github: true, appPermissions: { attention: [`The GitHub App lacks checks: write (round ${round})`] } };
+    now = clock + (10 + round * 2) * 60_000; await runCycle(config(), state, effects, () => now);
+    status = { github: true };
+    now += 60_000; await runCycle(config(), state, effects, () => now);
+  }
+  assert.equal(state.faults.instances.filter(entry => entry.faultClass === 'configuration').length, 3, 'a shortfall that clears and returns is a new instance each time');
+  assert.deepEqual(classesFiled(), ['session-liveness', 'configuration'], 'the recurring status-level class files its own item');
+  // A failed integration job on the coordination read is an observation fault, with or without the status read.
+  assert.deepEqual(cycleFaults(state, [], clock, { jobs: [{ work_id: 'GY-1', error: 'GitHub answered 502' }] }).map(fault => [fault.kind, fault.faultClass, fault.subject]), [['integration-job', 'observation', 'GY-1']]);
+  // An item's own fault and the same fault derived again for it are one observation, not two.
+  const both = cycleFaults(state, [blocked('GY-9')], clock, { config: config() });
+  assert.equal(both.filter(fault => fault.subject === 'GY-9').length, 1, `one blocker is one fault: ${JSON.stringify(both)}`);
+});

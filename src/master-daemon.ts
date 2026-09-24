@@ -8,7 +8,7 @@ import { ciReportingEnvironment } from './install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
-import { classified, faultClasses, faultClassItem, faultClassPolicyFromEnv, faultInstanceSchema, noteActionOutcome, noteFault, recurringClasses, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from './model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, faultInstanceSchema, noteActionOutcome, noteFault, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from './model/fault-classes.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
@@ -27,7 +27,7 @@ import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.j
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, buildMasterStatus, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 
@@ -837,11 +837,20 @@ export function fitDecisionReason(prefix: string, grounds: string, suffix: strin
 /**
  * An action detail within its bound. A scope request carries up to 50 paths of up to 500 characters,
  * so a detail that lists them — or quotes an error that does — is cut, never left to fail record()
- * after the action it records has already happened.
+ * after the action it records has already happened. record() applies it to every detail it stores.
  */
 export function boundDetail(detail: string, max = actionDetailMax): string {
   return detail.length <= max ? detail : `${detail.slice(0, max - 1)}…`;
 }
+
+/**
+ * Whether a detail differs from the one an action already stores. record() stores the bounded form,
+ * so a stable detail over the bound compares equal and is not re-recorded every cycle (GY-179).
+ */
+export function detailChanged(previous: { detail: string } | undefined, detail: string): boolean {
+  return previous?.detail !== boundDetail(detail);
+}
+
 /** Paths named in a detail: every one while short, else the first few and a count of the rest. */
 export function namePaths(paths: readonly string[], room = 600): string {
   const named: string[] = [];
@@ -1493,6 +1502,12 @@ export interface DaemonEffects {
   fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
+  /**
+   * The control plane's status, read as the operator-agent identity, whose status-level problems
+   * (App permissions, a GitHub pause, unserved executors) are classified and tracked each cycle.
+   * Absent without that identity; a read that fails leaves the cycle to the faults it has.
+   */
+  controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
 }
 
 /**
@@ -1504,27 +1519,60 @@ export function storeAction(state: DaemonState, key: string, action: Omit<Daemon
   const { faultClass: _, ...rest } = action;
   const failed = rest.state === 'failed' || rest.state === 'indeterminate';
   const fault = classified(faultKind);
-  const entry = daemonActionSchema.parse({ ...rest, ...(failed ? { faultClass: fault.faultClass } : {}) });
+  const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), ...(failed ? { faultClass: fault.faultClass } : {}) });
   noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
   state.actions[key] = entry;
   return entry;
 }
 
+/**
+ * Put an action on the cursor. The detail is bounded (in storeAction) before the schema sees it, so a caller
+ * that quotes a long error or path list cannot fail every cycle with an over-long string (GY-179).
+ */
 async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist']) {
   const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() });
   await persist(state);
   return entry;
 }
 
+/** What the cycle already read that faults are derived from, beside the items' own records. */
+export interface FaultSources {
+  config?: MasterConfig; agents?: HerdrAgent[]; credentials?: Record<string, { available: boolean; reason: string | null }>;
+  containment?: Record<string, ContainmentAssessment>;
+  /** The control plane's status as the loop read it, and the integration jobs on the coordination read. */
+  status?: (ControlPlaneStatus & Record<string, unknown>) | null; jobs?: { work_id?: string; error?: string | null }[];
+}
 /**
  * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
- * (escalations, fences, parks, scope requests, proof gaps, spent accounts, violations, blockers).
- * A fault that keeps standing is one instance; one that clears and returns is another. Failed
- * actions are not read here: the action history retains failures long after they stopped
- * mattering, so each is noted once, as it happens, by storeAction.
+ * (escalations, fences, parks, scope requests, proof gaps, spent accounts, violations, blockers);
+ * the attention `master status` derives from the same snapshot, Herdr and containment reads
+ * (session liveness, review convergence, base conflicts, overlap holds, merge violations, installation
+ * sources); the status-level problems (App permissions, held or failed integration jobs, a GitHub
+ * pause, unserved executors, no GitHub connection); and disk below its bound. Each has a stable
+ * subject, so a fault that keeps standing is one instance; one that clears and returns is another.
+ * A derived line in a class the item's own record already shows is the same fault, so it is not
+ * counted twice; nor is the one-hour dwell line (`gate`), which is the ordinary pace of work — a
+ * gate nothing moves is `stalled-item`. Failed actions are not read here: the action history
+ * retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
-export function cycleFaults(_state: DaemonState, work: Work[], now: number): FaultObservation[] {
-  return work.flatMap(item => workFaults(item, now));
+export function cycleFaults(state: DaemonState, work: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
+  const own = work.flatMap(item => workFaults(item, now));
+  const derived: FaultObservation[] = [];
+  const { config } = sources;
+  if (config) {
+    try {
+      const status = buildMasterStatus({ work, now: new Date(now).toISOString() }, config.workers, sources.agents ?? [], sources.credentials ?? {}, sources.containment ?? {}, undefined, config.baseBranch, sources.status ?? undefined);
+      for (const item of classifyAttention(status.attentionItems)) if (item.kind !== 'gate') derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+    } catch (error) {
+      derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
+    }
+    const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
+    if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
+      derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
+  }
+  if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }));
+  const shown = new Set(own.map(fault => `${fault.subject}|${fault.faultClass}`));
+  return [...own, ...derived.filter(fault => !shown.has(`${fault.subject}|${fault.faultClass}`))];
 }
 export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
 /**
@@ -1916,7 +1964,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock);
   for (const breach of budget.breaches) {
     const key = `escalation:scope-budget:${breach.id}`;
-    if (state.actions[key]?.detail === breach.detail) continue;
+    if (!detailChanged(state.actions[key], breach.detail)) continue;
     performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
@@ -1963,7 +2011,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       const inventory = await effects.herdr?.();
       const report = await effects.reclaimResources(snapshot.work, inventory ? (inventory.available ? inventory.agents : null) : agents);
       const detail = describeReclaim(report);
-      if (detail) performed.push(await record(state, `reclaim:resources:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done', detail: detail.slice(0, 2000), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      if (detail) performed.push(await record(state, `reclaim:resources:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, `reclaim:resources:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Resource reclaim failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
     }
@@ -1984,7 +2032,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!assessment.settleable) {
       const escalationKey = `escalation:containment:${item.id}:${epoch}`;
       const detail = `${item.key}: containment quarantine from epoch ${epoch} cannot be settled automatically: ${assessment.refusals.join('; ')}`;
-      if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
+      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
       continue;
     }
     if (!effects.settleContainment) continue;
@@ -2041,7 +2089,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
           catch (error) { performed.push(await record(state, `${key}:${item.id}`, { kind: 'capacity', work: item.key, principal: null, state: 'failed', detail: `Could not record the ${capacity.role} capacity escalation on ${item.key}: ${message(error)}`, attempts: (state.actions[`${key}:${item.id}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); }
         }
         const detail = `${describeCapacity(capacity.role, capacity.accounts)}${waiting.length ? `; waiting: ${waiting.map(item => item.key).join(', ')}` : ''}`;
-        if (previous?.detail !== detail) performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(previous, detail)) performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         continue;
       }
       const restored = open.filter(item => standingCapacity(item, capacity.role).length);
@@ -2086,8 +2134,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // A plane that cannot record what a launch produces is not dispatched into (GY-132): the worker
   // could not claim, and its work would be recorded nowhere. One escalation names the cause.
   const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await effects.planeHealth() : null;
-  if (unrecordable && state.actions['escalation:dispatch:plane']?.detail !== `Dispatch held: ${unrecordable}`)
-    performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`.slice(0, 2000), attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
+    performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   const taken = new Set<string>();
   for (const item of workersSpent || unrecordable ? [] : claimable) {
     const key = dispatchKey(item);
@@ -2101,7 +2149,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (!launchable.some(entry => entry.healthy || entry.busy)) {
         const detail = `No worker profile can take ${item.key}: ${launchable.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`;
         const escalationKey = `escalation:dispatch:${item.id}`;
-        if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
       break;
     }
@@ -2174,7 +2222,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
-    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
   /** Close the approver session a watch names, if Herdr still lists it. False only when it could not be closed. */
   const closeApprover = async (item: Work, watch: ApprovalWatch, why: string) => {
     const session = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
@@ -2270,9 +2318,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // launches again, inside the same bound.
       // A retired watch's approver is judging this decision already; supervision relaunches it if it ends.
       const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding` : await launch(item, watch, true);
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
   };
   /** Look again at a decision already requested: its state on the control plane, and its session. */
@@ -2328,8 +2376,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // has already escalated an open item whose fence this host assessed and could not settle.
       const withheld = withheldDecision(item, config, clock, assessment);
       const escalationKey = `escalation:decision-withheld:${item.id}:${item.containmentQuarantine?.epoch ?? item.epoch}`;
-      const detail = withheld ? `${withheld.reason}. Stop the supervisor on its registered host and settle the fence there (graphyard master settle-containment ${item.key}), or request the decision yourself on an attestation you verified`.slice(0, 2000) : '';
-      if (withheld && !(item.stage !== 'done' && assessment) && state.actions[escalationKey]?.detail !== detail) await note(escalationKey, item, 'escalation', 'done', detail);
+      const detail = withheld ? `${withheld.reason}. Stop the supervisor on its registered host and settle the fence there (graphyard master settle-containment ${item.key}), or request the decision yourself on an attestation you verified` : '';
+      if (withheld && !(item.stage !== 'done' && assessment) && detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
       continue;
     }
     const key = decisionKey(item, decision);
@@ -2341,7 +2389,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
-      if (state.actions[waitKey]?.detail !== wait.slice(0, 2000)) await note(waitKey, item, 'decision', 'done', wait);
+      if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
       continue;
     }
     if (watch) { if (!watch.settledAt) await supervise(item, decision, key, watch); continue; }
@@ -2352,7 +2400,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!effects.decide || !effects.approver) {
       const escalationKey = `escalation:decision:${item.id}:${decision.binding}`;
       const detail = `${item.key} needs a ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action} REASON, then graphyard master approver ${item.key} DECISION`;
-      if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       continue;
     }
     await request(item, decision, key, null);
@@ -2407,7 +2455,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         const detail = provider === 'github' ? `${item.key}: an independent GitHub approval of the current commit is required; the coordinator cannot supply it`
           : item.reviewRequest ? `${item.key}: Graphyard dispatched ${provider} review to profile ${item.reviewRequest.profile ?? provider}; waiting for a verdict on ${item.candidate!.sha.slice(0, 12)}`
             : `${item.key}: waiting for Graphyard to dispatch a ${provider} review for ${item.candidate!.sha.slice(0, 12)}`;
-        if (state.actions[key]?.detail !== detail) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
     }
     const outstanding = missingProofs(item, new Date(clock));
@@ -2469,7 +2517,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
           : watch ? `Automatic merging is disabled; ${item.key} merges as soon as approver session ${watch.agentName ?? '(not launched yet)'} (launch ${watch.launches} of ${maxApproverLaunches}) applies merge decision ${watch.decision}, which this loop requested`
           : effects.decide ? `Automatic merging is disabled; ${item.key} merges once an approver agent applies a merge decision for candidate ${item.candidate!.sha.slice(0, 12)}`
             : `Automatic merging is disabled; ${item.key} awaits explicit operator approval before the guarded merge runs: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION`;
-        if (state.actions[waitKey]?.detail !== detail) performed.push(await record(state, waitKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(state.actions[waitKey], detail)) performed.push(await record(state, waitKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         continue;
       }
     }
@@ -2493,7 +2541,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   try {
     const observation = await effects.observeDeployment(delivered, state.deployment?.containment ?? null);
     state.deployment = deploymentObservationSchema.parse(observation);
-    if (state.actions[deploymentKey]?.detail !== deploymentDetail(state.deployment)) {
+    if (detailChanged(state.actions[deploymentKey], deploymentDetail(state.deployment))) {
       performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: observation.source === 'unavailable' ? 'failed' : 'done', detail: deploymentDetail(state.deployment), attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }
   } catch (error) {
@@ -2554,7 +2602,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
 
   // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
-  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock), new Date(clock).toISOString());
+  const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => null) : null;
+  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs }), new Date(clock).toISOString());
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
 
   spent('deployment');
@@ -2858,7 +2907,7 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
     noted.push(storeAction(state, `escalation:config:${reload.at}`, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }, 'action:config'));
   }
   if (reload.changed.length) {
-    noted.push(storeAction(state, `config:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`.slice(0, 2000), attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
+    noted.push(storeAction(state, `config:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
   }
   if (noted.length || previous?.refused !== state.config.refused) await persist(state);
   return noted;
@@ -3132,6 +3181,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173).
+    get controlPlane() { return current().operatorAgent ? () => asOperatorAgent('GET', 'status') : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
