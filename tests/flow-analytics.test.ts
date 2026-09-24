@@ -13,7 +13,7 @@ import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import {
   classifyWait, computeFlow, coveredWindow, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, gateFactStep,
-  mergeReadyGate, projectFlow, readFlow, separateKinds, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
+  mergeReadyGate, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -782,7 +782,7 @@ test('unit:flow-read-not-crowded-out — 25,000 check-run facts early in a 7-day
   assert.equal(report.throughput.reduce((sum, bucket) => sum + bucket.delivered, 0), 2);
   const moves = stepMoves(dataset, gated).filter(move => Date.parse(move.at) >= dayStart);
   assert.deepEqual(moves.map(move => `${move.from}>${move.to}@${move.at}`), [
-    `null>review@${new Date(asOf - 3 * 3600_000).toISOString()}`, `review>merge@${new Date(asOf - 2 * 3600_000).toISOString()}`, `merge>deploy@${new Date(asOf - 39 * 60_000).toISOString()}`]);
+    `null>review@${new Date(asOf - 3 * 3600_000).toISOString()}`, `review>merge@${new Date(asOf - 2 * 3600_000).toISOString()}`, `merge>deploy@${new Date(asOf - 40 * 60_000).toISOString()}`], 'the merge moves it to Deploy when it is observed');
   assert.ok(report.window.kinds.every(entry => entry.toCovered === dataset.to), 'deliveries, merges and gate changes cover the whole window');
   assert.match(report.window.covered.statement, /read past that cutoff on bounds of their own/);
 });
@@ -1000,7 +1000,7 @@ test('facts read past the shared scan cutoff count landings and step moves but n
   assert.deepEqual(flowDrilldown(truncated, report, { metric: 'phase' }).rows.map(row => row.bucket), ['pr-created-to-review-start', 'review-start-to-review-complete'],
     'the drill-down keeps only the phases the scan read');
   assert.equal(report.throughput.find(bucket => bucket.bucket === '2026-09-23T00:00:00.000Z')!.delivered, 1, 'the delivery still lands');
-  assert.deepEqual(stepMoves(truncated, calendarItem).map(move => move.to), ['merge'], 'and the step move still counts');
+  assert.deepEqual(stepMoves(truncated, calendarItem).map(move => move.to), ['merge', 'deploy'], 'and the step moves, including the merge, still count');
   // The same facts all read by the shared scan do complete those phases.
   const whole = computeFlow(calendarDataset(to, facts), { days: 7 });
   assert.equal(whole.phases.find(entry => entry.phase === 'review-complete-to-evidence-complete')!.n, 1);
@@ -1070,6 +1070,42 @@ test('unit:merged-never-prove — a gate fact recorded once the candidate merged
   const moves = stepMoves({ facts: [...before, ...after], carryIn: [] }, item);
   assert.deepEqual(moves.map(move => move.to), ['prove', 'deploy']);
   assert.equal(moves[1].at, after[0].observedAt, 'Prove ends when the merge is recorded');
+});
+
+test('a merge projected before gate facts recorded it still moves the item to Deploy at the observed merge, in the window and carried in from before it', () => {
+  const fact = (kind: string, observedAt: string, id: number, details: Record<string, unknown> = {}) => ({ ...calendarFact(kind, observedAt, id), details });
+  // Gate facts from before GY-183 carry no `merged` flag, so on their own they keep a merged item at Prove.
+  const prove = (observedAt: string, id: number, reason: string) => fact('gates.changed', observedAt, id, { stage: 'acceptance', unmet: ['acceptance', 'merge'], firstUnmet: 'acceptance', reasons: [reason], hasCandidate: true, released: true, pr: 904 });
+  const facts = [
+    prove('2026-09-23T08:00:00.000Z', 2, 'AC-1 needs evidence'),
+    fact('merged', '2026-09-23T09:00:00.000Z', 3, { pr: 904, mergeSha: 'a'.repeat(40) }),
+    prove('2026-09-23T09:05:00.000Z', 4, 'AC-2 needs evidence'),
+  ];
+  const item = { ...calendarItem, stage: 'acceptance' } as Work;
+  const moves = stepMoves(calendarDataset('2026-09-24T22:55:00.000Z', facts), item);
+  assert.deepEqual(moves.map(move => `${move.from}>${move.to}@${move.at}`), ['null>prove@2026-09-23T08:00:00.000Z', 'prove>deploy@2026-09-23T09:00:00.000Z'],
+    'Prove ends at the merge, and a later legacy gate fact never puts the item back at Prove');
+  // The same history before the window opened: the item starts the window at Deploy, entered at the merge.
+  const carryIn = [facts[1], facts[2]];
+  const entries = stepEntries(carryIn, [facts[0], facts[2]]);
+  assert.equal(entries[calendarItem.id], '2026-09-23T09:00:00.000Z');
+  const carried = stepMoves({ facts: [], carryIn, stepEntries: entries, from: '2026-09-24T00:00:00.000Z', to: '2026-09-24T22:55:00.000Z' }, item);
+  assert.deepEqual(carried.map(move => `${move.to}@${move.at}`), ['deploy@2026-09-23T09:00:00.000Z']);
+});
+
+test('a report that read only part of the repository\'s work items shows the work-item bound in place of its daily landings and step-time split', () => {
+  const to = '2026-09-24T22:55:00.000Z';
+  const report = computeFlow(calendarDataset(to, [calendarFact('delivered', '2026-09-19T10:00:00.000Z', 2)], { workTruncated: true }), { days: 7 });
+  assert.equal(report.window.truncated, false, 'the fact scan itself read the whole window');
+  assert.equal(report.coverage.workItemsTruncated, true);
+  const page = renderToStaticMarkup(createElement(LandedPerDay, { report }));
+  assert.match(page, new RegExp(`data-flow="coverage"[^>]*>The repository holds more work items than the report reads, and it read only the oldest ${flowLimits.work.toLocaleString('en-US')} work items`));
+  assert.doesNotMatch(page, /class="landed-bar"/, 'no day is drawn as a count');
+  assert.equal([...page.matchAll(/data-uncovered="true"/g)].length, 7);
+  const dwell = (step: string, n: number) => ({ step, ...distribution(Array.from({ length: n }, () => 3600_000)) });
+  const times = renderToStaticMarkup(createElement(WhereTimeGoes, { report: { ...report, stepDwell: [dwell('build', 6), dwell('review', 6)] } }));
+  assert.doesNotMatch(times, /class="time-bar"/, 'no time split from a partial population');
+  assert.equal([...times.matchAll(/data-sparse="partial"/g)].length, 2);
 });
 
 test('unit:sparse-step-marked — a step median from fewer than five samples, or from a partially read window, shows its sample count and a sparse marker and takes no share of the time split', () => {

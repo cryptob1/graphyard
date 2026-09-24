@@ -393,16 +393,30 @@ export const stepEntryScan = 200;
 export function stepEntries(carryIn: readonly FlowFact[], facts: readonly FlowFact[]): Record<string, string> {
   const entries: Record<string, string> = {};
   for (const carried of carryIn.filter(fact => fact.kind === 'gates.changed')) {
-    const step = gateFactStep(carried.details);
+    // A merge carried in from before the window puts the item at Deploy from the merge on.
+    const merged = carryIn.find(fact => fact.workId === carried.workId && fact.kind === 'merged');
+    const mergedAt = merged ? time(merged.observedAt) : null;
+    const step = mergedStep(gateFactStep(carried.details), mergedAt !== null);
     if (!step) continue;
-    let entry = carried.observedAt;
+    let entry: string | null = null;
     const history = facts.filter(fact => fact.workId === carried.workId && fact.kind === 'gates.changed' && time(fact.observedAt)! <= time(carried.observedAt)!)
       .sort((a, b) => time(b.observedAt)! - time(a.observedAt)! || (b.id ?? 0) - (a.id ?? 0));
-    for (const fact of history) { if (gateFactStep(fact.details) !== step) break; entry = fact.observedAt; }
-    entries[carried.workId] = entry;
+    for (const fact of history) { if (stepAfterMerge(fact, mergedAt) !== step) break; entry = fact.observedAt; }
+    // Merged after the last gate fact that put it at a pre-merge step, it entered Deploy at the merge.
+    if (merged && step === 'deploy' && (entry === null || mergedAt! < time(entry)!)) entry = merged.observedAt;
+    entries[carried.workId] = entry ?? carried.observedAt;
   }
   return entries;
 }
+/** A merged item is at Deploy whatever step its gates still name (`gateFactStep`); work outside the flow stays outside. */
+const mergedStep = (step: FlowStep | null, merged: boolean): FlowStep | null => step && merged ? 'deploy' : step;
+/**
+ * The step a gate fact puts its item at once the item's merge (`merged` fact, observed at `mergedAt`)
+ * is taken into account. Gate facts projected before they recorded the merge (`details.merged`,
+ * GY-183) still read as a pre-merge step after it; the merged fact, which every projection kept,
+ * puts them at Deploy, so an installation's history needs no re-projection.
+ */
+const stepAfterMerge = (fact: FlowFact, mergedAt: number | null) => mergedStep(gateFactStep(fact.details), mergedAt !== null && time(fact.observedAt)! >= mergedAt);
 
 /**
  * The kinds every flow figure counts — deliveries, merges and gate changes (which place an item at
@@ -411,7 +425,6 @@ export function stepEntries(carryIn: readonly FlowFact[], facts: readonly FlowFa
  * without this a busy week's landings and step moves would fall in the part it never reached.
  */
 export const separateKinds: FlowKind[] = ['delivered', 'merged', 'gates.changed'];
-/** Up to when the facts of `kind` in the window were all read: its own read, else the shared scan's reach. */
 /**
  * Whether the shared scan read `fact`, rather than only the per-kind read past its cutoff. An
  * episode's phases pair a gate or merge fact with review and evidence facts only the shared scan
@@ -423,6 +436,7 @@ export function readByScan(dataset: Pick<FlowDataset, 'scanEnd'>): (fact: FlowFa
   const at = time(end.observedAt)!;
   return fact => { const t = time(fact.observedAt)!; return t < at || (t === at && (fact.id ?? 0) <= end.id); };
 }
+/** Up to when the facts of `kind` in the window were all read: its own read, else the shared scan's reach. */
 export function coveredUntil(dataset: { to?: string; covered?: CoveredWindow; kindCovered?: Partial<Record<FlowKind, string>> }, kind: FlowKind): string | undefined {
   return dataset.kindCovered?.[kind] ?? (dataset.covered?.truncated ? dataset.covered.toCovered : dataset.to);
 }
@@ -1239,7 +1253,8 @@ export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | nu
 /**
  * One item's moves between the seven steps, oldest first: the gate fact carried in from before the
  * window says where it started (`carried`, not a move inside the window), each recorded gate fact
- * that puts it at a different step is a move, and its exit (`flowExitAt`) takes it from Deploy
+ * that puts it at a different step is a move, its observed merge moves it to Deploy (gate facts after
+ * it never put it back at a pre-merge step), and its exit (`flowExitAt`) takes it from Deploy
  * out of the flow — never while the production watch (`dataset.production`) holds it at Deploy. The carried move starts when the item entered that step (`dataset.stepEntries`). Nothing after the report's cutoff is a move —
  * `dataset.to`, or where the read of gate facts stopped (`coveredUntil`) — and work that
  * left the flow before the window opened (`dataset.from`) has no moves in it at all: its finished
@@ -1251,11 +1266,18 @@ export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { fr
   const cutoff = end !== undefined && time(end) !== null ? time(end)! : Infinity;
   const start = dataset.from !== undefined && time(dataset.from) !== null ? time(dataset.from)! : -Infinity;
   const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
-  let at: FlowStep | null = carried ? gateFactStep(carried.details) : null;
+  // The merge moves the item to Deploy when it is observed, whatever its gate facts say (`stepAfterMerge`).
+  const carriedMerge = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'merged');
+  const merge = carriedMerge ?? dataset.facts.find(fact => fact.workId === item.id && fact.kind === 'merged');
+  const mergedAt = merge ? time(merge.observedAt) : null;
+  let at: FlowStep | null = carried ? mergedStep(gateFactStep(carried.details), !!carriedMerge) : null;
   const entered = dataset.stepEntries?.[item.id];
   if (carried && at) moves.push({ at: entered && time(entered) !== null ? entered : carried.observedAt, from: null, to: at, pr: carried.details.pr ?? null, carried: true });
-  for (const fact of dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed' && time(fact.observedAt)! <= cutoff).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)) {
-    const step = gateFactStep(fact.details);
+  const mergeCutoff = Math.min(cutoff, time(coveredUntil(dataset, 'merged') ?? '') ?? Infinity);
+  const timeline = dataset.facts.filter(fact => fact.workId === item.id && (fact.kind === 'gates.changed' ? time(fact.observedAt)! <= cutoff : fact === merge && !carriedMerge && time(fact.observedAt)! <= mergeCutoff))
+    .sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
+  for (const fact of timeline) {
+    const step = fact.kind === 'merged' ? 'deploy' : stepAfterMerge(fact, mergedAt);
     if (step === at) continue;
     moves.push({ at: fact.observedAt, from: at, to: step, pr: fact.details.pr ?? null, carried: false });
     at = step;

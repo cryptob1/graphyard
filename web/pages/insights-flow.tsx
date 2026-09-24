@@ -39,16 +39,22 @@ export function ReplayLane({ frames, t }: { frames: ReplayFrame[]; t: number }) 
 const day = 86_400_000;
 /**
  * What the report could not see, or null when it saw the whole window: the report's own coverage
- * statement when a scan bound cut it short, and the projection's lag when the ledger is ahead of
- * the flow record. A partial read is said out loud, never drawn as a quiet week.
+ * statement when a scan bound cut it short, the work-item bound when the repository holds more
+ * items than the report reads (`population`: the newest items, and every day's landings and step
+ * times, are then only part-counted), and the projection's lag when the ledger is ahead of the
+ * flow record. A partial read is said out loud, never drawn as a quiet week.
  */
-export function flowCoverage(report: any): { truncated: boolean; stale: boolean; statement: string } | null {
+export function flowCoverage(report: any): { truncated: boolean; stale: boolean; population: boolean; statement: string } | null {
   const truncated = !!report?.window?.truncated;
+  const population = !!report?.coverage?.workItemsTruncated;
   const projection = report?.coverage?.projection;
   const stale = !!projection?.stale;
-  if (!truncated && !stale) return null;
+  if (!truncated && !stale && !population) return null;
+  const limit = Number(report.coverage.workItemScanLimit);
+  const items = Number.isFinite(limit) && limit > 0 ? `${limit.toLocaleString('en-US')} work items` : 'its bound of work items';
+  const bound = population ? `The repository holds more work items than the report reads, and it read only the oldest ${items}, so newer items' landings and step times are not in these figures.` : '';
   const lag = stale ? `The flow record is ${projection.pendingEvents}${projection.pendingCapped ? ' or more' : ''} ledger event(s) behind, so the latest changes are not in these figures yet.` : '';
-  return { truncated, stale, statement: [truncated ? String(report.window.covered?.statement ?? 'The read stopped short of the requested window.') : '', lag].filter(Boolean).join(' ') };
+  return { truncated, stale, population, statement: [truncated ? String(report.window.covered?.statement ?? 'The read stopped short of the requested window.') : '', bound, lag].filter(Boolean).join(' ') };
 }
 /** Up to when the report read the facts of one kind: its own read (`window.kinds`), else the shared scan's reach. */
 function readUntil(report: any, kind: string): number {
@@ -61,14 +67,14 @@ function readUntil(report: any, kind: string): number {
 /**
  * Landed on main per day: one bar per calendar day the report counted. A day the read never
  * reached has no bar and no number — "not read" — and the coverage statement stands in the panel,
- * so a truncated or stale report never shows an uncounted day as nothing landed.
+ * so a truncated, work-bounded or stale report never shows an uncounted day as nothing landed.
  */
 export function LandedPerDay({ report }: { report: any }) {
   const coverage = flowCoverage(report);
   const until = readUntil(report, 'delivered');
   const end = Date.parse(report?.window?.to ?? '');
   const landed: { bucket: string; delivered: number; covered: boolean }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7)
-    .map((entry: any) => ({ bucket: entry.bucket, delivered: entry.delivered, covered: !coverage?.stale && (typeof entry.covered === 'boolean' ? entry.covered : Math.min(Date.parse(entry.bucket) + day, Number.isNaN(end) ? Infinity : end) <= until) }));
+    .map((entry: any) => ({ bucket: entry.bucket, delivered: entry.delivered, covered: !coverage?.stale && !coverage?.population && (typeof entry.covered === 'boolean' ? entry.covered : Math.min(Date.parse(entry.bucket) + day, Number.isNaN(end) ? Infinity : end) <= until) }));
   const peak = Math.max(1, ...landed.filter(entry => entry.covered).map(entry => entry.delivered));
   return <section className="panel" aria-label="Landed per day"><h2>Landed on main per day <small>last 7 days, UTC</small></h2>
     {coverage && <p className="notice" role="status" data-flow="coverage">{coverage.statement}</p>}
@@ -94,7 +100,7 @@ export interface StepTime { step: StepId; n: number; medianMs: number | null; ma
 export function stepTimes(report: any): { steps: StepTime[]; partial: boolean; coverage: ReturnType<typeof flowCoverage> } {
   const coverage = flowCoverage(report);
   // Step times read from gate facts the report did not reach, or from a lagging record, are not the week's.
-  const partial = !!coverage && (coverage.stale || readUntil(report, 'gates.changed') < Date.parse(report?.window?.to ?? ''));
+  const partial = !!coverage && (coverage.stale || coverage.population || readUntil(report, 'gates.changed') < Date.parse(report?.window?.to ?? ''));
   const dwell: any[] = Array.isArray(report?.stepDwell) ? report.stepDwell : [];
   const steps = stepIds.map(step => {
     const entry = dwell.find(candidate => candidate?.step === step);
