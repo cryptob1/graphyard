@@ -11,7 +11,7 @@ Restart `graphyard master run` freely: it reconciles and never dispatches twice.
 
 ## Lost worker before submission
 
-The lease expires 120 seconds after the last heartbeat and the next claim gets a higher epoch; keep the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until `graphyard resolve GY-N lease-loss --attestation stopped-worker|blocked "reason"` ([who may settle what](delegation.md#who-may-settle-what)).
+The lease expires 120 seconds after the last heartbeat and the next claim gets a higher epoch; keep the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([who may settle what](delegation.md#who-may-settle-what)).
 
 ## Supervisor died leaving a containment quarantine
 
