@@ -26,7 +26,11 @@ export const healthCheckWaitMs = 3000;
 export const healthRoutes = defineRoutes('health', [
   { method: '*', path: '/healthz', handle: async ({ services, send, url }) => {
     const pool = services.engine.store.pool;
-    await pool.query('SELECT 1');
+    // Even the reachability probe is bounded: on a fresh process the reconciliation step can hold
+    // every pooled connection for minutes, and an unbounded SELECT 1 then fails the deploy's health check.
+    const reachable = await Promise.race([pool.query('SELECT 1').then(() => true), new Promise<false>(resolve => setTimeout(() => resolve(false), healthCheckWaitMs).unref())]);
+    if (!reachable) return { ok: true, healthy: true, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
+      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued
     // behind them failed every deployment's health check (2026-09-23). The resource checks get a
     // bounded wait; past it the plane answers alive and names the checks it could not finish.
