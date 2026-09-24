@@ -66,6 +66,10 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   // Merged work still waiting on its release is in Moving (or Blocked) at Deploy, like the Work page.
   const inFlow = [...byGroup.moving, ...byGroup.blocked];
   const now7 = inFlow.map(item => ({ item, steps: prSteps(item, now) })).filter(entry => entry.steps.current);
+  // Each dot stands in its step's column, one row per item already there, so no two dots overlap.
+  const row = new Map<string, number>(); const perStep = new Map<StepId, number>();
+  for (const { item, steps } of now7) { const n = perStep.get(steps.current!) ?? 0; row.set(item.id, n); perStep.set(steps.current!, n + 1); }
+  const nowHeight = Math.max(170, 24 + Math.max(0, ...perStep.values()) * 22 + 40);
   const dwell = new Map<StepId, number | null>();
   // Per-step medians come from the same recorded step moves the replay plays (the report's stepDwell).
   for (const entry of Array.isArray(report?.stepDwell) ? report.stepDwell : []) if ((stepIds as readonly string[]).includes(entry.step)) dwell.set(entry.step, entry.medianMs ?? null);
@@ -84,8 +88,8 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
         <strong>{stepLabel[step]}</strong><span>{now7.filter(entry => entry.steps.current === step).length} now · median {minutes(dwell.get(step))}</span>{step === slowest && <small>slowest step</small>}
       </div>)}</div>
       <div className="flow-subhead"><span className="dot live"/><h2>Now</h2><span>Real time. A dot moves only when its item changes step.</span></div>
-      <div className="flow-lane now-lane" data-flow="now">{now7.map(({ item, steps }, lane) => <button type="button" key={item.id} className={`now-dot group-${byGroup.blocked.includes(item) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
-        style={{ left: column(steps.current!), top: `${12 + (lane % 5) * 22}px` }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[steps.current!]}: ${steps.label}`} onClick={() => setSelected(item.id)}><span className="mono">{item.key}</span></button>)}
+      <div className="flow-lane now-lane" data-flow="now" style={{ height: `${nowHeight}px` }}>{now7.map(({ item, steps }) => <button type="button" key={item.id} className={`now-dot group-${byGroup.blocked.includes(item) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
+        data-row={row.get(item.id)} style={{ left: column(steps.current!), top: `${12 + row.get(item.id)! * 22}px` }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[steps.current!]}: ${steps.label}`} onClick={() => setSelected(item.id)}><span className="mono">{item.key}</span></button>)}
         <p className="outside">Waiting outside the flow: {byGroup['needs-you'].length} {byGroup['needs-you'].length === 1 ? 'needs' : 'need'} you · {byGroup['up-next'].length} up next · {byGroup.backlog.length} in backlog</p>
       </div>
       <div className="flow-subhead"><h2>Last 24 hours, replayed</h2><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>

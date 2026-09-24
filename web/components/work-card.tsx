@@ -2,8 +2,9 @@ import type { Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
 import { formatDuration } from '../duration';
 import { groupOf, nextActor, timedGroups, type Group } from '../groups';
-import { phaseLabel, phaseOf, plainStatus, statusHeld } from '../plain-status';
-import { prSteps } from '../pr-steps';
+import { phaseLabel, phaseOf, plainStatus } from '../plain-status';
+import { prSteps, stepHeld } from '../pr-steps';
+import type { StepTransition } from '../flow-replay';
 import type { ActionlessCard } from '../pages/actionless';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
@@ -15,14 +16,14 @@ const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replac
 /**
  * One item as a row of its group (GY-161): key, title, one line saying why it is where it is, the
  * seven pull-request steps while it moves, who acts next as a role, and — only for moving work —
- * how long it has held its step, red past the one configured threshold. On a phone the same
- * element lays out as a card. The pull request is linked once, on the row's second line; the open
+ * how long it has held the step those seven show (`stepHeld`), red past the one configured
+ * threshold. On a phone the same element lays out as a card. The pull request is linked once, on the row's second line; the open
  * control and that link are siblings, never nested, so each stays a separate keyboard stop.
  */
-export default function WorkCard({ item, repository, now, onOpen, group: given, stall }: { item: Work; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard }) {
+export default function WorkCard({ item, repository, now, onOpen, group: given, stall, stepMoves }: { item: Work; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; stepMoves?: readonly StepTransition[] | null }) {
   const group = given ?? groupOf(item, now) ?? 'shipped';
   const status = plainStatus(item, now);
-  const held = statusHeld(item, now);
+  const held = stepHeld(item, now, stepMoves);
   const timed = timedGroups.has(group);
   const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now) : null;
   const actor = nextActor(item, group, now);

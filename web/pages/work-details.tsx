@@ -13,9 +13,9 @@ import PostDeployment from '../components/post-deployment';
 import StatusAge from '../components/status-age';
 import Term, { Explained } from '../components/term';
 import { age } from '../format';
-import { plainReason, plainStatus, statusHeld } from '../plain-status';
+import { plainReason, plainStatus } from '../plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
-import { prSteps, stepGate } from '../pr-steps';
+import { prSteps, stepGate, stepHeld } from '../pr-steps';
 import { latestCheck } from '../../src/merge-queue';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
@@ -41,11 +41,11 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
  * Everything else — ownership, sessions, gate reasons, evidence, history — is under "More
  * details", in the control plane's own vocabulary, and policy changes are in the admin Edit menu.
  */
-export default function WorkDetails({ item, work, status, token, observedAt, jobs, queue, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch }: Dashboard & { item: Work }) {
+export default function WorkDetails({ item, work, status, token, observedAt, jobs, queue, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
   // The same duration and the same threshold the card carries; this view is another view of it.
-  const held = statusHeld(item, now);
+  const held = stepHeld(item, now, stepMoves);
   const owner = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
   const current = item.gates.findIndex(g => !g.passed);

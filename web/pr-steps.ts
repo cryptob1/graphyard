@@ -1,8 +1,11 @@
 import { deliveryState, type Gate, type Work } from '../src/model';
 import { latestCheck } from '../src/merge-queue';
-import { releaseObservedAt, servedAt } from '../src/flow-analytics';
+import { deliveredAt, servedAt } from '../src/flow-analytics';
+import type { PipelineTimeline } from '../src/pipeline-speed';
 import { assignment } from './assignment';
-import { plainReason } from './plain-status';
+import { statusDuration, type StatusDuration } from './duration';
+import type { StepTransition } from './flow-replay';
+import { plainReason, statusSince } from './plain-status';
 
 /**
  * The seven pull-request steps every moving item shows (GY-161): Build, Validate, Test, Review,
@@ -102,9 +105,10 @@ export function prSteps(work: Work, now: number): PrSteps {
     label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who,
   });
   if (work.stage === 'done') {
-    // Shipped once merged, unless its policy asks for a post-deployment check that has not passed
-    // (web/groups.ts reads the same `servedAt`). "Live" only where production was observed serving it.
-    if (!work.delivery || servedAt(work)) return make(() => 'done', null, releaseObservedAt(work) ? 'Live' : 'Merged', 'Nobody — it has shipped');
+    // Delivered once merged, unless its policy asks for a post-deployment check that has not passed
+    // (web/groups.ts reads the same `deliveredAt`). "Live" only once the release is observed serving it.
+    if (!work.delivery || deliveredAt(work)) return servedAt(work) ? make(() => 'done', null, 'Live', 'Nobody — it is live')
+      : make(() => 'done', null, 'Merged', 'Nobody — it has merged');
     const { detail, who } = waitsOn('deploy', undefined, work, now);
     return make(id => id === 'deploy' ? 'current' : 'done', 'deploy', detail, who);
   }
@@ -120,4 +124,38 @@ export function prSteps(work: Work, now: number): PrSteps {
   const current = stepIds.find(id => id !== 'deploy' && !passed(id)) ?? 'merge';
   const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now);
   return make(id => id === current ? 'current' : passed(id) ? 'done' : 'pending', current, detail, who);
+}
+
+/**
+ * When the item entered the step `prSteps` shows it at: the Work row's "In step" clock and the
+ * item page's. The recorded step moves say it exactly — the same moves (`stepMoves`) the Insights
+ * replay plays, read through the steps drill-down — so the clock starts at this item's latest
+ * recorded move when that move put it at the step it is at now. Before the moves are read, or
+ * while the record is a moment behind the gates, the item's own record gives the step's start:
+ * Build keeps the builder's clock (`statusSince`: the claim, or the send-back, which is when
+ * Build restarted), Validate starts at the hand-in, Deploy at the merge, and a later step at the
+ * latest move the item recorded (`statusSince`).
+ */
+export function stepSince(work: Work, now: number, moves?: readonly StepTransition[] | null): string {
+  const current = prSteps(work, now).current;
+  const own = statusSince(work, now);
+  if (!current || current === 'build') return own;
+  const at = (value: string | null | undefined) => value && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now ? Date.parse(value) : null;
+  const latest = (moves ?? []).filter(move => move.key === work.key && at(move.at) !== null).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1);
+  if (latest?.to === current) return latest.at;
+  if (current === 'deploy') return work.delivery?.mergedAt ?? work.observation?.mergedAt ?? own;
+  if (current === 'validate') {
+    const pipeline = (work as Work & { pipeline?: PipelineTimeline }).pipeline;
+    const handedIn = at(pipeline?.resubmittedAt ?? pipeline?.submittedAt);
+    if (handedIn !== null) return new Date(handedIn).toISOString();
+  }
+  return own;
+}
+
+/**
+ * How long the item has held its current step, and whether that is past the one threshold
+ * (web/duration.ts). Merged work has arrived, as in `statusHeld`: it is never overdue.
+ */
+export function stepHeld(work: Work, now: number, moves?: readonly StepTransition[] | null): StatusDuration {
+  return statusDuration(stepSince(work, now, moves), now, work.stage === 'done');
 }

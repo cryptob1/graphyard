@@ -578,8 +578,8 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   // Step dwell: the same step moves the replay plays, completed stays only (entered and left).
   const stepDwell = flowSteps.map(step => {
     const values: number[] = [];
-    for (const item of scope) {
-      const moves = stepMoves(dataset, item);
+    for (const item of stageScope) {
+      const moves = stepMoves(dataset, item, productionEnvironment);
       moves.forEach((move, index) => {
         const next = moves[index + 1];
         if (move.to === step && next) { const ms = time(next.at)! - time(move.at)!; if (ms >= 0) values.push(ms); }
@@ -1005,56 +1005,72 @@ export function gateFactStep(details: Record<string, any>): FlowStep | null {
 }
 
 /**
- * When the control plane last observed a live release serving a merged item: the first verified
- * production release that included it (`releaseDeliveries`, written by the production watch), or
- * the deployment `master verify-deployment` recorded for it. Null when no production observation
- * covers it — which says nothing against it being delivered: most policies never record one.
+ * When the control plane last observed the live release serving a merged item: the first verified
+ * release of the production environment that included it (`releaseDeliveries`, written by the
+ * production watch — a staging or preview environment never counts), or the deployment
+ * `master verify-deployment` recorded for it. Null when no production observation covers it.
  */
-export function releaseObservedAt(work: Work): string | null {
+export function releaseObservedAt(work: Work, productionEnvironment = defaultProductionEnvironment): string | null {
   if (work.stage !== 'done' || work.closure || !work.delivery) return null;
-  const verified = (work.releaseDeliveries ?? []).map(entry => entry.verifiedAt).filter(at => time(at) !== null).sort()[0];
+  const verified = (work.releaseDeliveries ?? []).filter(entry => entry.environment === productionEnvironment)
+    .map(entry => entry.verifiedAt).filter(at => time(at) !== null).sort((a, b) => time(a)! - time(b)!)[0];
   return verified ?? work.delivery.deployment?.observedAt ?? null;
 }
 
 /**
- * When a merged item leaves Deploy and counts as shipped. `delivery.deployment` is written only
- * for policies that ask for a post-deployment smoke proof, so its absence never holds work at
- * Deploy: without that proof the item has shipped when the release was observed serving it
- * (`releaseObservedAt`), or at its merge when no production observation covers it. With the proof
- * asked for, it leaves Deploy on the passing verdict bound to the deployed commit. Null while that
- * verdict is outstanding (or failed), and for work closed without delivery.
+ * When the live release was observed serving a merged item, and only then (AGENTS.md: a delivery
+ * stays pending until the release serves it). With a post-deployment smoke proof asked for, that
+ * is the passing verdict bound to the deployed commit; otherwise the production observation
+ * (`releaseObservedAt`). Null while neither exists, and for work closed without delivery.
  */
-export function servedAt(work: Work): string | null {
+export function servedAt(work: Work, productionEnvironment = defaultProductionEnvironment): string | null {
   const delivery = work.delivery;
   if (work.stage !== 'done' || work.closure || !delivery) return null;
-  if (!work.policy?.deploySmoke) return releaseObservedAt(work) ?? delivery.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt;
+  if (!work.policy?.deploySmoke) return releaseObservedAt(work, productionEnvironment);
   const smoke = delivery.smoke;
   return delivery.deployment && smoke?.result === 'pass' && smoke.sha === delivery.deployment.sha && smoke.mergeSha === delivery.mergeSha ? smoke.at : null;
+}
+
+/**
+ * When a merged item leaves the flow (the Deploy step). `delivery.deployment` is written only for
+ * policies that ask for a post-deployment smoke proof, so its absence never holds work at Deploy:
+ * without that proof the item leaves the flow when the release is observed serving it, or at its
+ * merge when no production observation covers it yet — it is then delivered but not yet known to
+ * be live (`servedAt` stays null). With the proof asked for, it leaves on the passing verdict.
+ */
+export function deliveredAt(work: Work, productionEnvironment = defaultProductionEnvironment): string | null {
+  const delivery = work.delivery;
+  if (work.stage !== 'done' || work.closure || !delivery) return null;
+  const served = servedAt(work, productionEnvironment);
+  if (served || work.policy?.deploySmoke) return served;
+  return delivery.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt;
 }
 
 export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | null; pr: number | null; carried: boolean }
 /**
  * One item's moves between the seven steps, oldest first: the gate fact carried in from before the
  * window says where it started (`carried`, not a move inside the window), each recorded gate fact
- * that puts it at a different step is a move, and the recorded release serving it (`servedAt`)
- * takes it from Deploy out of the flow. The replay and the per-step dwell both read these.
+ * that puts it at a different step is a move, and its delivery (`deliveredAt`) takes it from
+ * Deploy out of the flow. Nothing after the report's cutoff (`dataset.to`) is a move. The replay
+ * and the per-step dwell both read these.
  */
-export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'>, item: Work): StepMove[] {
+export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { to?: string }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
   const moves: StepMove[] = [];
+  const cutoff = dataset.to !== undefined && time(dataset.to) !== null ? time(dataset.to)! : Infinity;
   const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
   let at: FlowStep | null = carried ? gateFactStep(carried.details) : null;
   if (carried && at) moves.push({ at: carried.observedAt, from: null, to: at, pr: carried.details.pr ?? null, carried: true });
-  for (const fact of dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed').sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)) {
+  for (const fact of dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed' && time(fact.observedAt)! <= cutoff).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)) {
     const step = gateFactStep(fact.details);
     if (step === at) continue;
     moves.push({ at: fact.observedAt, from: at, to: step, pr: fact.details.pr ?? null, carried: false });
     at = step;
   }
-  // Recorded as merged before the gate fact that said so (a merge-time `servedAt`), it leaves
-  // Deploy at that fact, never before it.
-  const served = servedAt(item);
-  if (at === 'deploy' && served && time(served) !== null)
-    moves.push({ at: moves.length && time(served)! < time(moves.at(-1)!.at)! ? moves.at(-1)!.at : served, from: 'deploy', to: null, pr: item.candidate?.pr ?? null, carried: false });
+  // Recorded as delivered before the gate fact that said so (a merge-time `deliveredAt`), it
+  // leaves Deploy at that fact, never before it; a delivery after the cutoff is not in the report.
+  const left = deliveredAt(item, productionEnvironment);
+  if (at === 'deploy' && left && time(left) !== null && time(left)! <= cutoff)
+    moves.push({ at: moves.length && time(left)! < time(moves.at(-1)!.at)! ? moves.at(-1)!.at : left, from: 'deploy', to: null, pr: item.candidate?.pr ?? null, carried: false });
   return moves;
 }
 export const drilldownCatalog = drilldownMetrics;
@@ -1173,7 +1189,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     // Each item's moves between the seven pull-request steps (`stepMoves`). `key`, when given, is
     // an instant: moves before it are left out.
     for (const item of scoped)
-      for (const move of stepMoves(dataset, item))
+      for (const move of stepMoves(dataset, item, report.productionEnvironment))
         if (!move.carried && (!key || time(move.at)! >= (time(key) ?? -Infinity)))
           row(item.key, move.to ?? 'outside', move.at, null, move.pr, null, `${move.from ?? 'outside'} to ${move.to ?? 'outside'}`);
   } else if (metric === 'blockers') {

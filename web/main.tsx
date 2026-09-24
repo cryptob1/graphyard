@@ -14,6 +14,7 @@ import { useFeatures } from './features';
 import LoginPage from './pages/login';
 import WorkDetails from './pages/work-details';
 import CreateWork from './pages/create-work';
+import { useStepMoves } from './step-moves';
 
 /**
  * The dashboard shell: session state, polling, the sidebar generated from the view
@@ -67,6 +68,7 @@ function App() {
     void load(); const timer = setInterval(load, 5000);
     return () => { active = false; controller.abort(); clearInterval(timer); };
   }, [token]);
+  const stepMoves = useStepMoves(!!token && !!status, token, api, sessionEpoch);
   useEffect(() => { setEvents([]); setEditingRequirements(false); window.scrollTo?.(0, 0); }, [selected, token]);
   useEffect(() => { let active = true; const epoch = sessionEpoch.current; if (selected) void api(`events?work=${selected}`).then(rows => { if (active && epoch === sessionEpoch.current) setEvents(rows); }).catch(e => { if (active && epoch === sessionEpoch.current) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
   const codexAvailable = status?.reviewProviders?.includes('codex') === true;
@@ -74,7 +76,7 @@ function App() {
   const queue = predictQueue(work, observedAt);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
-  const dashboard: Dashboard = { token, work, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, codexAvailable, queue, sessionEpoch, api, refresh, action, setError, signOut };
+  const dashboard: Dashboard = { token, work, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, codexAvailable, stepMoves, queue, sessionEpoch, api, refresh, action, setError, signOut };
   if (!token || !status) return <LoginPage token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken}/>;
   // One page at a time: an open item replaces the page it was opened from, and "← Back" returns to it.
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>

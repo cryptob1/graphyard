@@ -264,7 +264,7 @@ img.mark{width:26px;height:26px}
   .row-key{grid-area:key;color:var(--group);font-size:var(--type-tiny)}.row-time{grid-area:time;text-align:right;font-size:var(--type-tiny)}.row-main{grid-area:main}.row-steps{grid-area:steps}.row-steps:empty{display:none}.row-who{grid-area:who;font-size:var(--type-tiny)}.row-who::before{content:'Next: '}.decide{grid-area:decide}
   .steps-track .step-seg{height:4px}
   .item-head{flex-direction:column}.steps-detail{grid-template-columns:repeat(4,minmax(0,1fr))}.item-page h1{font-size:22px}
-  .flow-columns-head{grid-template-columns:repeat(4,minmax(0,1fr))}.flow-step:nth-child(5){border-left:0}.time-legend{grid-template-columns:1fr}
+  .flow-step{padding:var(--space-2) 2px;align-items:center;text-align:center}.flow-step strong{font-size:var(--type-tiny)}.flow-step span,.flow-step small{display:none}.time-legend{grid-template-columns:1fr}
   .shipped-line{flex-wrap:wrap}
 }
 .work-group>h2 .push{margin-left:auto;font-size:var(--type-small);font-weight:500;color:var(--accent)}

@@ -1,10 +1,15 @@
 import { isClosed, isDelivered, type Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
 import { plainStatus } from '../plain-status';
+import { releasedAt } from '../groups';
 import { Explained } from '../components/term';
 import type { Dashboard } from './dashboard';
 
-/** Every delivered item, newest first, with its pull request and whether the release serves it; closed items apart, below. */
+/**
+ * Every delivered item, newest first, with its pull request and whether the release serves it —
+ * "Live" once the release was observed serving it, "Merged, not yet seen live" until then; closed
+ * items apart, below.
+ */
 export default function ShippedPage({ work, status, observedAt, setSelected }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const shippedAt = (w: Work) => w.observation?.mergedAt ?? w.stageEnteredAt;
@@ -17,6 +22,7 @@ export default function ShippedPage({ work, status, observedAt, setSelected }: D
         <button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>
         {w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}
         <span className="muted">{new Date(shippedAt(w)).toLocaleDateString()}</span>
+        <span className={releasedAt(w) === null ? 'muted' : undefined} data-live={releasedAt(w) !== null}>{releasedAt(w) === null ? 'Merged, not yet seen live' : 'Live'}</span>
         {plain.blocking && <span className={plain.tone === 'stuck' ? 'danger-text' : 'amber'}><Explained sentence={plain.blocking}/></span>}
       </li>; })}</ul>}
     {closed.length > 0 && <details className="work-list closed-history"><summary>Closed without shipping <span className="count">{closed.length}</span></summary>
