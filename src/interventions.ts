@@ -203,6 +203,8 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         break;
       }
       case 'merge.operator-authorized': case 'merge.reconciled': {
+        // A merge inside a direct-merge window is the operator's standing policy, not a one-off intervention.
+        if (details.directMerge) { entry.bypass = null; break; }
         const mergedAt = instant(details.mergedAt, row.at);
         const open = entry.bypass;
         const operator = row.kind === 'merge.operator-authorized';

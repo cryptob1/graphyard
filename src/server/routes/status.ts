@@ -12,6 +12,7 @@ import { humanOnlySubjects } from '../waits.js';
 import { defineRoutes } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
+import { directMergeStatus } from '../../direct-merge.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -57,6 +58,8 @@ export const statusRoutes = defineRoutes('status', [
         // placement for the executor asking. It names hosts and login homes, so identities that
         // only implement or produce do not read it.
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
+        // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
+        directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },

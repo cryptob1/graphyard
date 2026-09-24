@@ -21,6 +21,7 @@ import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentReques
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
+import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -298,6 +299,8 @@ function operatorAuthorizing(decision: PostMergeDecision, refused: Set<string>):
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
+  /** The direct-merge window the deployment environment declares (direct-merge.ts), read once at construction. */
+  directMergeEnvironment: DirectMergeWindow | null = directMergeFromEnv();
   // The configured credential registry, used to report which required proof names
   // currently have an authorized producer. Authority itself lives in the grant store.
   principals: Principal[] = [];
@@ -1565,6 +1568,8 @@ export class Engine {
   async reconcile() {
     await this.store.transaction(async (db, now) => {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
+      await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
       for (const work of all) {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
@@ -1718,6 +1723,14 @@ export class Engine {
         // What the history refuses, an operator may still own (GY-94): a later decision with an
         // admin credential on one side, citing the refusal, delivers the merge as operator-
         // authorized — stating that no execution authorized it and what the record lacked.
+        // Inside a direct-merge window the operator owns every merge into the base branch: it is
+        // delivered as operator-authorized, naming the setting and who set it (direct-merge.ts).
+        const directMerge = !authorizedSnapshot && observation.mergeSha ? coveringWindow(await directMergeWindows(db, this.directMergeEnvironment), providerMergedTime) : null;
+        if (directMerge) {
+          const snapshot = past ?? structuredClone(work);
+          authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision;
+          operatorAuthorization = directMergeAuthorization(directMerge, { sha: observation.mergeSha!, at: observation.mergedAt }, snapshot.revision, new Date(cutoff).toISOString(), historical);
+        }
         if (!authorizedSnapshot && past && observation.mergeSha) {
           const decisions = await postMergeDecisions(db, work, observation, past.policyRevision, cutoff);
           const refused = new Set<string>((await db.query("SELECT payload->'details'->>'decision' AS decision FROM events WHERE work_id=$1 AND kind='merge.reconciliation.refused'", [id])).rows.map(row => row.decision as string));
