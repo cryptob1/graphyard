@@ -3,18 +3,17 @@
 
 ## Navigation
 
-- **Work**: open items grouped by what needs attention; **Needs you**, everything only you may answer; and **Workers**, every agent session across every item, as tabs. The **Agent fleet** page edits the [agent registry](onboarding.md#configure-the-fleet).
-- **Shipped**: delivered items and **Interventions**.
-- **Insights**: Shipping pulse, Flow analytics, Validation and Releases.
-- **Settings**: Test cases, Proof authority and Operator automation.
+One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned, GY-162), **Insights**, **Settings**. Colours and fonts are the tokens atop `web/style.css`, per `design/dashboard/`.
 
-**Needs you** lists every action only your credential may take: a parked human-only decision (**Answer and resume**) or an approval no agent may give (**Approve and deliver**).
+## Work: one classification
+
+Each open item is in one group (`web/groups.ts`): **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**. A tile counts one group and filters to its rows.
 
 ## Workers
 
-**Work → Workers** is a tab of the Work section, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), the record a launcher writes on the item; the data comes from polled work items, not from Herdr.
+**Workers** is its own sidebar entry, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), the record a launcher writes on the item, read from polled work items, not from Herdr.
 
-A handle recorded running whose `updatedAt` is older than **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *recorded running, not seen since <updatedAt>*, never as live; GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
+A handle recorded running whose `updatedAt` is older than **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *not seen for <time since updatedAt>*, never as running, and is not counted among the open sessions; GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
 
 Each running row offers two commands:
 
@@ -23,8 +22,8 @@ Each running row offers two commands:
 
 ## The status sentence
 
-Every card carries one sentence from the item's first refusing gate (*Waiting for review of PR #42*), mapped in `web/plain-status.ts`. **Stuck** means nothing moves until someone decides or fixes something. The card also shows how long the item has held its current status; past thirty minutes it reads `1h 12m overdue`. Each criterion's proofs show ✓ passed, ○ pending or × failed.
+Moving rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** from the gates (`web/pr-steps.ts`), the current one in plain words. A merged item is **Shipped**: *Merged*, then *Live* (counted this week) once production serves it; a pending post-deployment check, or watched production not serving it, keeps it at Deploy. An item page opens on its state, why, who acts next and its pull request. Moving and Blocked rows time their step; past thirty minutes it reads `1h 12m overdue`.
 
 ## Insights
 
-**Shipping pulse** measures PR-to-production time from provider observations (`POST /api/production-observations`) or `master verify-deployment`. **Flow analytics** shows where work waits. **Interventions** counts each time someone stepped in; with `GRAPHYARD_INTERVENTION_PATTERNS=1`, a repeated pattern opens a `bug` item. Missing values read `Unavailable`, never zero.
+**Flow** shows each item's step and replays the last day. **Shipping pulse** measures PR-to-production time from provider observations (`POST /api/production-observations`) or `master verify-deployment`. **Flow analytics** shows where work waits. **Interventions** counts each time someone stepped in; with `GRAPHYARD_INTERVENTION_PATTERNS=1`, a repeated pattern opens a `bug` item. Missing values read `Unavailable`, never zero.

@@ -73,8 +73,10 @@ async function fixture(page: Page, role = 'admin') {
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   // Attribution is part of Flow analytics' details, under Insights.
-  await page.getByRole('button', { name: /Insights/ }).click();
-  await page.getByRole('button', { name: 'Flow analytics' }).click();
+  // On a phone the one navigation folds into the Menu button (GY-161).
+  if (page.viewportSize()!.width <= 650) await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Insights', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: 'Flow analytics', exact: true }).click();
   await page.getByText('Show details', { exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Attribution', level: 2 })).toBeVisible();
   return state;

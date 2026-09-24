@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type WorkerRow } from '../workers-view';
+import type { Work } from '../../src/model';
+import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type SessionRoleKind, type WorkerRow } from '../workers-view';
+import { prSteps } from '../pr-steps';
+import { releaseView, type ReleaseView } from '../release';
 import type { Dashboard } from './dashboard';
+import DeliverySlices from '../components/delivery-slices';
 
 /**
- * The Workers tab (GY-116): every agent session across every item in one table — who it is, what
- * it is on, how long it has spent, and the command that attaches to it — read for triage: running
- * rows first by time spent, finished rows collapsed, and one line per principal on top.
+ * The Workers tab (GY-116, redrawn to the design in GY-161): every agent session across every item
+ * — who it is, what it is on, how long it has spent, and the command that attaches to it — read
+ * for triage: open sessions first by time spent, ended ones and the per-account summary folded.
  *
  * A row is a session handle the item carries (src/model/sessions.ts), not a Herdr listing: the
  * page draws what the control plane recorded and never asks a runtime. What the derivation is —
@@ -20,7 +24,13 @@ export function spent(ms: number) {
   const two = (n: number) => String(n).padStart(2, '0');
   return hours ? `${hours}h ${two(minutes)}m ${two(seconds)}s` : minutes ? `${minutes}m ${two(seconds)}s` : `${seconds}s`;
 }
-const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '—';
+/** How long ago an instant was, in the same units: `12s ago`, `4m 30s ago`. Never an absolute timestamp. */
+export function ago(iso: string | null, now: number) {
+  const at = Date.parse(iso ?? '');
+  return Number.isFinite(at) ? `${spent(now - at)} ago` : 'at an unrecorded time';
+}
+/** Commit SHAs (and other long hex ids) in recorded text, shown as their first 8 characters. */
+export const shortShas = (text: string) => text.replace(/\b[0-9a-f]{9,64}\b/g, hex => hex.slice(0, 8));
 
 /**
  * One-click copy of exactly the text given: no prose, no trailing newline. The text is also the
@@ -50,11 +60,29 @@ export function useLiveNow(observedAt: number) {
   return typeof window === 'undefined' ? anchor : anchor + Math.max(0, Date.now() - receivedAt.current.at);
 }
 
-/** The state column: live, stale (recorded running but not seen inside the threshold), or finished with why. */
-function State({ row }: { row: WorkerRow }) {
-  if (row.stale) return <span className="pulse-badge stale" data-stale={row.id}>recorded running, not seen since {when(row.stale.since)}</span>;
-  if (row.state === 'running') return <span className="green-text">running{row.outcome ? ` · ${row.outcome}` : ''}</span>;
-  return <span>finished{row.reconciled ? <> · <span className="amber" data-reconciled={row.reconciled}>ended by liveness reconciliation ({row.reconciled}): {row.outcome}</span></> : row.outcome ? ` · ${row.outcome}` : ''}</span>;
+/** Each role in the words the Workers design uses. */
+export const roleWords: Record<SessionRoleKind, string> = {
+  worker: 'Builds code', reviewer: 'Reviews code', producer: 'Proves requirements', approver: 'Approves decisions', 'escalation handler': 'Handles escalations', master: 'Runs the loop',
+};
+
+/**
+ * A session's health in plain words. Only a session seen inside the threshold reads as active;
+ * one recorded running but not seen since is stale, and one the runtime stopped reporting is ended
+ * — neither is ever shown as running.
+ */
+export function health(row: WorkerRow, now: number): { tone: 'live' | 'stale' | 'ended'; text: string } {
+  if (row.stale) return { tone: 'stale', text: `Not seen for ${spent(now - Date.parse(row.stale.since))}` };
+  if (row.state === 'running') return { tone: 'live', text: `Seen ${ago(row.updatedAt, now)}` };
+  if (row.reconciled === 'vanished') return { tone: 'ended', text: 'Ended · stopped responding' };
+  if (row.reconciled === 'superseded') return { tone: 'ended', text: 'Ended · replaced by a newer session' };
+  if (row.reconciled === 'ended') return { tone: 'ended', text: 'Ended · its runtime closed it' };
+  return { tone: 'ended', text: 'Finished' };
+}
+
+function Health({ row, now }: { row: WorkerRow; now: number }) {
+  const { tone, text } = health(row, now);
+  return <span className={`health ${tone}`} data-health={tone} data-stale={row.stale ? row.id : undefined}
+    data-reconciled={row.reconciled ?? undefined} title={row.outcome ? shortShas(row.outcome) : undefined}><span className="health-dot" aria-hidden="true"/>{text}</span>;
 }
 
 function Attach({ row }: { row: WorkerRow }) {
@@ -68,56 +96,75 @@ function Attach({ row }: { row: WorkerRow }) {
   return row.transcript ? <CopyButton text={row.transcript} label="Copy transcript path"/> : <span className="muted">no transcript recorded</span>;
 }
 
-function Row({ row, setSelected }: { row: WorkerRow; setSelected(id: string | null): void }) {
+/** What the session is doing now: a builder by its item's current step, anyone else by what it was launched for, an ended one by how it ended. */
+function doing(row: WorkerRow, item: Work | undefined, now: number, release: ReleaseView) {
+  if (row.state !== 'running') return shortShas(row.reconciled ? row.subject : row.outcome ?? row.subject);
+  if (row.roleKind === 'worker' && item && !row.stale) return prSteps(item, now, release).label;
+  return shortShas(row.subject);
+}
+
+/** Since when, relative to now: a running session by when it started, an ended one by when it ended and how long it ran. */
+function since(row: WorkerRow, now: number) {
+  if (row.state === 'running') return <>started <span className="spent">{spent(row.spentMs)}</span> ago</>;
+  return <>ended {ago(row.endedAt ?? row.updatedAt, now)} · ran <span className="spent">{spent(row.spentMs)}</span></>;
+}
+
+function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
   return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale ? 'stale' : undefined}>
-    <th scope="row">{row.agentName ?? '—'} <span className="muted">{row.principal}</span></th>
-    <td>{row.roleKind}{row.role && row.role !== row.kind ? <span className="muted"> ({row.role})</span> : ''}</td>
-    <td><button type="button" className="text-button" onClick={() => setSelected(row.workId)}>{row.key}{row.epoch !== null ? ` · epoch ${row.epoch}` : ''}</button></td>
-    <td>{row.subject}</td>
-    <td>{row.host}<span className="muted"> · {row.runtime}{row.pane ? ` · pane ${row.pane}` : ''}</span></td>
-    <td><State row={row}/></td>
-    <td>{when(row.startedAt)}</td>
-    <td data-spent={row.spentMs}>{spent(row.spentMs)}</td>
-    <td><Attach row={row}/></td>
+    <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row}/></th>
+    <td data-label="Role">{roleWords[row.roleKind]}</td>
+    <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
+    <td data-label="Doing now">{doing(row, item, now, release)}</td>
+    <td data-label="Since" data-spent={row.spentMs}>{since(row, now)}</td>
+    <td data-label="Health"><Health row={row} now={now}/></td>
   </tr>;
 }
 
-const columns = ['Agent', 'Role', 'Item', 'Subject', 'Host', 'State', 'Started', 'Time spent', 'Attach'];
-function Table({ rows, label, setSelected }: { rows: WorkerRow[]; label: string; setSelected(id: string | null): void }) {
-  return <table className="flow-data" aria-label={label}>
+const columns = ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health'];
+function Table({ rows, label, work, now, release, setSelected }: { rows: WorkerRow[]; label: string; work: Work[]; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
+  const byId = new Map(work.map(item => [item.id, item]));
+  return <table className="sessions-table" aria-label={label}>
     <thead><tr>{columns.map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
-    <tbody>{rows.map(row => <Row key={`${row.workId}:${row.id}`} row={row} setSelected={setSelected}/>)}</tbody>
+    <tbody>{rows.map(row => <Row key={`${row.workId}:${row.id}`} row={row} item={byId.get(row.workId)} now={now} release={release} setSelected={setSelected}/>)}</tbody>
   </table>;
 }
 
-function Principals({ principals, setSelected }: { principals: PrincipalSummary[]; setSelected(id: string | null): void }) {
-  return <table className="flow-data" aria-label="Principals">
-    <thead><tr><th scope="col">Principal</th><th scope="col">Role</th><th scope="col">Currently on</th><th scope="col">For</th><th scope="col">Sessions in the last 24 hours</th></tr></thead>
+/** One line per agent account: what it is on now, and how many sessions it ran in the last day. Folded away below the sessions. */
+function Accounts({ principals, setSelected }: { principals: PrincipalSummary[]; setSelected(id: string | null): void }) {
+  return <table className="sessions-table" aria-label="Principals">
+    <thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">Working on</th><th scope="col">For</th><th scope="col">Sessions today</th></tr></thead>
     <tbody>{principals.map(entry => <tr key={entry.principal} data-principal={entry.principal} data-current={entry.current ? `${entry.current.key}:${entry.current.epoch ?? ''}` : 'idle'}>
-      <th scope="row">{entry.principal}</th>
-      <td>{entry.roleKind}</td>
-      <td>{entry.current ? <button type="button" className="text-button" onClick={() => setSelected(entry.current!.workId)}>{entry.current.key}{entry.current.epoch !== null ? ` · epoch ${entry.current.epoch}` : ''}</button> : <span className="muted">idle</span>}</td>
-      <td>{entry.current ? spent(entry.current.sinceMs) : '—'}</td>
-      <td>{entry.sessionsLast24h}</td>
+      <th scope="row" data-label="Account" className="mono">{entry.principal}</th>
+      <td data-label="Role">{roleWords[entry.roleKind]}</td>
+      <td data-label="Working on">{entry.current ? <button type="button" className="text-button" onClick={() => setSelected(entry.current!.workId)}>{entry.current.key}</button> : <span className="muted">idle</span>}</td>
+      <td data-label="For">{entry.current ? spent(entry.current.sinceMs) : '—'}</td>
+      <td data-label="Sessions today">{entry.sessionsLast24h}</td>
     </tr>)}</tbody>
   </table>;
 }
 
-/** Every session handle across every item, running first, for the operator who wants to see who is doing what and watch one. */
-export default function WorkersPage({ work, observedAt, setSelected }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'>) {
+/**
+ * The Workers page (GY-161, design/dashboard/Workers.dc.html): one table of the agent sessions
+ * open now — the agent, its role in plain words, the item it works on, what it is doing, since
+ * when, and its health — with the sessions that ended and the per-account summary folded below.
+ */
+export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
   const view = workersView(work, new Date(now));
+  const release = releaseView(status);
+  // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
   const stale = view.running.filter(row => row.stale).length;
+  const open = view.running.length - stale;
   return <>
-    <div className="page-heading"><div><h1>Workers</h1><p>Every agent session the control plane has a handle for — worker, reviewer, producer, approver, escalation handler and master — with what it is on, how long it has spent, and the command that attaches to it. Running sessions first, longest first. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live; the liveness sweep is what ends a dead one.</p></div></div>
-    <section><div className="section-title"><h2>Principals <span className="count">{view.principals.length}</span></h2></div>
-      {view.principals.length ? <Principals principals={view.principals} setSelected={setSelected}/> : <p className="muted">No worker, reviewer or producer has recorded a session yet.</p>}
-    </section>
-    <section><div className="section-title"><h2>Running <span className="count">{view.running.length}</span></h2>{stale > 0 && <span className="amber" role="status">{stale} recorded running but not seen recently</span>}</div>
-      {view.running.length ? <Table rows={view.running} label="Running sessions" setSelected={setSelected}/> : <p className="muted">No session is running.</p>}
-    </section>
-    <details className="finished-sessions"><summary>Finished <span className="count">{view.finished.length}</span></summary>
-      {view.finished.length ? <Table rows={view.finished} label="Finished sessions" setSelected={setSelected}/> : <p className="muted">No session has finished yet.</p>}
+    <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
+    {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
+    <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
+    <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>
+      {view.finished.length ? <Table rows={view.finished} label="Ended sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No session has ended yet.</p>}
     </details>
+    <details className="finished-sessions accounts"><summary>By account <span className="count">{view.principals.length}</span></summary>
+      {view.principals.length ? <Accounts principals={view.principals} setSelected={setSelected}/> : <p className="muted">No agent has worked here yet.</p>}
+    </details>
+    <DeliverySlices status={status}/>
   </>;
 }

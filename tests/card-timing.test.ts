@@ -13,12 +13,14 @@ import type { Principal, Work } from '../src/model.js';
 import { predictQueue } from '../src/merge-queue.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { live } from '../browser-tests/ui-board.js';
 import { OVERDUE_MINUTES, formatDuration, statusDuration } from '../web/duration.js';
 import { phaseOf, phaseLabel, statusHeld, statusSince } from '../web/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import WorkCard from '../web/components/work-card.js';
+import { groupOf, timedGroups } from '../web/groups.js';
 
 // GY-108: every work card carries how long it has held its current status, always, and says so
 // in red past the one configured threshold. The renders here read the views the way a person
@@ -30,7 +32,8 @@ const root = new URL('..', import.meta.url);
 const read = (path: string) => readFile(new URL(path, root), 'utf8');
 const markup = (element: any) => renderToStaticMarkup(element);
 const noop = () => {};
-const fixture = fixtureWork() as unknown as Work[];
+// The fixture's merged items are served by the release (since GY-161 a merge alone is still at Deploy).
+const fixture = (fixtureWork() as unknown as Work[]).map(live);
 const minute = 60_000;
 
 function dashboard(work: Work[], observedAt = NOW, overrides: Partial<Dashboard> = {}): Dashboard {
@@ -44,18 +47,11 @@ function dashboard(work: Work[], observedAt = NOW, overrides: Partial<Dashboard>
   };
 }
 const homeView = (work: Work[], observedAt = NOW) => markup(createElement(OverviewPage as any, dashboard(work, observedAt)));
-/** The home page with `item` in the merge queue: the queue draws its own card for each entry. */
-const queuedEntry = (item: Work) => ({ id: item.id, key: item.key, position: 0, size: 1, sequence: 1, enqueuedAt: new Date(NOW - 7 * minute).toISOString(), waitMs: 7 * minute,
-  predecessors: [], predictedBase: null, tip: null, base: null, binding: null, current: true, publishable: true, reasons: [] });
-const queueCard = (item: Work, observedAt = NOW) => {
-  const html = markup(createElement(OverviewPage as any, dashboard([item], observedAt, { queue: [queuedEntry(item)] as any })));
-  return html.slice(html.indexOf('aria-label="Merge queue"'), html.indexOf('aria-label="Shipped this week"'));
-};
 /** A board column draws the same component the list draws; web/pages/overview.tsx maps one `card`. */
 const boardCard = (item: Work, observedAt = NOW) => markup(createElement(WorkCard as any, { item, now: observedAt, repository: 'fixture/repository', onOpen: noop }));
 const itemView = (item: Work, work: Work[] = fixture, observedAt = NOW) => markup(createElement(WorkDetails as any, { ...dashboard(work, observedAt), item }));
 /** Every duration the markup draws, in order, as a reader sees it. */
-const ages = (html: string) => [...html.matchAll(/<span class="status-age(?: overdue)?"[^>]*>(.*?)<\/span>(?=\s*<\/div>|\s*<h)/g)]
+const ages = (html: string) => [...html.matchAll(/<span class="status-age(?: overdue)?"[^>]*>(.*?)<\/span>(?=\s*<\/div>|\s*<\/span>|\s*<h)/g)]
   .map(match => visibleWords(match[1]).join(' '));
 const overdueCount = (html: string) => (html.match(/class="status-age overdue"/g) ?? []).length;
 
@@ -69,13 +65,13 @@ const held = (key: string, minutesAgo: number, observedAt = NOW): Work => {
 // ---- AC-1: the duration is on every card, in every view, always ------------------------------
 
 test('unit:card-shows-status-duration — every work card in every view carries how long it has held its status, measured from when it entered that status and drawn without a toggle', () => {
-  const open = fixture.filter(w => w.stage !== 'done');
+  // GY-161 narrowed "every card" to every card of work that is moving (or held up while moving):
+  // a parked, backlog or not-yet-claimed item has no step to be late in and draws no clock.
+  const open = fixture.filter(w => w.stage !== 'done' && timedGroups.has(groupOf(w, NOW)!));
   const home = homeView(fixture);
-  // One duration per open card the default view draws — no control to press, nothing collapsed.
-  assert.equal(ages(home).length, open.length, `a duration on each of the ${open.length} open cards: ${ages(home).join(' | ')}`);
-  // The default render is the untouched page: its times toggle is off, and the durations are
-  // there all the same, so nothing has to be pressed to learn how long an item has waited.
-  assert.match(home, /Show times/); assert.doesNotMatch(home, /\bp50\b/);
+  // One duration per timed card the default view draws — no control to press, nothing collapsed.
+  assert.equal(ages(home).length, open.length, `a duration on each of the ${open.length} moving cards: ${ages(home).join(' | ')}`);
+  assert.doesNotMatch(home, /\bp50\b/);
   for (const item of open) {
     const expected = formatDuration(Math.floor((NOW - Date.parse(statusSince(item, NOW))) / minute));
     assert.notEqual(expected, formatDuration(Math.floor((NOW - Date.parse(item.createdAt)) / minute)), `${item.key} is not showing its age`);
@@ -83,8 +79,6 @@ test('unit:card-shows-status-duration — every work card in every view carries 
     // The same card, drawn as a board column draws it, and the item view: one number everywhere.
     assert.ok(ages(boardCard(item))[0]?.startsWith(expected), `${item.key} shows ${expected} in board view`);
     assert.ok(ages(itemView(item))[0]?.startsWith(expected), `${item.key} shows ${expected} in the item view`);
-    // A queued item's card in the merge queue carries the same number, not only its queue wait.
-    assert.ok(ages(queueCard(item))[0]?.startsWith(expected), `${item.key} shows ${expected} in the merge queue: ${ages(queueCard(item)).join(' | ')}`);
   }
   // The status the card names, not the stage behind it: the item whose claim lapsed reads
   // "Waiting for someone to pick this up", so its clock runs from when the claim lapsed rather
@@ -106,7 +100,7 @@ test('unit:card-shows-status-duration — every work card in every view carries 
   const shipped = fixture.find(w => w.stage === 'done')!;
   assert.equal(phaseOf(shipped, NOW), 'shipped');
   assert.equal(statusHeld(shipped, NOW).overdue, false, 'delivered work has arrived; it is not waiting on anything');
-  assert.ok(ages(itemView(shipped))[0]!.length > 0, 'the item view of delivered work still says how long it has held that status');
+  assert.equal(overdueCount(itemView(shipped)), 0, 'the item view of delivered work never reads as overdue');
 });
 
 // ---- AC-2: one threshold, thirty minutes, driving every view ---------------------------------
@@ -117,7 +111,6 @@ test('unit:overdue-threshold-applied — twenty-nine minutes is not red, thirty-
     ['home list', item => homeView([item])],
     ['board column', item => boardCard(item)],
     ['item view', item => itemView(item)],
-    ['merge queue', item => queueCard(item)],
   ];
   for (const [name, render] of views) {
     for (const [minutes, overdue] of [[29, false], [30, false], [31, true], [90, true]] as const) {
@@ -129,8 +122,8 @@ test('unit:overdue-threshold-applied — twenty-nine minutes is not red, thirty-
     }
   }
   // The card itself carries the same verdict, so a stalled item is legible from the list's shape.
-  assert.match(boardCard(held('GY-15', 31)), /class="card tone-\w+ overdue"/);
-  assert.doesNotMatch(boardCard(held('GY-15', 29)), /class="card tone-\w+ overdue"/);
+  assert.match(boardCard(held('GY-15', 31)), /class="work-row group-[\w-]+ tone-\w+ overdue"/);
+  assert.doesNotMatch(boardCard(held('GY-15', 29)), /class="work-row group-[\w-]+ tone-\w+ overdue"/);
   // The verdict is taken on the minutes the text renders, so nothing turns red while reading 30m.
   for (const seconds of [30 * 60, 30 * 60 + 59]) {
     const at = statusDuration(NOW - seconds * 1000, NOW);
@@ -153,7 +146,7 @@ test('unit:overdue-threshold-applied — twenty-nine minutes is not red, thirty-
   }
   assert.deepEqual(definitions, ['web/duration.ts'], 'the threshold has one home');
   // Every view reaches the verdict through the one call.
-  for (const path of ['web/components/work-card.tsx', 'web/pages/work-details.tsx']) assert.match(await read(path), /statusHeld\(item, now\)/);
+  for (const path of ['web/components/work-card.tsx', 'web/pages/work-details.tsx']) assert.match(await read(path), /stepHeld\(item, now, stepMoves(, release)?\)/);
   assert.match(await read('web/components/status-age.tsx'), /held\.overdue/);
 });
 
@@ -176,9 +169,11 @@ test('integration:overdue-legible-without-colour — an overdue duration is mark
   assert.match(fresh, /title="In this status for 9m"/);
   // Colour is the third cue, and it carries its own weight: the red meets the text contrast bar
   // the rest of the dashboard meets (WCAG AA, 4.5:1) against the card it is drawn on.
+  // Since GY-161 both are design tokens (web/style.css :root), so each is read through its token.
   const style = await read('web/style.css');
-  const colour = /\.status-age\.overdue\{[^}]*color:(#[0-9a-f]{6})/.exec(style)?.[1];
-  const background = /\.card\{[^}]*background:(#[0-9a-f]{6})/.exec(style)?.[1];
+  const token = (value: string | undefined) => value?.startsWith('var(') ? new RegExp(`${value.slice(4, -1)}:(#[0-9a-f]{6})`).exec(style)?.[1] : value;
+  const colour = token([...style.matchAll(/\.status-age\.overdue\{[^}]*color:(#[0-9a-f]{6}|var\(--[\w-]+\))/g)].at(-1)?.[1]);
+  const background = token(/\n:root\{[^}]*?--bg:(#[0-9a-f]{6})/.exec(style)?.[1]);
   assert.ok(colour && background, `the overdue colour and the card background are declared: ${colour} on ${background}`);
   const luminance = (hex: string) => [1, 3, 5].map(at => parseInt(hex.slice(at, at + 2), 16) / 255)
     .map(channel => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
@@ -186,7 +181,7 @@ test('integration:overdue-legible-without-colour — an overdue duration is mark
   const contrast = (luminance(colour!) + 0.05) / (luminance(background!) + 0.05);
   assert.ok(contrast >= 4.5, `overdue red ${colour} on ${background} is ${contrast.toFixed(2)}:1`);
   // And the red is not the amber the dashboard already uses for "waiting", so the two read apart.
-  assert.notEqual(colour, /\.amber\{color:(#[0-9a-f]{6})/.exec(style)?.[1]);
+  assert.notEqual(colour, token(/\.amber\{color:(#[0-9a-f]{6}|var\(--[\w-]+\))/.exec(style)?.[1]));
 });
 
 // ---- AC-3: the duration follows real movement, driven through the engine ---------------------
