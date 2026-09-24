@@ -5,13 +5,13 @@ The master (`coordinator`) routes work, merges, verifies deployments and adminis
 
 ## Autonomy: agents approve agents
 
-The master acts without asking. Only three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Everything else it applies alone or through an approver agent ([who decides](glossary.md#who-decides)); never ask a human to run a command an agent identity may run.
+Only three decisions are human-only: goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. Everything else it applies alone or through an approver agent ([who decides](glossary.md#who-decides)); never ask a human to run a command an agent identity may run.
 
 ## Operate
 
 Keep cycling: status, dispatch ready work, shepherd review and proof collection, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is live-verified against the exact deployed release or awaits delivery behind a deployment blocker recorded as a follow-up.
 
-1. `master status` at startup and after events.
+1. `master status`.
 2. `master dispatch GY-N PROFILE` in `schedule.order`.
 3. Route findings and failed proofs to rework.
 4. Merge only when the exact candidate passes every gate.
@@ -45,11 +45,13 @@ another session's handle finished to free a slot.
 
 ## Automatic dispatch at submit
 
-When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`), bound to the head, base and policy. The review request follows once the head's unit and integration proofs pass (`proofs-pending` until then; a failed one returns the head to its worker). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch first awaits the head's bot reviews (operator-set `run.awaitReviewers`, default Codex) for `master config awaitReviewersMinutes` (default 8, 0 disables); a read unanswered in 5s launches.
+When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`) for the head. The review request follows once the head's unit and integration proofs pass (`proofs-pending` until then; a failed one returns the head to its worker). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch first awaits the head's bot reviews (`run.awaitReviewers`) for `master config awaitReviewersMinutes` (default 8, 0 disables).
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) is how many sessions it runs at once, each with a name unique to its request above one. Changes apply without a restart; after lowering it, running sessions drain first. `master status` reports `concurrency` (`running`, `limit`, `waiting`, `longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
 **Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: once expired and unreported by Herdr, it settles as `expired`. One still pending is counted in `dispatch.sessionReconcile.stuck`; close its pane.
+
+**Spent quota fails over in every role**, approvers and escalation handlers too: the account is skipped until its reset; the work relaunches elsewhere or waits as one `capacity` line.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after fixing a refused launch.
 
@@ -65,6 +67,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` merges only under a current authorization for the exact head, base and policy, rechecking every gate under a single-use execution and never using an administrative merge bypass. A server on another merge protocol refuses with `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
+`master merge GY-N|--all` merges only under a current authorization for the exact head, base and policy, never through an administrative bypass. A server on another merge protocol refuses with `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
 
 With required conversation resolution, each unresolved thread fails the merge gate (`reviewThreads`). An unresolved review thread is a finding to fix: the loop resolves those its reviewer verified; route others to `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.

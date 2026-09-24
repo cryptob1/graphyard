@@ -24,8 +24,8 @@ import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
-import { defaultAwaitReviewers } from './auto-dispatch.js';
-import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
+import { capacityRecheckMs, defaultAwaitReviewers } from './auto-dispatch.js';
+import { approverProfile, approverRoleHealth, escalationProfile, inspectProducerCredentials, inspectProfileAccounts, launchEscalationHandler, preservePartialWork, profileAccount, readEnvironmentLog, readEscalationSessions, recordObservedExhaustion, roleCapacity, saveEscalationSession, selectionKey, verifiedContext, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
@@ -245,6 +245,8 @@ export const approvalWatchSchema = z.object({
   closeAttempts: z.number().int().min(0).default(0),
   /** The GitHub observation a rework request was decided from (GY-144): its time and candidate head. */
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
+  /** The account and runtime the current session was launched on, so its exhaustion holds the right account (GY-182). */
+  account: z.string().max(200).nullable().default(null), runtime: z.string().max(40).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 
@@ -960,7 +962,8 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // to make an item disappear from the one measure built to notice it.
     const decision = routineDecision(item, config, now, context.assessments?.[item.id]);
     const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
-    if (decision && !watch?.settledAt) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
+    // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
+    if (decision && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
       : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} is unjudged after ${watch.launches} approver session(s)`
         : `${item.key}'s ${decision.action} decision ${watch.decision} is requested and waiting for approver session ${watch.agentName ?? '(not launched)'} to judge it`);
     const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
@@ -1403,7 +1406,7 @@ export interface DaemonEffects {
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
    * Never the requester.
    */
-  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null }>;
+  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null }>;
   /**
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
@@ -1446,8 +1449,16 @@ export interface DaemonEffects {
   endSession?: (session: LaunchedSession, resolution: string) => Promise<void>;
   /** Launches the session's request again on another account or runtime; throws `accountsExhausted` when none is left. */
   relaunch?: (session: LaunchedSession, work: Work, snapshot: { work: Work[]; now: string }) => Promise<{ profile: string }>;
-  /** Account health of the reviewer and producer profiles, as the worker profiles' arrives in `credentials`. */
-  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
+  /**
+   * The escalation handlers this host launched (GY-182), how one that ran out of quota is ended,
+   * and how its escalation is launched again on another account; the last throws `accountsExhausted`
+   * when none is left.
+   */
+  escalationSessions?: () => Promise<EscalationSession[]>;
+  endEscalation?: (session: EscalationSession, resolution: string, waiting: EscalationSession['waiting']) => Promise<void>;
+  relaunchEscalation?: (session: EscalationSession) => Promise<{ agentName: string; account: string | null }>;
+  /** Account health of the reviewer, producer and approver profiles, as the worker profiles' arrives in `credentials`. */
+  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer' | 'approver', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
@@ -1652,6 +1663,52 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
           detail: `${session.role} session ${session.agentName} for ${item.key} exhausted ${account ?? `${session.profile}'s own account`} mid-session (${signal.reason}; ${resets}); ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `${session.role} session ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+    // An escalation handler is a capacity role too (GY-182): one stopped on its provider's notice
+    // is ended, its account held, and the same escalation launched again on another account; with
+    // none left it waits for the first reset and is launched again then, by the loop alone.
+    for (const session of await effects.escalationSessions?.().catch(() => [] as EscalationSession[]) ?? []) {
+      const item = open.find(candidate => candidate.key === session.work);
+      if (!item) continue;
+      const key = failoverKey('escalation-handler', item, `${session.trigger}:${session.waiting ? `${session.waiting.since}:relaunch` : session.launchedAt}`), previous = state.actions[key];
+      if (session.waiting) {
+        if (Date.parse(session.waiting.retryAt) > clock || !effects.relaunchEscalation || !readyToRetry(previous, state.cycle)) continue;
+        try {
+          const launched = await effects.relaunchEscalation(session);
+          performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `escalation handler for ${item.key} (${session.trigger}) waited for capacity since ${session.waiting.since}; relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        } catch (error) {
+          if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { await effects.endEscalation?.(session, session.waiting.reason, { ...session.waiting, retryAt: new Date(clock + capacityRecheckMs).toISOString() }).catch(() => {}); continue; }
+          performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler for ${item.key} (${session.trigger}) could not be launched again: ${message(error)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        }
+        continue;
+      }
+      const agent = stopped(session.agentName);
+      if (!agent || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
+      const signal = await notice(agent);
+      if (!signal) continue;
+      const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
+      try {
+        const account = session.account ?? profileAccount(escalationProfile);
+        const hold = await effects.holdAccount?.(account, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'escalation-handler', profile: escalationProfile, work: item.key }) as { until?: string } | undefined;
+        await effects.reportCapacity(item, { event: 'exhausted', role: 'escalation-handler', requestId: session.trigger.slice(0, 64), profile: escalationProfile, account: session.account, runtime: session.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
+          partialWork: { state: 'not-applicable', detail: 'an escalation handler edits nothing: it requests a decision and leaves no work to keep' } });
+        const ended = `provider quota exhausted on ${session.account ?? 'its runtime\'s own account'} mid-session (${signal.reason}; ${resets})`;
+        let next: string;
+        try {
+          if (!effects.relaunchEscalation) throw new Error('this loop cannot launch an escalation handler');
+          await effects.endEscalation?.(session, ended, null);
+          const launched = await effects.relaunchEscalation(session);
+          next = `relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
+        } catch (error) {
+          if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) throw error;
+          const retryAt = signal.resetsAt ?? hold?.until ?? new Date(clock + capacityRecheckMs).toISOString();
+          await effects.endEscalation?.(session, ended, { since: new Date(clock).toISOString(), retryAt, reason: message(error).slice(0, 500) });
+          next = `no other account is left for the role (${message(error)}), so it is launched again at ${retryAt}`;
+        }
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `escalation handler ${session.agentName} for ${item.key} (${session.trigger}) ${ended}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
     }
   }
@@ -1949,11 +2006,18 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const capacities: RoleCapacity[] = [roleCapacity('worker', config.workers.filter(worker => worker.mode === 'launch'), credentials)];
   if (effects.reportCapacity) {
     const others = await effects.roleHealth?.().catch(() => null) ?? {};
-    for (const role of ['reviewer', 'producer'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
+    for (const role of ['reviewer', 'producer', 'approver'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
+    // An item waits on the approver role while it needs a decision no approver session is judging.
+    const unjudged = new Set(open.filter(item => {
+      const decision = effects.approver ? routineDecision(item, config, clock, assessments[item.id]) : null, watch = decision ? state.approvals[decisionKey(item, decision)] : undefined;
+      return !!decision && !watch?.settledAt && !watch?.exhaustedAt && !agents.some(agent => agent.name === watch?.agentName && !stoppedStates.includes(agent.agent_status ?? ''));
+    }).map(item => item.key));
     const needs: Record<CapacityRole, Work[]> = {
       worker: claimable,
       reviewer: open.filter(item => item.autoDispatch?.review?.state === 'requested'),
       producer: open.filter(item => item.autoDispatch?.producers.some(request => request.state === 'requested')),
+      approver: open.filter(item => unjudged.has(item.key)),
+      'escalation-handler': [],
     };
     for (const capacity of capacities) {
       const key = capacityKey(capacity.role), previous = state.actions[key];
@@ -1978,6 +2042,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   }
   const workersSpent = !!effects.reportCapacity && capacities[0].exhausted;
+  // With every approver account spent no approver is launched before the first reset (GY-182).
+  const approversSpent = !!effects.reportCapacity && !!capacities.find(capacity => capacity.role === 'approver')?.exhausted;
 
   // 4b-human. An item parked on a decision only a human may make holds no lease and is not
   //     claimable, so there is nothing to dispatch and nothing to escalate to an agent: the loop
@@ -2109,18 +2175,60 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     try { await effects.closeSession(session.pane_id); inventory = null; await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true; }
     catch (error) { inventory = null; watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
   };
-  /** Put a watched decision to an approver session. The launch is counted before it is made. */
+  const approverCapacity = capacities.find(capacity => capacity.role === 'approver');
+  const capacityWait = () => `every approver account is spent, so no approver is launched before ${approverCapacity?.retryAt ?? 'an account reports quota again'}`;
+  /**
+   * Put a watched decision to an approver session. The launch is counted before it is made; one
+   * refused because every account is spent is no launch at all (GY-182), and is not counted.
+   */
   const launch = async (item: Work, watch: ApprovalWatch, adopt: boolean) => {
     const name = approverSessionName(item, watch.decision), seen = await sessions();
     // A session a master started for the same decision (`master approver`) is the approver it has.
     const listed = adopt && seen.available ? seen.agents.find(agent => agent.name === name) : undefined;
-    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp });
+    if (!listed && approversSpent) { Object.assign(watch, { agentName: null, pane: null }); return `the decision waits: ${capacityWait()}`; }
+    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: null, runtime: null });
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}, already judging it`;
     inventory = null;
-    const launched = await effects.approver!(item, watch.decision);
-    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null });
-    return `launched independent approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})`;
+    let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
+    try { launched = await effects.approver!(item, watch.decision); }
+    catch (error) {
+      if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null }); return `the decision waits for approver capacity: ${message(error)}`; }
+      throw error;
+    }
+    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, account: launched?.account ?? null, runtime: launched?.runtime ?? null });
+    return `launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
+  };
+  /**
+   * An approver that stopped on its provider's limit notice (GY-182) has judged nothing and never
+   * will: its account is held until the reset the notice names, the exhaustion is recorded against
+   * the decision, the session is closed, and the same decision goes to the next eligible account
+   * in the same cycle. The launch it spent is not counted against the decision's bound.
+   */
+  const approverExhausted = async (item: Work, watch: ApprovalWatch) => {
+    if (!effects.sessionOutput || !effects.reportCapacity || !watch.agentName) return false;
+    const agent = (await sessions()).agents.find(candidate => candidate.name === watch.agentName);
+    if (!agent || !stoppedStates.includes(agent.agent_status ?? '')) return false;
+    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? detectExhaustion(output, clock) : null, () => null);
+    if (!signal) return false;
+    const key = failoverKey('approver', item, `${watch.decision}:${watch.launchedAt ?? watch.launches}`), previous = state.actions[key];
+    if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return true;
+    const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
+    const account = watch.account, spentOn = account ?? 'its runtime\'s own account';
+    try {
+      await effects.holdAccount?.(account ?? profileAccount(approverProfile), { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
+      await effects.reportCapacity(item, { event: 'exhausted', role: 'approver', requestId: watch.decision.slice(0, 64), profile: approverProfile, account, runtime: watch.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
+        partialWork: { state: 'not-applicable', detail: 'an approver session edits nothing: it judges a decision and leaves no work to keep' } });
+      const ended = `approver session ${watch.agentName} exhausted ${spentOn} mid-session (${signal.reason}; ${resets})`;
+      if (!await closeApprover(item, watch, ended)) throw new Error(`the session could not be closed, so its name still refuses a replacement`);
+      watch.ended = [...watch.ended, ended.slice(0, 300)].slice(-10);
+      Object.assign(watch, { launches: Math.max(0, watch.launches - 1), agentName: null, pane: null });
+      const next = await launch(item, watch, false);
+      performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `${ended} judging ${watch.action} decision ${watch.decision}; ${next}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `approver session ${watch.agentName ?? '(closed)'} for ${item.key} exhausted ${spentOn} (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    }
+    return true;
   };
   const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
     watch.exhaustedAt = stamp;
@@ -2204,8 +2312,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   /** Look again at a decision already requested: its state on the control plane, and its session. */
   const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
     const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
-    const step = approvalStep(watch, history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null, await sessions(), clock);
+    const current = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
+    if ((!current || current.state === 'requested') && await approverExhausted(item, watch)) return;
+    const step = approvalStep(watch, current, await sessions(), clock);
     if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
+    // A decision whose approver could not be launched for want of capacity is not a session that
+    // ended: nothing is closed, counted or recorded until an account resets (GY-182).
+    if (step.step === 'relaunch' && !watch.agentName && approversSpent) return;
     const base = `approver:${watch.decision}`;
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
@@ -2939,7 +3052,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime }; };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
@@ -2988,9 +3101,21 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
       throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
     },
+    escalationSessions: () => readEscalationSessions(root),
+    endEscalation: async (session, _resolution, waiting) => {
+      try { if (session.pane) await closeHerdrPane(session.pane, run); } catch (error) { if (!paneAlreadyGone(error)) throw error; }
+      await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, pane: null, waiting } : null);
+    },
+    relaunchEscalation: async session => {
+      // The same escalation, from a context assembled again now: the one the ended handler read may be stale.
+      const context = verifiedContext(await asOperatorAgent('GET', `work/${encodeURIComponent(session.work)}/context?trigger=${encodeURIComponent(session.trigger)}`));
+      const launched = await launchEscalationHandler(root, current(), context, session.kind as NonNullable<WorkerProfile['kind']>, await listHerdrAgents(run), run);
+      return { agentName: launched.agentName, account: launched.account };
+    },
     roleHealth: async () => {
       const config = current();
       return {
+        ...(config.approver && config.operatorAgent ? { approver: await approverRoleHealth(config) } : {}),
         ...(config.reviewers.length ? { reviewer: { profiles: config.reviewers, health: await inspectProfileAccounts(config, 'reviewer', config.reviewers, Object.fromEntries(config.reviewers.map(profile => [profile.name, { available: true, reason: null as string | null }]))) } } : {}),
         ...(config.producers.length ? { producer: { profiles: config.producers, health: await inspectProducerCredentials(root, config.producers) } } : {}),
       };

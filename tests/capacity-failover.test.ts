@@ -16,10 +16,11 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { answerHumanCommand, humanRequestsCommand, parkCommand } from '../src/cli/session-commands.js';
 import type { CliContext } from '../src/cli/context.js';
-import { capacityKey, emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
+import { actionableSubjects, capacityKey, emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { buildMasterStatus, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
-import { detectExhaustion, parseResetTime } from '../src/model/capacity.js';
+import { approverRoleHealth, approverSessionName, buildMasterStatus, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
+import { selectFleetSession, type FleetClient } from '../src/fleet.js';
+import { describeCapacity, detectExhaustion, parseResetTime } from '../src/model/capacity.js';
 import { answerCommand, humanRequestBlocker, openHumanRequests } from '../src/model/human-request.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import HumanRequestsPage from '../web/pages/human-requests.js';
@@ -573,4 +574,191 @@ test('integration:human-answer-resumes-item — answering from the CLI or the da
   assert.deepEqual(openHumanRequests([declined], Date.now()), []);
   clock.skewMs += 20_000; await cycle(state);
   assert.ok(!calls.dispatch.some(entry => entry.work === declined.key), 'a declined item stays parked');
+});
+
+// GY-182: approvers and escalation handlers are capacity roles, and an account one role saw spent
+// is spent for every role. The approver's account selection, its hold and its failover are the
+// real ones; only the Herdr tab and the approver's own judgement are the test's.
+const reviewerOn = (accounts: string[]) => ({ name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude' as const, agentArgs: [], approvals: 'auto' as const, environment: {}, accounts });
+async function approverLoop(label: string, accounts = ['env-a', 'env-b']) {
+  await fresh();
+  const approverHome = await mkdtemp(join(tmpdir(), `graphyard-capacity-${label}-`));
+  const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(approverHome, 'coordinator.token'), autoMerge: false }), reviewers: [reviewerOn(accounts)] } as MasterConfig;
+  const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
+  const decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null }[] = [];
+  const launches: (string | null)[] = [], attempts: string[] = [];
+  const now = () => Date.now() + clock.skewMs;
+  const harness = loop(config, herdr, clock, {
+    dispatch: async () => {},
+    decide: async (_work, action, _reason, input) => { const entry = { id: `decision-${label}-${decisions.length + 1}`, action, state: 'requested', input: input ?? {}, approvedBy: null }; decisions.push(entry); return entry; },
+    decisions: async () => ({ decisions }),
+    // The launch as `launchApprover` makes it: the same account selection, then a Herdr tab.
+    approver: async (work, decision) => {
+      attempts.push(decision);
+      const chosen = await selectApproverAccount(config, work.key, 'approver-agent', { ...loginsOnly(now), registry: undefined });
+      const agentName = approverSessionName(work, decision), pane = `pane-approver-${launches.length}`;
+      herdr.agents.push({ name: agentName, pane_id: pane, agent_status: 'working' });
+      launches.push(chosen.account?.name ?? null);
+      return { agentName, pane, account: chosen.account?.name ?? null, runtime: chosen.account?.kind ?? null };
+    },
+    roleHealth: async () => ({ approver: await approverRoleHealth(config, loginsOnly(now)) }),
+  });
+  // One item whose every gate passes; automatic merging is off, so it needs an approved merge decision.
+  const work = (await submittedAndProven(await launcherClaims(await released(`approver ${label}`), workerB), workerB)).work;
+  assert.equal(work.stage, 'merge');
+  return { config, herdr, clock, decisions, launches, attempts, work, ...harness };
+}
+
+test('unit:approver-exhaustion-fails-over — an approver session stopped on its provider limit notice is ended within one cycle, its account is recorded exhausted until the reset the notice names, and the same decision is relaunched on another account without a person', async () => {
+  const { config, herdr, decisions, launches, work, cycle, calls } = await approverLoop('failover');
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  assert.equal(decisions.length, 1, 'the loop requests the merge decision');
+  assert.deepEqual(launches, ['env-a'], 'and puts it to an approver on the first account');
+  const watch = Object.values(state.approvals)[0], launchedAt = watch.launchedAt;
+  assert.equal(watch.account, 'env-a');
+
+  // The approver stops on Claude's weekly-limit menu, as the seven approvers of 2026-09-24 did.
+  const notice = "You've hit your weekly limit · resets Sep 26, 10pm";
+  const name = approverSessionName(work, decisions[0].id);
+  herdr.agents.find(agent => agent.name === name)!.agent_status = 'idle';
+  herdr.output[name] = `● Reading the decision…\n  ⎿ ${notice}\n    /upgrade to increase your usage limit.\n`;
+  const detectedAt = Date.now();
+  const detection = await cycle(state);
+  const resetsAt = parseResetTime(notice, detectedAt)!;
+  assert.ok(Date.parse(resetsAt) > detectedAt, 'the notice names a reset in the future');
+
+  // Ended within that one cycle: the session is closed, not left on the provider's menu.
+  assert.deepEqual(calls.closed, ['pane-approver-0']);
+  const failover = detection.actions.find(action => action.kind === 'failover');
+  assert.ok(failover, `the cycle that saw the notice failed it over: ${JSON.stringify(detection.actions)}`);
+  assert.equal(failover.state, 'done', failover.detail);
+  assert.match(failover.detail, new RegExp(`exhausted env-a mid-session \\(${notice}; resets ${resetsAt.replace(/\./g, '\\.')}\\) judging merge decision ${decisions[0].id}; launched independent approver session ${name} on env-b`));
+  assert.equal(state.actions[failoverKey('approver', work, `${decisions[0].id}:${launchedAt}`)].state, 'done', 'one failover per exhausted session');
+
+  // The account is recorded exhausted until the time the notice names, for every launcher.
+  const held = (await observedExhaustions(config))['env-a'];
+  assert.equal(held.until, resetsAt); assert.equal(held.resetsAt, resetsAt); assert.equal(held.role, 'approver');
+  const recorded = (await reload(work.id)).capacity!.exhaustions.at(-1)!;
+  assert.deepEqual([recorded.role, recorded.requestId, recorded.account, recorded.resetsAt, recorded.reason, recorded.partialWork.state], ['approver', decisions[0].id, 'env-a', resetsAt, notice, 'not-applicable']);
+  const history = (await events(work)).filter(event => event.kind === 'capacity.exhausted');
+  assert.equal(history.length, 1); assert.equal(history[0].actor, coordinator.id);
+
+  // The same decision, relaunched on the other account: no new request, no launch spent.
+  assert.deepEqual(launches, ['env-a', 'env-b']);
+  assert.equal(decisions.length, 1, 'the decision is not requested again');
+  const relaunched = Object.values(state.approvals)[0];
+  assert.deepEqual([relaunched.decision, relaunched.account, relaunched.launches, relaunched.exhaustedAt], [decisions[0].id, 'env-b', 1, null], 'an exhausted account is not a judgement the decision failed to get');
+  assert.ok(herdr.agents.some(agent => agent.name === name && agent.pane_id === 'pane-approver-1'));
+
+  // The next cycle repeats nothing: one exhaustion, one failover, the new approver left to judge.
+  const after = await cycle(state);
+  assert.deepEqual(after.actions.filter(action => ['failover', 'decision', 'capacity'].includes(action.kind)), []);
+  assert.deepEqual(launches, ['env-a', 'env-b']);
+  assert.equal((await reload(work.id)).capacity!.exhaustions.length, 1);
+});
+
+test('unit:exhaustion-shared-across-roles — an account a worker session exhausted is skipped by the approver, reviewer, producer and registry-chosen launches until its reset, and is eligible again after it', async () => {
+  await fresh();
+  const sharedHome = await mkdtemp(join(tmpdir(), 'graphyard-capacity-shared-'));
+  const config = { ...loopConfig([profileOf('builder', workerA, ['env-a', 'env-b'])], { credentialFile: join(sharedHome, 'coordinator.token') }), reviewers: [reviewerOn(['env-a', 'env-b'])] } as MasterConfig;
+  const at = Date.now(), resetsAt = new Date(at + 3 * 3_600_000).toISOString();
+  // What the loop's worker failover holds when a worker stops on its notice.
+  await recordObservedExhaustion(config, 'env-a', { at: new Date(at).toISOString(), resetsAt, reason: "You've hit your weekly limit", role: 'worker', profile: 'builder', work: 'GY-1' }, at);
+
+  const before = { ...loginsOnly(() => at + 60_000), work: 'GY-2' }, afterReset = { ...loginsOnly(() => Date.parse(resetsAt) + 60_000), work: 'GY-2' };
+  const producerProfile = { name: 'prover', accounts: ['env-a', 'env-b'] };
+  const launched = async (probe: typeof before) => ({
+    worker: (await selectAccount(config, 'worker', config.workers[0], probe)).account?.name,
+    approver: (await selectApproverAccount(config, probe.work, 'approver-agent', probe)).account?.name,
+    reviewer: (await selectAccount(config, 'reviewer', config.reviewers[0], probe)).account?.name,
+    producer: (await selectAccount(config, 'producer', producerProfile, probe)).account?.name,
+    'escalation-handler': (await selectAccount(config, 'escalation-handler', producerProfile, probe)).account?.name,
+  });
+  assert.deepEqual(await launched(before), { worker: 'env-b', approver: 'env-b', reviewer: 'env-b', producer: 'env-b', 'escalation-handler': 'env-b' }, 'no role is handed the account another role saw spent');
+  const skips = (await readEnvironmentLog(config)).skipped.filter(entry => entry.environment === 'env-a');
+  assert.deepEqual([...new Set(skips.map(entry => entry.role))].sort(), ['approver', 'escalation-handler', 'producer', 'reviewer', 'worker']);
+  assert.ok(skips.every(entry => entry.cause === 'exhausted' && /env-a exhausted its quota mid-session/.test(entry.reason)));
+
+  // A role the agent registry decides: the registry is told the account is spent, so it chooses another.
+  const seen: { account: string; state: string; resetsAt: string | null }[][] = [];
+  const registry = {
+    revision: 1, runtimes: [{ name: 'claude', launch: { kind: 'claude', args: [], environment: {}, homeVariable: 'CLAUDE_CONFIG_DIR' } }], models: [{ name: 'default', runtime: 'claude', id: null }],
+    accounts: ['env-a', 'env-b'].map(name => ({ name, runtime: 'claude', model: 'default', enabled: true, credential: { host: 'loop-host', home: null }, quota: { state: 'unknown' } })),
+    roles: ['approver', 'reviewer'].map(name => ({ name, accounts: ['env-a', 'env-b'], concurrency: 2 })),
+  };
+  const client: FleetClient = {
+    document: async () => registry as any, end: async () => {},
+    select: async request => {
+      seen.push(request.observations.map(entry => ({ account: entry.account, state: entry.quota.state, resetsAt: entry.quota.resetsAt })));
+      const account = registry.accounts.find(entry => request.observations.find(observed => observed.account === entry.name)?.quota.state !== 'exhausted')!;
+      return { selected: true, reason: `first eligible account ${account.name}`, skipped: [], session: { id: `session-${seen.length}` }, account, runtime: registry.runtimes[0], model: registry.models[0], revision: 1 } as any;
+    },
+  };
+  // The registry's own cache sits beside the credential, so the registry-decided roles get a home of their own.
+  const fleetConfig = { ...config, credentialFile: join(await mkdtemp(join(tmpdir(), 'graphyard-capacity-fleet-')), 'coordinator.token') };
+  for (const role of ['approver', 'reviewer'] as const) {
+    const chosen = await selectFleetSession(fleetConfig, role, { name: `${role}-fleet` }, await heldAwareProbe(config, { ...before, registry: client }));
+    assert.equal(chosen?.account.name, 'env-b', `${role}: the registry chose around the held account`);
+  }
+  assert.deepEqual(seen.map(observations => observations.find(entry => entry.account === 'env-a')), [{ account: 'env-a', state: 'exhausted', resetsAt }, { account: 'env-a', state: 'exhausted', resetsAt }]);
+
+  // After the reset nothing holds it: every role selects it again, on its own.
+  assert.deepEqual(await launched(afterReset), { worker: 'env-a', approver: 'env-a', reviewer: 'env-a', producer: 'env-a', 'escalation-handler': 'env-a' });
+  const restored = await selectFleetSession(fleetConfig, 'approver', { name: 'approver-fleet' }, await heldAwareProbe(config, { ...afterReset, registry: client }));
+  assert.equal(restored?.account.name, 'env-a');
+  assert.notEqual(seen.at(-1)!.find(entry => entry.account === 'env-a')!.state, 'exhausted');
+});
+
+test('unit:role-exhausted-waits-for-reset — with every approver account exhausted no approver is launched before the earliest reset, master status shows one capacity line naming each account and its reset, and no decision reads as stalled per item', async () => {
+  const { config, clock, decisions, launches, attempts, now, work, cycle } = await approverLoop('spent');
+  const resetA = new Date(Date.now() + 2 * 3_600_000).toISOString(), resetB = new Date(Date.now() + 5 * 24 * 3_600_000).toISOString();
+  await recordObservedExhaustion(config, 'env-a', { at: new Date().toISOString(), resetsAt: resetA, reason: "You've hit your weekly limit", role: 'approver', profile: 'approver', work: null });
+  await recordObservedExhaustion(config, 'env-b', { at: new Date().toISOString(), resetsAt: resetB, reason: 'Weekly usage limit reached', role: 'worker', profile: 'builder', work: null });
+
+  const state = emptyDaemonState(config);
+  const first = await cycle(state);
+  assert.equal(decisions.length, 1, 'the decision is requested: it is the launch that waits');
+  assert.deepEqual(attempts, [], 'no approver launch is even attempted while every account is spent');
+  const watch = Object.values(state.approvals)[0];
+  assert.deepEqual([watch.launches, watch.agentName, watch.exhaustedAt], [0, null, null]);
+
+  // One capacity escalation naming each account and its reset, and one line for the cycle.
+  const waiting = await reload(work.id);
+  const escalation = waiting.capacity!.escalations.find(entry => entry.role === 'approver')!;
+  assert.deepEqual(escalation.accounts.map(entry => [entry.account, entry.resetsAt]), [['env-a', resetA], ['env-b', resetB]]);
+  assert.equal(escalation.retryAt, resetA, 'the role is tried again at the earliest reset');
+  const line = state.actions[capacityKey('approver')];
+  assert.equal(line.detail, `${describeCapacity('approver', escalation.accounts)}; waiting: ${work.key}`);
+  assert.match(line.detail, new RegExp(`^approver capacity is exhausted on every configured account \\(env-a resets ${resetA.replace(/\./g, '\\.')}, env-b resets ${resetB.replace(/\./g, '\\.')}\\); approver launches are paused until ${resetA.replace(/\./g, '\\.')}`));
+  assert.equal(first.actions.filter(action => action.kind === 'capacity').length, 1);
+
+  // Later cycles attempt no launch before the earliest reset and repeat nothing.
+  for (let pass = 0; pass < 3; pass++) {
+    clock.skewMs += 20 * 60_000;
+    const again = await cycle(state);
+    assert.deepEqual(again.actions.filter(action => ['capacity', 'decision', 'escalation', 'failover'].includes(action.kind)), [], `pass ${pass}: ${JSON.stringify(again.actions)}`);
+  }
+  assert.deepEqual(attempts, []); assert.deepEqual(launches, []);
+  assert.equal(decisions.length, 1);
+  assert.equal(Object.values(state.approvals)[0].launches, 0, 'a launch never made is never counted against the decision');
+  assert.equal((await events(waiting)).filter(event => event.kind === 'capacity.escalated').length, 1);
+
+  // master status: one capacity line for the role, and no stalled-decision alarm for the item.
+  const snapshot = await ok(coordinator, 'GET', 'work-snapshot');
+  const status = buildMasterStatus({ work: snapshot.work, now: snapshot.now }, config.workers, [], await workerHealth(config, now));
+  assert.equal(status.capacity.length, 1);
+  assert.equal(status.capacity[0].role, 'approver');
+  assert.equal(status.capacity[0].line, line.detail);
+  assert.deepEqual(status.capacity[0].accounts.map(entry => [entry.account, entry.resetsAt]), [['env-a', resetA], ['env-b', resetB]]);
+  assert.deepEqual(status.attentionItems.filter(item => /capacity/.test(item.subject)).map(item => item.text), [line.detail]);
+  assert.deepEqual(status.attentionItems.filter(item => /approver session|unjudged|unanswered/.test(item.text)), []);
+  assert.deepEqual(actionableSubjects(config, snapshot.work, now(), { approvals: state.approvals }).filter(subject => subject.kind === 'decision'), [], 'waiting on capacity is not a decision the loop reads as stalled');
+
+  // The earliest reset passes: the loop alone launches the approver on that account.
+  clock.skewMs = Date.parse(resetA) - Date.now() + 60_000;
+  const restored = await cycle(state);
+  assert.deepEqual(launches, ['env-a']);
+  assert.ok(restored.actions.some(action => action.kind === 'decision' && /launched independent approver session .* on env-a/.test(action.detail)), JSON.stringify(restored.actions));
+  assert.deepEqual((await reload(work.id)).capacity!.escalations, []);
 });

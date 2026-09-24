@@ -16,7 +16,7 @@ import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
 import { harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
-import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
+import { capacityRetryAt, quotaRoles, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
@@ -29,7 +29,7 @@ import { mergeBaseDismissal, mergeBaseDismissalAttention, missingAncestryReason,
 import { attentionLines, type ProductionReport } from './production-watch.js';
 import { allocateSessionCheckout, inspectWorktreeRoot, reclaimCommand, removeSessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootConcerns, worktreeRootMinFreeBytes, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout, type WorktreeRootHealth } from './install/worktree-root.js';
 import { pipelineSpeed, pipelineSpeedSummary } from './pipeline-speed.js';
-import { fleetRoleHealth, selectFleetSession, type FleetLaunchAccount, type FleetProbe } from './fleet.js';
+import { fleetRoleHealth, httpFleetClient, selectFleetSession, type FleetLaunchAccount, type FleetProbe } from './fleet.js';
 import type { FleetView } from './model/registry.js';
 import { contextFingerprint, escalationAction, followPrecedent, handleEscalation, type EscalationContext } from './model/escalation-context.js';
 
@@ -854,7 +854,8 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   return health;
 }
 
-export type LaunchRole = 'worker' | 'reviewer' | 'producer';
+/** Every launched role selects its account the same way and skips the same spent accounts (GY-182). */
+export type LaunchRole = CapacityRole;
 /**
  * Why a launch passed an account over. Only `exhausted` — a quota read as spent, or one a session
  * itself reported — is the provider's capacity and waits for a reset. A logged-out account or a
@@ -880,13 +881,13 @@ export class NoHealthyAccountError extends Error {
 const environmentLogSchema = z.object({
   version: z.literal(1),
   environments: z.record(z.string(), z.any()).default({}),
-  skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
+  skipped: z.array(z.object({ at: z.string(), role: z.enum(quotaRoles), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
     // Logs written before GY-89 carry no cause; they read as the exhaustion the flag then meant.
     cause: z.enum(['exhausted', 'logged-out', 'unconfigured']).default('exhausted') }).strict()).max(50).default([]),
   // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
-  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
+  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(quotaRoles), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
 }).strict();
 /**
  * An account a running session exhausted. The provider's own usage endpoint may lag behind the
@@ -946,8 +947,23 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  */
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
 export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void> }
+/**
+ * The registry chooses from what this host reports of each login, so an account a session here saw
+ * spent is reported spent (GY-182): whichever role found out, the registry hands it to no role
+ * before its reset, and records the hold for every other executor too. Nothing changes while no
+ * account is held.
+ */
+export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, probe: FleetProbe = {}): Promise<FleetProbe> {
+  const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
+  if (!Object.keys(held).length) return probe;
+  const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000) : null);
+  if (!client) return probe;
+  return { ...probe, registry: { document: () => client.document(), end: (session, reason) => client.end(session, reason),
+    select: request => client.select({ ...request, observations: request.observations.map(entry => !held[entry.account] ? entry
+      : { account: entry.account, quota: { ...entry.quota, state: 'exhausted', resetsAt: held[entry.account].until, reason: describeObservedExhaustion(entry.account, held[entry.account]).slice(0, 500) } }) }) } };
+}
 export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string }, probe: FleetProbe = {}): Promise<LaunchSelection> {
-  const fleet = await selectFleetSession(config, role, profile, probe);
+  const fleet = await selectFleetSession(config, role, profile, await heldAwareProbe(config, probe));
   if (fleet) {
     await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped).catch(() => {});
     return fleet;
@@ -1059,7 +1075,10 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
   const fleet = await fleetRoleHealth(config, role, probe).catch(() => null);
   for (const profile of profiles) {
     if (fleet) {
-      if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: fleet.available, reason: fleet.reason, accounts: fleet.accounts };
+      // What a session on this host printed outranks the registry's last probe (GY-182).
+      const accounts = withHeldAccounts(fleet.accounts, held), usable = fleet.available && accounts.some(account => account.healthy);
+      if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: usable,
+        reason: usable ? null : !fleet.available ? fleet.reason : `No eligible account for ${role}: ${accounts.map(account => account.reason).filter(Boolean).join('; ')}`, accounts };
       continue;
     }
     if (result[profile.name]?.available === false) continue;
@@ -1086,6 +1105,11 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
   return result;
 }
 
+/** Registry accounts as this host knows them: one a session here saw spent is spent, whatever the registry last read. */
+export function withHeldAccounts(accounts: ProfileAccountHealth[], held: Record<string, ObservedExhaustion>): ProfileAccountHealth[] {
+  return accounts.map(account => held[account.environment] ? { ...account, healthy: false, reason: describeObservedExhaustion(account.environment, held[account.environment]), quota: 'exhausted', resetsAt: held[account.environment].resetsAt } : account);
+}
+
 /**
  * Whether a role has any account left. A role is out of capacity only when every launch profile
  * it has is unavailable for one reason — each of its accounts is spent — so a logged-out account
@@ -1095,7 +1119,9 @@ export interface RoleCapacity { role: CapacityRole; exhausted: boolean; accounts
 export function roleCapacity(role: CapacityRole, profiles: { name: string }[], health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>): RoleCapacity {
   const spent = profiles.map(profile => ({ profile, accounts: health[profile.name]?.accounts ?? [], available: health[profile.name]?.available !== false }));
   const exhausted = spent.length > 0 && spent.every(entry => !entry.available && entry.accounts.length > 0 && entry.accounts.every(account => account.quota === 'exhausted'));
-  const accounts: CapacityAccount[] = exhausted ? spent.flatMap(entry => entry.accounts.map(account => ({ account: account.environment, profile: entry.profile.name, resetsAt: account.resetsAt, reason: (account.reason ?? 'quota exhausted').slice(0, 500) }))) : [];
+  // Profiles the registry decides share its accounts; each account is named once.
+  const accounts: CapacityAccount[] = exhausted ? spent.flatMap(entry => entry.accounts.map(account => ({ account: account.environment, profile: entry.profile.name, resetsAt: account.resetsAt, reason: (account.reason ?? 'quota exhausted').slice(0, 500) })))
+    .filter((account, index, all) => all.findIndex(other => other.account === account.account) === index) : [];
   return { role, exhausted, accounts, retryAt: capacityRetryAt(accounts) };
 }
 
@@ -2516,7 +2542,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const speed = pipelineSpeedSummary(snapshot.work, now);
   // Capacity, one line per spent role: the accounts, their resets, and every item that waits on it.
   const open = snapshot.work.filter(work => work.stage !== 'done');
-  const capacity = (['worker', 'reviewer', 'producer'] as const).flatMap(role => {
+  const capacity = quotaRoles.flatMap(role => {
     const waiting = open.filter(work => standingCapacity(work, role).length);
     if (!waiting.length) return [];
     const latest = waiting.map(work => standingCapacity(work, role)[0]).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
@@ -3841,6 +3867,47 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
 export const approverDistinguisher = 6;
 export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
   distinctSessionName(sessionNameLimit - sessionName('graphyard-approver', work.key).length - 1 >= approverDistinguisher ? ['graphyard-approver'] : ['gy-approver'], work.key, decision);
+/**
+ * The names an approver's and an escalation handler's exhaustion is held under when the session
+ * ran on no named account: the runtime's own login, which every launch of the role shares.
+ */
+export const approverProfile = 'approver', escalationProfile = 'escalation-handler';
+/**
+ * Where an approver may run when the agent registry does not decide the role (GY-182): the accounts
+ * the reviewer profiles name — the runtime an approver already borrowed — or, with none named, the
+ * worker profiles'. An approver is a capacity role like any other, so an account a session of any
+ * role saw spent is skipped until its reset, and the next account takes the decision.
+ */
+export function approverProfiles(config: Pick<MasterConfig, 'reviewers' | 'workers'>) {
+  const named = <P extends { name: string; accounts?: string[] }>(profiles: P[]) => profiles.filter(profile => profile.accounts?.length).map(profile => ({ name: profile.name, accounts: profile.accounts! }));
+  const reviewers = named(config.reviewers);
+  return reviewers.length ? reviewers : named(config.workers.filter(profile => profile.mode === 'launch'));
+}
+export type ApproverSelection = { fleet: NonNullable<Awaited<ReturnType<typeof selectFleetSession>>>; account: FleetLaunchAccount; profile: string; skipped: AccountSkip[] }
+  | { fleet: null; account: AgentEnvironment | null; profile: string; skipped: AccountSkip[] };
+/**
+ * The account an approver launches on: the registry's approver role when it defines one, else the
+ * first healthy, unheld account of `approverProfiles`, else the runtime's own login unless a session
+ * saw it spent. Throws `NoHealthyAccountError` — `capacityExhausted` when every skip was spent quota.
+ */
+export async function selectApproverAccount(config: MasterConfig, work: string | null, principal: string, probe: FleetProbe = {}): Promise<ApproverSelection> {
+  const fleet = await selectFleetSession(config, 'approver', { name: approverProfile, principal }, await heldAwareProbe(config, { ...probe, work: work ?? undefined }));
+  if (fleet) return { fleet, account: fleet.account, profile: approverProfile, skipped: fleet.skipped };
+  const profiles = approverProfiles(config), skipped: AccountSkip[] = [];
+  if (!profiles.length) { await selectAccount(config, 'approver', { name: approverProfile }, { ...probe, work: work ?? undefined }); return { fleet: null, account: null, profile: approverProfile, skipped }; }
+  for (const profile of profiles) {
+    try {
+      const selected = await selectAccount(config, 'approver', profile, { ...probe, work: work ?? undefined });
+      return { fleet: null, account: selected.account as AgentEnvironment | null, profile: profile.name, skipped: [...skipped, ...selected.skipped] };
+    } catch (error) { if (!(error instanceof NoHealthyAccountError)) throw error; skipped.push(...error.skipped); }
+  }
+  const spent = new NoHealthyAccountError(`No healthy agent account for the approver: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);
+  if (spent.capacityExhausted) throw spent;
+  // A named account that is logged out or unconfigured is a fault to fix, not a wait: the approver
+  // runs on the runtime's own login, as it did before it had accounts, unless that one is spent too.
+  await selectAccount(config, 'approver', { name: approverProfile }, { ...probe, work: work ?? undefined });
+  return { fleet: null, account: null, profile: approverProfile, skipped };
+}
 export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
@@ -3850,12 +3917,13 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // The approver's runtime and account come from the registry's approver role. An explicit
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
   // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
-  const selected = explicitKind ? null : await selectFleetSession(config, 'approver', { name, principal: config.approver!.id }, { ...probe, work: work.key });
+  const chosen = explicitKind ? null : await selectApproverAccount(config, work.key, config.approver!.id, probe);
+  const selected = chosen?.fleet ?? null;
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
-  const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
+  const kind = chosen?.account?.kind ?? explicitKind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
   if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
-  const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
+  const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen?.account ?? null);
   const cli = `node ${config.cliPath}`;
   let delivery: RequestDelivery | undefined;
   const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
@@ -3869,8 +3937,40 @@ export async function launchApprover(root: string, work: Work, decision: string,
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
-  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false,
-    account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped } : null };
+  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, runtime: kind,
+    account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
+      : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null };
+}
+
+/** The approver role's accounts as `roleCapacity` reads them: whether any is left, and each one's reset. */
+export async function approverRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}) {
+  const named = approverProfiles(config), profiles = named.length ? named : [{ name: approverProfile }];
+  return { profiles, health: await inspectProfileAccounts(config, 'approver', profiles, Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null as string | null }])), probe) };
+}
+
+/**
+ * The escalation handlers this host launched and has not seen end (GY-182). A handler is launched
+ * by a master, not by the loop, so this is what lets the loop find one that stopped on its
+ * provider's limit notice, hold the account and launch the same escalation again elsewhere.
+ * `waiting` is a handler ended for spent quota with no account left: it is launched again once
+ * `retryAt` passes.
+ */
+export const escalationSessionSchema = z.object({
+  agentName: z.string().max(200), pane: z.string().max(200).nullable(), work: z.string().max(40), trigger: z.string().max(64),
+  kind: z.string().max(40), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(), launchedAt: z.string(),
+  waiting: z.object({ since: z.string(), retryAt: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
+}).strict();
+export type EscalationSession = z.infer<typeof escalationSessionSchema>;
+export const retainedEscalationSessions = 50, escalationSessionMs = 86_400_000;
+const escalationSessionsPath = async (root: string) => resolve(await localDirectory(root), 'escalations', 'sessions.json');
+export async function readEscalationSessions(root: string): Promise<EscalationSession[]> {
+  try { return z.array(escalationSessionSchema).parse(JSON.parse(await readFile(await escalationSessionsPath(root), 'utf8'))); } catch { return []; }
+}
+/** Replace the handler of `work`/`trigger` (or drop it with `session` null); records past a day are dropped. */
+export async function saveEscalationSession(root: string, work: string, trigger: string, session: EscalationSession | null, now = Date.now()) {
+  const kept = (await readEscalationSessions(root)).filter(entry => !(entry.work === work && entry.trigger === trigger) && now - Date.parse(entry.waiting?.since ?? entry.launchedAt) < escalationSessionMs);
+  const file = await escalationSessionsPath(root); await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await atomicPrivateWrite(file, [...kept, ...(session ? [session] : [])].slice(-retainedEscalationSessions));
 }
 
 /**
@@ -3894,10 +3994,15 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   const escalationRetry = `graphyard master escalation ${context.key} ${context.escalation.trigger} ${kind}`;
   const name = nameForLaunch(escalationRetry, () => distinctSessionName(['graphyard-escalation', 'graphyard-esc', 'gy-esc'], context.key, context.escalation.trigger));
   if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
+  // A capacity role like any other (GY-182): the registry's escalation-handler role chooses the
+  // account when it defines one, and a login a session saw spent is not launched on before it resets.
+  const selected = await selectFleetSession(config, 'escalation-handler', { name, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: context.key }));
+  if (!selected) await selectAccount(config, 'escalation-handler', { name: escalationProfile }, { work: context.key });
+  const runtime = selected?.account.kind ?? kind;
   const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);
   await atomicPrivateWrite(file, context);
-  const launch = agentLaunchPlan(kind, 'auto');
+  const launch = accountLaunch({ kind: runtime, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
   const cli = `node ${config.cliPath}`;
   const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which. If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once, citing only ids listed in precedent.detail; when precedent.detail lists no decision that applies, leave out --precedent and the control plane records that no precedent was available — never invent an id. An independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
@@ -3906,12 +4011,14 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry }));
+    ({ delivery } = await startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry }));
   } catch (error) {
     if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
+    await selected?.release(`escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
-  return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false };
+  await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), waiting: null }).catch(() => {});
+  return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
 }
 
 export const broadScopeFlag = '--allow-broad-scope';
