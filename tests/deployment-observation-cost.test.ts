@@ -341,34 +341,50 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
   } finally { delete process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT; await rm(fixture.directory, { recursive: true, force: true }); }
 });
 
-test('unit:deployment-source-is-a-release — a run of failed production attempts newer than the served release leaves the last observed release standing', async () => {
+test('unit:deployment-source-is-a-release — past the read bound or an unreadable status, no release is asserted, the last one observed neither', async () => {
   const fixture = await deliveredHistory(3);
   try {
     await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const [old, , release] = fixture.shas;
-    // More failed attempts of the newest commit than the candidate bound reads, then the release.
+    const [old, rollback, release] = fixture.shas;
+    // More failed attempts of the newest commit than the candidate bound reads, then a successful
+    // rollback to an older release, then the release the loop last observed.
     const listed = [...Array.from({ length: deploymentListingSize + 5 }, (_, index) => ({ id: 100 + index, sha: release, ref: release, environment: 'graphyard / production' })),
+      { id: 3, sha: rollback, ref: rollback, environment: 'graphyard / production' },
       { id: 2, sha: old, ref: old, environment: 'graphyard / production' }];
     const statuses: string[] = [];
+    let unreadable: string | null = null;
     const run = (command: string, args: string[]) => {
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       if (args[1].includes('/deployments?')) return JSON.stringify(args[1].endsWith('page=1') ? listed : []);
       const status = /\/deployments\/(\d+)\/statuses/.exec(args[1]);
-      if (status) { statuses.push(status[1]); return JSON.stringify([{ state: status[1] === '2' ? 'success' : 'failure' }]); }
+      if (status) {
+        statuses.push(status[1]);
+        if (status[1] === unreadable) throw new Error('HTTP 502');
+        return JSON.stringify([{ state: ['2', '3'].includes(status[1]) ? 'success' : 'failure' }]);
+      }
       throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
     };
     const configured = config(fixture.token, { run: { productionEnvironment: 'graphyard / production' } });
-    const first = await observeDeployment(configured, fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
-    assert.equal(first.source, 'unavailable', 'with no release observed before, the bound leaves nothing to stand on');
-    assert.equal(statuses.length, deploymentListingSize);
     const retained = { release: old, settled: { 'GY-1': old } };
-    const later = await observeDeployment(configured, fixture.delivered, run, fetch, () => clock, { root: fixture.checkout, retained });
-    assert.equal(later.source, 'github-deployment');
-    assert.equal(later.sha, old, 'production still serves the release last observed');
-    assert.ok(later.deployed.includes('GY-1'), 'already-live deliveries stay deployed');
-    assert.ok(!later.deployed.includes(fixture.delivered[2].key), 'the failed release\'s delivery is not deployed');
-    assert.match(later.reason!, /none of the 20 newest graphyard \/ production deployment attempt\(s\).*still serve/);
-    assert.ok(later.requests! <= maxDeploymentRequests);
+    const bounded = await observeDeployment(configured, fixture.delivered, run, fetch, () => clock, { root: fixture.checkout, retained });
+    assert.equal(bounded.source, 'unavailable', 'the rollback past the bound is unread, so the retained release is not asserted');
+    assert.equal(bounded.sha, null);
+    assert.deepEqual(bounded.deployed, []);
+    assert.equal(statuses.length, deploymentListingSize);
+    assert.match(bounded.reason!, /None of the 20 newest graphyard \/ production deployment attempt\(s\).*past the 20-attempt read bound/);
+    assert.ok(bounded.requests! <= maxDeploymentRequests);
+    // An unreadable status may be the newest success: nothing older is taken past it.
+    statuses.length = 0; unreadable = '101';
+    const short = [listed[0], listed[1], listed.at(-2)!, listed.at(-1)!];
+    const shortRun = (command: string, args: string[]) => args[1]?.includes('/deployments?') ? JSON.stringify(args[1].endsWith('page=1') ? short : []) : run(command, args);
+    const blind = await observeDeployment(configured, fixture.delivered, shortRun, fetch, () => clock, { root: fixture.checkout, retained });
+    assert.equal(blind.source, 'unavailable');
+    assert.match(blind.reason!, /status of graphyard \/ production deployment 101 could not be read/);
+    assert.deepEqual(statuses, ['100', '101'], 'no older release is read past the unreadable one');
+    // With every attempt readable, the successful rollback is the release, not the retained one.
+    statuses.length = 0; unreadable = null;
+    const served = await observeDeployment(configured, fixture.delivered, shortRun, fetch, () => clock, { root: fixture.checkout, retained });
+    assert.equal(served.sha, rollback);
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
 

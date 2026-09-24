@@ -2442,7 +2442,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   let requests = 0;
   const unavailable = (reason: string): DeploymentObservation => ({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key), requests, derived: 0, retained: 0, containment: options.retained ?? null });
   if (!delivered.length) return { source: 'unavailable', sha: null, at, reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [], requests, derived: 0, retained: 0, containment: options.retained ?? null };
-  let sha: string | null = null, source: DeploymentObservation['source'] = 'unavailable', fallback: string | null = null;
+  let sha: string | null = null, source: DeploymentObservation['source'] = 'unavailable';
   if (config.run.deploymentUrl) {
     let payload: any;
     try {
@@ -2496,20 +2496,20 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
         candidates++;
         let statuses: any[];
         requests++;
+        // An attempt whose status cannot be read may be the newest success, so no older release is
+        // taken past it: the observation is unavailable, and every delivery stays pending.
         try { statuses = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
-        catch { continue; }
-        if (Array.isArray(statuses) && statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
+        catch (error) { return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves: ${message(error)}`); }
+        if (!Array.isArray(statuses)) return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves`);
+        if (statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
       }
     }
     if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
-    // Failed, pending and unreadable production attempts each cost a status read, so a run of them
-    // newer than the release production still serves can use up the bound before it is reached.
-    // Production then still serves the last release this loop saw succeed (a newer success, a
-    // rollback included, would have been among the attempts read), and its containment stands.
-    if (!sha && candidates && options.retained?.release) {
-      sha = options.retained.release; source = 'github-deployment';
-      fallback = `none of the ${candidates} newest ${production} deployment attempt(s) of the managed base branch reports a successful status, so production is taken to still serve ${sha.slice(0, 12)}, the last release observed`;
-    }
+    // Failed and pending production attempts each cost a status read, so a run of them newer than
+    // the release production serves can use up the bound before it is reached. What lies past the
+    // bound is unread — a rollback to an older release included — so no release is asserted, the
+    // last one observed neither: the observation is unavailable and says why.
+    if (!sha && candidates >= deploymentListingSize) return unavailable(`None of the ${candidates} newest ${production} deployment attempt(s) of the managed base branch reports a successful status, and older ones are past the ${deploymentListingSize}-attempt read bound, so the release production serves is not known`);
     if (!sha) return unavailable(`No GitHub deployment of the managed base branch to the ${production} environment reports a successful status${namesake.size
       ? `; deployments to ${[...namesake].map(name => `'${name}'`).join(', ')} are not the '${production}' environment — name the one production serves with graphyard master config productionEnvironment='${[...namesake][0]}' (or GRAPHYARD_PRODUCTION_ENVIRONMENT)`
       : ''}`);
@@ -2536,8 +2536,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   // A base branch this checkout could not fetch is said out loud: containment was then derived
   // from whatever objects are here, and a delivery git could not place stays pending, never deployed.
   const stale = ancestry.fetchFailure;
-  const reason = [fallback, stale ? `Containment was derived without a fresh base branch: ${stale}` : null].filter(Boolean).join('; ').slice(0, 500) || null;
-  return deploymentObservationSchema.parse({ source, sha, at, reason, deployed: deployed.slice(-200), pending: pending.slice(-200),
+  return deploymentObservationSchema.parse({ source, sha, at, reason: stale ? `Containment was derived without a fresh base branch: ${stale}` : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
     requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
 }
 
