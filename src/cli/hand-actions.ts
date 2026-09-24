@@ -193,14 +193,20 @@ export function assertHandReview(work: Work, sessions: ReviewSession[], failures
  * race with the executor. Returns `claimBy`, the local instant after which the hand launch must not
  * claim the lease because the backed-off dispatch row is about to be offered to the executor again;
  * undefined when no row is backing off.
+ *
+ * `now` is the snapshot's control-plane clock and `requestedAt` the local instant the snapshot was
+ * requested, taken before it was read. Every local instant spent since — the snapshot's transit,
+ * the events read — is added to `now` before the race is judged, and the deadline is carried from
+ * `requestedAt`, so a slow read only ever brings the refusal and the deadline earlier, never later.
  */
-export async function assertHandDispatch(work: Work, now: string, intervalSeconds: number, read: (path: string) => Promise<any>): Promise<{ claimBy?: number }> {
+export async function assertHandDispatch(work: Work, now: string, intervalSeconds: number, read: (path: string) => Promise<any>, requestedAt = Date.now()): Promise<{ claimBy?: number }> {
   assertHandAction(work, 'dispatch');
   const events: { created_at?: string }[] = await read(releaseEventsPath(work));
   const releasedAt = events[0]?.created_at ? new Date(events[0].created_at).toISOString() : null;
-  const refusal = dispatchRaceRefusal(work, new Date(now), { intervalMs: intervalSeconds * 1000, releasedAt });
+  const snapshotAt = Date.parse(now), judgedAt = new Date(snapshotAt + Math.max(0, Date.now() - requestedAt));
+  const refusal = dispatchRaceRefusal(work, judgedAt, { intervalMs: intervalSeconds * 1000, releasedAt });
   if (refusal) throw new Error(refusal);
-  const retryAt = dispatchRetryAt(work, new Date(now));
-  // The row's backoff is on the control plane's clock; the deadline is carried onto this host's.
-  return retryAt === null ? {} : { claimBy: Date.now() + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs };
+  const retryAt = dispatchRetryAt(work, judgedAt);
+  // The row's backoff is on the control plane's clock; the deadline is carried onto this host's from before the snapshot was read.
+  return retryAt === null ? {} : { claimBy: requestedAt + (retryAt - snapshotAt) - handDispatchClaimMarginMs };
 }

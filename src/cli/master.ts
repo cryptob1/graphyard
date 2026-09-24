@@ -191,11 +191,11 @@ export const masterCommands = defineCommands([
       if (id === 'dispatch') {
         const { values, positionals } = parseArgs({ args, options: { 'allow-overlap': { type: 'boolean' } }, allowPositionals: true });
         if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE [--allow-overlap]');
-        const snapshot = await masterApi('work-snapshot');
+        const requestedAt = Date.now(), snapshot = await masterApi('work-snapshot');
         const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
         const profile = master.workers.find(item => item.name === positionals[1]);
         if (!work) throw new Error(`Unknown work item ${positionals[0]}`);
-        const { claimBy } = await assertHandDispatch(work, snapshot.now, master.run.dispatchIntervalSeconds, path => masterApi(path));
+        const { claimBy } = await assertHandDispatch(work, snapshot.now, master.run.dispatchIntervalSeconds, path => masterApi(path), requestedAt);
         if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
         const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
         if (profile.credentialFile) {

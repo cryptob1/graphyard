@@ -24,7 +24,7 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except recovery the loop stopped relaunching, unproduced `manual:` attestations, and `decide merge` of an unauthorized merge or without an operator agent. Hand `dispatch` waits out a live or just-released one.
+The loop drives every item. Unless created `"systemDriven": false`, one refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of an unauthorized merge or without an operator agent. Hand `dispatch` waits out a live or just-released one.
 
 ### Session liveness is reconciled, not trusted
 

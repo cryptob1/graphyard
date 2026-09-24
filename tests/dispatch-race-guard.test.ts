@@ -285,10 +285,12 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
 test('unit:dispatch-race-guard a hand launch through a long backoff claims nothing once the backoff is about to end', async () => {
   const now = iso(), retryAt = Date.parse(now) + handDispatchFenceMs + 60_000;
   const backedOff = item({ systemDriven: false, actionQueue: { actions: [dispatchRow({ attempts: 2, retryAt: new Date(retryAt).toISOString() })], history: [] } });
-  const before = Date.now();
-  const { claimBy } = await assertHandDispatch(backedOff, now, 10, async () => []);
-  // The deadline is the row's retryAt carried onto this host's clock, less the claim's headroom.
-  assert.ok(claimBy! >= before + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs && claimBy! <= Date.now() + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs);
+  const requestedAt = Date.now() - 5_000;
+  const { claimBy } = await assertHandDispatch(backedOff, now, 10, async () => [], requestedAt);
+  // The deadline is the row's retryAt carried onto this host's clock from before the snapshot was read, less the claim's headroom.
+  assert.equal(claimBy, requestedAt + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs);
+  // Time spent reading after the snapshot is counted against the backoff: 61s gone brings its end inside the fence, and the hand dispatch is refused.
+  await assert.rejects(assertHandDispatch(backedOff, now, 10, async () => [], Date.now() - 61_000), /is in a failure backoff that ends at .*master dispatch is refused/);
   assert.deepEqual(await assertHandDispatch(item({ systemDriven: false }), now, 10, async () => []), {}, 'no backoff, no deadline');
   const master = await masterHarness({ work: [backedOff] });
   try {
@@ -364,5 +366,9 @@ test('unit:system-driven-items the master\'s own next steps name the loop step f
   // The AGENTS.md master block routes merges of system-driven items to the loop and keeps the hand commands for the opt-out.
   const block = managedMasterInstructions('').replace(/\s+/g, ' ');
   assert.match(block, /Items are system-driven unless created with `"systemDriven": false`: for them `graphyard master run` dispatches, launches review and proof producers, requests merge decisions and performs the guarded merge/);
-  assert.match(block, /which the loop requests for a system-driven item; for an item with `"systemDriven": false` request it with `graphyard master decide GY-N merge`/);
+  // An opted-out item is still driven by the loop: the instructions allow the hand commands in addition, never instead.
+  assert.match(block, /The loop drives an item created `"systemDriven": false` the same way; opting out only also allows the hand actions/);
+  assert.match(block, /a hand `graphyard master decide GY-N merge` is only for an opted-out item the loop has not requested it for/);
+  assert.doesNotMatch(workAttentionOwner(item({ systemDriven: true }), 'launch-review').next, /then graphyard master review GY-7$/);
+  assert.equal(workAttentionOwner(item({ systemDriven: false }), 'launch-review').next, 'Fix the refusal reason, then graphyard master review GY-7');
 });
