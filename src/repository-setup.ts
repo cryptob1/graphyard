@@ -558,6 +558,10 @@ async function resolvedInstall(worktree: string): Promise<string | null> {
   }
 }
 
+function parseJson(text: string): any {
+  try { return JSON.parse(text); } catch (error) { return error instanceof Error ? error : new Error(String(error)); }
+}
+
 export type DependencyInstaller = (cwd: string, signal?: AbortSignal) => Promise<void>;
 /** `npm ci` in the worktree, its output on stderr so a caller's JSON on stdout stays whole. */
 export const npmCi: DependencyInstaller = (cwd, signal) => new Promise((done, fail) => {
@@ -578,10 +582,14 @@ export interface WorktreeDependencyReport { state: 'current' | 'installed' | 'fa
 export async function ensureWorktreeDependencies(worktree: string, install: DependencyInstaller = npmCi, signal?: AbortSignal): Promise<WorktreeDependencyReport> {
   const text = await readFile(resolve(worktree, 'package-lock.json'), 'utf8').catch(() => null);
   if (text === null) return { state: 'none', install: null, reason: 'The checkout has no package-lock.json; nothing is installed for it' };
-  const lockfile = JSON.parse(text);
+  const lockfile = parseJson(text);
+  if (lockfile instanceof Error) return { state: 'failed', install: null, reason: `The checkout's package-lock.json cannot be parsed (${lockfile.message}); nothing was installed for it` };
   const current = await resolvedInstall(worktree);
-  const installed = current ? JSON.parse(await readFile(resolve(current, '.package-lock.json'), 'utf8').catch(() => 'null')) : null;
-  const matches = current ? installMatchesLockfile(lockfile, installed) : `no node_modules is reachable from ${worktree}`;
+  // A hidden lockfile an interrupted install left truncated is a mismatched install: npm ci replaces it.
+  const installed = current ? parseJson(await readFile(resolve(current, '.package-lock.json'), 'utf8').catch(() => 'null')) : null;
+  const matches = !current ? `no node_modules is reachable from ${worktree}`
+    : installed instanceof Error ? `the install's hidden lockfile (${resolve(current, '.package-lock.json')}) is unreadable: ${installed.message}`
+    : installMatchesLockfile(lockfile, installed);
   if (matches === true) return { state: 'current', install: current, reason: `${current} was installed from this package-lock.json` };
   const own = resolve(worktree, 'node_modules');
   signal?.throwIfAborted();

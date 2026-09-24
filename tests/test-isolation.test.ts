@@ -145,6 +145,19 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.equal((await ensureWorktreeDependencies(worktree, installer)).state, 'current', 'the worktree\'s own matching install is kept');
     assert.equal(installs.length, 1);
 
+    // A hidden lockfile an interrupted install left truncated is reinstalled, not thrown on.
+    await writeFile(join(worktree, 'node_modules', '.package-lock.json'), '{"packages": {"node_modules/left-');
+    const truncated = await ensureWorktreeDependencies(worktree, installer);
+    assert.equal(truncated.state, 'installed', truncated.reason);
+    assert.match(truncated.reason, /hidden lockfile .* is unreadable/);
+    assert.equal(installs.length, 2);
+    // The checkout's own unparsable package-lock.json is reported, not thrown, and installs nothing.
+    await writeFile(join(worktree, 'package-lock.json'), '{"lockfileVersion": 3,');
+    const unparsable = await ensureWorktreeDependencies(worktree, installer);
+    assert.equal(unparsable.state, 'failed'); assert.match(unparsable.reason, /package-lock\.json cannot be parsed/);
+    assert.equal(installs.length, 2);
+    await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(lock('2.0.0')));
+
     assert.equal(installMatchesLockfile(lock('1.0.0'), { packages: {} }), 'node_modules/left-pad is named by package-lock.json but not installed');
     assert.equal(installMatchesLockfile(lock('1.0.0'), null), 'the install records no hidden lockfile (node_modules/.package-lock.json)');
 
