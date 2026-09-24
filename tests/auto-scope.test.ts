@@ -10,7 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
-import { emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, answeringWidening, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
+import { actionDetailMax, emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, answeringWidening, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
@@ -124,7 +124,7 @@ test('integration:auto-scope-approval — the loop decides an implied additive r
   assert.equal(action.state, 'done');
   assert.equal(action.work, work.key);
   assert.equal(action.principal, implementer.id);
-  assert.match(action.detail, new RegExp(`Widened ${work.key} with ${theme.replace(/\./g, '\\.')}, docs/widget\\.md`));
+  assert.match(action.detail, new RegExp(`Widened ${work.key} with 2 files \\(${theme.replace(/\./g, '\\.')}, docs/widget\\.md\\)`));
   assert.match(action.detail, /AC-2 names src\/widget\/Theme\.ts/);
   assert.match(action.detail, /docs\/ is documentation this repository requires updating/);
   assert.ok(result.actions.some(entry => entry.kind === 'scope' && entry.state === 'done'), 'the cycle reports the decision it took');
@@ -436,6 +436,24 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.deepEqual(widened.at(-1)!.paths, ['src/cli/queue-status.ts'], 'only the uncovered path is widened');
   assert.ok(partial.plannedFiles.includes('src/cli/queue-status.ts'), `widened: ${partial.plannedFiles}`);
   assert.equal(partial.scopeRequest, null);
+
+  // A request at the bounds a scope request allows — 50 paths of 500 characters — that a finding names
+  // in full is widened, and its record is bounded: the widening already happened, so recording it
+  // must not fail and leave the request to be escalated as though nothing were widened.
+  let many = await claimed('finding names many long paths');
+  const long = Array.from({ length: 50 }, (_, index) => `src/${String(index).padStart(2, '0')}-${'x'.repeat(480)}.ts`);
+  await request(many, { paths: long, reason: 'The reviewer finding names every one of these files' });
+  const manyEffects: Partial<DaemonEffects> = { ...overrides, basePaths: async paths => new Set(paths), reviewFindings: async () => [{ ground: 'review thread PRRT_many05', text: long.join(' and ') }] };
+  await cycle(state, manyEffects);
+  many = await reload(many.id);
+  assert.ok(long.every(path => many.plannedFiles.includes(path)), 'every named path is widened');
+  assert.equal(many.scopeRequest, null);
+  const recorded = Object.entries(state.actions).filter(([key]) => key.includes(many.id));
+  assert.ok(recorded.every(([, action]) => action.detail.length <= actionDetailMax), 'every action detail is within its bound');
+  const widenedMany = recorded.find(([key]) => key.includes(':finding:'))![1];
+  assert.equal(widenedMany.state, 'done', widenedMany.detail);
+  assert.match(widenedMany.detail, new RegExp(`^Widened ${many.key} with 50 files \\(src/00-x+…, src/01-x+… and 48 more\\) on the review finding that names them: src/00-`));
+  assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${many.id}`)), 'a widened request is not escalated');
 
   // A file the base lacks is a creation: however plainly a finding asks for it, the loop never grants
   // it, and it stays refused and escalated to the master.

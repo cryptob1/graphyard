@@ -39,12 +39,14 @@ import { probeSupervisorAbsence } from './containment-probe.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
+/** The most an action's detail may carry: daemonActionSchema's bound, which record() enforces. */
+export const actionDetailMax = 2000;
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
   work: z.string().nullable().default(null),
   principal: z.string().nullable().default(null),
   state: z.enum(['started', 'done', 'failed', 'indeterminate']),
-  detail: z.string().max(2000),
+  detail: z.string().max(actionDetailMax),
   attempts: z.number().int().min(0).max(1000).default(1),
   // The item's attempt epoch when the action started. A dispatch that lands always advances it,
   // which is what separates a landed assignment from a submission left over from an earlier one.
@@ -775,6 +777,27 @@ export function fitDecisionReason(prefix: string, grounds: string, suffix: strin
   const room = decisionReasonMax - prefix.length - suffix.length;
   return prefix + (grounds.length <= room ? grounds : `${grounds.slice(0, Math.max(0, room - 1))}…`) + suffix;
 }
+/**
+ * An action detail within its bound. A scope request carries up to 50 paths of up to 500 characters,
+ * so a detail that lists them — or quotes an error that does — is cut, never left to fail record()
+ * after the action it records has already happened.
+ */
+export function boundDetail(detail: string, max = actionDetailMax): string {
+  return detail.length <= max ? detail : `${detail.slice(0, max - 1)}…`;
+}
+/** Paths named in a detail: every one while short, else the first few and a count of the rest. */
+export function namePaths(paths: readonly string[], room = 600): string {
+  const named: string[] = [];
+  let used = 0;
+  for (const path of paths) {
+    const text = path.length > 200 ? `${path.slice(0, 199)}…` : path;
+    if (named.length && used + text.length + 2 > room) break;
+    named.push(text);
+    used += text.length + 2;
+  }
+  const more = paths.length - named.length;
+  return `${paths.length} file${paths.length === 1 ? '' : 's'} (${named.join(', ')}${more ? ` and ${more} more` : ''})`;
+}
 /** The least of its own grounds a rework request keeps beside the refusals it cites; below it the request would not say why. */
 export const reworkGroundsMin = 160;
 /**
@@ -895,7 +918,7 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     try { assertDispatchable(item, work, new Date(now).toISOString()); add('dispatch', item, `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
     if (request && (!request.decision || redecidableScopeRefusal(item)) && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
-      add('scope', item, `${item.key}: ${request.requestedBy} is waiting for a decision on ${request.paths.join(', ')}`);
+      add('scope', item, boundDetail(`${item.key}: ${request.requestedBy} is waiting for a decision on ${namePaths(request.paths, 300)}`, 500));
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed') add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
     if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
     if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} is waiting for the control plane to bring its candidate onto the moved base`);
@@ -1693,7 +1716,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
       const scoped = findingScope(paths, findings, path => existing.has(path));
       if ('refusal' in scoped) {
-        const detail = `Not widened on a review finding: ${scoped.refusal}`;
+        const detail = boundDetail(`Not widened on a review finding: ${scoped.refusal}`);
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
         // An unchanged refusal is the same decision read again, not a new action.
         if (judged && previous.detail !== detail) performed.push(entry);
@@ -1703,10 +1726,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
         `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       await effects.widenScope(item, request, paths, reason);
-      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: `Widened ${item.key} with ${paths.join(', ')} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return true;
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: `Could not widen ${item.key} on a review finding: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return false;
     }
   };
@@ -1724,7 +1747,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!readyToRetry(previous, state.cycle)) continue;
     const attempts = (previous?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'started',
-      detail: `Deciding ${item.key}'s scope request for ${request.paths.join(', ') || 'no path'}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      detail: `Deciding ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'}`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
       const decided = await effects.decideScope(item);
       const decision = decided.scopeDecision;
@@ -1733,20 +1756,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: decision.at, waitedMs: decision.waitedMs, state: decision.state }));
       const waited = `${Math.round(decision.waitedMs / 1000)}s after ${request.requestedBy} asked`;
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
-        detail: decision.state === 'approved'
-          ? `Widened ${item.key} with ${request.paths.join(', ')} ${waited}: ${decision.reason}`
-          : `Refused ${item.key}'s scope request for ${request.paths.join(', ') || 'no path'} ${waited}: ${decision.reason}`,
+        detail: boundDetail(decision.state === 'approved'
+          ? `Widened ${item.key} with ${namePaths(request.paths)} ${waited}: ${decision.reason}`
+          : `Refused ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'} ${waited}: ${decision.reason}`),
         attempts, cycle: state.cycle }, now(), effects.persist));
       if (decision.state === 'refused' && await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision })) continue;
       if (decision.state === 'refused') {
         const escalationKey = `escalation:scope:${item.id}:${request.at}`;
         performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
-          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.join(', ') || 'a requirements change'} because ${request.reason}, and the loop refused it because ${decision.reason}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
+          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.length ? namePaths(request.paths) : 'a requirements change'} because ${boundDetail(request.reason, 400)}, and the loop refused it because ${boundDetail(decision.reason, 500)}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
           attempts: 1, cycle: state.cycle }, now(), effects.persist));
       }
     } catch (error) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed',
-        detail: `Could not decide ${item.key}'s scope request: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+        detail: boundDetail(`Could not decide ${item.key}'s scope request: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
 
