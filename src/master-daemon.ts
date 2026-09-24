@@ -11,7 +11,7 @@ import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, s
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { baseRefreshConflict, pendingBaseRefresh, unresolvedThreadRefusal } from './merge-queue.js';
+import { baseRefreshConflict, blockingThreads, pendingBaseRefresh, unresolvedThreadRefusal } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
@@ -710,6 +710,12 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
   return stopped.stopped ? { ...needed, reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
 }
 /** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
+/** Whether the current head already carries its review: an observed approval of it, or no review required. */
+function headReviewed(work: Work) {
+  if (!work.policy.review) return true;
+  const candidate = work.candidate, observation = work.observation;
+  return !!candidate && !!observation && observation.candidate.sha === candidate.sha && observation.reviews.some(review => review.sha === candidate.sha && review.state === 'APPROVED');
+}
 function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
@@ -719,13 +725,20 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   // and the engine's `rework` does not clear it: once the round is requested the item needs a
   // worker, not a second decision, even when that round's worker dies before pushing.
   const conflict = work.reworkRequested ? null : baseRefreshConflict(work);
-  if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: work.candidate!.sha };
+  // A rework binding names its grounds as well as the head: a refused request on one ground (the
+  // approver judged it premature) must not bar the same head's rework on another. On 2026-09-24
+  // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
+  // requested changes, and the loop never asked again because both keyed on the head alone.
+  if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
   const verdict = standingVerdict(work);
-  if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: work.candidate!.sha };
+  if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
-  // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a human.
-  const threads = !work.reworkRequested && work.candidate ? unresolvedThreadRefusal(work) : null;
-  if (threads) return { action: 'rework', reason: `${work.key}: ${threads}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`, binding: work.candidate!.sha };
+  // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a
+  // human. Only once the current head is approved: until then its reviewer judges each thread, and
+  // the loop resolves the ones the approval vouches for; asking earlier is premature.
+  const threads = !work.reworkRequested && work.candidate && headReviewed(work) ? unresolvedThreadRefusal(work) : null;
+  if (threads) return { action: 'rework', reason: `${work.key}: ${threads}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
+    binding: `${work.candidate!.sha}:threads:${blockingThreads(work).map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
 }

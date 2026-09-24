@@ -848,7 +848,7 @@ test('routine decisions rest on what the loop verified and are supervised to the
 
   // A loop killed between requesting a decision and recording it resumes to something it will
   // act on: requested again (and the standing request adopted), or supervised from its watch.
-  const interrupted = emptyDaemonState(master), key = decisionKey(reviewed, { action: 'rework', binding: sha });
+  const interrupted = emptyDaemonState(master), key = decisionKey(reviewed, routineDecision(reviewed, master, at)!);
   interrupted.actions[key] = { kind: 'decision', work: 'GY-700', principal: null, state: 'started', detail: 'Requesting the rework decision for GY-700', attempts: 1, epoch: 1, cycle: 3, at: verdictAt };
   assert.deepEqual(reconcilePendingActions(interrupted, [reviewed], at).map(action => action.state), ['failed']);
   interrupted.actions[key].state = 'started';

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { GitHub } from '../src/github.js';
-import { decisionKey, emptyDaemonState, githubPause, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, githubPause, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -116,7 +116,8 @@ test('unit:rework-records-its-observation — a rework request carries the time 
   assert.ok(decided[0].reason.includes(observedAt), `the decision carries the observation time: ${decided[0].reason}`);
   assert.ok(decided[0].reason.includes(reviewed), `the decision carries the observed candidate SHA: ${decided[0].reason}`);
   assert.match(decided[0].reason, /Decided from the GitHub observation taken at/);
-  const watch = state.approvals[decisionKey(item, { action: 'rework', binding: reviewed })];
+  // The watch is keyed by the head and the verdict it answers.
+  const watch = Object.entries(state.approvals).find(([key]) => key.includes(`:${reviewed}:verdict:`))![1];
   assert.deepEqual(watch.observation, { at: observedAt, sha: reviewed }, 'the loop keeps the same pair with the request');
   assert.ok(result.actions.some(action => action.kind === 'decision' && action.detail.includes(observedAt) && action.detail.includes(reviewed)));
 });
