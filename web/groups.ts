@@ -1,5 +1,6 @@
 import { deliveryState, isClosed, type Work } from '../src/model';
 import { parkedOnHuman, type HumanRequestRow } from '../src/model/human-request';
+import { shortShas } from './format';
 import { phaseOf, plainReason, plainStatus } from './plain-status';
 import { prSteps } from './pr-steps';
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
@@ -133,7 +134,7 @@ export const timedGroups: ReadonlySet<Group> = new Set(['moving', 'blocked']);
  * what they do, in plain words.
  */
 export function nextActor(work: Work, group: Group | null, now: number, release: ReleaseView = noRelease): { who: string; does: string } {
-  if (group === 'needs-you') return { who: 'You', does: work.humanRequest?.needed ?? 'Answer the decision it is waiting on' };
+  if (group === 'needs-you') return { who: 'You', does: work.humanRequest ? shortShas(work.humanRequest.needed) : 'Answer the decision it is waiting on' };
   if (group === 'backlog') {
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
     return dependency && work.ready ? { who: 'Nobody yet', does: plainReason(dependency, 'ready').text } : { who: 'Master agent', does: 'Release it for work when it is a priority' };

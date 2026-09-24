@@ -15,14 +15,14 @@ import { noRelease, releaseView } from '../web/release.js';
 import ShippedPage from '../web/pages/shipped.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
 import { jargon } from '../web/plain-status.js';
-import { formatAge } from '../web/duration.js';
+import { formatAge, formatDuration } from '../web/duration.js';
 import { primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
 import { endedItemIdleMs, workersView } from '../web/workers-view.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
-import InsightsFlow, { InsightsDetails, ReplayLane, readFlow } from '../web/pages/insights-flow.js';
+import InsightsFlow, { Headline, InsightsDetails, ReplayLane, readFlow } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
 import Sidebar from '../web/components/sidebar.js';
 import TopBar from '../web/components/top-bar.js';
@@ -1017,8 +1017,8 @@ test('GY-161 review: a step entered before the drill-down window still starts it
 
 // GY-168: the follow-ups from the browser review of GY-161's merge.
 
-/** Hex runs long enough to be a commit SHA (at least one letter, so a numeric id is not one). */
-const longHex = (text: string) => [...text.matchAll(/\b[0-9a-f]{9,}\b/gi)].map(match => match[0]).filter(hex => /[a-f]/i.test(hex));
+/** Hex runs long enough to be a commit SHA (at least one letter, so a numeric id is not one; a UUID's segments are not one either). */
+const longHex = (text: string) => [...text.replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, 'uuid').matchAll(/\b[0-9a-f]{9,}\b/gi)].map(match => match[0]).filter(hex => /[a-f]/i.test(hex));
 
 test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page text of the item page and every other page; only a title, link or copy action carries the whole SHA', () => {
   const head = '23d8dfbf674cbc8586cc98238acac9143a1765fa', base = '9c41be07d2f5a8e6b3c0d1f47e2a9b8c6d5e4f30', deployed = 'b7e1f0a2c3d4e5f60718293a4b5c6d7e8f901234';
@@ -1046,7 +1046,10 @@ test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page 
   const merged = { ...real[0], delivery: { ...real[0].delivery!, mergeSha: head } } as Work;
   const smoked = { ...real[1], policy: { ...real[1].policy, deploySmoke: true }, delivery: { ...real[1].delivery!, mergeSha: base,
     deployment: { sha: deployed, covers: 'descendant', source: 'railway', observedAt: at(hour), observer: 'master' } } } as unknown as Work;
-  const work = [...board().filter(item => item.id !== reviewing.id), loaded, merged, smoked, ...real.slice(2)];
+  // A parked item whose human-only request names commits, as its Needs-you card shows it on the item page.
+  const parkedOn = find('GY-20');
+  const asked = { ...parkedOn, humanRequest: { ...parkedOn.humanRequest!, reason: `The live proof of ${head} needs a paid plan`, needed: `A cloud account for ${base}` } } as Work;
+  const work = [...board().filter(item => ![reviewing.id, parkedOn.id].includes(item.id)), loaded, asked, merged, smoked, ...real.slice(2)];
   const status = { ...boardStatus(), production: { observedAt: at(0), serving: deployed, error: null, deployed: [merged.key], pending: [smoked.key], incidents: [] } };
   const d = dashboard({ work, status: status as any });
   // All rendered text, folded sections included; attributes (a title, a link, a copy action) are not text.
@@ -1056,6 +1059,8 @@ test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page 
     const page = markup(createElement(WorkDetails, { ...d, item }));
     assert.deepEqual(longHex(text(page)), [], `${item.key} item page text`);
   }
+  const askedText = text(markup(createElement(WorkDetails, { ...d, item: asked })));
+  assert.ok(askedText.includes(`The live proof of ${head.slice(0, 8)} needs a paid plan`) && askedText.includes(`A cloud account for ${base.slice(0, 8)}`), 'the Needs-you card shows the request in 8 characters');
   const itemText = text(markup(createElement(WorkDetails, { ...d, item: loaded })));
   for (const sha of [head, base]) assert.ok(itemText.includes(sha.slice(0, 8)), `${sha.slice(0, 8)} is shown`);
   assert.ok(!itemText.includes(head) && !itemText.includes(base));
@@ -1070,6 +1075,8 @@ test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page 
   for (const item of work) assert.deepEqual(longHex(text(markup(createElement(WorkCard, { item, now: NOW, onOpen: noop, release: releaseView(status) })))), [], `${item.key} card text`);
   // Numbers are not SHAs: a review or run id stays whole.
   assert.equal(shortShas(`review 5303188884 on ${head}`), `review 5303188884 on ${head.slice(0, 8)}`);
+  // A UUID names a record, not a commit, and stays whole.
+  assert.equal(shortShas(`overriding refused reconciliation 36fad33a-319f-488b-b94a-c25de44ee705 at ${base}`), `overriding refused reconciliation 36fad33a-319f-488b-b94a-c25de44ee705 at ${base.slice(0, 8)}`);
 });
 
 test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no tabs, in the design\'s order (headline numbers, Flow with Now and the 24-hour replay, landed per day beside where the time goes), the flow-analytics detail behind one collapsed Show details; Workers hides sessions not seen for over an hour on delivered or closed items behind a collapsed Ended group', async () => {
@@ -1099,6 +1106,11 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   const waiting = classify(d.work, NOW, d.status?.humanOnly, releaseView(d.status)).byGroup['needs-you'];
   assert.ok(waiting.length > 0);
   assert.match(page, new RegExp(`data-kpi="waiting-on-people"><span>Time waiting on people</span><strong>\\d[^<]*</strong><small>${waiting.length} items? waits? on you now</small>`));
+  // An item in Needs you through a human-only row waits from that request, not from when it entered its stage.
+  const requested = { ...waiting[0], humanRequest: null, stageEnteredAt: new Date(NOW - 10 * hour).toISOString() } as unknown as Work;
+  const asked = { id: requested.id, request: { at: new Date(NOW - 30 * 60_000).toISOString() } } as any;
+  const headline = markup(createElement(Headline, { shipped: 0, moving: 0, waiting: [requested], now: NOW, pulse: { pulse: null, unavailable: true, elapsed: 0, stale: true, refresh: noop } as any, requests: [asked] }));
+  assert.match(headline, new RegExp(`<strong>${formatDuration(30)}</strong><small>1 item waits on you now</small>`));
   // Show details: exactly one toggle on the page, collapsed, and nothing of the detail read or drawn until it opens.
   assert.equal(page.match(/Show details/g)?.length, 1, 'one Show details toggle');
   assert.match(page, /<details class="insight-details"><summary>Show details<\/summary><\/details>/, 'collapsed and empty until opened');
@@ -1131,6 +1143,8 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   // Over an hour unseen on a finished item: filed with the ended sessions, saying why.
   for (const id of ['d1', 'c1']) { assert.ok(!ids(view.running).includes(id), `${id} is not open`); assert.ok(ids(view.finished).includes(id), `${id} is ended`); }
   assert.equal(view.finished.find(row => row.id === 'd1')!.leftOn, 'delivered'); assert.equal(view.finished.find(row => row.id === 'c1')!.leftOn, 'closed');
+  // Its run time stops when it was last seen, not at the page clock.
+  for (const later of [NOW, NOW + 5 * hour]) assert.equal(workersView(work, new Date(later)).finished.find(row => row.id === 'd1')!.spentMs, hour);
   // Under an hour, or on an open item, it stays in the open table (marked stale, never live).
   for (const id of ['d2', 'o1', 's12']) assert.ok(ids(view.running).includes(id), `${id} stays open`);
   assert.equal(view.running.find(row => row.id === 'o1')!.leftOn, null);
@@ -1186,6 +1200,17 @@ test('unit:ui-shipped-strip-latest — the shipped strip names the most recently
     const page = strip(none);
     assert.deepEqual(latestOf(page), [newest.key, newest.key]); assert.equal(unreleased(page), 0);
   }
+  // A smoke-gated merge with no production observation is not claimed as not yet live either.
+  const smokeGated = { ...newest, policy: { ...newest.policy, deploySmoke: true }, delivery: { ...newest.delivery!, deployment: null } } as unknown as Work;
+  const gated = home(dashboard({ work: [...work.filter(item => item.id !== newest.id), smokeGated] }));
+  assert.equal(unreleased(gated.slice(gated.indexOf('aria-label="Shipped this week"'))), 0);
+  assert.doesNotMatch(gated, /not yet seen live/);
+  // A legacy delivery with no delivery record, dated from its observed merge, can be the latest.
+  const legacy = { ...real[2], id: 'legacy-merge', key: 'GY-9', title: 'A merge from before delivery records', delivery: null,
+    observation: { ...real[2].observation, mergedAt: new Date(NOW - 60_000).toISOString() } } as unknown as Work;
+  assert.ok(mergedAt(legacy) > mergedAt(newest));
+  const withLegacy = home(dashboard({ work: [...work, legacy] }));
+  assert.deepEqual(latestOf(withLegacy.slice(withLegacy.indexOf('aria-label="Shipped this week"'))), ['GY-9', 'GY-9']);
   // A closed item never counts as a merge, even the newest.
   const closed = { ...newest, closure: { kind: 'obsolete', ref: null, reason: 'Reverted', by: 'operator', at: new Date(NOW).toISOString(), from: 'merge' } } as unknown as Work;
   const withClosed = home(dashboard({ work: [...work.filter(item => item.id !== newest.id), closed] }));

@@ -8,6 +8,7 @@ import { readStepRows } from '../step-moves';
 import { ShippingPulse, usePulse, type PulseRead } from '../shipping-pulse';
 import FlowAnalytics from '../flow-analytics';
 import type { Work } from '../../src/model';
+import type { HumanRequestRow } from '../../src/model/human-request';
 import type { Dashboard } from './dashboard';
 
 const column = (step: StepId) => `${(stepIds.indexOf(step) + 0.5) / stepIds.length * 100}%`;
@@ -46,13 +47,19 @@ export function ReplayLane({ frames, t }: { frames: ReplayFrame[]; t: number }) 
  * the time the items waiting on people have waited so far. An unmeasured figure reads
  * Unavailable, never zero.
  */
-export function Headline({ shipped, moving, waiting, now, pulse }: { shipped: number; moving: number; waiting: Work[]; now: number; pulse: PulseRead }) {
+export function Headline({ shipped, moving, waiting, now, pulse, requests }: { shipped: number; moving: number; waiting: Work[]; now: number; pulse: PulseRead; requests?: HumanRequestRow[] | null }) {
   const production = pulse.pulse?.prToProduction;
   const live = !pulse.pulse ? (pulse.unavailable ? 'Unavailable' : '…')
     : production!.configured === false || production!.medianHours === null ? 'Unavailable' : formatDuration(production!.medianHours * 60);
   const liveNote = !pulse.pulse ? (pulse.unavailable ? 'the shipping pulse could not be read' : 'reading the shipping pulse')
     : production!.configured === false ? 'no production observation is recorded' : `pull request to production · ${production!.sampleSize} of ${production!.eligible} measured`;
-  const waited = waiting.reduce((total, item) => total + Math.max(0, now - Date.parse(item.humanRequest?.at ?? item.stageEnteredAt)), 0);
+  // An item waits from when it was asked: its oldest open human-only row (status `humanOnly`),
+  // else its own parked request; its stage clock only when neither says.
+  const asked = (item: Work) => {
+    const rows = (requests ?? []).filter(row => row.id === item.id).map(row => Date.parse(row.request.at)).filter(Number.isFinite);
+    return rows.length ? Math.min(...rows) : Date.parse(item.humanRequest?.at ?? item.stageEnteredAt);
+  };
+  const waited = waiting.reduce((total, item) => total + Math.max(0, now - asked(item)), 0);
   return <section className="insight-kpis" aria-label="Headline numbers">
     <div className="kpi" data-kpi="shipped"><span>Shipped</span><strong>{shipped}</strong><small>seen live this week</small></div>
     <div className="kpi" data-kpi="start-to-live"><span>Start to live, median</span><strong>{live}</strong><small>{liveNote}</small></div>
@@ -140,7 +147,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
   const peak = Math.max(1, ...landed.map(day => day.delivered));
   return <>
     <div className="page-heading"><div><h1>Insights</h1><p className="summary">How work moves from build to live. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
-    <Headline shipped={shippedThisWeek(work, now, release).length} moving={byGroup.moving.length} waiting={byGroup['needs-you']} now={now} pulse={pulse}/>
+    <Headline shipped={shippedThisWeek(work, now, release).length} moving={byGroup.moving.length} waiting={byGroup['needs-you']} now={now} pulse={pulse} requests={status?.humanOnly}/>
     {error && <p className="notice" role="status">The recorded history could not be read: {error}. The Now view below is live.</p>}
     <section className="flow-panel" aria-label="Flow">
       <div className="flow-subhead flow-title"><h2>Flow</h2><span>Build to live, one column per step.</span></div>

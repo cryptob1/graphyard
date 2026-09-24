@@ -33,12 +33,14 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const recent = shippedThisWeek(work, now, release);
   // The latest is the newest merge: most real deliveries carry no release record, so ordering by
-  // release would name an old item, or none.
-  const merged = work.filter(w => w.stage === 'done' && !isClosed(w) && !!w.delivery && Number.isFinite(mergedAt(w)));
+  // release would name an old item, or none. A legacy delivery with no delivery record is dated
+  // from its observed merge (`mergedAt`), so it counts too.
+  const merged = work.filter(w => w.stage === 'done' && !isClosed(w) && !!(w.delivery?.mergedAt ?? w.observation?.mergedAt) && Number.isFinite(mergedAt(w)));
   const latest = merged.length ? merged.reduce((newest, w) => mergedAt(w) > mergedAt(newest) ? w : newest) : null;
   // Merged this week but not yet seen live, as the production observation says, whatever its group:
-  // a merge the production watch reports pending or failed, or merged after its last pass.
-  const unreleased = merged.filter(w => now - mergedAt(w) <= week && leftFlowAt(w, release) === null).length;
+  // a merge the production watch reports pending or failed, or merged after its last pass. With no
+  // production observation nothing is claimed: a smoke-gated merge is not "not live" by default.
+  const unreleased = release.observedAt === null ? 0 : merged.filter(w => now - mergedAt(w) <= week && leftFlowAt(w, release) === null).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>

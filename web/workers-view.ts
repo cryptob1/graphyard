@@ -132,9 +132,10 @@ const parsed = (iso: string | null) => { const at = Date.parse(iso ?? ''); retur
 /** One handle as a tab row: how long it has spent, its two attach forms, and whether it is stale or was reconciled. */
 export function workerRow(work: Pick<Work, 'id' | 'key'> & Partial<Pick<Work, 'stage' | 'closure'>>, handle: SessionHandle, now: Date, thresholdMs = sessionStaleThresholdMs): WorkerRow {
   const startedAt = parsed(handle.startedAt) ?? now.getTime();
-  const endedAt = handle.state === 'running' ? now.getTime() : parsed(handle.endedAt) ?? parsed(handle.updatedAt) ?? startedAt;
   const stale = staleSession(handle, now, thresholdMs);
   const leftOn = stale && stale.idleMs > endedItemIdleMs && work.stage === 'done' ? work.closure ? 'closed' : 'delivered' : null;
+  // A session left on a finished item stopped counting when it was last seen, not at the page clock.
+  const endedAt = handle.state === 'running' && !leftOn ? now.getTime() : parsed(handle.endedAt) ?? parsed(handle.updatedAt) ?? startedAt;
   return { ...handle, workId: work.id, key: work.key, roleKind: sessionRoleKind(handle), spentMs: Math.max(0, endedAt - startedAt),
     local: localAttachCommand(handle), remote: remoteAttachCommand(handle),
     stale, reconciled: reconciledClosure(handle), leftOn };
