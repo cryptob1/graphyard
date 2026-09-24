@@ -78,11 +78,11 @@ export const namesPath = (text: string, path: string) => new RegExp(`(^|[^A-Za-z
 const fileToken = /[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\/[A-Za-z0-9_./-]*|\.[A-Za-z][A-Za-z0-9]{0,7})/g;
 const creationVerb = /\b(create[sd]?|creating|add(?:s|ed|ing)?|new file|introduce[sd]?|introducing)\b/gi;
 // A negation governing a creation verb: "do not create", "src/a.ts should not be added", "no new
-// file", "adding src/a.ts is not needed". It reaches back to the nearest comma, colon or conjunction
-// before the verb and on to the next one after it, so "don't change src/a.ts, but add src/b.ts" and
-// "add src/b.ts, not src/a.ts" still ask for src/b.ts. File names are masked first: `src/not.ts`
-// names a file, it negates nothing.
-const negation = /\b(?:not|never|no|without|avoid(?:s|ing)?|instead of|rather than|unnecessary|unneeded)\b|n[’']t\b/i;
+// file", "adding src/a.ts is not needed", "we cannot create src/a.ts". It reaches back to the nearest
+// comma, colon or conjunction before the verb and on to the next one after it, so "don't change
+// src/a.ts, but add src/b.ts" and "add src/b.ts, not src/a.ts" still ask for src/b.ts. File names
+// are masked first: `src/not.ts` names a file, it negates nothing.
+const negation = /\b(?:not|cannot|never|no|without|avoid(?:s|ing)?|instead of|rather than|unnecessary|unneeded)\b|n[’']t\b/i;
 const boundary = /[,:]|\b(?:but|and|then|so)\b/i;
 const negated = (clause: string, at: number, end: number) => {
   const masked = clause.replace(fileToken, name => ' '.repeat(name.length));

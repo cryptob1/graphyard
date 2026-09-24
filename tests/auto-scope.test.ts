@@ -481,7 +481,8 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   // A negated creation verb forbids the very file it names.
   for (const text of ['Do not create src/missing.ts; update src/merge-queue.ts instead', "Don't add src/missing.ts", 'src/missing.ts should not be added', 'Never introduce src/missing.ts',
     'No need to create src/missing.ts', "You shouldn't create src/missing.ts here", 'Fix src/merge-queue.ts without adding src/missing.ts',
-    'Adding src/missing.ts is not needed; update src/merge-queue.ts instead', 'Creating src/missing.ts is unnecessary', "Adding src/missing.ts isn't the fix"])
+    'Adding src/missing.ts is not needed; update src/merge-queue.ts instead', 'Creating src/missing.ts is unnecessary', "Adding src/missing.ts isn't the fix",
+    'We cannot create src/missing.ts; update src/merge-queue.ts instead', 'src/missing.ts cannot be added'])
     assert.match((elsewhere(text) as { refusal: string }).refusal, /does not ask for it to be created/, text);
   assert.deepEqual(elsewhere("Don't change src/merge-queue.ts, but add src/missing.ts"), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, 'a negation of another verb does not reach past the conjunction');
   assert.deepEqual(elsewhere('Add src/missing.ts, not a second copy in src/merge-queue.ts'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, 'a negation after the verb stops at the comma');

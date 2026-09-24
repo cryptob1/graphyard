@@ -880,3 +880,24 @@ test('a bot-review read that never settles holds the tick only to its own deadli
     assert.equal(tick.launched.filter(entry => entry.kind === 'review').length, 2);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('producers launch before any reviewer waits on a bot read: an unanswered read delays no producer on its item or a later one, only the reviewer launches after it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-order-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
+    const requested = Date.parse(first.autoDispatch!.review!.requestedAt), started = Date.now(), producedAt: number[] = [];
+    const base = stubEffects(() => [first, second], log);
+    const effects = stubEffects(() => [first, second], log, {
+      headReviewers: () => new Promise<string[]>(() => { /* GitHub never answers */ }),
+      launchProducer: async (...args) => { producedAt.push(Date.now() - started); return base.launchProducer(...args); },
+    });
+    const config = masterConfig(token); for (const profile of [...config.reviewers, ...config.producers]) profile.concurrency = 2;
+    const deadline = 1_500;
+    await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000, undefined, deadline);
+    const firstReview = log.findIndex(entry => entry.startsWith('review:'));
+    assert.ok(firstReview > 0 && log.slice(firstReview).every(entry => entry.startsWith('review:')), `every producer launches before the first reviewer: ${JSON.stringify(log)}`);
+    for (const key of [first.key, second.key]) assert.ok(log.some(entry => entry.startsWith(`producer:${key}:`)), `${key}'s producers launch: ${JSON.stringify(log)}`);
+    assert.ok(producedAt.length >= 2 && producedAt.every(ms => ms < deadline), `no producer waits on the unanswered bot read (${deadline}ms): ${JSON.stringify(producedAt)}`);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
