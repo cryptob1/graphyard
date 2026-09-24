@@ -98,7 +98,7 @@ class Api {
 // ---- Hand-built work items, for the unit cases that need no database ----
 
 const item = (key: string, pr: number, head: string, baseSha: string, overrides: Partial<Work> = {}): Work => ({
-  id: key.toLowerCase(), key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:budget'] }],
+  id: key.toLowerCase(), key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }],
   policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 3, policyRevision: 1, createdAt: '2026-09-21T09:00:00Z', updatedAt: '2026-09-21T09:00:00Z',
   stageEnteredAt: '2026-09-21T09:00:00Z', ready: true, epoch: 1, lease: null, workspaces: [{ host: 'machine', path: `/w/${key}`, branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }],
   candidate: { sha: head, baseSha, pr, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' }, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [],
@@ -278,13 +278,13 @@ async function webhook(work?: Work) {
 
 const reload = async (work: Work) => (await store.list()).find(entry => entry.id === work.id)!;
 let prNumber = 200;
-async function submitted(api: Api, title: string, options: { approved?: boolean; checks?: 'success' | 'in_progress' } = {}) {
+async function submitted(api: Api, title: string, options: { approved?: boolean; checks?: 'success' | 'in_progress'; proofs?: string[] } = {}) {
   const pr = ++prNumber;
-  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:budget'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: options.proofs ?? ['unit:budget'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'machine-a', path: `/tmp/budget/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
-  api.open(pr, `graphyard/${work.key.toLowerCase()}-1`, options);
+  api.open(pr, `graphyard/${work.key.toLowerCase()}-1`, { approved: options.approved, checks: options.checks });
   return engine.execute(worker, 'submit', work.id, { epoch: 1, pr }, randomUUID());
 }
 /** Make exactly this item's job the next due one; every other job waits an hour. */
@@ -316,7 +316,8 @@ test('integration:observation-cadence-by-state — a merge-gate candidate is obs
   const mergeMs = await scheduledInMs(merging);
   let idle = await submitted(api, 'Awaiting proof'); idle = await job(idle, github);
   const idleMs = await scheduledInMs(idle);
-  let active = await submitted(api, 'Awaiting review', { approved: false }); active = await job(active, github);
+  // A manual-only criterion: since GY-115 an unproven automatable proof holds review, which is the idle case above.
+  let active = await submitted(api, 'Awaiting review', { approved: false, proofs: ['manual:budget'] }); active = await job(active, github);
   const activeMs = await scheduledInMs(active);
   const all = await store.list(); const now = new Date();
   assert.equal(merging.stage, 'merge'); assert.ok(merging.gates.every(gate => gate.name === 'merge' || gate.passed));

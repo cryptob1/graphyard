@@ -30,7 +30,6 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 - [Shipping pulse](shipping-pulse.md) — repository delivery flow: throughput, intent-to-merge, and deployment lag without rankings.
 - [Flow analytics](flow-analytics.md) — delivery bottlenecks, phase durations, and their data lineage.
 - [Interventions as product feedback](interventions.md) — every operator intervention as product feedback: what counts, the rate per delivery, how a pattern becomes work, and how to record judgement about delivered work.
-- [Pipeline-speed verification](pipeline-speed-verification.md) — post-merge verification of the pipeline-speed criteria: the commands that read the deployed control plane, and what they found.
 
 ## Build integrations
 
@@ -47,15 +46,12 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 ## Understand or contribute
 
 - [Architecture and correctness model](architecture.md) — the correctness model behind ownership, evidence, and gates.
-- [Development and dogfooding](development.md) — repository layout, where new features go, and dogfooding.
+- [Development and dogfooding](development.md) — repository layout, where new features go, and validating a change.
 - [Turnkey E2E execution and verified delivery](turnkey-delivery-roadmap.md) — planned work, clearly separated from shipped behavior.
 - [Graphyard visual identity](visual-identity.md) — the marks, palette, and voice the dashboard and docs share.
 
 ## Maintainer and historical records
 
 - [Graphyard repository bootstrap](first-pr.md) — repository-specific bootstrap procedure for Graphyard maintainers.
-- [Implementation audit — September 13, 2026](history/implementation-audit-2026-09-13.md) — what the September 2026 audit found and what it changed.
-- [Huck Engineer investigation: lessons for Graphyard](history/huck-engineer-comparison.md) — what Huck Engineer taught Graphyard about worker pipelines.
-- [Role-glossary audit — September 18, 2026](history/role-glossary-audit-2026-09-18.md) — the ambiguity audit, concision samples, and safety-parity check behind the glossary.
 
 Historical records explain past decisions. They are not current setup instructions.
