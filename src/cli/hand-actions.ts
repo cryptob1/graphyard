@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { claimable, claimLive, settling, type ActionRow } from '../model/actions.js';
+import { actionClaimMs, claimable, claimLive, settling, waitingToRetry, type ActionRow } from '../model/actions.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import type { Work } from '../model/work.js';
@@ -115,9 +115,29 @@ export const releaseEventsPath = (work: Pick<Work, 'id'>) => `events?work=${enco
 const implementationDispatch = (row: ActionRow) => row.kind === 'dispatch' && row.inputs.kind === 'dispatch' && row.inputs.target === 'implementation';
 
 /**
+ * How long a hand dispatch may take from this guard to its lease claim. `master dispatch` reads the
+ * worker credential, Herdr and the account registry before `prepareWorkerLaunch` claims the item,
+ * and nothing reserves the queued dispatch row meanwhile; a row whose failure backoff ends inside
+ * this window would be claimed by the executor while the hand launch is still on its way to the
+ * lease, and the two would launch one item twice. It is the executor's own claim bound: the time
+ * one dispatch attempt is given before its row is offered to the next.
+ */
+export const handDispatchFenceMs = actionClaimMs;
+/** The headroom a hand launch keeps before the row's backoff ends: its lease claim is one CLI call. */
+export const handDispatchClaimMarginMs = 15_000;
+
+/** When the item's backed-off implementation dispatch row is offered to the executor again, or null when it is not in a backoff. */
+export function dispatchRetryAt(work: Pick<Work, 'actionQueue'>, now: Date): number | null {
+  const row = (work.actionQueue?.actions ?? []).find(implementationDispatch);
+  return row && waitingToRetry(row, now) ? Date.parse(row.retryAt!) : null;
+}
+
+/**
  * Why a hand dispatch of this item would race the executor's, or null when it would not. The
- * action named is the row the dispatcher runs; a row waiting out a failure backoff is not about to
- * run, so a hand dispatch then is the recovery it is for.
+ * action named is the row the dispatcher runs. A row waiting out a failure backoff is not about to
+ * run only while its backoff outlasts the hand launch's way to its lease claim
+ * (`handDispatchFenceMs`); a hand dispatch then is the recovery it is for, and it claims nothing
+ * once the backoff is about to end (`assertHandDispatch`'s `claimBy`).
  */
 export function dispatchRaceRefusal(work: Pick<Work, 'key' | 'actionQueue'>, now: Date, window: { intervalMs: number; releasedAt: string | null }): string | null {
   const row = (work.actionQueue?.actions ?? []).find(implementationDispatch);
@@ -125,6 +145,9 @@ export function dispatchRaceRefusal(work: Pick<Work, 'key' | 'actionQueue'>, now
   if (row && claimLive(row, now)) return `${work.key}: ${named(row)} is claimed by executor ${row.claim!.executor} on ${row.claim!.host} until ${row.claim!.expiresAt}; the executor's dispatch is in progress, so master dispatch is refused`;
   if (row && settling(row, now)) return `${work.key}: ${named(row)} was completed at ${row.resolvedAt} and is settling; the executor's dispatch already launched a worker, so master dispatch is refused`;
   if (row && claimable(row, now)) return `${work.key}: ${named(row)} is pending and claimable; the loop's dispatcher claims it on its next tick, so master dispatch is refused`;
+  const retryAt = dispatchRetryAt(work, now);
+  if (row && retryAt !== null && retryAt - now.getTime() < handDispatchFenceMs)
+    return `${work.key}: ${named(row)} is in a failure backoff that ends at ${row.retryAt}, inside the ${Math.round(handDispatchFenceMs / 1000)}s a hand dispatch has to reach its lease claim; the dispatcher claims it then, so master dispatch is refused`;
   const released = window.releasedAt ? Date.parse(window.releasedAt) : NaN;
   if (Number.isFinite(released) && now.getTime() - released < window.intervalMs)
     return `${work.key} was released at ${window.releasedAt}, within the loop's ${Math.round(window.intervalMs / 1000)}s dispatch interval; the dispatcher's next tick claims its dispatch action, so master dispatch is refused`;
@@ -145,11 +168,19 @@ export function assertHandReview(work: Work, sessions: ReviewSession[], failures
   assertHandAction(work, 'review');
 }
 
-/** Every refusal `master dispatch` owes before it launches anything: system-driven first, then the race with the executor. */
-export async function assertHandDispatch(work: Work, now: string, intervalSeconds: number, read: (path: string) => Promise<any>) {
+/**
+ * Every refusal `master dispatch` owes before it launches anything: system-driven first, then the
+ * race with the executor. Returns `claimBy`, the local instant after which the hand launch must not
+ * claim the lease because the backed-off dispatch row is about to be offered to the executor again;
+ * undefined when no row is backing off.
+ */
+export async function assertHandDispatch(work: Work, now: string, intervalSeconds: number, read: (path: string) => Promise<any>): Promise<{ claimBy?: number }> {
   assertHandAction(work, 'dispatch');
   const events: { created_at?: string }[] = await read(releaseEventsPath(work));
   const releasedAt = events[0]?.created_at ? new Date(events[0].created_at).toISOString() : null;
   const refusal = dispatchRaceRefusal(work, new Date(now), { intervalMs: intervalSeconds * 1000, releasedAt });
   if (refusal) throw new Error(refusal);
+  const retryAt = dispatchRetryAt(work, new Date(now));
+  // The row's backoff is on the control plane's clock; the deadline is carried onto this host's.
+  return retryAt === null ? {} : { claimBy: Date.now() + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs };
 }

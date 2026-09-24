@@ -12,8 +12,8 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { actionClaimMs, actionId, type ActionRow } from '../src/model/actions.js';
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
-import { masterConfigSchema } from '../src/master.js';
-import { dispatchRaceRefusal, handDecision, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
+import { dispatchWork, masterConfigSchema, type WorkerProfile } from '../src/master.js';
+import { assertHandDispatch, dispatchRaceRefusal, handDecision, handDispatchClaimMarginMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
 
 // GY-175: the master-side rules the loop depends on are enforced by the master CLI itself, not
@@ -87,7 +87,7 @@ async function masterHarness(state: { work: Work[]; releasedAt?: string | null }
     failures: { [requestId]: { kind, work: 'GY-7', sha: headSha, attempts, reason: `${kind} profile refused the launch`, at: iso(-60_000), nextAt: iso(60_000) } } }), { mode: 0o600 });
   /** Writes the loop's producer ledger with these sessions. */
   const producerSessions = (records: object[]) => writeFile(join(root, '.graphyard/producers.json'), JSON.stringify({ version: 1, producers: records }), { mode: 0o600 });
-  return { run, refusal, reads, close, refusedLaunches, producerSessions };
+  return { run, refusal, reads, close, refusedLaunches, producerSessions, root, credentials };
 }
 
 const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40), reviewRequestId = 'c'.repeat(32);
@@ -123,9 +123,13 @@ test('unit:dispatch-race-guard the refusal names the pending dispatch action whi
   assert.match(settled!, /was completed at .* and is settling/);
   const released = dispatchRaceRefusal(item(), now, { intervalMs: 10_000, releasedAt: iso(-3_000) });
   assert.match(released!, /GY-7 was released at .*, within the loop's 10s dispatch interval/);
-  // Past the interval, with nothing queued, and a row waiting out a failure backoff: a hand dispatch is the recovery.
+  // A backoff that ends before a hand launch could reach its lease claim is the executor's next claim: refused.
+  const backingOff = dispatchRaceRefusal(item({ actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: new Date(now.getTime() + 20_000).toISOString() })], history: [] } }), now, window);
+  assert.match(backingOff!, new RegExp(`dispatch action ${dispatchRow().id} .* is in a failure backoff that ends at .*, inside the ${handDispatchFenceMs / 1000}s a hand dispatch has to reach its lease claim`));
+  assert.match(dispatchRaceRefusal(item({ actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: new Date(now.getTime() + handDispatchFenceMs - 1).toISOString() })], history: [] } }), now, window)!, /failure backoff/);
+  // Past the interval, with nothing queued, and a row whose backoff outlasts the fence: a hand dispatch is the recovery.
   assert.equal(dispatchRaceRefusal(item(), now, { intervalMs: 10_000, releasedAt: iso(-11_000) }), null);
-  assert.equal(dispatchRaceRefusal(item({ actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: iso(60_000) })], history: [] } }), now, window), null);
+  assert.equal(dispatchRaceRefusal(item({ actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: new Date(now.getTime() + handDispatchFenceMs + 60_000).toISOString() })], history: [] } }), now, window), null);
   assert.deepEqual([...releaseEventKinds], ['ready', 'unblock', 'release', 'lease.expired']);
 });
 
@@ -144,6 +148,9 @@ test('unit:dispatch-race-guard master dispatch is refused naming the pending act
     state.releasedAt = iso(-60_000);
     const through = await master.refusal(['dispatch', 'GY-7', 'claude-worker']);
     assert.match(through, /Unknown worker profile claude-worker/); assert.doesNotMatch(through, /dispatch interval|claimable|claimed by/);
+    // A row whose failure backoff ends within the fence is the executor's next claim, and master dispatch says so.
+    state.work = [item({ systemDriven: false, actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: iso(30_000) })], history: [] } })];
+    assert.match(await master.refusal(['dispatch', 'GY-7', 'claude-worker']), new RegExp(`GY-7: dispatch action ${dispatchRow().id} .* is in a failure backoff that ends at .*; the dispatcher claims it then, so master dispatch is refused`));
   } finally { await master.close(); }
 });
 
@@ -270,5 +277,26 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
     await master.producerSessions([]);
     await master.refusedLaunches(producerRequestId, dispatchFailureLimit, 'producer');
     assert.match(await master.refusal(decide), /No master operator-agent identity is provisioned/, 'so does a producer launch the loop gave up on');
+  } finally { await master.close(); }
+});
+
+test('unit:dispatch-race-guard a hand launch through a long backoff claims nothing once the backoff is about to end', async () => {
+  const now = iso(), retryAt = Date.parse(now) + handDispatchFenceMs + 60_000;
+  const backedOff = item({ systemDriven: false, actionQueue: { actions: [dispatchRow({ attempts: 2, retryAt: new Date(retryAt).toISOString() })], history: [] } });
+  const before = Date.now();
+  const { claimBy } = await assertHandDispatch(backedOff, now, 10, async () => []);
+  // The deadline is the row's retryAt carried onto this host's clock, less the claim's headroom.
+  assert.ok(claimBy! >= before + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs && claimBy! <= Date.now() + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs);
+  assert.deepEqual(await assertHandDispatch(item({ systemDriven: false }), now, 10, async () => []), {}, 'no backoff, no deadline');
+  const master = await masterHarness({ work: [backedOff] });
+  try {
+    const credential = join(master.credentials, 'worker.token'); await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
+    const prepared: string[] = [];
+    const prepare = async (_root: string, key: string) => { prepared.push(key); return { epoch: 1, path: join(master.root, 'assigned'), base: 'c'.repeat(40) }; };
+    // Past its deadline the launch stops before the lease claim, so the executor's attempt is the only one.
+    await assert.rejects(dispatchWork(master.root, backedOff, profile, [], undefined, [backedOff], prepare, async () => {}, 1, now, { claimBy: Date.now() - 1 }),
+      /GY-7: the hand launch did not reach its lease claim before the item's backed-off dispatch action is offered to the executor again, so it claims nothing/);
+    assert.deepEqual(prepared, [], 'nothing was claimed');
   } finally { await master.close(); }
 });

@@ -195,14 +195,14 @@ export const masterCommands = defineCommands([
         const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
         const profile = master.workers.find(item => item.name === positionals[1]);
         if (!work) throw new Error(`Unknown work item ${positionals[0]}`);
-        await assertHandDispatch(work, snapshot.now, master.run.dispatchIntervalSeconds, path => masterApi(path));
+        const { claimBy } = await assertHandDispatch(work, snapshot.now, master.run.dispatchIntervalSeconds, path => masterApi(path));
         if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
         const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
         if (profile.credentialFile) {
           const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
           if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
         }
-        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'] }));
+        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'], claimBy }));
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
