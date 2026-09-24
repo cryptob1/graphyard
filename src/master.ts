@@ -3937,15 +3937,44 @@ export async function launchApprover(root: string, work: Work, decision: string,
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
+  const spentOn = selected?.account.name ?? chosen?.account?.name ?? null;
+  await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, launchedAt: new Date().toISOString() }).catch(() => {});
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, runtime: kind,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
       : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null };
+}
+
+/**
+ * The account each approver session was launched on (GY-182). The loop adopts a session a master
+ * started with `master approver` rather than launching its own, and an adopted session that stops
+ * on a limit notice must hold the account it actually spent, not the runtime's own login.
+ */
+export const approverLaunchSchema = z.object({ agentName: z.string().max(200), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(), launchedAt: z.string() }).strict();
+export type ApproverLaunch = z.infer<typeof approverLaunchSchema>;
+const approverLaunchesPath = async (root: string) => resolve(await localDirectory(root), 'approvers', 'launches.json');
+export async function readApproverLaunch(root: string, agentName: string): Promise<ApproverLaunch | null> {
+  try { return z.array(approverLaunchSchema).parse(JSON.parse(await readFile(await approverLaunchesPath(root), 'utf8'))).findLast(entry => entry.agentName === agentName) ?? null; } catch { return null; }
+}
+/** Record the launch of `launch.agentName`, replacing an earlier one of that name; records past a day are dropped. */
+export async function saveApproverLaunch(root: string, launch: ApproverLaunch, now = Date.now()) {
+  const file = await approverLaunchesPath(root);
+  let kept: ApproverLaunch[] = [];
+  try { kept = z.array(approverLaunchSchema).parse(JSON.parse(await readFile(file, 'utf8'))); } catch { /* a missing or unreadable record starts empty */ }
+  kept = kept.filter(entry => entry.agentName !== launch.agentName && now - Date.parse(entry.launchedAt) < escalationSessionMs);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await atomicPrivateWrite(file, [...kept, launch].slice(-retainedEscalationSessions));
 }
 
 /** The approver role's accounts as `roleCapacity` reads them: whether any is left, and each one's reset. */
 export async function approverRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}) {
   const named = approverProfiles(config), profiles = named.length ? named : [{ name: approverProfile }];
   return { profiles, health: await inspectProfileAccounts(config, 'approver', profiles, Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null as string | null }])), probe) };
+}
+
+/** The escalation-handler role's accounts as `roleCapacity` reads them, as `approverRoleHealth` does for the approver. */
+export async function escalationRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}) {
+  const profiles = [{ name: escalationProfile }];
+  return { profiles, health: await inspectProfileAccounts(config, 'escalation-handler', profiles, { [escalationProfile]: { available: true, reason: null as string | null } }, probe) };
 }
 
 /**
@@ -3966,9 +3995,14 @@ const escalationSessionsPath = async (root: string) => resolve(await localDirect
 export async function readEscalationSessions(root: string): Promise<EscalationSession[]> {
   try { return z.array(escalationSessionSchema).parse(JSON.parse(await readFile(await escalationSessionsPath(root), 'utf8'))); } catch { return []; }
 }
-/** Replace the handler of `work`/`trigger` (or drop it with `session` null); records past a day are dropped. */
+/**
+ * Replace the handler of `work`/`trigger` (or drop it with `session` null). A running handler's
+ * record is dropped a day after launch; a waiting one is kept until a day past its `retryAt`, so a
+ * weekly reset still finds the escalation to launch again.
+ */
 export async function saveEscalationSession(root: string, work: string, trigger: string, session: EscalationSession | null, now = Date.now()) {
-  const kept = (await readEscalationSessions(root)).filter(entry => !(entry.work === work && entry.trigger === trigger) && now - Date.parse(entry.waiting?.since ?? entry.launchedAt) < escalationSessionMs);
+  const current = (entry: EscalationSession) => now - Date.parse(entry.waiting ? entry.waiting.retryAt : entry.launchedAt) < escalationSessionMs;
+  const kept = (await readEscalationSessions(root)).filter(entry => !(entry.work === work && entry.trigger === trigger) && current(entry));
   const file = await escalationSessionsPath(root); await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await atomicPrivateWrite(file, [...kept, ...(session ? [session] : [])].slice(-retainedEscalationSessions));
 }

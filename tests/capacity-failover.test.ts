@@ -18,7 +18,7 @@ import { answerHumanCommand, humanRequestsCommand, parkCommand } from '../src/cl
 import type { CliContext } from '../src/cli/context.js';
 import { actionableSubjects, capacityKey, emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { approverRoleHealth, approverSessionName, buildMasterStatus, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
+import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, readApproverLaunch, readEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
 import { describeCapacity, detectExhaustion, parseResetTime } from '../src/model/capacity.js';
 import { answerCommand, humanRequestBlocker, openHumanRequests } from '../src/model/human-request.js';
@@ -580,7 +580,7 @@ test('integration:human-answer-resumes-item — answering from the CLI or the da
 // is spent for every role. The approver's account selection, its hold and its failover are the
 // real ones; only the Herdr tab and the approver's own judgement are the test's.
 const reviewerOn = (accounts: string[]) => ({ name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude' as const, agentArgs: [], approvals: 'auto' as const, environment: {}, accounts });
-async function approverLoop(label: string, accounts = ['env-a', 'env-b']) {
+async function approverLoop(label: string, accounts = ['env-a', 'env-b'], extra: (now: () => number) => Partial<DaemonEffects> = () => ({})) {
   await fresh();
   const approverHome = await mkdtemp(join(tmpdir(), `graphyard-capacity-${label}-`));
   const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(approverHome, 'coordinator.token'), autoMerge: false }), reviewers: [reviewerOn(accounts)] } as MasterConfig;
@@ -602,6 +602,7 @@ async function approverLoop(label: string, accounts = ['env-a', 'env-b']) {
       return { agentName, pane, account: chosen.account?.name ?? null, runtime: chosen.account?.kind ?? null };
     },
     roleHealth: async () => ({ approver: await approverRoleHealth(config, loginsOnly(now)) }),
+    ...extra(now),
   });
   // One item whose every gate passes; automatic merging is off, so it needs an approved merge decision.
   const work = (await submittedAndProven(await launcherClaims(await released(`approver ${label}`), workerB), workerB)).work;
@@ -761,4 +762,79 @@ test('unit:role-exhausted-waits-for-reset — with every approver account exhaus
   assert.deepEqual(launches, ['env-a']);
   assert.ok(restored.actions.some(action => action.kind === 'decision' && /launched independent approver session .* on env-a/.test(action.detail)), JSON.stringify(restored.actions));
   assert.deepEqual((await reload(work.id)).capacity!.escalations, []);
+});
+
+/** A repository of its own for the loop's local records (`.graphyard/local`). */
+async function localRoot(label: string) {
+  const root = await mkdtemp(join(tmpdir(), `graphyard-capacity-${label}-`));
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  return root;
+}
+
+test('an approver session a master launched is adopted on the account its launch chose, and its exhaustion holds that account, not the runtime login', async () => {
+  const root = await localRoot('adopt-root');
+  const { config, herdr, decisions, launches, attempts, work, cycle } = await approverLoop('adopt', ['env-a', 'env-b'], () => ({ approverLaunch: agentName => readApproverLaunch(root, agentName) }));
+  // `master approver` already launched the decision's session on env-a, and recorded where.
+  const name = approverSessionName(work, 'decision-adopt-1');
+  herdr.agents.push({ name, pane_id: 'pane-master-approver', agent_status: 'working' });
+  await saveApproverLaunch(root, { agentName: name, account: 'env-a', runtime: 'claude', launchedAt: new Date().toISOString() });
+
+  const state = emptyDaemonState(config);
+  const adopted = await cycle(state);
+  assert.equal(decisions.length, 1);
+  assert.deepEqual(attempts, [], 'the listed session is adopted, not launched again');
+  const watch = Object.values(state.approvals)[0];
+  assert.deepEqual([watch.agentName, watch.account, watch.runtime], [name, 'env-a', 'claude']);
+  assert.ok(adopted.actions.some(action => action.kind === 'decision' && action.detail.includes(`adopted approver session ${name} on env-a`)), JSON.stringify(adopted.actions));
+
+  const notice = "You've hit your weekly limit · resets Sep 26, 10pm";
+  herdr.agents.find(agent => agent.name === name)!.agent_status = 'idle';
+  herdr.output[name] = `  ⎿ ${notice}\n`;
+  const detection = await cycle(state);
+  const failover = detection.actions.find(action => action.kind === 'failover')!;
+  assert.equal(failover?.state, 'done', JSON.stringify(detection.actions));
+  const held = await observedExhaustions(config);
+  assert.ok(held['env-a'], 'the account the adopted session spent is held');
+  assert.equal(held[profileAccount('approver')], undefined, 'not the runtime\'s own login');
+  assert.equal((await reload(work.id)).capacity!.exhaustions.at(-1)!.account, 'env-a');
+  assert.deepEqual(launches, ['env-b'], 'the failover launch goes around the spent account');
+});
+
+test('a waiting escalation handler is kept until its reset, even a weekly one more than a day away', async () => {
+  const root = await localRoot('escalation-records');
+  const at = Date.now(), day = 86_400_000, retryAt = new Date(at + 3 * day).toISOString();
+  const handler = (work: string, trigger: string, launchedAt: number, waiting: EscalationSession['waiting']): EscalationSession =>
+    ({ agentName: `esc-${trigger}`, pane: null, work, trigger, kind: 'claude', account: 'env-a', runtime: 'claude', launchedAt: new Date(launchedAt).toISOString(), waiting });
+  await saveEscalationSession(root, 'GY-1', 'weekly', handler('GY-1', 'weekly', at, { since: new Date(at).toISOString(), retryAt, reason: 'every account is spent' }), at);
+  await saveEscalationSession(root, 'GY-1', 'running', handler('GY-1', 'running', at, null), at);
+  // Two days on another handler is saved: the running record is past its day, the waiting one is not past its reset.
+  await saveEscalationSession(root, 'GY-2', 'other', handler('GY-2', 'other', at + 2 * day, null), at + 2 * day);
+  assert.deepEqual((await readEscalationSessions(root)).map(entry => entry.trigger), ['weekly', 'other']);
+  // A waiting record a day past its reset that was never launched again is dropped.
+  await saveEscalationSession(root, 'GY-2', 'other', null, Date.parse(retryAt) + day);
+  assert.deepEqual(await readEscalationSessions(root), []);
+});
+
+test('an escalation handler waiting on spent quota records an escalation-handler capacity escalation on the item, shown in master status, and withdrawn at the reset', async () => {
+  const at = Date.now(), resetsAt = new Date(at + 3 * 86_400_000).toISOString();
+  let waitingFor = '';
+  const { config, clock, work, cycle, now } = await approverLoop('escalation-capacity', ['env-a', 'env-b'], now => ({
+    roleHealth: async () => ({ 'escalation-handler': await escalationRoleHealth(config, loginsOnly(now)) }),
+    escalationSessions: async () => [{ agentName: 'gy-esc', pane: null, work: waitingFor, trigger: 'lease-loss', kind: 'claude', account: null, runtime: 'claude', launchedAt: new Date(at).toISOString(), waiting: { since: new Date(at).toISOString(), retryAt: resetsAt, reason: 'no account left' } }],
+  }));
+  waitingFor = work.key;
+  await recordObservedExhaustion(config, profileAccount(escalationProfile), { at: new Date(at).toISOString(), resetsAt, reason: "You've hit your weekly limit", role: 'escalation-handler', profile: escalationProfile, work: work.key }, at);
+
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  const escalation = (await reload(work.id)).capacity!.escalations.find(entry => entry.role === 'escalation-handler');
+  assert.ok(escalation, 'the wait is recorded on the item, not only in the local record');
+  assert.deepEqual(escalation.accounts.map(entry => [entry.account, entry.resetsAt]), [[profileAccount(escalationProfile), resetsAt]]);
+  const snapshot = await ok(coordinator, 'GET', 'work-snapshot');
+  const status = buildMasterStatus({ work: snapshot.work, now: snapshot.now }, config.workers, [], await workerHealth(config, now));
+  assert.deepEqual(status.capacity.filter(entry => entry.role === 'escalation-handler').map(entry => entry.waiting), [[work.key]]);
+
+  clock.skewMs = Date.parse(resetsAt) - Date.now() + 60_000;
+  await cycle(state);
+  assert.deepEqual((await reload(work.id)).capacity!.escalations.filter(entry => entry.role === 'escalation-handler'), []);
 });

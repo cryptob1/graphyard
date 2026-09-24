@@ -25,7 +25,7 @@ import { independentProducerProfiles, launchProducer, readProducerLedger, reclai
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { capacityRecheckMs, defaultAwaitReviewers } from './auto-dispatch.js';
-import { approverProfile, approverRoleHealth, escalationProfile, inspectProducerCredentials, inspectProfileAccounts, launchEscalationHandler, preservePartialWork, profileAccount, readEnvironmentLog, readEscalationSessions, recordObservedExhaustion, roleCapacity, saveEscalationSession, selectionKey, verifiedContext, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
+import { approverProfile, approverRoleHealth, escalationProfile, escalationRoleHealth, readApproverLaunch, inspectProducerCredentials, inspectProfileAccounts, launchEscalationHandler, preservePartialWork, profileAccount, readEnvironmentLog, readEscalationSessions, recordObservedExhaustion, roleCapacity, saveEscalationSession, selectionKey, verifiedContext, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
@@ -1407,6 +1407,8 @@ export interface DaemonEffects {
    * Never the requester.
    */
   approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null }>;
+  /** The account and runtime a listed approver session was launched on, so an adopted session's exhaustion holds the account it spent. */
+  approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null } | null>;
   /**
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
@@ -1458,7 +1460,7 @@ export interface DaemonEffects {
   endEscalation?: (session: EscalationSession, resolution: string, waiting: EscalationSession['waiting']) => Promise<void>;
   relaunchEscalation?: (session: EscalationSession) => Promise<{ agentName: string; account: string | null }>;
   /** Account health of the reviewer, producer and approver profiles, as the worker profiles' arrives in `credentials`. */
-  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer' | 'approver', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
+  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer' | 'approver' | 'escalation-handler', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
@@ -2006,7 +2008,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const capacities: RoleCapacity[] = [roleCapacity('worker', config.workers.filter(worker => worker.mode === 'launch'), credentials)];
   if (effects.reportCapacity) {
     const others = await effects.roleHealth?.().catch(() => null) ?? {};
-    for (const role of ['reviewer', 'producer', 'approver'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
+    for (const role of ['reviewer', 'producer', 'approver', 'escalation-handler'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
+    const waitingEscalations = new Set((await effects.escalationSessions?.().catch(() => [] as EscalationSession[]) ?? []).filter(session => session.waiting).map(session => session.work));
     // An item waits on the approver role while it needs a decision no approver session is judging.
     const unjudged = new Set(open.filter(item => {
       const decision = effects.approver ? routineDecision(item, config, clock, assessments[item.id]) : null, watch = decision ? state.approvals[decisionKey(item, decision)] : undefined;
@@ -2017,7 +2020,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       reviewer: open.filter(item => item.autoDispatch?.review?.state === 'requested'),
       producer: open.filter(item => item.autoDispatch?.producers.some(request => request.state === 'requested')),
       approver: open.filter(item => unjudged.has(item.key)),
-      'escalation-handler': [],
+      // An item waits on the escalation-handler role while a handler for it ended on spent quota with no account left.
+      'escalation-handler': open.filter(item => waitingEscalations.has(item.key)),
     };
     for (const capacity of capacities) {
       const key = capacityKey(capacity.role), previous = state.actions[key];
@@ -2186,9 +2190,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // A session a master started for the same decision (`master approver`) is the approver it has.
     const listed = adopt && seen.available ? seen.agents.find(agent => agent.name === name) : undefined;
     if (!listed && approversSpent) { Object.assign(watch, { agentName: null, pane: null }); return `the decision waits: ${capacityWait()}`; }
-    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: null, runtime: null });
+    // An adopted session keeps the account its launch chose: that is the account it spends.
+    const adopted = listed ? await effects.approverLaunch?.(name).catch(() => null) ?? null : null;
+    Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null });
     await effects.persist(state);
-    if (listed) return `adopted approver session ${name}, already judging it`;
+    if (listed) return `adopted approver session ${name}${adopted?.account ? ` on ${adopted.account}` : ''}, already judging it`;
     inventory = null;
     let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
     try { launched = await effects.approver!(item, watch.decision); }
@@ -3102,6 +3108,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
     },
     escalationSessions: () => readEscalationSessions(root),
+    approverLaunch: agentName => readApproverLaunch(root, agentName),
     endEscalation: async (session, _resolution, waiting) => {
       try { if (session.pane) await closeHerdrPane(session.pane, run); } catch (error) { if (!paneAlreadyGone(error)) throw error; }
       await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, pane: null, waiting } : null);
@@ -3116,6 +3123,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const config = current();
       return {
         ...(config.approver && config.operatorAgent ? { approver: await approverRoleHealth(config) } : {}),
+        ...(config.operatorAgent ? { 'escalation-handler': await escalationRoleHealth(config) } : {}),
         ...(config.reviewers.length ? { reviewer: { profiles: config.reviewers, health: await inspectProfileAccounts(config, 'reviewer', config.reviewers, Object.fromEntries(config.reviewers.map(profile => [profile.name, { available: true, reason: null as string | null }]))) } } : {}),
         ...(config.producers.length ? { producer: { profiles: config.producers, health: await inspectProducerCredentials(root, config.producers) } } : {}),
       };
