@@ -71,6 +71,6 @@ test('every diagram is self-describing and every use of one has alt text and an 
 
 test('the in-app docs navigation lists every page the index links', () => {
   const nav = read('web/docs.tsx');
-  for (const page of ['glossary', 'operations-reference', 'history/role-glossary-audit-2026-09-18']) assert.ok(nav.includes(`['${page}',`), `web/docs.tsx lists ${page}`);
+  for (const page of ['glossary', 'operations-reference', 'first-pr']) assert.ok(nav.includes(`['${page}',`), `web/docs.tsx lists ${page}`);
   assert.match(nav, /import\.meta\.glob\('\.\.\/docs\/\*\*\/\*\.svg'/, 'diagrams are bundled from docs/');
 });

@@ -1,102 +1,51 @@
 <!-- page: Operate Graphyard | 4 | worker installation and multi-machine use. -->
 # Herdr integration
 
-Herdr is the runtime that launches, shows, and stops agent sessions. Graphyard remains authoritative for work ownership, leases, evidence, and progression. Terms follow the [glossary](glossary.md).
+Herdr launches, shows and stops sessions; Graphyard owns leases, evidence and progression.
 
 ## Install the plugin
 
-Requires Node 24, Herdr 0.7.1 or newer, and a Graphyard checkout. Supervised Muse launch and lifecycle detection require Herdr 0.9.1 or newer, which recognizes kind `muse`, plus an installed, provider-authenticated `muse` executable.
-
-From the managed repository, with an individual worker token:
+Requires Node 24 and Herdr 0.7.1+ (0.9.1+ and an authenticated `muse` executable for Muse). From the managed repository, with an individual worker token:
 
 ```sh
 export GRAPHYARD_CLI=/absolute/path/to/graphyard/bin/graphyard.mjs
-node "$GRAPHYARD_CLI" init \
-  --url https://YOUR-GRAPHYARD-HOST \
-  --herdr \
-  --host-id UNIQUE_MACHINE_NAME \
-  --token-stdin
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Paste the token, press Enter, then press Ctrl-D to send EOF. Setup verifies the worker and repository, updates the managed `AGENTS.md` section, stores the connection in ignored `.graphyard/connection.json`, and enables the plugin. Commit `AGENTS.md` and `.gitignore`; never commit `.graphyard/`.
-
-Rerun `init` after moving the Graphyard checkout or changing servers. Each concurrent worker needs its own principal and token.
+Paste the token, Enter, Ctrl-D. Setup updates the managed `AGENTS.md` section and stores the connection in ignored `.graphyard/connection.json`. Commit `AGENTS.md` and `.gitignore`, never `.graphyard/`. Rerun `init` after moving the checkout or changing servers.
 
 ## Use the ledger
 
-Run **Open Graphyard control plane** from Herdr. The pane supports:
-
-```text
-list
-show GY-1
-claim GY-1
-handoff GY-1
-heartbeat GY-1 1
-release GY-1 1
-quit
-```
-
-`claim` returns an epoch. It does not prove a session started. `handoff` prints the assigned worktree and launch command. Run worker sessions under lease supervision:
+**Open Graphyard control plane** in Herdr accepts `list`, `show GY-1`, `claim GY-1`, `handoff GY-1`, `heartbeat GY-1 1`, `release GY-1 1`, `quit`. `handoff` prints the worktree and launch command. Run workers supervised:
 
 ```sh
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-A direct `watch` invocation stops the worker process group on Unix. On Windows it can stop only the direct child, so use external containment if the worker session may spawn descendants. Master-created foreground Herdr launches require Linux with a working systemd user manager. See [operations](operations.md) for recovery.
-
-## Master mode
-
-For several workers, use the [master-agent mode](master-agent.md). It joins Graphyard work state with Herdr session health, dispatches trusted local launch profiles, and requests guarded merges.
-
-A visible session is health information, not ownership. Graphyard recognizes ownership only after the worker principal's authenticated claim.
-
-Muse is available as `kind: "muse"` in a master launch profile; see [Muse](master-agent.md#muse). Dispatch still follows the normal authenticated claim, assigned-worktree, Herdr pane, and `graphyard watch` path under the profile's own worker credential. Herdr's Muse states make launch, active work, waiting, blocked, exit, and offline sessions observable, but cannot claim, release, renew, or advance Graphyard work. A failed launch is cleaned up before release, and lease loss terminates the supervised process. There is no supported unsupervised Muse dispatch path.
+On Windows `watch` stops only the direct child. Master-created foreground launches need Linux with a systemd user manager. For several workers use the [master agent](master-agent.md); Muse is `kind: "muse"` in a launch profile ([Muse](master-agent.md#muse)).
 
 ## Multiple machines
 
-All machines use the same Graphyard URL. Give each worker:
-
-- a unique worker principal and token;
-- a stable host ID;
-- its own local worktree;
-- a GitHub identity that cannot merge the protected base branch.
-
-Graphyard does not need SSH access or mounted worker filesystems. It records workspace reservations and verifies the PR branch through GitHub.
-
-Local master launch profiles run on the coordinator host. Version 0.1 does not remotely start supervised Herdr tabs across hosts. Remote workers claim work through their local plugin or CLI after the master routes it.
-
-## Assignment names
-
-Optional `displayName` and `runtime` fields in `GRAPHYARD_PRINCIPALS` control labels such as **Atlas · Codex**. The authenticated principal, not the label or the runtime, determines ownership. Renaming a principal affects future claims and does not rewrite history.
+All machines use one Graphyard URL. Each worker needs its own principal and token, a stable host ID, its own worktree, and a GitHub identity that cannot merge the protected branch. Master launch profiles run on the coordinator host; remote workers claim through their local plugin or CLI. Optional `displayName` and `runtime` in `GRAPHYARD_PRINCIPALS` set labels only.
 
 ## First fleet check
 
-Before scaling:
-
-1. race two worker principals for one item and confirm one claim wins;
-2. stop the winner and reclaim after lease expiry;
-3. confirm the old epoch is refused;
-4. submit stale evidence and confirm acceptance stays closed;
-5. supply current review and proof, merge through the master, and observe Done.
+1. Race two workers for one item; one claim wins.
+2. Stop the winner; reclaim after expiry.
+3. Confirm the old epoch is refused.
+4. Submit stale evidence; acceptance stays closed.
+5. Supply current review and proof, merge through the master, observe Done.
 
 ## Automated recovery contract
 
-`integration:herdr-recovery` is the trusted contract behind steps 1 to 3 of that check. It runs from protected source in `scripts/herdr-recovery-contract.mjs` against a candidate container that holds no producer credential, and it drives only the public HTTP API with the identities Graphyard authenticates: two worker principals, two host IDs, and two non-overlapping worktree reservations.
-
-Its fixed inventory is:
+`integration:herdr-recovery` (`scripts/herdr-recovery-contract.mjs`) proves steps 1–3 over the HTTP API with two workers, two host IDs and two worktrees:
 
 | Case | What it establishes |
 | --- | --- |
-| `exclusive-claim` | Sixteen concurrent claims from two machine identities produce one lease and one claim event. |
-| `expiry-recovery` | The lease expires without a heartbeat, the stopped machine cannot renew it, and the second machine claims the next epoch. |
-| `stale-owner-refused` | Heartbeat, release, workspace, submit, blocked, quarantine, launch, rereview, and a fresh claim all refuse for the superseded owner. |
-| `isolated-worktrees` | The replacement cannot reserve the stopped machine's branch or an overlapping path, registers its own worktree, and the earlier reservation is retained. |
-| `supervised-fence-recovery` | A supervised worker that quarantined containment and stopped without settling keeps the item fenced: `admin` rework is refused while the fences are live, and surrendering the lease does not lift launch authority. After both expire, rework succeeds, the stopped machine's settlement capability no longer applies, and the second machine owns the work. |
+| `exclusive-claim` | Sixteen concurrent claims produce one lease |
+| `expiry-recovery` | The stopped machine cannot renew; the second claims the next epoch |
+| `stale-owner-refused` | Every owner mutation refuses the superseded owner |
+| `isolated-worktrees` | The replacement cannot reuse the old branch or path |
+| `supervised-fence-recovery` | Rework is refused while lease and launch fences are live and succeeds after |
 
-The contract waits on the lease and launch fences the candidate itself reports, measured by the candidate's clock, so it exercises the shipped defaults rather than a test-only timeout. It also refuses to certify a candidate that has shortened them: each fence must be reported as at least the two-minute default, and must then hold for that long on the harness's own clock, which the candidate does not control. Only this repository's test suite substitutes shorter fences, against its own short-fenced engine.
-
-A trusted run executes the contract from the protected checkout, so a new contract must be merged to `main` before any work item may require its proof, and preparation refuses a candidate whose own base does not already carry the contract. Until it lands, the pull request introducing it is covered by the unprivileged `container-recovery` CI job, which runs the identical inventory against the candidate and publishes no evidence. Dispatch a trusted run as described in [adding a trusted contract](first-pr.md#adding-a-trusted-contract).
-
-This proves the control-plane contract for cross-machine recovery. It does not start Herdr, does not run two physical hosts, and does not prove that a disconnected agent process stopped. The [two-machine operational drill](coordination.md#two-machine-operational-drill) remains the procedure for real hosts, and [operations](operations.md#lost-worker-before-submission) covers recovery in production.
-
-For exact API behavior, read the [agent protocol](protocol.md). For the complete installation path, read [onboarding](onboarding.md).
+It refuses candidates that shorten the two-minute fences. It does not start Herdr or prove a process stopped; see the [two-machine drill](coordination.md#two-machine-operational-drill) and [operations](operations.md#lost-worker-before-submission). To add a contract, see [adding a trusted contract](first-pr.md#adding-a-trusted-contract).

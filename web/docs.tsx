@@ -15,9 +15,6 @@ const pages = [
   ['first-pr', 'Graphyard repository bootstrap'],
   ['turnkey-delivery-roadmap', 'Turnkey E2E & delivery roadmap'],
   ['shipping-pulse', 'Shipping pulse'],
-  ['history/implementation-audit-2026-09-13', 'Historical implementation audit'],
-  ['history/role-glossary-audit-2026-09-18', 'Historical role-glossary audit'],
-  ['history/huck-engineer-comparison', 'Historical Huck investigation'],
 ];
 const sources = import.meta.glob('../docs/**/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 // Repo-native diagrams live beside the Markdown so GitHub renders them from the same relative
