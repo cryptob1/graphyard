@@ -47,8 +47,10 @@ function canonicalJson(value: unknown): string {
 export const flowAnalyticsRoutes = defineRoutes('flow-analytics', [
   {
     method: 'GET', path: /^\/api\/analytics\/flow(?:\/(drilldown|export))?$/,
-    async handle({ url, actor, res, services: { engine } }, [part]) {
-      const query = flowQuery(url);
+    async handle({ url, actor, res, services: { engine, production } }, [part]) {
+      // The watch's report as this request reads it, so the flow holds merges at Deploy exactly
+      // where the board (grouped by the same report on /api/status) does.
+      const query = { ...flowQuery(url), production: production?.status() ?? null };
       // Bounded catch-up keeps the read current without blocking on a full backfill.
       await projectFlow(engine.store, { batches: 3 });
       const dataset = await readFlow(engine.store, query);

@@ -689,6 +689,31 @@ test('integration:flow-analytics-drilldown-export', async () => {
   assert.match(await download.text(), /^# metric,evidence/);
 });
 
+// GY-161: the flow route reads the production watch itself on every request, so a merge the watch
+// still reports unserved stays at Deploy in the steps history without any client having polled
+// /api/status in this process (after a restart, or when only the flow report is read).
+test('integration:flow-analytics-production-hold', async () => {
+  const slice = 'gy161-hold';
+  let work = await submitted(slice);
+  const reviewed = { reviews: approval(head, 9301) };
+  work = await engine.observe(work.id, work.revision, observation(work, slice, reviewed));
+  work = await engine.execute(producer, 'evidence', work.id, proof(), randomUUID());
+  await deliver(work, slice, '6'.repeat(40), reviewed);
+  await projectFlow(store);
+  const watch = { observedAt: new Date(Date.now() - 60_000).toISOString(), serving: '7'.repeat(40), error: null, pending: [work.key], incidents: [] };
+  const watched = server(engine, [{ ...operator, token: tokens.operator }], null, undefined, { production: { status: () => watch } as any });
+  await new Promise<void>(resolve => watched.listen(0, '127.0.0.1', resolve));
+  try {
+    const steps = async (base: string) => {
+      const response = await fetch(`${base}/api/analytics/flow/drilldown?metric=steps&slice=${slice}`, { headers: { Authorization: `Bearer ${tokens.operator}` } });
+      assert.equal(response.status, 200);
+      return ((await response.json()).rows as { workKey: string; detail: string }[]).filter(row => row.workKey === work.key).map(row => row.detail);
+    };
+    assert.ok((await steps(url)).includes('deploy to outside'), 'with no production watch the merge takes it out of the flow');
+    assert.ok(!(await steps(`http://127.0.0.1:${(watched.address() as any).port}`)).includes('deploy to outside'), 'the watch holds it at Deploy on the flow read alone');
+  } finally { await new Promise<void>(resolve => watched.close(() => resolve())); }
+});
+
 test('integration:flow-analytics-bounded-indexed', async () => {
   const slice = 'gy35-bounds';
   const blocker = await released(slice);
