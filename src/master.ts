@@ -216,7 +216,11 @@ export const masterRunSchema = z.object({
    * findings are open threads the reviewer judges in the same round rather than arriving after its
    * approval and costing a rework round each (GY-163). A bot with nothing to say posts no review,
    * so `awaitReviewersMinutes` bounds the wait from the review request; 0 turns it off.
-   * Unset: the Codex connector, for 8 minutes (`defaultAwaitReviewers`).
+   * Unset: the Codex connector, for 8 minutes (`defaultAwaitReviewers`). The duration is the
+   * master's to tune (`master config awaitReviewersMinutes=0`, an empty value restores the
+   * default). The login list stays the operator's, edited in .graphyard/master.json: it also
+   * decides whose review threads are trusted grounds for automatic scope widening, so the master
+   * cannot add a login whose findings would widen scope.
    */
   awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
   awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
@@ -635,17 +639,18 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
 /**
  * The settings the master may tune on its own: the loop and dispatch cadence, the workflows the
  * provider runs with its own secret, the deployment the loop verifies, which reviewer profile
- * answers first, the producer session budget, the quota ceiling, and a profile's account order.
+ * answers first, the producer session budget, how long a reviewer launch waits for bot reviews,
+ * the quota ceiling, and a profile's account order.
  * Everything else — autoMerge, the merge method, server and repository binding, credential and
  * identity paths, the environment inventory — is onboarding's or the operator's: no CLI path
  * writes it, and the master's harness grants no direct edit of master.json, so flipping autoMerge
  * or re-pointing a credential can never be a routine master action.
  */
-export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent'] as const;
-const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'quotaCeilingPercent'] as const;
+export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'awaitReviewersMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent'] as const;
+const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'awaitReviewersMinutes', 'quotaCeilingPercent'] as const;
 export interface MasterOwnedSettings {
   intervalSeconds?: number | null; dispatchIntervalSeconds?: number | null; proofWorkflow?: string | null; smokeWorkflow?: string | null;
-  deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
+  deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; awaitReviewersMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
   accounts?: { profile: string; accounts: string[] }[];
 }
 
