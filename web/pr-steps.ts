@@ -49,21 +49,23 @@ export const changesRequested = (work: Work) => !!work.gates.find(gate => gate.n
 
 export type CheckState = 'passed' | 'failed' | 'running';
 /**
- * Each required CI check as the test gate reads it. The gate counts only runs from the trusted CI
- * Apps, which the dashboard is not told, so its own reasons decide which checks have not passed: a
- * check it does not name has passed, and no run from another App with the same name can make a
- * named one read passed. A named check reads failed once every App's latest run of it has finished
- * and one of them did not succeed; while any is still running it is running. Only each App's latest
- * run counts, as in the test gate: a re-run replaces an old failure or success. The Test step and
- * the item page's Checks line both read this.
+ * Each required CI check as the test gate reads it. The gate's own reasons decide which checks
+ * have not passed: a check it does not name has passed, and no run from another App with the same
+ * name can make a named one read passed. A named check reads failed only on evidence that a
+ * trusted CI App (status `ciAppIds`, the Apps the gate counts) failed it: once every trusted App's
+ * latest run of it has finished and one did not succeed. An untrusted App's failure, no trusted
+ * run at all, or not being told which Apps are trusted leaves it running — the gate says only that
+ * the trusted check has not passed. Only each App's latest run counts, as in the test gate: a
+ * re-run replaces an old failure or success. The Test step and the item page's Checks line both
+ * read this.
  */
-export function checkStates(work: Work): { name: string; state: CheckState }[] {
+export function checkStates(work: Work, ciAppIds: readonly number[] | null = null): { name: string; state: CheckState }[] {
   const gate = work.gates.find(entry => entry.name === 'test');
   const reasons = gate?.reasons ?? [];
   const named = (name: string) => !gate || reasons.includes(`Required CI check ${name} has not passed on the current candidate`);
   return (work.policy.checks ?? []).map(name => {
     if (!named(name)) return { name, state: 'passed' };
-    const runs = (work.observation?.checks ?? []).filter(check => check.name === name);
+    const runs = (work.observation?.checks ?? []).filter(check => check.name === name && !!ciAppIds?.includes(check.appId));
     const latest = [...new Set(runs.map(check => check.appId))].map(app => latestCheck(runs.filter(check => check.appId === app))?.result ?? '');
     return { name, state: latest.length > 0 && latest.every(result => !pendingCheck.has(result)) && latest.some(result => result !== 'success') ? 'failed' : 'running' };
   });
@@ -84,7 +86,7 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, 
       return { detail: 'checking which files it changes', who: 'Graphyard (automatic)' };
     }
     case 'test': {
-      const checks = checkStates(work);
+      const checks = checkStates(work, release.ciAppIds);
       const failed = checks.filter(check => check.state === 'failed').map(check => check.name);
       if (failed.length) return { detail: `the check ${failed.join(', ')} failed`, who: 'Builder agent' };
       return { detail: `${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };

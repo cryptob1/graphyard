@@ -93,7 +93,7 @@ export function busyFixtureWork(count) {
   return Array.from({ length: count }, (_, index) => shipped(100 + index, `Delivered item ${index + 1}`, 500 + index, -(index + 1) * hour));
 }
 
-export const fixtureStatus = (role = 'admin') => ({ actor: { id: role === 'admin' ? 'operator' : `fixture-${role}`, role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github'],
+export const fixtureStatus = (role = 'admin') => ({ actor: { id: role === 'admin' ? 'operator' : `fixture-${role}`, role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github'], ciAppIds: [1, 15368],
   repository: 'fixture/shop', baseBranch: 'main', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 },
     slices: [{ id: 'product', name: 'Product', lead: null, workers: [], bottlenecks: [] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [] } });
 

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Work } from '../../src/model';
 import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type SessionRoleKind, type WorkerRow } from '../workers-view';
 import { prSteps } from '../pr-steps';
+import { releaseView, type ReleaseView } from '../release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
 
@@ -96,9 +97,9 @@ function Attach({ row }: { row: WorkerRow }) {
 }
 
 /** What the session is doing now: a builder by its item's current step, anyone else by what it was launched for, an ended one by how it ended. */
-function doing(row: WorkerRow, item: Work | undefined, now: number) {
+function doing(row: WorkerRow, item: Work | undefined, now: number, release: ReleaseView) {
   if (row.state !== 'running') return shortShas(row.reconciled ? row.subject : row.outcome ?? row.subject);
-  if (row.roleKind === 'worker' && item && !row.stale) return prSteps(item, now).label;
+  if (row.roleKind === 'worker' && item && !row.stale) return prSteps(item, now, release).label;
   return shortShas(row.subject);
 }
 
@@ -108,23 +109,23 @@ function since(row: WorkerRow, now: number) {
   return <>ended {ago(row.endedAt ?? row.updatedAt, now)} · ran <span className="spent">{spent(row.spentMs)}</span></>;
 }
 
-function Row({ row, item, now, setSelected }: { row: WorkerRow; item?: Work; now: number; setSelected(id: string | null): void }) {
+function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
   return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale ? 'stale' : undefined}>
     <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row}/></th>
     <td data-label="Role">{roleWords[row.roleKind]}</td>
     <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
-    <td data-label="Doing now">{doing(row, item, now)}</td>
+    <td data-label="Doing now">{doing(row, item, now, release)}</td>
     <td data-label="Since" data-spent={row.spentMs}>{since(row, now)}</td>
     <td data-label="Health"><Health row={row} now={now}/></td>
   </tr>;
 }
 
 const columns = ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health'];
-function Table({ rows, label, work, now, setSelected }: { rows: WorkerRow[]; label: string; work: Work[]; now: number; setSelected(id: string | null): void }) {
+function Table({ rows, label, work, now, release, setSelected }: { rows: WorkerRow[]; label: string; work: Work[]; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
   const byId = new Map(work.map(item => [item.id, item]));
   return <table className="sessions-table" aria-label={label}>
     <thead><tr>{columns.map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
-    <tbody>{rows.map(row => <Row key={`${row.workId}:${row.id}`} row={row} item={byId.get(row.workId)} now={now} setSelected={setSelected}/>)}</tbody>
+    <tbody>{rows.map(row => <Row key={`${row.workId}:${row.id}`} row={row} item={byId.get(row.workId)} now={now} release={release} setSelected={setSelected}/>)}</tbody>
   </table>;
 }
 
@@ -150,15 +151,16 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
 export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
   const view = workersView(work, new Date(now));
+  const release = releaseView(status);
   // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
   const stale = view.running.filter(row => row.stale).length;
   const open = view.running.length - stale;
   return <>
     <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
-    {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
+    {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
     <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
     <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>
-      {view.finished.length ? <Table rows={view.finished} label="Ended sessions" work={work} now={now} setSelected={setSelected}/> : <p className="muted">No session has ended yet.</p>}
+      {view.finished.length ? <Table rows={view.finished} label="Ended sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No session has ended yet.</p>}
     </details>
     <details className="finished-sessions accounts"><summary>By account <span className="count">{view.principals.length}</span></summary>
       {view.principals.length ? <Accounts principals={view.principals} setSelected={setSelected}/> : <p className="muted">No agent has worked here yet.</p>}

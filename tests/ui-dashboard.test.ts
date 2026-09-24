@@ -300,6 +300,8 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     ['CI pending behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'in_progress', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
     ['CI pending behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'queued', appId: 1, id: 1 }, { name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
     ['CI failed behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · the check test failed', 'Builder agent'],
+    // No trusted run yet, only another App's failure under the same name: the gate says only that the trusted check has not passed.
+    ['CI absent from the trusted App behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
     ['review requested', find('GY-15', work), 'review', 'Reviewing · waiting for the reviewer', 'Reviewer agent'],
     ['proofs pending', find('GY-16', work), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
     // An obligation inherited from another change's deferred proof counts in the total and stays open until proven.
@@ -313,8 +315,10 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     // A change request sends it back to the builder: the item waits at Build, not at Review.
     ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'build', 'Building · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
   ];
+  // The CI Apps the test gate trusts, as status carries them.
+  const trusted = { ...noRelease, ciAppIds: [1] };
   for (const [name, item, current, label, who] of cases) {
-    const steps = prSteps(item, NOW);
+    const steps = prSteps(item, NOW, trusted);
     assert.deepEqual(steps.steps.map(step => step.id), [...stepIds], name);
     assert.deepEqual(steps.steps.map(step => step.label), ['Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge', 'Deploy']);
     assert.equal(steps.current, current, name); assert.equal(steps.label, label, name); assert.equal(steps.who, who, name);
@@ -673,6 +677,9 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   const incident = { observedAt: new Date(NOW).toISOString(), serving: 'abc', incidents: [{ key: stale.key }], pending: [] };
   const detail = firstScreen(markup(createElement(WorkDetails, { ...dashboard({ work: [stale], status: { ...boardStatus(), production: incident } as any }), item: stale })));
   assert.match(detail, /Production has not deployed it\./); assert.doesNotMatch(detail, /Shipped in/);
+  // What is left names the release-aware Deploy detail, never "nothing blocks it".
+  const left = /aria-label="What is left">[\s\S]*?<\/section>/.exec(detail)![0];
+  assert.match(left, /<small>1 thing<\/small>/); assert.match(left, /Production has not deployed it\./); assert.doesNotMatch(left, /nothing blocks it/);
 });
 
 test('unit:ui-insights-real-items — Insights builds its flow and 24-hour replay from real-shaped items (no observation, no reviews, no candidate) without failing, through the same code path the page reads', async () => {
@@ -806,9 +813,14 @@ test('GY-161 review: where the production watch observes production, a merge wai
     [withChecks([{ id: 1, name: 'test', result: 'in_progress', appId: 1 }, { id: 2, name: 'test', result: 'success', appId: 99 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], [ci]), 'test running · typecheck passed'],
     [withChecks([{ id: 1, name: 'test', result: 'success', appId: 1 }, { id: 2, name: 'test', result: 'failure', appId: 99 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], []), 'test passed · typecheck passed'],
     [withChecks([{ id: 1, name: 'test', result: 'failure', appId: 1 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], [ci]), 'test failed · typecheck passed'],
+    // Only an untrusted App published the named check, and it failed: the trusted check is still to come.
+    [withChecks([{ id: 2, name: 'test', result: 'failure', appId: 99 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], [ci]), 'test running · typecheck passed'],
   ];
+  // The status the item page reads names the trusted CI Apps; the server carries its own list.
+  assert.deepEqual(releaseView(boardStatus()).ciAppIds, [1, 15368]);
+  assert.match(await read('src/server/routes/status.ts'), /ciAppIds: engine\.ciAppIds/);
   for (const [item, line] of cases) {
-    assert.equal(checkStates(item).map(check => `${check.name} ${check.state}`).join(' · '), line);
+    assert.equal(checkStates(item, [1]).map(check => `${check.name} ${check.state}`).join(' · '), line);
     const detail = markup(createElement(WorkDetails, { ...dashboard({ work: [item] }), item }));
     assert.match(detail, new RegExp(`<dt>Checks</dt><dd>${line}</dd>`));
   }

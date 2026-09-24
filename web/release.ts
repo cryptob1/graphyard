@@ -15,9 +15,14 @@ export interface ReleaseView {
   unserved: ReadonlySet<string>;
   /** Merged items with an open deployment incident (failed or missing): blocked at Deploy. */
   failed: ReadonlySet<string>;
+  /**
+   * The CI Apps whose check runs the test gate counts (status `ciAppIds`), so a check reads failed
+   * only on a trusted App's own failure; null when status has not said.
+   */
+  ciAppIds: readonly number[] | null;
 }
 
-export const noRelease: ReleaseView = { environment: defaultProductionEnvironment, unserved: new Set(), failed: new Set() };
+export const noRelease: ReleaseView = { environment: defaultProductionEnvironment, unserved: new Set(), failed: new Set(), ciAppIds: null };
 
 /** The release view from the status read every page already has. */
 export function releaseView(status: any): ReleaseView {
@@ -32,6 +37,7 @@ export function releaseView(status: any): ReleaseView {
     environment,
     unserved: new Set(observed ? keys(production.pending) : []),
     failed: new Set(observed ? keys((Array.isArray(production.incidents) ? production.incidents : []).map((incident: any) => incident?.key)) : []),
+    ciAppIds: Array.isArray(status?.ciAppIds) ? status.ciAppIds.filter((id: unknown): id is number => typeof id === 'number') : null,
   };
 }
 

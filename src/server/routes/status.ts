@@ -56,7 +56,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment,
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds,
         // What the timeline reconstruction has done in this process, and any failure it hit.
         pipelineBackfill: pipelineBackfillState(observedAt.getTime()),
         // The fleet as the registry holds it: each account's runtime, model, role eligibility, live

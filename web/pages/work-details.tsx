@@ -89,12 +89,15 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         : withoutPr(plain.sentence).replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
   // What is left belongs to the step the bar shows as current: once handed in, that step's own
   // gate (Test before Review, unlike the evaluation order); before, whatever holds the build.
+  // Deploy has no gate: merged work held there is left with what the release lacks (the same
+  // release-aware detail the why line and the step bar say), never "nothing blocks it".
   const stepGateName = steps.current && steps.current !== 'build' ? stepGate[steps.current] : undefined;
-  const failing = (stepGateName ? item.gates.find(g => g.name === stepGateName && !g.passed) : undefined) ?? item.gates.find(g => !g.passed);
+  const failing = steps.current === 'deploy' ? undefined : (stepGateName ? item.gates.find(g => g.name === stepGateName && !g.passed) : undefined) ?? item.gates.find(g => !g.passed);
   // A proof still owed is named by the proof: each criterion is listed once, under Requirements.
-  const left = failing ? [...new Set(failing.reasons.map(r => r.match(/^AC-\d+: (\S+) needs trusted/)?.[1]).map((proof, i) => proof ? `The proof ${proof} has not passed yet` : plainReason(failing.reasons[i], failing.name).text))] : [];
+  const left = steps.current === 'deploy' ? [`${steps.detail.replace(/^./, c => c.toUpperCase())}.`]
+    : failing ? [...new Set(failing.reasons.map(r => r.match(/^AC-\d+: (\S+) needs trusted/)?.[1]).map((proof, i) => proof ? `The proof ${proof} has not passed yet` : plainReason(failing.reasons[i], failing.name).text))] : [];
   // Each required check as the test gate reads it, the same states the Test step counts.
-  const checks = checkStates(item);
+  const checks = checkStates(item, release.ciAppIds);
   // The review gate's own verdict, whichever provider gave it (GitHub, Codex or an agent reviewer).
   const reviewGate = item.gates.find(g => g.name === 'review');
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
