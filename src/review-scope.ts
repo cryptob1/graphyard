@@ -76,11 +76,31 @@ const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** Whether `text` names `path` itself — as a whole token, optionally with `:line` — not a longer path that contains it. */
 export const namesPath = (text: string, path: string) => new RegExp(`(^|[^A-Za-z0-9_./-])${escape(path)}(?=$|[^A-Za-z0-9_./-]|\\.(?:$|\\s))`).test(text);
 
+// A sentence or clause of a finding: split at a sentence end, a semicolon or a line break, never at a
+// comma, so "Don't touch a.ts, b.ts or c.ts" stays one clause and every file in it reads as negated.
+const clauses = (text: string) => text.split(/[;!?\n]|\.(?=\s|$)/);
+// A path-like token — a slash, or a name with an extension — is masked before the negation words are
+// read, so `src/no-op.ts` or `not.ts` is never itself read as a "no" or a "not".
+const maskPaths = (clause: string) => clause.replace(/\S*\/\S*|[\w-]+\.[A-Za-z]\w*\b/g, ' ');
+// "Update src/caller.ts instead" is affirmative; "instead of src/a.ts" and "rather than src/a.ts" are not.
+const negation = /\b(?:not|no|never|nor|neither|none|cannot|dont|doesnt|isnt|shouldnt|mustnt|wont|cant|without|avoid|leave|keep|unchanged|untouched|alone|instead\s+of|rather\s+than|except|excluding|exclude|outside|forbid|forbidden|prohibit|prohibited|refrain|stop)\b|n['’]t\b/i;
+/**
+ * Whether `text` mentions `path` in a negated clause — "Do not change `src/security.ts`", "leave
+ * src/a.ts alone", "fix src/b.ts rather than src/a.ts". The loop does not tell a prohibition from a
+ * description that happens to say "not", so any negation word in the clause counts: a finding that
+ * describes a file as "does not check X" is refused and escalated, never widened on a guess.
+ */
+// A review's verdict on a finding — "Not fixed: src/a.ts:12 …", "not yet addressed" — says the file still needs the change, so it is no negation of it.
+const verdict = /\bnot\s+(?:yet\s+)?(?:fixed|addressed|resolved)\b/gi;
+export const negatesPath = (text: string, path: string) => clauses(text).some(clause => namesPath(clause, path) && negation.test(maskPaths(clause).replace(verdict, ' ')));
+
 /**
  * The finding each requested path rests on, or the reason the request is not a finding's to grant.
  * Only single files that exist on the base branch and that a finding names literally qualify: never a
  * directory, and never a file the base lacks. Whether a finding asks for a new file is free text the
- * loop does not judge, so a creation stays refused and escalated to the master.
+ * loop does not judge, so a creation stays refused and escalated to the master. A file any trusted
+ * finding names in a negated clause is refused too, however another finding names it: the mention
+ * may be the reviewer ruling that very file out, and the loop grants only on an unqualified mention.
  */
 export function findingScope(paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean): { grounds: { path: string; ground: string }[] } | { refusal: string } {
   const grounds: { path: string; ground: string }[] = [];
@@ -88,6 +108,8 @@ export function findingScope(paths: readonly string[], findings: readonly Review
     if (pathScope(path).prefix || path.endsWith('*')) return { refusal: `${path} is a directory scope; a review finding grants only the files it names` };
     const naming = findings.find(entry => namesPath(entry.text, path));
     if (!naming) return { refusal: `no unresolved review finding on the head names ${path}` };
+    const negated = findings.find(entry => negatesPath(entry.text, path));
+    if (negated) return { refusal: `${negated.ground} names ${path} in a negated clause; the loop grants only a file a finding names without a negation, and leaves this to the master` };
     if (!exists(path)) return { refusal: `${path} does not exist on the base branch as a file; a review finding grants only existing files, never a directory, and a new file is the master's to decide` };
     grounds.push({ path, ground: naming.ground });
   }

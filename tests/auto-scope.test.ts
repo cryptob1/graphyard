@@ -14,7 +14,7 @@ import { actionDetailMax, emptyDaemonState, findingRecheckMs, runCycle, scopeBud
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
-import { basePaths, findingScope, namesPath, readReviewFindings } from '../src/review-scope.js';
+import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
@@ -553,6 +553,16 @@ test('unit:review-finding-scope — only a file on the base that a finding names
   assert.match((findingScope(['src/other.ts'], findings, exists) as { refusal: string }).refusal, /no unresolved review finding/);
   assert.match((findingScope(['src/merge-queue.ts', 'src/other.ts'], findings, exists) as { refusal: string }).refusal, /names src\/other\.ts/, 'one unnamed file refuses the whole request');
   assert.ok(namesPath('see src/a.ts.', 'src/a.ts') && namesPath('(src/a.ts:12)', 'src/a.ts') && !namesPath('lib/src/a.ts', 'src/a.ts') && !namesPath('src/a.ts.bak', 'src/a.ts'));
+  // A file a finding names in a negated clause is the reviewer ruling it out, not asking for it: refused, even beside an affirmative mention.
+  const ruledOut = [{ ground: 'review 15', text: 'Do not change `src/security.ts`; update `src/caller.ts` instead.' }];
+  assert.match((findingScope(['src/security.ts'], ruledOut, () => true) as { refusal: string }).refusal, /review 15 names src\/security\.ts in a negated clause/);
+  assert.deepEqual(findingScope(['src/caller.ts'], ruledOut, () => true), { grounds: [{ path: 'src/caller.ts', ground: 'review 15' }] });
+  for (const text of ["Don't touch src/security.ts, src/a.ts or src/b.ts", 'Leave src/security.ts alone.', 'Fix src/caller.ts rather than src/security.ts', 'src/security.ts must never change', 'Change the caller instead of src/security.ts'])
+    assert.match((findingScope(['src/security.ts'], [{ ground: 'review 16', text }], () => true) as { refusal: string }).refusal, /negated clause/, text);
+  assert.match((findingScope(['src/security.ts'], [{ ground: 'review 17', text: 'Fix src/security.ts:12' }, { ground: 'review 18', text: 'Do not change src/security.ts' }], () => true) as { refusal: string }).refusal, /review 18 names src\/security\.ts in a negated clause/, 'a negated mention anywhere refuses the file');
+  assert.deepEqual(findingScope(['src/no-op.ts'], [{ ground: 'review 19', text: 'Fix src/no-op.ts. Do not change src/other.ts' }], () => true), { grounds: [{ path: 'src/no-op.ts', ground: 'review 19' }] }, 'a path is not read as a negation, and a negation in another sentence is not this path\'s');
+  assert.ok(!negatesPath('**Not fixed: PRRT_x (src/a.ts:87, reject it).**', 'src/a.ts') && negatesPath('Not fixed, and do not change src/a.ts', 'src/a.ts'), 'a review\'s "not fixed" verdict is no negation of the file');
+  assert.ok(!negatesPath('Fix src/a.ts\nDo not change src/b.ts', 'src/a.ts') && negatesPath('Fix src/a.ts\nDo not change src/b.ts', 'src/b.ts'));
   // A file the base lacks is a creation, the master's to decide, however plainly a finding asks for it.
   for (const text of ['src/missing.ts is wrong', 'Create src/missing.ts for the helper', 'Add a new file at `src/missing.ts`', 'src/missing.ts should be added next to the queue'])
     assert.match((findingScope(['src/missing.ts'], [{ ground: 'review 9', text }], exists) as { refusal: string }).refusal, /src\/missing\.ts does not exist on the base branch/, text);
