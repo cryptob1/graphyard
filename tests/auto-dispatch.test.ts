@@ -827,3 +827,34 @@ test('manual:dispatcher-state-docs-review — the master guide states that the d
     'A tick failure is attributed and surfaced', 'dispatch.lastFailure', 'Three consecutive failures raise one attention item', 'no reviewer or producer session is being launched for any item',
     'A session that exits at launch is classified from its pane', 'agent_not_found', 'herdr pane read', 'provider limit notice', 'fails over exactly as a mid-session', "the pane's last words", 'exits **at launch**']) assert.ok(guide.includes(fragment), `docs/master-agent.md must state: ${fragment}`);
 });
+
+test('unit:review-waits-for-bot-reviewers — a reviewer launch waits, bounded, for the configured bot reviewers to review the head, launches once they have, and never waits when the bound is 0', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const reviewLaunches = (log: string[]) => log.filter(entry => entry.startsWith('review:'));
+    const codex = 'chatgpt-codex-connector[bot]';
+    // GY-163: Codex's inline findings landed after our reviewer approved, one rework round each.
+    for (const scenario of [
+      { name: 'within the bound, no bot review of the head', reviewers: [] as string[] | null, at: 60_000, launches: 0 },
+      { name: 'the bot reviewed the head', reviewers: [codex], at: 60_000, launches: 1 },
+      { name: 'the bound passed with no bot review', reviewers: [], at: 8 * 60_000 + 1, launches: 1 },
+      { name: 'the read failed: the launch is not held on GitHub', reviewers: null, at: 60_000, launches: 1 },
+    ]) {
+      const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
+      const effects = stubEffects(() => [item], log, { headReviewers: async (_work, request) => {
+        assert.equal(request.sha, H, 'the read asks about the requested head');
+        if (scenario.reviewers === null) throw new Error('gh: HTTP 502');
+        return scenario.reviewers;
+      } });
+      const tick = await runDispatchTick(masterConfig(token), emptyDispatchCursor(masterConfig(token)), effects, () => requested + scenario.at);
+      assert.equal(reviewLaunches(log).length, scenario.launches, scenario.name);
+      if (!scenario.launches) assert.ok(tick.waiting.some(entry => entry.kind === 'review' && /waits up to 8 min .* for chatgpt-codex-connector\[bot\]'s review/.test(entry.reason)), `${scenario.name}: ${JSON.stringify(tick.waiting)}`);
+    }
+    // Turned off: 0 minutes launches at once whatever the bots have done.
+    const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
+    const off = masterConfig(token, { run: { awaitReviewersMinutes: 0 } as Partial<MasterRun> });
+    await runDispatchTick(off, emptyDispatchCursor(off), stubEffects(() => [item], log, { headReviewers: async () => [] }), () => requested + 1000);
+    assert.equal(reviewLaunches(log).length, 1, 'awaitReviewersMinutes 0 never waits');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
