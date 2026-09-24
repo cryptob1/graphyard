@@ -709,6 +709,12 @@ export class GitHub {
     }
     return contained;
   }
+  /** How many commits `head` holds that `base` does not: one compare page of one commit, and only the count is read. */
+  async aheadBy(base: string, head: string): Promise<number> {
+    const comparison = await this.request(`/compare/${base}...${encodeURIComponent(head)}?per_page=1`);
+    demand(typeof comparison?.ahead_by === 'number', `GitHub did not report how far ${head} is ahead of ${base.slice(0, 12)}`, 502);
+    return comparison.ahead_by;
+  }
   /**
    * The commits `head` holds that `base` does not, or null when GitHub's list is truncated and
    * ancestry must be asked per commit. Immutable for a pair of SHAs, so asked once.
