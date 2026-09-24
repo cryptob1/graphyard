@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { broadScope, dispatchOrder, dispatchOverlap, scopeBreadth } from '../src/coordination.js';
+import { broadScope, dispatchOrder, dispatchOverlap, effectiveConcurrency, scopeBreadth } from '../src/coordination.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { candidateConflicts, fetchCandidateHeads, gitConflictProbe } from '../src/conflicts.js';
 import { assertDispatchable, buildMasterStatus, dispatchSchedule, dispatchWork, masterConfigSchema, sequenceAdvice, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -199,4 +199,9 @@ test('unit:overlap-priority-and-open-pr — work never waits behind lower-priori
   // A fresh item with no pull request is still held behind same- or higher-priority work on its directory.
   assert.deepEqual(dispatchOverlap(work('GY-172', { priority: 1, plannedFiles: ['tests/'] }), [redesign], clock).map(entry => entry.key), ['GY-161']);
   assert.deepEqual(dispatchOverlap(work('GY-173', { priority: 0, plannedFiles: ['tests/'] }), [redesign], clock), [], 'but never behind lower-priority work');
+  // Effective concurrency reads the same exceptions: each of these pairs may be in flight at once.
+  const pairs: [Work, Work][] = [[fix, redesign], [fix, claimed('GY-170', ['tests/'], { priority: 0 })], [work('GY-173', { priority: 0, plannedFiles: ['tests/'] }), redesign]];
+  for (const pair of pairs) assert.deepEqual(effectiveConcurrency(pair, clock), { effective: 2, items: pair.map(entry => entry.key), nodes: 2, edges: 0, exact: true }, pair.map(entry => entry.key).join(' + '));
+  // A named file, at equal priority, still excludes in both directions.
+  assert.equal(effectiveConcurrency([fix, claimed('GY-171', ['tests/auto-scope.test.ts'], { priority: 0 })], clock).effective, 1);
 });

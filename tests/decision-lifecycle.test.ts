@@ -329,10 +329,13 @@ test('integration:decision-pinning-scope — resolve is pinned to what it acts o
   assert.deepEqual(standingEscalations(await reload(superseded.id)).map(entry => entry.at), [supersededLoss.at], 'the loss still stands for a human or a verified stop');
 });
 
-test('a resolve pin recorded before it named the held lease is compared on the fields it recorded', () => {
+test('a resolve pin recorded before it named the held lease is stale: it cannot show the lease still stands', () => {
   const current = { policyRevision: 3, sha: null, baseSha: null, epoch: 2, lease: 2, escalations: [{ trigger: 'lease-loss', at: '2030-01-01T00:00:00.000Z' }] };
   const { lease, ...recorded } = current;
-  assert.equal(samePin(current, recorded), true);
+  assert.equal(samePin(current, current), true);
+  assert.equal(samePin(current, recorded), false, 'even while the lease stands, the legacy pin cannot prove it');
+  // The case the field exists for: the replacement lease lapsed and its loss was a suppressed repeat.
+  assert.equal(samePin({ ...current, lease: null }, recorded), false);
   assert.equal(samePin(current, { ...current, lease: null }), false);
   assert.equal(samePin({ ...current, lease: null }, current), false);
   assert.equal(samePin(current, null), false);

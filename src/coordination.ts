@@ -55,19 +55,28 @@ export function exclusionPaths(work: Work): string[] {
  */
 export function dispatchOverlap(work: Work, all: Work[], now: number): OverlapAhead[] {
   if (work.stage === 'done') return [];
-  const mine = exclusionPaths(work);
-  // Work never waits behind lower-priority work, and an item whose pull request is open is not held
-  // by a directory another item merely declared: its changed files are concrete and the directory
-  // is a guess. On 2026-09-24 the priority-0 GY-164, mid-review with PR #155 open, sat held behind
-  // the priority-1 GY-161, claimed later over the whole tests/ directory. A named file, or another
-  // candidate's changed file, still excludes. A directory is any spelling pathScope reads as one: tests/, tests/* or tests/**.
-  return all.filter(w => w.id !== work.id && inFlight(w, now) && w.priority <= work.priority).flatMap(w => {
-    const theirs = exclusionPaths(w);
-    const paths = mine.filter(path => theirs.some(other => pathScopesOverlap(path, other)));
-    if (!paths.length) return [];
-    if (work.candidate && !w.candidate && theirs.filter(other => mine.some(path => pathScopesOverlap(path, other))).every(other => pathScope(other).prefix)) return [];
-    return [{ key: w.key, stage: w.stage, state: claimedNow(w, now) ? 'claimed' as const : 'submitted' as const, paths, theirs: theirs.filter(other => mine.some(path => pathScopesOverlap(path, other))) }];
+  return all.filter(w => w.id !== work.id && inFlight(w, now)).flatMap(w => {
+    const held = overlapHolds(work, w);
+    return held ? [{ key: w.key, stage: w.stage, state: claimedNow(w, now) ? 'claimed' as const : 'submitted' as const, ...held }] : [];
   });
+}
+/**
+ * Whether `other`, in flight, would hold `work` from dispatch, and on which paths: the one pairwise
+ * rule `dispatchOverlap` and `effectiveConcurrency` share. Work never waits behind lower-priority
+ * work, and an item whose pull request is open is not held by a directory another item merely
+ * declared: its changed files are concrete and the directory is a guess. On 2026-09-24 the
+ * priority-0 GY-164, mid-review with PR #155 open, sat held behind the priority-1 GY-161, claimed
+ * later over the whole tests/ directory. A named file, or another candidate's changed file, still
+ * excludes. A directory is any spelling pathScope reads as one: tests/, tests/* or tests/**.
+ */
+function overlapHolds(work: Work, other: Work): { paths: string[]; theirs: string[] } | null {
+  if (other.priority > work.priority) return null;
+  const mine = exclusionPaths(work), theirs = exclusionPaths(other);
+  const paths = mine.filter(path => theirs.some(entry => pathScopesOverlap(path, entry)));
+  if (!paths.length) return null;
+  const overlapping = theirs.filter(entry => mine.some(path => pathScopesOverlap(path, entry)));
+  if (work.candidate && !other.candidate && overlapping.every(entry => pathScope(entry).prefix)) return null;
+  return { paths, theirs: overlapping };
 }
 
 /** Ready to be offered a worker, if nothing overlapping is ahead of it: released, unblocked, unclaimed, and not submitted unless rework was requested. */
@@ -125,8 +134,10 @@ export interface EffectiveConcurrency { effective: number; items: string[]; node
  */
 export function effectiveConcurrency(all: Work[], now: number): EffectiveConcurrency {
   const nodes = all.filter(work => inFlight(work, now) || dispatchable(work, now));
-  const paths = nodes.map(exclusionPaths);
-  const adjacent = nodes.map((_, i) => nodes.map((_, j) => i !== j && paths[i].some(path => paths[j].some(other => pathScopesOverlap(path, other)))));
+  // Two items exclude each other only when neither may be dispatched while the other is in flight:
+  // under the scheduler's own exceptions, a higher-priority item or an open candidate over another's
+  // declared directory goes ahead, so the pair can be in flight at once.
+  const adjacent = nodes.map((a, i) => nodes.map((b, j) => i !== j && !!overlapHolds(a, b) && !!overlapHolds(b, a)));
   const edges = adjacent.reduce((total, row) => total + row.filter(Boolean).length, 0) / 2;
   let budget = 100_000, exhausted = false, best: number[] = [];
   const search = (remaining: number[], chosen: number[]) => {

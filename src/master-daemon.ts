@@ -780,8 +780,11 @@ export function supersededLeaseLoss(work: Work): { escalation: ReturnType<typeof
     if (escalation.trigger !== 'lease-loss' || escalation.actor !== 'graphyard' || epoch === null) continue;
     const fence = work.containmentQuarantine;
     if (fence && fence.epoch <= epoch) continue;
-    const newer = work.epoch > epoch && (work.lease && work.lease.epoch > epoch ? `epoch ${work.lease.epoch} is held by ${work.lease.owner}`
-      : work.submission && work.submission.epoch > epoch ? `epoch ${work.submission.epoch} submitted PR #${work.submission.pr}` : null);
+    // Only the latest attempt's own lease or submission shows it: a submission survives the rework
+    // claim that follows it, so an older one would vouch for a later attempt that lapsed unexplained
+    // (its lease-loss suppressed as a repeat of this one) and resolving would erase that loss too.
+    const newer = work.epoch > epoch && (work.lease && work.lease.epoch === work.epoch ? `epoch ${work.lease.epoch} is held by ${work.lease.owner}`
+      : work.submission && work.submission.epoch === work.epoch ? `epoch ${work.submission.epoch} submitted PR #${work.submission.pr}` : null);
     if (newer) return { escalation, epoch, superseded: true, evidence: `A newer attempt superseded it: ${newer}, a claim is granted only after the epoch ${epoch} lease has ended, and ${fence ? `the containment fence now standing belongs to epoch ${fence.epoch}, so the epoch ${epoch} fence was lowered` : 'no containment fence stands'}. ` };
     if (work.epoch === epoch && (!work.lease || work.lease.epoch !== epoch)) return { escalation, epoch, superseded: false, evidence: `No newer attempt holds the item. ` };
   }

@@ -54,6 +54,19 @@ test('unit:lease-loss-resolve-routine — a control-plane lease-loss a newer att
   assert.equal(idle?.action, 'resolve');
   assert.match(idle!.reason, /The previous worker is stopped/);
 
+  // Only the latest attempt's own submission shows supersession. Epoch 2 submitted, rework moved the
+  // item to epoch 3, and epoch 3 lapsed unexplained (its lease-loss a suppressed repeat of epoch 1's):
+  // the epoch-2 submission survives the rework claim but vouches for nothing after it.
+  const submission = { epoch: 2, pr: 157, sha: 'c'.repeat(40) };
+  const stale = item({ epoch: 3, lease: null, containmentQuarantine: null, submission } as Partial<Work>);
+  assert.equal(supersededLeaseLoss(stale), null);
+  assert.equal(decide(stale), null);
+  const submitted = supersededLeaseLoss(item({ epoch: 2, lease: null, containmentQuarantine: null, submission } as Partial<Work>));
+  assert.equal(submitted?.superseded, true);
+  assert.match(submitted!.evidence, /epoch 2 submitted PR #157/);
+  // A later attempt holding the lease still supersedes every earlier one.
+  assert.equal(supersededLeaseLoss(item({ epoch: 3, lease: { owner: 'graphyard-opencode-1', epoch: 3, expiresAt: iso(60_000) }, containmentQuarantine: null, submission } as Partial<Work>))?.superseded, true);
+
   // Other triggers, and a lease-loss a lead raised, stay for the master.
   for (const other of [{ ...lost, trigger: 'security-concern', reason: 'a credential' }, { ...lost, actor: 'slice-lead' }]) {
     assert.equal(supersededLeaseLoss(item({ escalation: other, escalations: [other] } as Partial<Work>)), null, `${other.trigger} by ${other.actor}`);

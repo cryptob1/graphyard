@@ -27,7 +27,7 @@ Each resolution records `escalation.resolved`: resolver, session kind, reason, a
 | Standing escalation | Settled by |
 | --- | --- |
 | `lease-loss` for a lapse the ledger explains | Reconciliation, or any `admin` with `resolve GY-N lease-loss --attestation blocked\|stopped-worker "reason"` |
-| Control-plane `lease-loss` of a superseded or stopped epoch | The loop's own two-party decision, stale if the superseding lease lapses first |
+| Control-plane `lease-loss` of a superseded or stopped epoch | The loop's two-party decision, stale if the superseding lease lapses |
 | `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised | A two-party decision the master requests, or a declared human session |
 
-A declared human session (`admin`, `sessionKind: "human"`) settles any. A two-party decision is `master decide GY-N resolve`, applied once an independent approver approves; no lead, worker, producer or coordinator resolves alone.
+A declared human session (`admin`, `sessionKind: "human"`) settles any. A two-party `master decide GY-N resolve` applies once an independent approver approves; nobody else resolves alone.

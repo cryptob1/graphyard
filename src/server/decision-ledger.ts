@@ -36,12 +36,11 @@ export const resolvePin = (work: Work): ResolvePin => ({ policyRevision: work.po
 export const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : 1).map(([key, entry]) => [key, canonical(entry)]))
   : value;
-// A pin recorded before it named the held lease is compared on the fields it recorded.
-export const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) => {
-  if (!pinned) return false;
-  const { lease, ...rest } = current;
-  return JSON.stringify(canonical('lease' in pinned ? current : rest)) === JSON.stringify(canonical(pinned));
-};
+// A pin recorded before it named the held lease cannot show the lease still stands, so it never
+// matches: a replacement lease that lapsed since is invisible to its other fields, and approving it
+// would clear the incident after that loss had gone unrecorded. The requester asks again.
+export const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) =>
+  !!pinned && 'lease' in pinned && JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
 export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | null };
 
 /** The fold itself, over one item's decision entries in ledger order. */
