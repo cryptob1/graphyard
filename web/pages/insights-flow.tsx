@@ -36,6 +36,67 @@ export function ReplayLane({ frames, t }: { frames: ReplayFrame[]; t: number }) 
   </div>;
 }
 
+const day = 86_400_000;
+/**
+ * What the report could not see, or null when it saw the whole window: the report's own coverage
+ * statement when a scan bound cut it short, and the projection's lag when the ledger is ahead of
+ * the flow record. A partial read is said out loud, never drawn as a quiet week.
+ */
+export function flowCoverage(report: any): { truncated: boolean; stale: boolean; statement: string } | null {
+  const truncated = !!report?.window?.truncated;
+  const projection = report?.coverage?.projection;
+  const stale = !!projection?.stale;
+  if (!truncated && !stale) return null;
+  const lag = stale ? `The flow record is ${projection.pendingEvents}${projection.pendingCapped ? ' or more' : ''} ledger event(s) behind, so the latest changes are not in these figures yet.` : '';
+  return { truncated, stale, statement: [truncated ? String(report.window.covered?.statement ?? 'The read stopped short of the requested window.') : '', lag].filter(Boolean).join(' ') };
+}
+/** Up to when the report read the facts of one kind: its own read (`window.kinds`), else the shared scan's reach. */
+function readUntil(report: any, kind: string): number {
+  const own = Array.isArray(report?.window?.kinds) ? report.window.kinds.find((entry: any) => entry?.kind === kind)?.toCovered : undefined;
+  const reach = own ?? (report?.window?.truncated ? report.window.covered?.toCovered : report?.window?.to);
+  const at = Date.parse(reach ?? '');
+  return Number.isNaN(at) ? Infinity : at;
+}
+
+/**
+ * Landed on main per day: one bar per calendar day the report counted. A day the read never
+ * reached has no bar and no number — "not read" — and the coverage statement stands in the panel,
+ * so a truncated or stale report never shows an uncounted day as nothing landed.
+ */
+export function LandedPerDay({ report }: { report: any }) {
+  const coverage = flowCoverage(report);
+  const until = readUntil(report, 'delivered');
+  const end = Date.parse(report?.window?.to ?? '');
+  const landed: { bucket: string; delivered: number; covered: boolean }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7)
+    .map((entry: any) => ({ bucket: entry.bucket, delivered: entry.delivered, covered: !coverage?.stale && (typeof entry.covered === 'boolean' ? entry.covered : Math.min(Date.parse(entry.bucket) + day, Number.isNaN(end) ? Infinity : end) <= until) }));
+  const peak = Math.max(1, ...landed.filter(entry => entry.covered).map(entry => entry.delivered));
+  return <section className="panel" aria-label="Landed per day"><h2>Landed on main per day <small>last 7 days, UTC</small></h2>
+    {coverage && <p className="notice" role="status" data-flow="coverage">{coverage.statement}</p>}
+    {landed.length ? <div className="landed-bars">{landed.map(entry => entry.covered
+      ? <div key={entry.bucket} className="landed-day" data-bucket={entry.bucket} title={`${entry.delivered} on ${entry.bucket.slice(0, 10)}`}>
+        <span>{entry.delivered}</span><span className="landed-bar" style={{ height: `${Math.round(entry.delivered / peak * 160)}px` }}/><small>{new Date(entry.bucket).toISOString().slice(5, 10)}</small>
+      </div>
+      : <div key={entry.bucket} className="landed-day uncovered" data-bucket={entry.bucket} data-uncovered="true" title={`${entry.bucket.slice(0, 10)} was not read`}>
+        <span>—</span><small>{new Date(entry.bucket).toISOString().slice(5, 10)} not read</small>
+      </div>)}</div> : <p className="muted">{report ? coverage ? 'No day of this window was read.' : 'Nothing landed in this window.' : 'Reading the recorded deliveries…'}</p>}
+  </section>;
+}
+
+/**
+ * The items the Now view draws: every open item that has a current step. That is the Moving and
+ * Blocked groups, and also rework waiting for a builder while its pull request is still open —
+ * the Work page files it under Up next, but its candidate is in the flow, back at Build.
+ */
+export function flowNow(work: Dashboard['work'], now: number, status: Dashboard['status']) {
+  const release = releaseView(status);
+  const { byGroup } = classify(work, now, status?.humanOnly, release);
+  // Merged work still waiting on its release is in Moving (or Blocked) at Deploy, like the Work page.
+  const rework = byGroup['up-next'].filter(item => !!item.candidate);
+  const inFlow = [...byGroup.moving, ...byGroup.blocked, ...rework];
+  const entries = inFlow.map(item => ({ item, steps: prSteps(item, now, release) })).filter(entry => entry.steps.current);
+  return { byGroup, entries, outside: { upNext: byGroup['up-next'].length - rework.length } };
+}
+
 /**
  * Insights → Flow (GY-161): build to live, one column per pull-request step.
  *
@@ -78,23 +139,20 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing]);
 
-  const release = releaseView(status);
-  const { byGroup } = classify(work, now, status?.humanOnly, release);
-  // Merged work still waiting on its release is in Moving (or Blocked) at Deploy, like the Work page.
-  const inFlow = [...byGroup.moving, ...byGroup.blocked];
-  const now7 = inFlow.map(item => ({ item, steps: prSteps(item, now, release) })).filter(entry => entry.steps.current);
+  const { byGroup, entries: now7, outside } = flowNow(work, now, status);
   // Each dot stands in its step's column, one row per item already there, so no two dots overlap.
   const row = new Map<string, number>(); const perStep = new Map<StepId, number>();
   for (const { item, steps } of now7) { const n = perStep.get(steps.current!) ?? 0; row.set(item.id, n); perStep.set(steps.current!, n + 1); }
   const nowHeight = Math.max(170, 24 + Math.max(0, ...perStep.values()) * 22 + 40);
   const dwell = new Map<StepId, number | null>();
   // Per-step medians come from the same recorded step moves the replay plays (the report's stepDwell).
-  for (const entry of Array.isArray(report?.stepDwell) ? report.stepDwell : []) if ((stepIds as readonly string[]).includes(entry.step)) dwell.set(entry.step, entry.medianMs ?? null);
+  const coverage = flowCoverage(report);
+  // Step times read from gate facts the report did not reach, or from a lagging record, are not the week's.
+  const dwellPartial = !!coverage && (coverage.stale || readUntil(report, 'gates.changed') < Date.parse(report?.window?.to ?? ''));
+  if (!dwellPartial) for (const entry of Array.isArray(report?.stepDwell) ? report.stepDwell : []) if ((stepIds as readonly string[]).includes(entry.step)) dwell.set(entry.step, entry.medianMs ?? null);
   const shares = stepIds.map(step => ({ step, ms: dwell.get(step) ?? 0 })).filter(entry => entry.ms > 0);
   const total = shares.reduce((sum, entry) => sum + entry.ms, 0);
   const slowest = shares.length ? shares.reduce((a, b) => b.ms > a.ms ? b : a).step : null;
-  const landed: { bucket: string; delivered: number }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7);
-  const peak = Math.max(1, ...landed.map(day => day.delivered));
   return <>
     <div className="page-heading"><div><h1>Flow</h1><p className="summary">Build to live, one column per step. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
     {error && <p className="notice" role="status">The recorded history could not be read: {error}. The Now view below is live.</p>}
@@ -105,7 +163,7 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
       <div className="flow-subhead"><span className="dot live"/><h2>Now</h2><span>Real time. A dot moves only when its item changes step.</span></div>
       <div className="flow-lane now-lane" data-flow="now" style={{ height: `${nowHeight}px` }}>{now7.map(({ item, steps }) => <button type="button" key={item.id} className={`now-dot group-${byGroup.blocked.includes(item) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
         data-row={row.get(item.id)} style={{ left: column(steps.current!), top: `${12 + row.get(item.id)! * 22}px` }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[steps.current!]}: ${steps.label}`} onClick={() => setSelected(item.id)}><span className="mono">{item.key}</span></button>)}
-        <p className="outside">Waiting outside the flow: {byGroup['needs-you'].length} {byGroup['needs-you'].length === 1 ? 'needs' : 'need'} you · {byGroup['up-next'].length} up next · {byGroup.backlog.length} in backlog</p>
+        <p className="outside">Waiting outside the flow: {byGroup['needs-you'].length} {byGroup['needs-you'].length === 1 ? 'needs' : 'need'} you · {outside.upNext} up next · {byGroup.backlog.length} in backlog</p>
       </div>
       <div className="flow-subhead"><h2>Last 24 hours, replayed</h2><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>
       {frames === null ? <p className="muted flow-wait">{error ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
@@ -120,15 +178,12 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
       </div>}
     </section>
     <div className="insight-charts">
-      <section className="panel" aria-label="Landed per day"><h2>Landed on main per day <small>last 7 days</small></h2>
-        {landed.length ? <div className="landed-bars">{landed.map(day => <div key={day.bucket} className="landed-day" title={`${day.delivered} on ${day.bucket.slice(0, 10)}`}>
-          <span>{day.delivered}</span><span className="landed-bar" style={{ height: `${Math.round(day.delivered / peak * 160)}px` }}/><small>{new Date(day.bucket).toISOString().slice(5, 10)}</small>
-        </div>)}</div> : <p className="muted">{report ? 'Nothing landed in this window.' : 'Reading the recorded deliveries…'}</p>}
-      </section>
+      <LandedPerDay report={report}/>
       <section className="panel" aria-label="Where the time goes"><h2>Where the time goes <small>median time per step</small></h2>
         {total > 0 ? <><div className="time-bar">{shares.map(entry => <span key={entry.step} className={`time-share step-${entry.step}`} style={{ flex: entry.ms }} title={`${stepLabel[entry.step]} ${minutes(entry.ms)}`}/>)}</div>
           <ul className="time-legend">{shares.map(entry => <li key={entry.step} className={entry.step === slowest ? 'slowest' : undefined}><i className={`time-share step-${entry.step}`}/>{stepLabel[entry.step]} {Math.round(entry.ms / total * 100)}% · {minutes(entry.ms)}{entry.step === slowest ? ', slowest' : ''}</li>)}</ul></>
-          : <p className="muted">{report ? 'No item finished a step in this window.' : 'Reading the recorded step times…'}</p>}
+          : dwellPartial ? <p className="notice" role="status">{coverage!.statement}</p>
+            : <p className="muted">{report ? 'No item finished a step in this window.' : 'Reading the recorded step times…'}</p>}
       </section>
     </div>
   </>;

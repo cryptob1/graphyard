@@ -322,6 +322,12 @@ export interface FlowDataset {
    * a dataset assembled by hand may leave it out and is then read as fully covered.
    */
   covered?: CoveredWindow;
+  /**
+   * For each kind read on its own bound (`separateKinds`), the instant up to which every fact of
+   * that kind in the window was read: `to`, or the last fact its own bound reached. Absent (a
+   * dataset assembled by hand), a kind is covered as far as the shared scan (`covered`) reached.
+   */
+  kindCovered?: Partial<Record<FlowKind, string>>;
   /** What the production watch holds at Deploy (`productionHold`); absent reads as no observation. */
   production?: ProductionHold;
   /**
@@ -389,6 +395,18 @@ export function stepEntries(carryIn: readonly FlowFact[], facts: readonly FlowFa
   return entries;
 }
 
+/**
+ * The kinds every flow figure counts — deliveries, merges and gate changes (which place an item at
+ * a step) — read past the shared scan's cutoff on a bound of their own for each kind. Check-run
+ * and observation facts arrive by the tens of thousands a week and fill the shared scan first, so
+ * without this a busy week's landings and step moves would fall in the part it never reached.
+ */
+export const separateKinds: FlowKind[] = ['delivered', 'merged', 'gates.changed'];
+/** Up to when the facts of `kind` in the window were all read: its own read, else the shared scan's reach. */
+export function coveredUntil(dataset: { to?: string; covered?: CoveredWindow; kindCovered?: Partial<Record<FlowKind, string>> }, kind: FlowKind): string | undefined {
+  return dataset.kindCovered?.[kind] ?? (dataset.covered?.truncated ? dataset.covered.toCovered : dataset.to);
+}
+
 const carryKinds: FlowKind[] = ['stage.changed', 'gates.changed', 'work.created', 'work.released', 'delivered', 'merged', 'candidate.observed', 'lease.claimed', 'lease.released', 'lease.lost', 'dependencies.changed'];
 
 function rowToFact(row: any): FlowFact {
@@ -425,6 +443,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     [ids, from, to, scanLimit + 1]) : { rows: [], rowCount: 0 };
   const truncated = scan.rowCount! > scanLimit;
   const facts = scan.rows.slice(0, scanLimit).map(rowToFact);
+  const scanned = facts.length;
   // What an exhausted row bound cost, in window time and in facts left unread, rather than a
   // silent partial window. The remainder starts strictly after the last fact the scan returned,
   // in the scan's own (observed_at, id) order — so neither that fact nor a returned sibling at the
@@ -436,6 +455,24 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
        AND (observed_at,id) > ((SELECT observed_at FROM flow_facts WHERE id=$3), $3::bigint) LIMIT $4) probe`,
     [ids, to, lastFact.id, flowLimits.remainingProbe + 1]) : null;
   const covered = truncated ? coveredWindow(from, to, lastFact?.observedAt ?? from, (remainingProbe?.rows[0].remaining ?? 0) as number, scanLimit) : fullyCovered(from, to);
+  // Past where the shared scan stopped, each kind the flow figures count is read on its own bound,
+  // in the same order, so check-run and observation facts can never crowd a landing or a step
+  // move out of the report. A kind whose own bound is exhausted is covered to its last fact read.
+  const kindCovered: Partial<Record<FlowKind, string>> = Object.fromEntries(separateKinds.map(kind => [kind, to]));
+  if (truncated && lastFact) {
+    const separate: FlowFact[] = [];
+    for (const kind of separateKinds) {
+      const rows = (await store.pool.query(
+        `SELECT * FROM flow_facts WHERE kind=$1 AND work_id=ANY($2) AND observed_at<$3
+           AND (observed_at,id) > ((SELECT observed_at FROM flow_facts WHERE id=$4), $4::bigint) ORDER BY observed_at,id LIMIT $5`,
+        [kind, ids, to, lastFact.id, scanLimit + 1])).rows;
+      const read = rows.slice(0, scanLimit).map(rowToFact);
+      separate.push(...read);
+      if (rows.length > scanLimit) kindCovered[kind] = read.at(-1)!.observedAt;
+    }
+    facts.push(...separate.sort((a, b) => time(a.observedAt)! - time(b.observedAt)! || a.id! - b.id!));
+  }
+  if (covered.truncated) covered.statement += ` Deliveries, merges and gate changes are read past that cutoff on bounds of their own, so the daily landings and step moves cover ${separateKinds.map(kind => `${kind} to ${kindCovered[kind]}`).join(', ')}.`;
   // Current state is read as of the observation instant, inclusively: a fact recorded in
   // the same millisecond as the read clock is the state at that instant, never stale.
   // The in-window scan above stays half-open on `to` as documented.
@@ -469,7 +506,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND details->>'mergeSha'=ANY($1) ORDER BY observed_at,id LIMIT $2`, [mergeShas, flowLimits.deploymentMerges + 1])).rows : [];
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -576,10 +613,19 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
 
 // Blocker aggregates and their drill-down share one bounded reason label.
 export const blockerReasonKey = (fact: FlowFact) => String(fact.details.reason ?? '').slice(0, 200) || null;
-function bucketStarts(from: number, to: number) {
-  const starts: number[] = [];
-  for (let at = from; at < to && starts.length < flowLimits.buckets; at += day) starts.push(at);
-  return starts;
+/**
+ * Daily buckets are calendar days in UTC ending today: the `days` UTC midnights up to the one that
+ * starts the day `to` falls in, so the last bucket is today, still partial. The window opens part
+ * way through the day before the first bucket; that sliver is counted in the first bucket, so the
+ * buckets together hold every instant of the window. More days than `flowLimits.buckets` keep the
+ * latest ones. `bucketOf` is the bucket start an instant is counted in, or null outside them all.
+ */
+export function dayBuckets(from: number, to: number, days: number) {
+  const today = Math.floor(to / day) * day, count = Math.max(1, Math.min(days, flowLimits.buckets));
+  const starts = Array.from({ length: count }, (_, index) => today - (count - 1 - index) * day);
+  const floor = count === days ? Math.min(from, starts[0]) : starts[0];
+  const bucketOf = (at: number) => at < floor || at >= today + day ? null : Math.max(starts[0], Math.floor(at / day) * day);
+  return { starts, truncated: count < days, bucketOf };
 }
 function valueAt(points: { at: number; value: any }[], at: number) {
   let value: any = null;
@@ -662,7 +708,8 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   });
 
   // Cumulative flow: one reconstructed sample per daily boundary.
-  const starts = bucketStarts(from, to);
+  const buckets = dayBuckets(from, to, dataset.days), starts = buckets.starts;
+  const inBucket = (at: number, start: number) => buckets.bucketOf(at) === start;
   const stagePoints = new Map(stageScope.map(item => {
     const points = [...(carry.get(`${item.id}:stage.changed`) ? [carry.get(`${item.id}:stage.changed`)!] : []), ...itemFacts(item.id, 'stage.changed')]
       .map(fact => ({ at: time(fact.observedAt)!, value: fact.details.to as string }))
@@ -672,7 +719,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   }));
   const cumulativeFlow = {
     buckets: starts.map(at => new Date(at).toISOString()),
-    truncated: starts.length >= flowLimits.buckets && from + flowLimits.buckets * day < to,
+    truncated: buckets.truncated,
     series: stages.map(stage => ({ stage, counts: starts.map(at => stageScope.filter(item => {
       const entry = stagePoints.get(item.id)!;
       if (entry.created > at || (entry.delivered !== null && entry.delivered <= at && stage !== 'done')) return false;
@@ -682,7 +729,10 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
 
   // Throughput and lead time.
   const deliveredFacts = scopedFacts.filter(fact => fact.kind === 'delivered');
-  const throughput = starts.map(at => ({ bucket: new Date(at).toISOString(), delivered: deliveredFacts.filter(fact => time(fact.observedAt)! >= at && time(fact.observedAt)! < at + day).length }));
+  // A day the read never reached is marked uncovered, so its count is never shown as a zero.
+  const deliveredUntil = time(coveredUntil(dataset, 'delivered')) ?? to;
+  const throughput = starts.map(at => ({ bucket: new Date(at).toISOString(), delivered: deliveredFacts.filter(fact => inBucket(time(fact.observedAt)!, at)).length,
+    covered: Math.min(at + day, to) <= deliveredUntil }));
   const leadValues: { key: string; ms: number; at: string }[] = [];
   for (const fact of deliveredFacts) {
     const created = latest.get(`${fact.workId}:work.created`);
@@ -694,7 +744,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const leadTime = {
     bands: distribution(leadValues.map(value => value.ms)),
     trend: starts.map(at => {
-      const values = leadValues.filter(value => time(value.at)! >= at && time(value.at)! < at + day).map(value => value.ms);
+      const values = leadValues.filter(value => inBucket(time(value.at)!, at)).map(value => value.ms);
       return { bucket: new Date(at).toISOString(), ...distribution(values) };
     }),
   };
@@ -1022,7 +1072,9 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     // The window as asked for, and — when a bound cut the scan short — the interval these figures
     // actually describe, so a partial window is never read as a full one.
     window: { days: query.days, from: dataset.from, to: dataset.to, covered, truncated: covered.truncated,
-      boundaries: 'Half-open interval [from, to) in UTC. Daily buckets start at the window start and are labelled by their start instant.' },
+      // Deliveries, merges and gate changes are read on their own bounds past the shared scan's cutoff.
+      kinds: separateKinds.map(kind => ({ kind, toCovered: coveredUntil(dataset, kind) ?? dataset.to })),
+      boundaries: 'Half-open interval [from, to) in UTC. Daily buckets are calendar days in UTC ending today (the last one partial), labelled by their UTC midnight; the first also holds the part of the window before its midnight.' },
     filters: { type: query.type ?? null, stage: query.stage ?? null, slice: query.slice ?? null },
     availableSlices: [...new Set(dataset.work.flatMap(item => workSlices(item).slices))].sort(),
     availableTypes: [...new Set(dataset.work.map(item => item.type))].sort(),
@@ -1166,13 +1218,13 @@ export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | nu
  * window says where it started (`carried`, not a move inside the window), each recorded gate fact
  * that puts it at a different step is a move, and its exit (`flowExitAt`) takes it from Deploy
  * out of the flow — never while the production watch (`dataset.production`) holds it at Deploy. The carried move starts when the item entered that step (`dataset.stepEntries`). Nothing after the report's cutoff is a move —
- * `dataset.to`, or where a truncated scan stopped (`covered.toCovered`) — and work that
+ * `dataset.to`, or where the read of gate facts stopped (`coveredUntil`) — and work that
  * left the flow before the window opened (`dataset.from`) has no moves in it at all: its finished
  * Deploy stay belongs to an earlier window. The replay and the per-step dwell both read these.
  */
-export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { from?: string; to?: string; production?: ProductionHold; covered?: CoveredWindow; stepEntries?: Record<string, string> }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
+export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { from?: string; to?: string; production?: ProductionHold; covered?: CoveredWindow; kindCovered?: Partial<Record<FlowKind, string>>; stepEntries?: Record<string, string> }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
   const moves: StepMove[] = [];
-  const end = dataset.covered?.truncated ? dataset.covered.toCovered : dataset.to;
+  const end = coveredUntil(dataset, 'gates.changed');
   const cutoff = end !== undefined && time(end) !== null ? time(end)! : Infinity;
   const start = dataset.from !== undefined && time(dataset.from) !== null ? time(dataset.from)! : -Infinity;
   const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
@@ -1236,7 +1288,8 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     // absent here exactly as it is excluded there, never emitted as a negative duration.
     for (const fact of dataset.facts.filter(fact => fact.kind === 'delivered' && scopedIds.has(fact.workId))) {
       const created = dataset.latest.find(entry => entry.workId === fact.workId && entry.kind === 'work.created');
-      const bucket = new Date(Math.floor((time(fact.observedAt)! - time(dataset.from)!) / day) * day + time(dataset.from)!).toISOString();
+      const start = dayBuckets(time(dataset.from)!, time(dataset.to)!, dataset.days).bucketOf(time(fact.observedAt)!);
+      const bucket = start === null ? '' : new Date(start).toISOString();
       if (key && bucket !== key) continue;
       const leadMs = created ? time(fact.observedAt)! - time(created.observedAt)! : null;
       const measurable = leadMs !== null && leadMs >= 0;
