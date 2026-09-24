@@ -4,6 +4,7 @@ import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { ciReportingEnvironment } from './install/ci-proofs.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
@@ -2356,10 +2357,22 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   } else {
     let deployments: any[];
     requests++;
-    try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentListingSize}&ref=${encodeURIComponent(config.baseBranch)}`])); }
+    // Not filtered by ref: a platform that deploys the base branch (Railway) records each release
+    // with its commit SHA as the ref, so `ref=main` saw only the CI reporting environment's records,
+    // and on 2026-09-24 GY-159 stayed pending behind a release production had already served.
+    try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentListingSize}`])); }
     catch (error) { return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`); }
     if (!Array.isArray(deployments) || !deployments.length) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
+    const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
     for (const deployment of deployments.slice(0, deploymentListingSize)) {
+      // CI proof reporting records deployments too; it is never a release.
+      if (deployment?.environment === ciReportingEnvironment) continue;
+      // A release is the base branch or a commit on it; another branch's deployment is not.
+      const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
+      if (ref && ref !== config.baseBranch) {
+        if (typeof deployment.sha !== 'string' || ref.toLowerCase() !== deployment.sha.toLowerCase()) continue;
+        if (await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) !== true) continue;
+      }
       let statuses: any[];
       requests++;
       try { statuses = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
