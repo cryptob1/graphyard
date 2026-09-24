@@ -14,16 +14,23 @@ export interface ReviewFinding { ground: string; text: string }
 const findingThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { id isResolved comments(first: 20) { nodes { body } } }
+    nodes { id isResolved comments(first: 20) { nodes { body author { login } } } }
   } } }
 }`;
 
+/** A GitHub login as both APIs spell it: GraphQL drops the `[bot]` suffix REST keeps. */
+const login = (value: unknown) => String(value ?? '').toLowerCase().replace(/\[bot\]$/, '');
+
 /**
- * The findings standing against the item's head: each unresolved thread's comments, and the latest
- * change request the configured reviewer posted on `sha`. A failed read throws; the caller then
- * leaves the refusal standing rather than widening on nothing.
+ * The findings standing against the item's head: each unresolved thread's comments by a trusted
+ * author, and the latest change request the configured reviewer posted on `sha`. Trusted is the
+ * configured reviewer and the automatic bot reviewers the review launch waits for: anyone else who
+ * can comment on the pull request — the item's own worker included — could otherwise open a thread
+ * naming a file and have the loop widen scope for it. A failed read throws; the caller then leaves
+ * the refusal standing rather than widening on nothing.
  */
-export async function readReviewFindings(input: { repository: string; pr: number; sha: string; reviewer: string | null }, run: ChildRun): Promise<ReviewFinding[]> {
+export async function readReviewFindings(input: { repository: string; pr: number; sha: string; reviewer: string | null; trusted: readonly string[] }, run: ChildRun): Promise<ReviewFinding[]> {
+  const trusted = new Set([...input.trusted, ...(input.reviewer ? [input.reviewer] : [])].map(login));
   const [owner, name] = input.repository.split('/');
   const findings: ReviewFinding[] = [];
   let after: string | null = null;
@@ -33,7 +40,8 @@ export async function readReviewFindings(input: { repository: string; pr: number
     if (!Array.isArray(connection?.nodes)) throw new Error(`GitHub did not list the review threads of pull request #${input.pr}`);
     for (const thread of connection.nodes) {
       if (thread?.isResolved !== false || typeof thread.id !== 'string') continue;
-      const text = (thread.comments?.nodes ?? []).map((comment: any) => typeof comment?.body === 'string' ? comment.body : '').join('\n');
+      const text = (thread.comments?.nodes ?? []).filter((comment: any) => trusted.has(login(comment?.author?.login)))
+        .map((comment: any) => typeof comment?.body === 'string' ? comment.body : '').join('\n');
       if (text) findings.push({ ground: `review thread ${thread.id}`, text });
     }
     if (!connection.pageInfo?.hasNextPage) break;
@@ -51,6 +59,29 @@ const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** Whether `text` names `path` itself — as a whole token, optionally with `:line` — not a longer path that contains it. */
 export const namesPath = (text: string, path: string) => new RegExp(`(^|[^A-Za-z0-9_./-])${escape(path)}(?=$|[^A-Za-z0-9_./-]|\\.(?:$|\\s))`).test(text);
 
+// A file-like token: a path with a directory or an extension, with any `:line` suffix and trailing
+// sentence punctuation left off.
+const fileToken = /[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\/[A-Za-z0-9_./-]*|\.[A-Za-z][A-Za-z0-9]{0,7})/g;
+const creationVerb = /\b(create[sd]?|creating|add(?:s|ed|ing)?|new file|introduce[sd]?|introducing)\b/gi;
+
+/**
+ * Whether `text` asks for `path` to be created: some clause naming the path has a creation verb
+ * whose nearest file named in that clause is `path` itself, so a verb about another file — "create
+ * src/b.ts; src/a.ts is wrong", "add a case to src/b.ts next to src/a.ts" — grants nothing for it.
+ */
+export function asksToCreate(text: string, path: string): boolean {
+  for (const clause of text.split(/[;!?\n]|\.(?=\s|$)/)) {
+    if (!namesPath(clause, path)) continue;
+    const files = [...clause.matchAll(fileToken)].map(match => ({ at: match.index!, end: match.index! + match[0].length, name: match[0].replace(/\.+$/, '') }));
+    for (const verb of clause.matchAll(creationVerb)) {
+      const at = verb.index!, distance = (file: { at: number; end: number }) => file.at >= at ? file.at - at : at - file.end;
+      const nearest = files.reduce<(typeof files)[number] | null>((best, file) => !best || distance(file) < distance(best) ? file : best, null);
+      if (nearest?.name === path) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * The finding each requested path rests on, or the reason the request is not a finding's to grant.
  * Only single files a finding names literally qualify, never a directory; a file must exist on the
@@ -60,9 +91,10 @@ export function findingScope(paths: readonly string[], findings: readonly Review
   const grounds: { path: string; ground: string }[] = [];
   for (const path of paths) {
     if (pathScope(path).prefix || path.endsWith('*')) return { refusal: `${path} is a directory scope; a review finding grants only the files it names` };
-    const finding = findings.find(entry => namesPath(entry.text, path));
-    if (!finding) return { refusal: `no unresolved review finding on the head names ${path}` };
-    if (!exists(path) && !/\b(create|add|new file|introduce)\b/i.test(finding.text)) return { refusal: `${path} does not exist on the base branch and ${finding.ground} does not ask for it to be created` };
+    const naming = findings.filter(entry => namesPath(entry.text, path));
+    if (!naming.length) return { refusal: `no unresolved review finding on the head names ${path}` };
+    const finding = exists(path) ? naming[0] : naming.find(entry => asksToCreate(entry.text, path)) ?? naming[0];
+    if (!exists(path) && !asksToCreate(finding.text, path)) return { refusal: `${path} does not exist on the base branch and ${finding.ground} does not ask for it to be created` };
     grounds.push({ path, ground: finding.ground });
   }
   return { grounds };

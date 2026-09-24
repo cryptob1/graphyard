@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | the loop, dispatch and merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes work, merges, verifies deployments and administers GitHub; it never implements, reviews or produces evidence. `master guide` prints this page.
+The master (`coordinator`) routes work, merges, verifies deployments and administers GitHub; it never implements, reviews or produces evidence.
 
 ## Autonomy: agents approve agents
 
@@ -45,13 +45,13 @@ another session's handle finished to free a slot.
 
 ## Automatic dispatch at submit
 
-When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`), bound to the exact head, base and policy. The review request follows only once the head's unit and integration proofs pass (`proofs-pending` until then; a failed one returns the head to its worker). **The loop launches each recorded request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a producer profile added with `master producer add FILE` ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`.
+When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`), bound to the exact head, base and policy. The review request follows only once the head's unit and integration proofs pass (`proofs-pending` until then; a failed one returns the head to its worker). **The loop launches each recorded request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a producer profile added with `master producer add FILE` ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch first waits up to `run.awaitReviewersMinutes` (default 8) for the `run.awaitReviewers` bots (default Codex) to review the head.
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) is how many sessions it runs at once, each with a name unique to its request above one. Changes apply without a restart; after lowering it, running sessions drain first. `master status` reports `concurrency` (`running`, `limit`, `waiting`, `longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
 **Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: once expired and unreported by Herdr, it settles as `expired`. One still pending is counted in `dispatch.sessionReconcile.stuck`; close its pane.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after fixing a refused launch; `master status` shows what is requested, what is running and since when.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after fixing a refused launch.
 
 ### Proofs must exercise their criterion
 

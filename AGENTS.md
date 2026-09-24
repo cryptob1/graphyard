@@ -104,8 +104,13 @@ Review and proof collection start on their own. When a candidate passes the buil
 the control plane records a review request and one producer request per proof group,
 each bound to the exact head, base and policy revision, and `graphyard master run`
 launches the configured reviewer profile and a producer session for each of them within
-30 seconds, without a keystroke. A head change cancels those sessions and requests the
-new head afresh unless the merge queue carried the approval or the proof. You handle
+30 seconds, without a keystroke, except that a reviewer launch first waits, up to
+`run.awaitReviewersMinutes` (default 8, 0 disables) from the request, for the automatic
+bot reviewers in `run.awaitReviewers` (default the Codex connector) to review the
+head, so their findings are judged in the same round; the wait is named in `master
+status`, and a failed GitHub read launches at once. A head change cancels those
+sessions and requests the new head afresh unless the merge queue carried the
+approval or the proof. You handle
 findings, rework and merges; you never launch reviews or producers by hand. `master
 status` shows, per candidate, what is requested, what is running and since when, and
 any launch the loop refused; `graphyard master review GY-N [PROFILE]` is the recovery

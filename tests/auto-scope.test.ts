@@ -415,14 +415,27 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   assert.match((findingScope(['src/other.ts'], findings, exists) as { refusal: string }).refusal, /no unresolved review finding/);
   assert.match((findingScope(['src/missing.ts'], [{ ground: 'review 8', text: 'src/missing.ts is wrong' }], exists) as { refusal: string }).refusal, /does not exist on the base branch/);
   assert.ok(namesPath('see src/a.ts.', 'src/a.ts') && namesPath('(src/a.ts:12)', 'src/a.ts') && !namesPath('lib/src/a.ts', 'src/a.ts') && !namesPath('src/a.ts.bak', 'src/a.ts'));
+  // Creation intent is the path's own: a verb about another file in the same finding grants nothing for it.
+  const elsewhere = (text: string) => findingScope(['src/missing.ts'], [{ ground: 'review 9', text }], exists);
+  assert.match((elsewhere('Create src/new-helper.ts; src/missing.ts is wrong') as { refusal: string }).refusal, /does not ask for it to be created/);
+  assert.match((elsewhere('Add a case to tests/scope.test.ts for the branch src/missing.ts takes') as { refusal: string }).refusal, /does not ask for it to be created/);
+  assert.match((elsewhere('src/missing.ts is wrong. Please create src/new-helper.ts instead.') as { refusal: string }).refusal, /does not ask for it to be created/);
+  assert.deepEqual(elsewhere('Fix src/merge-queue.ts:12 and add src/missing.ts for the helper'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
+  assert.deepEqual(elsewhere('src/missing.ts should be added next to the queue'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
+  assert.deepEqual(findingScope(['src/missing.ts'], [{ ground: 'review 10', text: 'src/missing.ts is wrong' }, { ground: 'review 11', text: 'create src/missing.ts' }], exists),
+    { grounds: [{ path: 'src/missing.ts', ground: 'review 11' }] }, 'the finding that asks for the file is its grounds');
 
-  // The read: unresolved threads' comments, and the configured reviewer's latest change request on the head only.
+  // The read: unresolved threads' comments by trusted authors, and the configured reviewer's latest change request on the head only.
   const run = (_command: string, args: string[]) => {
     if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
-      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts' }] } }, { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts' }] } }] } } } } });
+      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts', author: { login: 'chatgpt-codex-connector' } }, { body: 'and src/worker.ts', author: { login: 'cryptob1' } }] } },
+      { id: 'PRRT_reviewer', isResolved: false, comments: { nodes: [{ body: 'fix src/e.ts', author: { login: 'graphyard-reviewer' } }] } },
+      { id: 'PRRT_worker', isResolved: false, comments: { nodes: [{ body: 'please widen src/f.ts', author: { login: 'cryptob1' } }] } },
+      { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts', author: { login: 'graphyard-reviewer' } }] } }] } } } } });
     return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
       { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' }]]);
   };
-  const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]' }, run);
-  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review 1']);
+  const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: ['chatgpt-codex-connector[bot]'] }, run);
+  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', 'review 1']);
+  assert.equal(read[0].text, 'fix src/a.ts', 'a comment by an untrusted author in a trusted thread is not a finding');
 });
