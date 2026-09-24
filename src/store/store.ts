@@ -1,12 +1,21 @@
 import pg from 'pg';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
-import { migration } from './schema.js';
+import { migration, tables } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 
 export * from './snapshot-delta.js';
+
+/** The advisory lock every coordination transaction takes (Store.transaction). */
+const coordinationLock = 71490321;
+/** How long a migrating release waits for any one lock: well inside Railway's 120-second health check. */
+export const migrationLockTimeoutMs = 30_000;
+/** The migration's statements ahead of the first table's DDL: the shared trigger function. */
+const migrationPrelude = migration.slice(0, migration.indexOf(tables[0].ddl));
+const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
+const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
 
 export class Store {
   pool: pg.Pool;
@@ -15,14 +24,50 @@ export class Store {
    * Apply the additive migration and record the schema generation it reached. Running
    * against a database a newer release already migrated refuses: rolling the application
    * back under a schema it does not know is how columns and rows go missing silently.
+   *
+   * A release whose generation and migration are already recorded starts without any
+   * coordination or table lock: it reads graphyard_schema and its comment (the digest of the
+   * migration that last ran) and skips the DDL, so a new container never queues behind a busy
+   * live replica. Only a release that must migrate takes the coordination lock, and it waits
+   * at most `lockTimeoutMs` for it and for each table lock the DDL needs before startup fails
+   * naming the lock, well inside the platform's health window.
    */
-  async init() {
-    await this.transaction(async db => {
-      await db.query(migration);
+  async init(options: { lockTimeoutMs?: number } = {}) {
+    const digest = `migration sha256:${createHash('sha256').update(migration).digest('hex')}`;
+    const recorded = await this.recordedGeneration();
+    if (recorded && recorded.version > schemaVersion) throw newerSchema(recorded.version);
+    if (recorded?.version === schemaVersion && recorded.digest === digest) return;
+    const timeout = Math.max(1, Math.floor(options.lockTimeoutMs ?? migrationLockTimeoutMs));
+    const db = await this.pool.connect();
+    let waitingOn = `the coordination advisory lock pg_advisory_xact_lock(${coordinationLock})`;
+    try {
+      await db.query('BEGIN');
+      await db.query(`SET LOCAL lock_timeout = ${timeout}`);
+      await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      waitingOn = 'a lock on the migration\'s shared function graphyard_immutable';
+      await db.query(migrationPrelude);
+      for (const table of tables) {
+        waitingOn = `a lock on table ${table.name} (or an object its migration touches)`;
+        await db.query(table.ddl);
+      }
+      waitingOn = 'a lock on table graphyard_schema';
       const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
-      if (current > schemaVersion) throw new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
+      if (current > schemaVersion) throw newerSchema(current);
       if (current < schemaVersion) await db.query('INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
-    });
+      await db.query(`COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
+      await db.query('COMMIT');
+    } catch (error) {
+      await db.query('ROLLBACK').catch(() => {});
+      if ((error as { code?: string }).code === '55P03') throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session (usually the live replica); startup fails instead of outlasting the health check — retry the deploy when the live replica is idle`, { cause: error });
+      throw error;
+    } finally { db.release(); }
+  }
+  /** The recorded generation and migration digest, read without any lock a replica holds; null before the first migration. */
+  private async recordedGeneration(): Promise<{ version: number; digest: string | null } | null> {
+    const table = (await this.pool.query("SELECT to_regclass('graphyard_schema') AS oid")).rows[0].oid;
+    if (!table) return null;
+    const { rows } = await this.pool.query("SELECT COALESCE((SELECT MAX(version) FROM graphyard_schema),0) AS version, obj_description(to_regclass('graphyard_schema'),'pg_class') AS digest");
+    return { version: Number(rows[0].version), digest: rows[0].digest };
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   async close() { await this.pool.end(); }
@@ -32,7 +77,7 @@ export class Store {
       await db.query('BEGIN');
       // Serializes short coordination decisions across replicas, including dependency edits
       // and cross-task workspace reservations. Never hold this lock during external I/O.
-      await db.query('SELECT pg_advisory_xact_lock(71490321)');
+      await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       const result = await fn(db, rows[0].now);
       await db.query('COMMIT');
