@@ -12,7 +12,7 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import {
-  classifyWait, computeFlow, coveredWindow, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, gateFactStep,
+  classifyWait, computeFlow, coveredWindow, dayBuckets, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, gateFactStep,
   mergeReadyGate, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { createElement } from 'react';
@@ -974,6 +974,19 @@ test('unit:flow-calendar-buckets — daily buckets are UTC calendar days ending 
   // The part of the window before the first midnight is still counted, in the first bucket.
   const early = computeFlow(calendarDataset(to, [calendarFact('delivered', '2026-09-17T23:30:00.000Z', 3)]), { days: 7 });
   assert.equal(early.throughput[0].delivered, 1);
+});
+
+test('a window ending exactly at 00:00Z ends on the day before: seven whole calendar days, none doubled and no empty today', () => {
+  const to = '2026-09-25T00:00:00.000Z';
+  const facts = ['18', '19', '20', '21', '22', '23', '24'].map((date, index) => calendarFact('delivered', `2026-09-${date}T00:30:00.000Z`, 2 + index));
+  const report = computeFlow(calendarDataset(to, facts), { days: 7 });
+  assert.deepEqual(report.throughput.map(bucket => bucket.bucket), ['18', '19', '20', '21', '22', '23', '24'].map(date => `2026-09-${date}T00:00:00.000Z`),
+    'the last bucket is the day holding the window\'s last instant, not the exclusive end');
+  assert.deepEqual(report.throughput.map(bucket => bucket.delivered), [1, 1, 1, 1, 1, 1, 1], 'each landing counts on the day it happened');
+  assert.ok(report.throughput.every(bucket => bucket.covered));
+  const buckets = dayBuckets(Date.parse(to) - 7 * day, Date.parse(to), 7);
+  assert.equal(buckets.bucketOf(Date.parse('2026-09-18T00:00:00.000Z')), Date.parse('2026-09-18T00:00:00.000Z'));
+  assert.equal(buckets.bucketOf(Date.parse(to)), null, 'the exclusive end is outside every bucket');
 });
 
 test('facts read past the shared scan cutoff count landings and step moves but never complete a candidate episode\'s phases', () => {

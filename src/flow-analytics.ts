@@ -650,13 +650,14 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
 export const blockerReasonKey = (fact: FlowFact) => String(fact.details.reason ?? '').slice(0, 200) || null;
 /**
  * Daily buckets are calendar days in UTC ending today: the `days` UTC midnights up to the one that
- * starts the day `to` falls in, so the last bucket is today, still partial. The window opens part
+ * starts the day of the window's last instant, so the last bucket is today, still partial. `to` is
+ * exclusive, so a window ending exactly at midnight ends the day before, never on an empty bucket. The window opens part
  * way through the day before the first bucket; that sliver is counted in the first bucket, so the
  * buckets together hold every instant of the window. More days than `flowLimits.buckets` keep the
  * latest ones. `bucketOf` is the bucket start an instant is counted in, or null outside them all.
  */
 export function dayBuckets(from: number, to: number, days: number) {
-  const today = Math.floor(to / day) * day, count = Math.max(1, Math.min(days, flowLimits.buckets));
+  const today = Math.floor(Math.max(from, to - 1) / day) * day, count = Math.max(1, Math.min(days, flowLimits.buckets));
   const starts = Array.from({ length: count }, (_, index) => today - (count - 1 - index) * day);
   const floor = count === days ? Math.min(from, starts[0]) : starts[0];
   const bucketOf = (at: number) => at < floor || at >= today + day ? null : Math.max(starts[0], Math.floor(at / day) * day);
