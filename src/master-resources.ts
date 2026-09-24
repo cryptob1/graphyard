@@ -40,7 +40,7 @@ export interface ResourceReading {
 }
 
 /** `advisory`: the bound is a default nobody configured, so reaching it warns but does not fail health. */
-export interface PlaneReading { used: number | null; bound: number | null; detail?: string | null; advisory?: boolean }
+export interface PlaneReading { used: number | null; bound: number | null; detail?: string | null; advisory?: boolean; tables?: { table: string; bytes: number }[] }
 /** What `/healthz` reports about the plane's own resources. */
 export interface PlaneResources { writable: boolean; writeError: string | null; database: PlaneReading | null; github: PlaneReading | null }
 
@@ -573,7 +573,10 @@ export async function readDatabaseCapacity(pool: { query(sql: string): Promise<{
   const bound = set ? configured : defaultDatabaseMaxBytes;
   try {
     const used = Number((await pool.query('SELECT pg_database_size(current_database()) AS size')).rows[0].size);
-    return { used, bound, advisory: !set, detail: `pg_database_size against ${set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset; it warns but does not fail health)'}` };
+    // The largest tables, so growth is attributed from outside the database (a catalogue read, no scan).
+    const tables = await pool.query(`SELECT relname AS table, pg_total_relation_size(c.oid) AS bytes FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind = 'r' AND n.nspname = 'public' ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 6`).then(r => r.rows.map(row => ({ table: String(row.table), bytes: Number(row.bytes) })), () => undefined);
+    return { used, bound, advisory: !set, ...(tables ? { tables } : {}), detail: `pg_database_size against ${set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset; it warns but does not fail health)'}` };
   } catch (error) { return { used: null, bound, advisory: !set, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
 }
 
