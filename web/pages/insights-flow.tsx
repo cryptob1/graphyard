@@ -94,13 +94,15 @@ export interface StepTime { step: StepId; n: number; medianMs: number | null; ma
 /**
  * Each step's median time from the report's step dwell, and whether it may be read as fact. A step
  * with fewer than five samples is `sparse`; every step is `partial` when the report did not read the
- * whole window's gate facts or its record lags the ledger. A marked step shows its sample count and
+ * whole window's gate facts or merges, or its record lags the ledger. A marked step shows its sample count and
  * marker and takes no share of the time split, so a median from two stays is never drawn as the week's.
  */
 export function stepTimes(report: any): { steps: StepTime[]; partial: boolean; coverage: ReturnType<typeof flowCoverage> } {
   const coverage = flowCoverage(report);
-  // Step times read from gate facts the report did not reach, or from a lagging record, are not the week's.
-  const partial = !!coverage && (coverage.stale || coverage.population || readUntil(report, 'gates.changed') < Date.parse(report?.window?.to ?? ''));
+  // Step times read from gate facts or merges the report did not reach (a merge past its read never
+  // moves the item to Deploy), or from a lagging record, are not the week's.
+  const to = Date.parse(report?.window?.to ?? '');
+  const partial = !!coverage && (coverage.stale || coverage.population || Math.min(readUntil(report, 'gates.changed'), readUntil(report, 'merged')) < to);
   const dwell: any[] = Array.isArray(report?.stepDwell) ? report.stepDwell : [];
   const steps = stepIds.map(step => {
     const entry = dwell.find(candidate => candidate?.step === step);

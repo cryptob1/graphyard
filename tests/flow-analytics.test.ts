@@ -1132,6 +1132,15 @@ test('unit:sparse-step-marked — a step median from fewer than five samples, or
   assert.doesNotMatch(partialPage, /class="time-bar"/);
   assert.equal([...partialPage.matchAll(/data-sparse="partial"/g)].length, 5, 'every step with a median is marked');
   assert.match(partialPage, /6 samples · partial window/);
+  // Gate facts read to the end, but the merges read only in part: merges past that read never move
+  // an item to Deploy, so the step times are partial too.
+  const mergesPartial = { ...partial, window: { ...partial.window, kinds: [{ kind: 'gates.changed', toCovered: to }, { kind: 'merged', toCovered: covered.toCovered }] } };
+  const mergesPage = renderToStaticMarkup(createElement(WhereTimeGoes, { report: mergesPartial }));
+  assert.doesNotMatch(mergesPage, /class="time-bar"/, 'no split while the merges were read in part');
+  assert.equal([...mergesPage.matchAll(/data-sparse="partial"/g)].length, 5);
+  // Both read to the end: only the sparse marker remains.
+  const fullKinds = { ...partial, window: { ...partial.window, kinds: [{ kind: 'gates.changed', toCovered: to }, { kind: 'merged', toCovered: to }] } };
+  assert.doesNotMatch(renderToStaticMarkup(createElement(WhereTimeGoes, { report: fullKinds })), /data-sparse="partial"/);
 });
 
 function escapeHtml(text: string) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;'); }
