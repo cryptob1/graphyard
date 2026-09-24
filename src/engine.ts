@@ -560,7 +560,12 @@ export class Engine {
         if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) {
           // A widening that answers the request is its decision, kept where the asking worker's own
           // `status` and `scope-request --wait` read it (GY-176): approved, and by whom and why.
-          if (data.answers) work.scopeDecision = { state: 'approved', reason: data.reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(work.scopeRequest.at)),
+          // A routed decision is applied as its requester, so the approver and their own reason
+          // are read from the decision's approval entry rather than from the acting identity.
+          const approval = data.answers && key.startsWith('decision:')
+            ? (await db.query(`SELECT actor, payload->>'reason' AS reason FROM events WHERE work_id=$1 AND kind='decision.approved' AND payload->>'id'=$2 ORDER BY seq DESC LIMIT 1`, [work.id, key.slice('decision:'.length)])).rows[0] as { actor: string; reason: string | null } | undefined
+            : undefined;
+          if (data.answers) work.scopeDecision = { state: 'approved', reason: approval?.reason ?? data.reason, at: now.toISOString(), decidedBy: approval?.actor ?? actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(work.scopeRequest.at)),
             paths: work.scopeRequest.paths, requestedBy: work.scopeRequest.requestedBy, requestedAt: work.scopeRequest.at, epoch: work.scopeRequest.epoch };
           work.scopeRequest = null;
           if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;

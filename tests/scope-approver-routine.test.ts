@@ -158,6 +158,8 @@ test('unit:scope-approver-routine — an additive request the rules refuse is re
   assert.equal(revision.payload.details.liveScopeWidening ?? revision.payload.liveScopeWidening ?? true, true);
 
   assert.equal(work.scopeDecision!.state, 'approved', 'the outcome is held on the item');
+  assert.equal(work.scopeDecision!.decidedBy, approver.id, 'by the approver, not the requester the decision is applied as');
+  assert.equal(work.scopeDecision!.reason, 'The helper is the layout criterion spelled out', "with the approver's own reason, never truncated behind the request's");
   // Cycle 3: the item no longer needs the decision; the approver session goes and the outcome is noted.
   await loop.cycle(state);
   assert.equal(Object.values(state.actions).filter(action => action.kind === 'scope' && action.work === work.key && /^Approved/.test(action.detail)).length, 1);
