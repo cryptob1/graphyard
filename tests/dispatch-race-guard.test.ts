@@ -12,7 +12,8 @@ import { actionClaimMs, actionId, type ActionRow } from '../src/model/actions.js
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import { masterConfigSchema } from '../src/master.js';
-import { dispatchRaceRefusal, loopOwned, releaseEventKinds, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
+import { dispatchRaceRefusal, handDecision, loopOwned, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
+import { dispatchFailureLimit } from '../src/auto-dispatch.js';
 
 // GY-175: the master-side rules the loop depends on are enforced by the master CLI itself, not
 // remembered by one agent. A hand dispatch never races the executor's, and a system-driven item is
@@ -80,8 +81,20 @@ async function masterHarness(state: { work: Work[]; releasedAt?: string | null }
     await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true });
   };
-  return { run, refusal, reads, close };
+  /** Records a launch of the item's review request the loop's cursor saw refused `attempts` times. */
+  const refusedLaunches = (requestId: string, attempts: number) => writeFile(join(credentials, 'coordinator.dispatch.json'), JSON.stringify({ version: 1, url, repository: 'owner/project',
+    failures: { [requestId]: { kind: 'review', work: 'GY-7', sha: headSha, attempts, reason: 'reviewer profile refused the launch', at: iso(-60_000), nextAt: iso(60_000) } } }), { mode: 0o600 });
+  return { run, refusal, reads, close, refusedLaunches };
 }
+
+const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40), reviewRequestId = 'c'.repeat(32);
+/** A system-driven item whose submitted head holds a live review request. */
+function underReview(overrides: Partial<Work> = {}): Work {
+  return item({ systemDriven: true, stage: 'review', submission: { pr: 12, epoch: 1 } as any,
+    candidate: { pr: 12, sha: headSha, baseSha, branch: 'graphyard/gy-7-1', author: 'worker', createdAt: iso(-600_000) } as any,
+    autoDispatch: { review: { id: reviewRequestId, kind: 'review', pr: 12, sha: headSha, baseSha, policyRevision: 1, provider: 'github', state: 'requested', reason: 'independent approval is required', requestedAt: iso(-600_000) }, producers: [], history: [] } as any, ...overrides });
+}
+const session = (state: string, at: number) => ({ requestId: reviewRequestId, state, requestedAt: iso(at), closedAt: iso(at + 60_000), resolution: `${state} session` });
 
 // ---- AC-1: no hand dispatch while the executor's dispatch is pending, claimed or just released ----
 
@@ -181,5 +194,41 @@ test('unit:system-driven-items monitoring and the loop itself are unaffected on 
     assert.ok(status.daemon, 'master status reports on a system-driven item');
     const loop = JSON.parse((await master.run(['run', '--once'])).stdout);
     assert.equal(loop.cycles, 1); assert.equal(loop.failedCycles, 0);
+  } finally { await master.close(); }
+});
+
+test('unit:system-driven-items master decide attest stays open for a manual proof no producer runs, and closed for one a producer runs', async () => {
+  const work = item({ systemDriven: true, producerProofs: ['manual:produced-review'] });
+  assert.equal(handDecision(work, 'attest', { proof: 'manual:docs-review' }), null, 'only an attestation satisfies a manual proof no producer runs');
+  assert.equal(handDecision(work, 'attest', { proof: 'manual:produced-review' }), 'evidence');
+  assert.equal(handDecision(work, 'attest', { proof: 'unit:guard' }), 'evidence');
+  assert.equal(handDecision(work, 'attest', null), 'evidence');
+  assert.equal(handDecision(work, 'merge', null), 'merge-decision');
+  assert.equal(handDecision(work, 'rework', null), null);
+  const master = await masterHarness({ work: [work] });
+  try {
+    const open = await master.refusal(['decide', 'GY-7', 'attest', '{"proof":"manual:docs-review"}', 'reviewed', 'by', 'hand']);
+    assert.doesNotMatch(open, /is system-driven/, 'the attestation reaches the decision request');
+    assert.match(await master.refusal(['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'hand']), /GY-7 is system-driven: master decide attest is a hand action the loop owns/);
+  } finally { await master.close(); }
+});
+
+test('unit:system-driven-items master review stays open only as the recovery of a review request the loop stopped relaunching', async () => {
+  const now = Date.now();
+  // The loop still launches it: nothing launched yet, a session running, a failed session awaiting its retry.
+  assert.equal(reviewRecovery(underReview(), [], undefined, now), null);
+  assert.equal(reviewRecovery(underReview(), [{ ...session('pending', -60_000), closedAt: undefined }], undefined, now), null);
+  assert.equal(reviewRecovery(underReview(), [session('failed', -120_000)], undefined, now), null);
+  assert.equal(reviewRecovery(underReview(), [], { attempts: dispatchFailureLimit - 1 }, now), null);
+  assert.equal(reviewRecovery(item({ systemDriven: true }), [session('completed', -120_000)], { attempts: dispatchFailureLimit }, now), null, 'no live request: nothing to recover');
+  // The loop stopped: a settled session, exhausted sessions, exhausted launch refusals.
+  assert.match(reviewRecovery(underReview(), [session('completed', -120_000)], undefined, now)!, /session attempt 1 completed without satisfying it/);
+  assert.match(reviewRecovery(underReview(), [1, 2, 3, 4].map(n => session('failed', -n * 3_600_000)), undefined, now)!, /exhausted its 4 automatic sessions/);
+  assert.match(reviewRecovery(underReview(), [], { attempts: dispatchFailureLimit }, now)!, /refused 12 time\(s\)/);
+  const master = await masterHarness({ work: [underReview()] });
+  try {
+    assert.match(await master.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/);
+    await master.refusedLaunches(reviewRequestId, dispatchFailureLimit);
+    assert.doesNotMatch(await master.refusal(['review', 'GY-7']), /is system-driven/, 'the recovery the loop names reaches the launch');
   } finally { await master.close(); }
 });

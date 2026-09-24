@@ -1,8 +1,6 @@
 <!-- page: Start here | 3 | machines, accounts, the master, the first PR. -->
 # Onboard a repository
 
-Start with one worker; add capacity after the first PR reaches Done.
-
 ## 1. Install the control plane
 
 Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply` after reviewing `--plan`.
@@ -96,7 +94,7 @@ node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 
 The second `init` installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances that run each item's next action; without it resyncs and reclaims go unserved.
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. `master start claude` also writes the harness rules. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation, and `master review GY-1` is the recovery path.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 
@@ -104,7 +102,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. Create a small real item and `master dispatch GY-1 PROFILE`; the worker opens a PR and runs `complete GY-1 EPOCH PR_NUMBER`, and review and proofs start automatically. When `Graphyard / merge` appears, require it in branch protection, then `master merge GY-1`.
+`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it, the worker runs `complete GY-1 EPOCH PR_NUMBER`, review and proofs start, and the loop merges it once `Graphyard / merge` is required in branch protection. `"systemDriven": false` allows [hand dispatch and merge](master-agent.md#system-driven-items).
 
 Before adding workers, let one lease expire and confirm a reclaim fences the old epoch.
 

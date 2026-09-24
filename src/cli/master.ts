@@ -7,7 +7,7 @@ import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, c
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { reviewCommand } from '../reviewer.js';
+import { readReviewLedger, reviewCommand } from '../reviewer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -24,7 +24,7 @@ import { reviewerCommand } from './master-reviewer.js';
 import { registryCommand, registryHelp } from './master-registry.js';
 import { executorsCommand, executorsHelp } from './master-executors.js';
 import { closeHelp, closeRequest } from './master-close.js';
-import { assertHandAction, assertHandDispatch, loopOwnedDecisions } from './hand-actions.js';
+import { assertHandAction, assertHandDispatch, assertHandReview, decisionPayload, handDecision } from './hand-actions.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -115,8 +115,10 @@ export const masterCommands = defineCommands([
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
       if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
       // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175).
-      const owned = id === 'decide' ? loopOwnedDecisions[args[1]] : undefined;
-      if (owned) { const work = (await masterApi('work-snapshot')).work.find((item: any) => item.id === args[0] || item.key === args[0]); if (work) assertHandAction(work, owned); }
+      if (id === 'decide' && ['attest', 'merge'].includes(args[1])) {
+        const work = (await masterApi('work-snapshot')).work.find((item: any) => item.id === args[0] || item.key === args[0]);
+        const owned = work ? handDecision(work, args[1], await decisionPayload(args[2])) : null; if (owned) assertHandAction(work, owned);
+      }
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
         { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
       if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
@@ -133,8 +135,11 @@ export const masterCommands = defineCommands([
       if (id === 'reviewer') return reviewerCommand(root, master, args, print);
       // The fleet on this host against the CLI checkout's commit: the release a restart would load.
       if (id === 'executors') return print(await executorsCommand(master, args, { actions: () => masterApi('actions'), coordinatorCommit: cli.commit }));
-      // A system-driven item's reviewer is the loop's to launch (GY-175).
-      if (id === 'review') { const work = (await masterApi('work-snapshot')).work.find((item: any) => item.id === args[0] || item.key === args[0]); if (work) assertHandAction(work, 'review'); }
+      // A system-driven item's reviewer is the loop's to launch, save the recovery it sends the master to (GY-175).
+      if (id === 'review') {
+        const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+        if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
+      }
       if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), await listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
