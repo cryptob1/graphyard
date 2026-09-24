@@ -14,8 +14,12 @@ export interface ReviewFinding { ground: string; text: string }
 const findingThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { id isResolved comments(first: 20) { nodes { body author { login } } } }
+    nodes { id isResolved comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { body author { login } } } }
   } } }
+}`;
+// The rest of one thread's comments, for a thread longer than the page the thread listing carries.
+const threadCommentsQuery = `query($id: ID!, $after: String) {
+  node(id: $id) { ... on PullRequestReviewThread { comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body author { login } } } } }
 }`;
 
 /** A GitHub login as both APIs spell it: GraphQL drops the `[bot]` suffix REST keeps. */
@@ -40,7 +44,17 @@ export async function readReviewFindings(input: { repository: string; pr: number
     if (!Array.isArray(connection?.nodes)) throw new Error(`GitHub did not list the review threads of pull request #${input.pr}`);
     for (const thread of connection.nodes) {
       if (thread?.isResolved !== false || typeof thread.id !== 'string') continue;
-      const text = (thread.comments?.nodes ?? []).filter((comment: any) => trusted.has(login(comment?.author?.login)))
+      const comments: any[] = [...(thread.comments?.nodes ?? [])];
+      // Every comment of the thread, not the first page: a trusted author naming the file late in a
+      // long thread is as much a finding as one naming it first.
+      for (let more = thread.comments?.pageInfo, pages = 0; more?.hasNextPage; pages++) {
+        if (pages >= 20) throw new Error(`review thread ${thread.id} on pull request #${input.pr} has more comments than the loop reads`);
+        const next: any = JSON.parse(String(await run('gh', ['api', 'graphql', '-f', `query=${threadCommentsQuery}`, '-f', `id=${thread.id}`, '-f', `after=${more.endCursor}`])))?.data?.node?.comments;
+        if (!Array.isArray(next?.nodes)) throw new Error(`GitHub did not list the comments of review thread ${thread.id}`);
+        comments.push(...next.nodes);
+        more = next.pageInfo;
+      }
+      const text = comments.filter((comment: any) => trusted.has(login(comment?.author?.login)))
         .map((comment: any) => typeof comment?.body === 'string' ? comment.body : '').join('\n');
       if (text) findings.push({ ground: `review thread ${thread.id}`, text });
     }
@@ -64,23 +78,30 @@ export const namesPath = (text: string, path: string) => new RegExp(`(^|[^A-Za-z
 const fileToken = /[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\/[A-Za-z0-9_./-]*|\.[A-Za-z][A-Za-z0-9]{0,7})/g;
 const creationVerb = /\b(create[sd]?|creating|add(?:s|ed|ing)?|new file|introduce[sd]?|introducing)\b/gi;
 // A negation governing a creation verb: "do not create", "src/a.ts should not be added", "no new
-// file". It reaches back to the nearest comma, colon or conjunction before the verb, so "don't
-// change src/a.ts, but add src/b.ts" still asks for src/b.ts.
-const negation = /\b(?:not|never|no|without|avoid(?:s|ing)?|instead of|rather than)\b|n[’']t\b/i;
-const negated = (clause: string, at: number) => negation.test(clause.slice(0, at).split(/[,:]|\b(?:but|and|then|so)\b/i).at(-1)!);
+// file", "adding src/a.ts is not needed". It reaches back to the nearest comma, colon or conjunction
+// before the verb and on to the next one after it, so "don't change src/a.ts, but add src/b.ts" and
+// "add src/b.ts, not src/a.ts" still ask for src/b.ts. File names are masked first: `src/not.ts`
+// names a file, it negates nothing.
+const negation = /\b(?:not|never|no|without|avoid(?:s|ing)?|instead of|rather than|unnecessary|unneeded)\b|n[’']t\b/i;
+const boundary = /[,:]|\b(?:but|and|then|so)\b/i;
+const negated = (clause: string, at: number, end: number) => {
+  const masked = clause.replace(fileToken, name => ' '.repeat(name.length));
+  return negation.test(masked.slice(0, at).split(boundary).at(-1)!) || negation.test(masked.slice(end).split(boundary)[0]);
+};
 
 /**
  * Whether `text` asks for `path` to be created: some clause naming the path has a creation verb
  * whose nearest file named in that clause is `path` itself, so a verb about another file — "create
  * src/b.ts; src/a.ts is wrong", "add a case to src/b.ts next to src/a.ts" — grants nothing for it,
- * and neither does a negated one: "do not create src/a.ts" forbids exactly the file it names.
+ * and neither does a negated one: "do not create src/a.ts" and "adding src/a.ts is not needed"
+ * forbid exactly the file they name.
  */
 export function asksToCreate(text: string, path: string): boolean {
   for (const clause of text.split(/[;!?\n]|\.(?=\s|$)/)) {
     if (!namesPath(clause, path)) continue;
     const files = [...clause.matchAll(fileToken)].map(match => ({ at: match.index!, end: match.index! + match[0].length, name: match[0].replace(/\.+$/, '') }));
     for (const verb of clause.matchAll(creationVerb)) {
-      if (negated(clause, verb.index!)) continue;
+      if (negated(clause, verb.index!, verb.index! + verb[0].length)) continue;
       const at = verb.index!, distance = (file: { at: number; end: number }) => file.at >= at ? file.at - at : at - file.end;
       const nearest = files.reduce<(typeof files)[number] | null>((best, file) => !best || distance(file) < distance(best) ? file : best, null);
       if (nearest?.name === path) return true;

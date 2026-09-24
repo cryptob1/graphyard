@@ -13,7 +13,7 @@ These need judgement:
 
 ## Items, scope and human waits
 
-A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`: documentation, files the criteria name and, for an item planning all of `docs/`, single files under `web/` and `browser-tests/` widen automatically; the loop re-decides a refused request once per policy revision. A refused additive request widens, as operator-agent, for files named literally by an unresolved reviewer or `run.awaitReviewers` bot thread, or the reviewer's `CHANGES_REQUESTED` review of the head, citing its id (rechecked every two minutes); never a directory, nor a missing file its clause does not ask, unnegated, to create. One needing a human-only decision runs `park GY-N EPOCH KIND NEEDED -- REASON`, and the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`: documentation, files the criteria name and, for an item planning all of `docs/`, single files under `web/` and `browser-tests/` widen automatically; the loop re-decides a refused request once per policy revision. Refused additive requests widen, as operator-agent, to files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's `CHANGES_REQUESTED` review of the head, names literally, citing its id (rechecked every two minutes); never directories, nor missing files not asked, unnegated, to exist. One needing a human-only decision runs `park GY-N EPOCH KIND NEEDED -- REASON`, and the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
@@ -77,4 +77,4 @@ A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator`
 
 ## Pipeline speed
 
-The target is submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs [--record DIR]` records what `manual:speed-target-met` reads.
+The target is submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs [--split GY-N] [--record DIR]` records what `manual:speed-target-met` reads. Never trade a gate or proof for the number.

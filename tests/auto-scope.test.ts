@@ -439,19 +439,28 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   assert.deepEqual(elsewhere('src/missing.ts should be added next to the queue'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
   // A negated creation verb forbids the very file it names.
   for (const text of ['Do not create src/missing.ts; update src/merge-queue.ts instead', "Don't add src/missing.ts", 'src/missing.ts should not be added', 'Never introduce src/missing.ts',
-    'No need to create src/missing.ts', "You shouldn't create src/missing.ts here", 'Fix src/merge-queue.ts without adding src/missing.ts'])
+    'No need to create src/missing.ts', "You shouldn't create src/missing.ts here", 'Fix src/merge-queue.ts without adding src/missing.ts',
+    'Adding src/missing.ts is not needed; update src/merge-queue.ts instead', 'Creating src/missing.ts is unnecessary', "Adding src/missing.ts isn't the fix"])
     assert.match((elsewhere(text) as { refusal: string }).refusal, /does not ask for it to be created/, text);
   assert.deepEqual(elsewhere("Don't change src/merge-queue.ts, but add src/missing.ts"), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, 'a negation of another verb does not reach past the conjunction');
+  assert.deepEqual(elsewhere('Add src/missing.ts, not a second copy in src/merge-queue.ts'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, 'a negation after the verb stops at the comma');
+  assert.deepEqual(findingScope(['src/not.ts'], [{ ground: 'review 12', text: 'Add src/not.ts for the helper' }], path => path !== 'src/not.ts'),
+    { grounds: [{ path: 'src/not.ts', ground: 'review 12' }] }, 'a file name is not a negation');
   assert.deepEqual(findingScope(['src/missing.ts'], [{ ground: 'review 10', text: 'src/missing.ts is wrong' }, { ground: 'review 11', text: 'create src/missing.ts' }], exists),
     { grounds: [{ path: 'src/missing.ts', ground: 'review 11' }] }, 'the finding that asks for the file is its grounds');
 
   // The read: unresolved threads' comments by trusted authors, and the configured reviewer's latest change request on the head only.
   const run = (_command: string, args: string[]) => {
+    // A long thread: the listing carries its first page of comments, the rest is read by the thread's id.
+    if (args[1] === 'graphql' && args.includes('id=PRRT_long')) return JSON.stringify({ data: { node: { comments: args.includes('after=c1')
+      ? { pageInfo: { hasNextPage: true, endCursor: 'c2' }, nodes: [{ body: 'noise', author: { login: 'graphyard-reviewer' } }] }
+      : { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ body: 'late: fix src/g.ts', author: { login: 'graphyard-reviewer' } }] } } } });
     if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
       { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts', author: { login: 'chatgpt-codex-connector' } }, { body: 'and src/worker.ts', author: { login: 'cryptob1' } }] } },
       { id: 'PRRT_reviewer', isResolved: false, comments: { nodes: [{ body: 'fix src/e.ts', author: { login: 'graphyard-reviewer' } }] } },
       { id: 'PRRT_worker', isResolved: false, comments: { nodes: [{ body: 'please widen src/f.ts', author: { login: 'cryptob1' } }] } },
-      { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts', author: { login: 'graphyard-reviewer' } }] } }] } } } } });
+      { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts', author: { login: 'graphyard-reviewer' } }] } },
+      { id: 'PRRT_long', isResolved: false, comments: { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [{ body: 'first', author: { login: 'graphyard-reviewer' } }] } }] } } } } });
     return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
       { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' }]]);
   };
@@ -469,6 +478,7 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   await rm(repo, { recursive: true, force: true });
 
   const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: ['chatgpt-codex-connector[bot]'] }, run);
-  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', 'review 1']);
+  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', 'review thread PRRT_long', 'review 1']);
+  assert.ok(namesPath(read[2].text, 'src/g.ts'), 'a trusted comment past the first page of a long thread is a finding');
   assert.equal(read[0].text, 'fix src/a.ts', 'a comment by an untrusted author in a trusted thread is not a finding');
 });
