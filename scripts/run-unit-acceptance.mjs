@@ -23,7 +23,7 @@ try {
   // (preinstall/postinstall/prepare, or a dependency's) run during `npm ci` and could otherwise
   // rewrite the file after it was copied. The full tree: an inherited omit/production config would
   // skip the devDependencies the suite needs while npm still exits 0.
-  execFileSync('npm', ['ci', '--include=dev', '--no-audit', '--no-fund'], { cwd: candidate, env: npmCiEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] });
+  execFileSync('npm', ['ci', '--include=dev', '--no-dry-run', '--no-audit', '--no-fund'], { cwd: candidate, env: npmCiEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] });
   // The protected inventory replaces whatever the candidate carries at that path, so the cases
   // judged are the ones this checkout registers. The candidate's own source is what they import.
   // It is copied and byte-compared immediately before the run so nothing between the copy and the

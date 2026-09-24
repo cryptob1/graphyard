@@ -589,15 +589,22 @@ export async function ensureWorktreeDependencies(worktree: string, install: Depe
   const lockfile = parseJson(text);
   if (lockfile instanceof Error) return { state: 'failed', install: null, reason: `The checkout's package-lock.json cannot be parsed (${lockfile.message}); nothing was installed for it` };
   const current = await resolvedInstall(worktree);
-  // A hidden lockfile an interrupted install left truncated is a mismatched install: npm ci replaces it.
-  const installed = current ? parseJson(await readFile(resolve(current, '.package-lock.json'), 'utf8').catch(() => 'null')) : null;
-  const matches = !current ? `no node_modules is reachable from ${worktree}`
-    : installed instanceof Error ? `the install's hidden lockfile (${resolve(current, '.package-lock.json')}) is unreadable: ${installed.message}`
-    : installMatchesLockfile(lockfile, installed);
+  const matches = !current ? `no node_modules is reachable from ${worktree}` : await installMatches(lockfile, current);
   if (matches === true) return { state: 'current', install: current, reason: `${current} was installed from this package-lock.json` };
   const own = resolve(worktree, 'node_modules');
   signal?.throwIfAborted();
   try { await install(worktree, signal); }
   catch (error) { if (signal?.aborted) throw signal.reason; return { state: 'failed', install: current, reason: `package-lock.json differs from the install (${matches}), and installing it failed: ${error instanceof Error ? error.message : String(error)}` }; }
+  // npm can exit 0 having installed nothing or less (a dry-run or omit config from an .npmrc): the
+  // install is reported only once its own hidden lockfile matches the checkout's.
+  const after = await installMatches(lockfile, own);
+  if (after !== true) return { state: 'failed', install: own, reason: `package-lock.json differs from the install (${matches}), and npm ci exited 0 without installing it: ${after}` };
   return { state: 'installed', install: own, reason: `package-lock.json differs from the install it resolved (${matches}); installed its own` };
+}
+
+async function installMatches(lockfile: { packages?: Record<string, any> }, install: string): Promise<true | string> {
+  // A hidden lockfile an interrupted install left truncated is a mismatched install: npm ci replaces it.
+  const installed = parseJson(await readFile(resolve(install, '.package-lock.json'), 'utf8').catch(() => 'null'));
+  return installed instanceof Error ? `the install's hidden lockfile (${resolve(install, '.package-lock.json')}) is unreadable: ${installed.message}`
+    : installMatchesLockfile(lockfile, installed);
 }

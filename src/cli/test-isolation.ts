@@ -136,11 +136,12 @@ export function abnormalTestExit(tap: string, status: number | null, signal: Nod
 /**
  * `npm ci` arguments and environment for an install a build and its tests run against: the full
  * tree always. An inherited NODE_ENV=production or npm_config_omit=dev would otherwise skip the
- * devDependencies (typescript, tsx, playwright) while npm still exits 0.
+ * devDependencies (typescript, tsx, playwright) while npm still exits 0, and an inherited
+ * npm_config_dry_run (or dry-run in an .npmrc) would install nothing and exit 0.
  */
-export const npmCiArgs = ['ci', '--include=dev', '--no-audit', '--no-fund'];
+export const npmCiArgs = ['ci', '--include=dev', '--no-dry-run', '--no-audit', '--no-fund'];
 export function npmCiEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const clean: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(env)) if (!/^(npm_config_(omit|only|production|also|dev|include)|NODE_ENV)$/i.test(name)) clean[name] = value;
+  for (const [name, value] of Object.entries(env)) if (!/^(npm_config_(omit|only|production|also|dev|include|dry_run|dry-run)|NODE_ENV)$/i.test(name)) clean[name] = value;
   return clean;
 }

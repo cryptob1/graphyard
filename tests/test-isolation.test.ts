@@ -123,7 +123,8 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     const lock = (version: string) => ({ name: 'app', lockfileVersion: 3, packages: { '': { name: 'app' }, 'node_modules/left-pad': { version, integrity: `sha512-${version}` }, 'node_modules/@esbuild/darwin-arm64': { version: '0.1.0', optional: true } } });
     await writeFile(join(root, 'node_modules', '.package-lock.json'), JSON.stringify({ name: 'app', lockfileVersion: 3, packages: { 'node_modules/left-pad': { version: '1.0.0', integrity: 'sha512-1.0.0' } } }));
     const installs: string[] = [];
-    const installer = async (cwd: string) => { installs.push(cwd); };
+    // As npm ci does, the installer leaves the checkout's lockfile as the install's hidden lockfile.
+    const installer = async (cwd: string) => { installs.push(cwd); await mkdir(join(cwd, 'node_modules'), { recursive: true }); await writeFile(join(cwd, 'node_modules', '.package-lock.json'), await readFile(join(cwd, 'package-lock.json'))); };
 
     await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(lock('1.0.0')));
     const shared = await ensureWorktreeDependencies(worktree, installer);
@@ -137,8 +138,13 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.deepEqual(installs, [worktree], 'a changed lockfile is installed in the worktree itself');
     assert.match(changed.reason, /left-pad is installed at 1\.0\.0, package-lock\.json names 2\.0\.0/);
 
+    await rm(join(worktree, 'node_modules'), { recursive: true, force: true });
     const failed = await ensureWorktreeDependencies(worktree, async () => { throw new Error('npm ci exited with 1'); });
     assert.equal(failed.state, 'failed'); assert.match(failed.reason, /npm ci exited with 1/);
+    // An npm ci that exits 0 having installed nothing (an inherited dry-run) is a failed install, never reported as installed.
+    const dryRun = await ensureWorktreeDependencies(worktree, async () => {});
+    assert.equal(dryRun.state, 'failed', dryRun.reason);
+    assert.match(dryRun.reason, /npm ci exited 0 without installing it: the install records no hidden lockfile/);
 
     await mkdir(join(worktree, 'node_modules'));
     await writeFile(join(worktree, 'node_modules', '.package-lock.json'), JSON.stringify({ packages: { 'node_modules/left-pad': { version: '2.0.0', integrity: 'sha512-2.0.0' } } }));
@@ -167,7 +173,8 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.match(String(installMatchesLockfile({ packages: { 'node_modules/dep': { version: '1.0.0', resolved: '../dep', link: true } } }, git('aaa'))), /installed as a package, package-lock.json names a link/);
     // The install always takes the full tree: an inherited production/omit config would skip devDependencies while npm exits 0.
     assert.ok(npmCiArgs.includes('--include=dev'));
-    const cleared = npmCiEnvironment({ PATH: '/bin', NODE_ENV: 'production', npm_config_omit: 'dev', NPM_CONFIG_PRODUCTION: 'true' });
+    assert.ok(npmCiArgs.includes('--no-dry-run'), 'a dry-run from an .npmrc is overridden too');
+    const cleared = npmCiEnvironment({ PATH: '/bin', NODE_ENV: 'production', npm_config_omit: 'dev', NPM_CONFIG_PRODUCTION: 'true', npm_config_dry_run: 'true', 'npm_config_dry-run': 'true' });
     assert.deepEqual(cleared, { PATH: '/bin' });
 
     // A refused lease heartbeat stops the install and fails the worktree command.
@@ -183,12 +190,13 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
       /lease heartbeat for GY-1 epoch 1 was refused while installing dependencies, so the install was stopped: Lease epoch is expired/);
     assert.equal(first, 1, 'renewed once up front, not after a whole interval'); assert.equal(started, 0, 'npm never started under a refused lease');
     let kept = 0;
-    const brief = (cwd: string) => new Promise<void>(done => setTimeout(done, 70));
+    const brief = (cwd: string) => new Promise<void>(done => setTimeout(() => installer(cwd).then(done), 70));
     assert.equal((await installUnderLease(worktree, async () => { kept++; }, 'GY-1 epoch 1', { install: brief, intervalMs: 20 })).state, 'installed');
     assert.ok(kept >= 1, 'accepted heartbeats keep the install going');
     // A heartbeat still in flight when the install finishes is awaited: refused, it fails the call.
+    await rm(join(worktree, 'node_modules'), { recursive: true, force: true });
     let late = 0;
-    const quick = (cwd: string) => new Promise<void>(done => setTimeout(done, 30));
+    const quick = (cwd: string) => new Promise<void>(done => setTimeout(() => installer(cwd).then(done), 30));
     const refusedLate = () => { late++; return late === 1 ? Promise.resolve() : new Promise((_, fail) => setTimeout(() => fail(new Error('Lease epoch is superseded')), 60)); };
     await assert.rejects(installUnderLease(worktree, refusedLate, 'GY-1 epoch 1', { install: quick, intervalMs: 20 }),
       /lease heartbeat for GY-1 epoch 1 was refused while installing dependencies, so the install was stopped: Lease epoch is superseded/);
