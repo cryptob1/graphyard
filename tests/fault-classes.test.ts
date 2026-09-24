@@ -7,12 +7,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteFault, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
 import { controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, fileRecurringFaultClasses, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, reconcilePendingActions, runCycle, storeAction, type DaemonEffects } from '../src/master-daemon.js';
-import { faulted } from '../src/master-status.js';
+import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, type DaemonEffects } from '../src/master-daemon.js';
+import { derivedAttention, faulted } from '../src/master-status.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
@@ -424,4 +424,50 @@ test('unit:recurring-class-item — attention master status adds after buildMast
   const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' } };
   assert.equal(daemonEffects('/nonexistent', config(), deps).reportedAttention, undefined);
   assert.equal(typeof daemonEffects('/nonexistent', { ...config(), operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/operator.token' } } as MasterConfig, deps).reportedAttention, 'function');
+});
+
+test('unit:recurring-class-item — review conflicts and the other lines status derives after buildMasterStatus reach the loop', async () => {
+  const conflicted = (key: string, sha: string): Work => item(key, { stage: 'review', reviewConflict: { state: 'conflicted', key, pr: 7, sha, baseSha: 'b'.repeat(40), policyRevision: 1, reviewer: 'graphyard-reviewer[bot]', requestId: null, at: iso(-hour), reason: 'two verdicts',
+    verdicts: [{ id: 1, reviewer: 'graphyard-reviewer[bot]', state: 'APPROVED', submittedAt: iso(-hour), observedAt: iso(-hour), requestId: null }, { id: 2, reviewer: 'graphyard-reviewer[bot]', state: 'CHANGES_REQUESTED', submittedAt: iso(-hour), observedAt: iso(-hour), requestId: null }] } } as Partial<Work>);
+  const work = [conflicted('GY-1', 'a'.repeat(40)), conflicted('GY-2', 'c'.repeat(40)), conflicted('GY-3', 'd'.repeat(40))];
+  const snapshot = { work, now: iso(0) };
+  // The same builder master status uses: the loop reads it with the ledgers, and without the report's rows.
+  const derived = await derivedAttention('/nonexistent', config(), async () => ({}), { github: true }, snapshot, { reviews: [], producers: [], runtime: { available: true, agents: [] }, trees: [] });
+  assert.deepEqual(derived.conflicted.map(entry => entry.subject), ['GY-1', 'GY-2', 'GY-3']);
+  assert.deepEqual(classifyAttention(derived.items).filter(entry => entry.kind === 'review-conflict').map(entry => [entry.subject, entry.faultClass]),
+    [['GY-1', 'review-convergence'], ['GY-2', 'review-convergence'], ['GY-3', 'review-convergence']]);
+  const state = emptyDaemonState(config());
+  trackFaults(state.faults, cycleFaults(state, work, clock, { config: config(), reported: derived.items }), iso(0));
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'review-conflict').map(entry => entry.subject), ['GY-1', 'GY-2', 'GY-3']);
+  assert.deepEqual(recurringClasses(state.faults.instances, work, policy, clock).filter(entry => entry.file).map(entry => entry.faultClass), ['review-convergence'],
+    'three review conflicts in the window file the review-convergence item');
+});
+
+test('unit:recurring-class-item — the fault record stays bounded when failing runs never succeed', () => {
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  // One-shot failures (timestamped keys) that never record a success: every one is a failing run.
+  for (let index = 0; index < retainedFaultInstances + 50; index += 1)
+    noteActionOutcome(record, `config:${index}`, 'failed', { kind: 'action:config', faultClass: 'configuration', subject: 'installation', text: `refused ${index}` }, iso(index));
+  assert.equal(record.instances.length, retainedFaultInstances, 'the bound holds even when every instance is a standing run');
+  const kept = new Set(record.instances.map(entry => entry.id));
+  assert.ok(Object.values(record.failing).every(id => kept.has(id)), 'no failing reference outlives its instance');
+  assert.equal(Object.keys(record.failing).length, retainedFaultInstances);
+});
+
+test('unit:recurring-class-item — a failing run ends when its action is retired, succeeds or stays silent for the window', () => {
+  const state = emptyDaemonState(config());
+  const fail = (key: string, at: number, row: 'failed' | 'done' | 'started' | null) => {
+    noteActionOutcome(state.faults, key, 'failed', { kind: 'action:refresh', faultClass: 'observation', subject: key, text: 'failed' }, iso(at));
+    if (row) state.actions[key] = { kind: 'refresh', work: null, principal: null, state: row, detail: 'x', attempts: 1, cycle: 1, epoch: null, at: iso(at) } as any;
+  };
+  fail('refresh:retired', -hour, null); fail('refresh:done', -hour, 'done'); fail('refresh:silent', -25 * hour, 'failed');
+  fail('refresh:running', -hour, 'failed'); fail('refresh:retrying', -2 * hour, 'started');
+  endFailingRuns(state, policy, clock);
+  assert.deepEqual(Object.keys(state.faults.failing).sort(), ['refresh:retrying', 'refresh:running']);
+  // Pruning a retired row drops its run with it.
+  for (let index = 0; index <= retainedActions; index += 1) state.actions[`old:${index}`] = { kind: 'refresh', work: null, principal: null, state: 'done', detail: 'x', attempts: 1, cycle: 1, epoch: null, at: iso(-48 * hour + index) } as any;
+  state.actions['refresh:running'].at = iso(-72 * hour);
+  pruneDaemonState(state);
+  assert.equal(state.actions['refresh:running'], undefined);
+  assert.deepEqual(Object.keys(state.faults.failing), ['refresh:retrying']);
 });

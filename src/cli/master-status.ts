@@ -3,29 +3,23 @@ import { probeCandidateConflicts } from '../conflicts.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
-import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-import { executorFleet } from './executor-report.js';
-import { owedAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
+import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
+import { needsHumanActions } from './owed-report.js';
 import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { directMergeLine, nameOrphanSupervisors, stalledItemAttention } from './status-attention.js';
+import { directMergeLine, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
-import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
-import { stalledActionAttention } from './stalled-actions.js';
-import { githubBudgetAttention } from './github-budget-attention.js';
-import { overlongSessionAttention } from './overlong-sessions.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
-import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
-import { attributeAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
+import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import { contextOverflows } from '../model/escalation-context.js';
 import { interventionSummary } from './intervention-status.js';
@@ -131,9 +125,6 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot), ...consentHoldItems(trees, snapshot)];
-  // A session past its role's maximum: running but making no progress is as visible as one that died.
-  const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
   // A review every session settled on a dismissal for is the stronger statement of the same
@@ -143,19 +134,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // An open item the control plane names no action for. Those waiting on another item or on a
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
-  const stalledItems = stalledItemAttention(snapshot);
-  // An action no live executor can claim is not queued behind other work (GY-105); it is named
-  // with its wait and the unit to start, ahead of everything that waits on it.
-  const executors = await executorFleet(root, masterApi, snapshot);
-  // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
-  const conflicted = reviewConflictAttention(snapshot.work, reviewRecords).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
-  // A row that keeps failing for the same reason: owed, attempted, and going nowhere. It is raised
-  // as soon as it is classified, which is inside the same idle bound a row nobody is acting on has.
-  const stalled = stalledActionAttention(snapshot);
-  // What waits on a judgment rather than on capacity, named once and counted apart (GY-104).
-  const owed = owedAttention(snapshot, status.work as { key: string; attention: string | null }[], scopeRequests);
-  // The GitHub budget (GY-117): a pause as one incident, an exhaustion ahead, a silent webhook.
-  const budget = githubBudgetAttention(coordinator);
+  // Requests, conflicts, stalls, executors and owed judgments come from derivedAttention, which the loop reads too.
+  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+    { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees });
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...stalled, ...overlong, ...budget, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
   // The loop's own health goes in front of all of it (see loopItems above), then the dispatcher's,
@@ -163,8 +144,6 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.unshift(...loopItems, ...dispatchItems, ...executors.attention);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
-    { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null });
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane will take from the operator's own credential alone, derived by
@@ -211,8 +190,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
 }
 
 /** What the report adds after buildMasterStatus; the loop reads it too, to track every class (GY-173). */
-export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[] },
-  observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & { commit: string | null }) {
+export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
+  observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & Pick<Parameters<typeof derivedAttention>[5], 'rows' | 'trees' | 'standalone'> & { commit: string | null }) {
   const generatedFiles: AttentionItem[] = [];
   try {
     const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
@@ -227,8 +206,9 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() });
   const throughput = await throughputStatus(root, coordinator, snapshot.work);
   const resources = await resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop });
-  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems];
-  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, items };
+  const derived = await derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } });
+  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
+  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items };
 }
 
 /**

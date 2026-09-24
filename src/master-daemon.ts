@@ -367,6 +367,8 @@ export function pruneDaemonState(state: DaemonState) {
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
+  // A failing run whose action row is retired has ended (GY-173): its reference would otherwise hold its instance forever.
+  for (const key of Object.keys(state.faults.failing)) if (!state.actions[key]) delete state.faults.failing[key];
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
   if (state.latency.length > retainedSamples) state.latency = state.latency.slice(-retainedSamples);
   // A clock is dropped when its delivery was sampled; this bound only catches items the loop
@@ -1510,10 +1512,11 @@ export interface DaemonEffects {
   controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
   /**
    * The attention `master status` adds after `buildMasterStatus` (generated-file drift, context
-   * overflows, intervention patterns, executors behind the release, terminal decisions, throughput,
-   * resources), read with the control plane's status so the loop tracks every class the report shows.
+   * overflows, intervention patterns, executors, terminal decisions, throughput, resources, and the
+   * requests, review conflicts, stalls, overlong sessions, owed judgments, setup and dispatcher lines
+   * of derivedAttention), read with the control plane's status so the loop tracks every class the report shows.
    */
-  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness'] }) => Promise<AttentionItem[]>;
+  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<AttentionItem[]>;
 }
 
 /**
@@ -1584,6 +1587,20 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   return [...own, ...derived.filter(fault => !shown.has(`${fault.subject}|${fault.faultClass}`))];
 }
 export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
+/**
+ * A failing run ends when its action succeeds (noteActionOutcome), and also when the loop no longer
+ * keeps the action's row or the row has not been attempted again within the recurrence window: a
+ * one-shot failure (a timestamped refusal, a terminal action) never records the success that would
+ * end it, and a run left standing would keep its instance past the retention bound for ever. The
+ * action failing again after that opens a new instance.
+ */
+export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, policy: FaultClassPolicy, now: number) {
+  const from = now - policy.windowHours * 3_600_000;
+  for (const action of Object.keys(state.faults.failing)) {
+    const row = state.actions[action];
+    if (!row || row.state === 'done' || !(Date.parse(row.at) >= from)) delete state.faults.failing[action];
+  }
+}
 /**
  * One structural item per recurring class (AC-2). A class whose unaccounted instances in the window
  * reach the threshold, with no open item naming it, gets one backlog item filed as the master's
@@ -2613,8 +2630,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => null) : null;
   const summary = controlPlane && effects.reportedAttention ? daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId) : null;
-  const reported = summary ? await effects.reportedAttention!(snapshot.work, controlPlane!, { agents, approvals: summary.approvals, loop: summary.liveness })
+  const reported = summary ? await effects.reportedAttention!(snapshot.work, controlPlane!, { agents, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
     .catch(error => [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem]) : [];
+  endFailingRuns(state, effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), clock);
   trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported }), new Date(clock).toISOString());
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
 
@@ -3195,10 +3213,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173).
     get controlPlane() { return current().operatorAgent ? () => asOperatorAgent('GET', 'status') : undefined; },
     get reportedAttention() {
-      return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness'] }) =>
+      return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) =>
         // Imported when first read: the status report imports this module, so a static import would be a cycle.
-        (await (await import('./cli/master-status.js')).reportedAttention(root, current(), path => asOperatorAgent('GET', path), coordinator, { work }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
-          runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop })).items : undefined;
+        (await (await import('./cli/master-status.js')).reportedAttention(root, current(), path => asOperatorAgent('GET', path), coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
+          runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true })).items : undefined;
     },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),

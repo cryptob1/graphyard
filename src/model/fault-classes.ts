@@ -249,9 +249,10 @@ export interface FaultRecord { instances: FaultInstance[]; open: Record<string, 
 export const retainedFaultInstances = 1000;
 const instanceOf = (observation: FaultObservation, at: string): FaultInstance => ({ id: `${observation.kind}|${observation.subject.slice(0, 200)}|${at}`, kind: observation.kind, faultClass: observation.faultClass,
   subject: observation.subject.slice(0, 200), text: observation.text.slice(0, 500), at, lastSeenAt: at, linkedTo: null });
-function retain(record: FaultRecord) { // drops the oldest past the bound, never one a standing fault or failing run names
-  let excess = record.instances.length - retainedFaultInstances; const standing = new Set([...Object.values(record.open), ...Object.values(record.failing)]);
-  if (excess > 0) record.instances.splice(0, record.instances.length, ...record.instances.filter(entry => excess <= 0 || standing.has(entry.id) || excess-- <= 0));
+function retain(record: FaultRecord) { // drops the oldest past the bound: first those no standing fault or failing run names, then any, so the bound holds
+  for (const spare of [new Set([...Object.values(record.open), ...Object.values(record.failing)]), new Set<string>()]) { let excess = record.instances.length - retainedFaultInstances;
+    if (excess > 0) record.instances.splice(0, record.instances.length, ...record.instances.filter(entry => excess <= 0 || spare.has(entry.id) || excess-- <= 0)); }
+  const kept = new Set(record.instances.map(entry => entry.id)); for (const refs of [record.open, record.failing]) for (const key of Object.keys(refs)) if (!kept.has(refs[key])) delete refs[key];
 }
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
@@ -262,8 +263,7 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
   const opened: FaultInstance[] = [], seen = new Set<string>();
   for (const observation of observations) {
     const key = `${observation.kind}|${observation.subject.slice(0, 200)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(key)) continue; seen.add(key);
     const standing = record.open[key] ? record.instances.find(entry => entry.id === record.open[key]) : undefined;
     if (standing) { standing.lastSeenAt = at; continue; }
     const instance = instanceOf(observation, at);
