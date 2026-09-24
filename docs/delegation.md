@@ -1,15 +1,15 @@
 <!-- page: Operate Graphyard | 6 | bounded product, infrastructure, and docs/experience coordination. -->
 # Slice-lead delegation
 
-Graphyard can split delivery into three slices: **product**, **infrastructure** and **docs/experience** (`docs-experience` in API data). A slice lead is an AI coordinator session with its own `slice-lead` principal. It is not a worker, reviewer, proof producer or merge authority. Slices are optional; the single-worker bootstrap flow is unchanged.
+Graphyard can split delivery into three slices: **product**, **infrastructure** and **docs/experience** (`docs-experience` in API data). A slice lead is an AI coordinator session with its own `slice-lead` principal, never a worker, reviewer, proof producer or merge authority. Slices are optional.
 
 ## Authority boundaries
 
-A lead may coordinate workers in its slice, approve or reject plans, classify failures, request reruns, send work back and escalate. Every ruling is append-only and carries a versioned rule ID and a reason, written with an `Idempotency-Key`.
+A lead may coordinate workers in its slice, approve or reject plans, classify failures, request reruns, send work back and escalate. Every ruling is append-only, with a versioned rule ID, a reason and an `Idempotency-Key`.
 
 A lead cannot implement, claim, submit evidence, review its own slice, change requirements, bypass a gate or merge; the server refuses and records `lead.action.refused`. A ruling against delivered work is refused; record a follow-up item.
 
-Human-only intake origins require a **declared human session**: an `admin` credential declaring `sessionKind: "ai"`, or nothing, is refused. Routine intake (feedback, defects, dependencies, verification findings) is unaffected. Leads must escalate security concerns, suspected requirement weakening, evidence-policy conflict and lease loss.
+Human-only intake origins require a **declared human session**: an `admin` credential declaring `sessionKind: "ai"`, or nothing, is refused; routine intake is unaffected. Leads must escalate security concerns, suspected requirement weakening, evidence-policy conflict and lease loss.
 
 ## Blocking rulings and their recovery
 
@@ -24,7 +24,7 @@ An approval naming any other ruling, or none, is refused. Clearing a hold does n
 
 ## Independent proof producers
 
-Trusted evidence comes from a `producer` independent of the implementation and the lead, bound to the exact head, base and policy revision. A submission is refused (`evidence.producer.refused`) when the identity has ever held an assignment on the item, holds `slice-lead` authority, or is bound to the item's slice. Independence is standing: if a producer later takes an assignment on the item, its evidence stops counting at the next evaluation. Producer credentials may not declare a `slice` or reuse a lead's ID.
+Trusted evidence comes from a `producer` independent of the implementation and the lead, bound to the exact head, base and policy revision. A submission is refused (`evidence.producer.refused`) when the identity has ever held an assignment on the item, holds `slice-lead` authority, or is bound to the item's slice. Independence is standing: a producer that later takes an assignment on the item stops counting at the next evaluation. Producer credentials may not declare a `slice` or reuse a lead's ID.
 
 ## Escalation
 
@@ -35,7 +35,7 @@ Trusted evidence comes from a `producer` independent of the implementation and t
 | `security-concern` | A lead files an `escalate` ruling naming it. |
 | `requirement-weakening` | A revision retires a criterion or narrows its proofs. |
 
-Escalations are never overwritten or cleared by a lead. Each trigger stands on its own (at most one unresolved per trigger), listed in `escalations`, and each refuses the `merge` gate until resolved.
+A lead never overwrites or clears an escalation. Each trigger stands alone (at most one unresolved each), listed in `escalations`, refusing the `merge` gate until resolved.
 
 A lapse the ledger explains is a `lease.expired` history entry with its cause, not an escalation:
 
@@ -44,7 +44,7 @@ A lapse the ledger explains is a `lease.expired` history entry with its cause, n
 - `stopped-by-attestation` — an admin `rework` or `recover-containment --previous-worker-stopped` for that epoch.
 - `exhausted-capacity` — the loop recorded the account had no quota (`capacity.exhausted`).
 
-Reconciliation auto-settles a control-plane `lease-loss` whose epoch is later explained, recording `escalation.auto-settled` with notes such as `auto-settled: submitted before expiry`, `auto-settled: blocked report for epoch N explains the lapse (blocked by WORKER at TIME)` and `auto-settled: stopped-worker attestation for epoch N explains the lapse (rework by ADMIN at TIME)`. A replacement worker may claim while a `lease-loss` stands; delivery waits.
+Reconciliation auto-settles a control-plane `lease-loss` whose epoch is later explained, recording `escalation.auto-settled` with a note such as `auto-settled: blocked report for epoch N explains the lapse (blocked by WORKER at TIME)` or `auto-settled: stopped-worker attestation for epoch N explains the lapse (rework by ADMIN at TIME)`. A replacement worker may claim while a `lease-loss` stands; delivery waits.
 
 ### An unresolved escalation refuses delivery
 
@@ -62,17 +62,17 @@ No lead, worker, producer, coordinator or scoped operator agent may resolve an e
 
 ### A concern raised mid-merge fences the execution
 
-Raising an escalation or blocking ruling fences any in-flight merge execution in the same transaction; the broker re-reads the item immediately before calling GitHub and refuses a fenced execution.
+Raising an escalation or blocking ruling fences any in-flight merge execution in the same transaction; the broker re-reads the item just before calling GitHub and refuses a fenced execution.
 
 ## Ownership and worktrees
 
-Each claimed item is held by one worker identity under one lease epoch, in one registered worktree, while its `watch` supervisor renews the lease; any other identity, epoch or worktree is refused. After `complete`, renewals are refused. A worker may hold several items in a slice. A standing escalation does not stop a replacement being dispatched ([master-agent](master-agent-reference.md#a-concern-carried-beside-the-work)).
+Each claimed item is held by one worker identity under one lease epoch in one registered worktree, renewed by its `watch` supervisor; any other identity, epoch or worktree, and any renewal after `complete`, is refused. A worker may hold several items in a slice. A standing escalation does not stop a replacement being dispatched ([master-agent](master-agent-reference.md#a-concern-carried-beside-the-work)).
 
 ## Capacity and identity
 
 Defaults: three slice leads, two engineers per lead, one to two shared independent review/proof agents. Capacity counts engineers, not leases. Override with `GRAPHYARD_MAX_SLICE_LEADS`, `GRAPHYARD_MAX_ENGINEERS_PER_LEAD`, `GRAPHYARD_MIN_REVIEWERS` and `GRAPHYARD_MAX_REVIEWERS`. Every `role: "producer"` credential, including [delivery](delivery.md) builder, observer and promoter identities, counts toward the review/proof limit; the server refuses to start above it.
 
-Lead credentials use `role: "slice-lead"`, `sessionKind: "ai"` and a `slice`. Declare `sessionKind: "human"` on the operator credential a person uses. Principal IDs and tokens must be unique across the roster; declare `sessionKind` on every credential.
+Lead credentials use `role: "slice-lead"`, `sessionKind: "ai"` and a `slice`; a person's operator credential declares `sessionKind: "human"`. Principal IDs and tokens are unique; declare `sessionKind` on every credential.
 
 ## Dashboard and reads
 

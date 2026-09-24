@@ -1,13 +1,13 @@
 <!-- page: Understand or contribute | 3 | planned work, clearly separated from shipped behavior. -->
 # Turnkey E2E execution and verified delivery
 
-Status of the delivery roadmap (GY-15): from work assignment to independently verified delivery after guided setup. Each increment's acceptance checks live as named tests in its test file.
+The delivery roadmap (GY-15): from assignment to independently verified delivery. Each increment's acceptance checks are named tests in its test file.
 
 ## Product promise and boundary
 
-Graphyard discovers supported repository and deployment infrastructure, proposes an explicit delivery profile, dispatches required validation, collects results and explains every refusal. Agent runtimes still run coding sessions; GitHub and deployment platforms own their facts; test code stays in Git. Graphyard never manufactures passing evidence or presents inferred criteria as verified requirements.
+Graphyard discovers supported infrastructure, proposes an explicit delivery profile, dispatches required validation, collects results and explains every refusal. It never manufactures passing evidence or presents inferred criteria as verified requirements.
 
-Delivery profiles are explicit, and a green merge never stands in for verified production behavior:
+A green merge never stands in for verified production behavior:
 
 - **Through merge:** a verified, authorized merge completes the workflow.
 - **Preview validation:** a pinned preview artifact plus required behavioral proof is the boundary.
@@ -26,18 +26,18 @@ Delivery profiles are explicit, and a green merge never stands in for verified p
 
 ## D3 — Releases and observed production delivery
 
-Release model, observation protocol and bounded reconciliation. No provider adapter ships: an observer is an operator-run process with its own credential. Runtime identity must be independently measured; an application self-report or an unknown identity refuses verification. Checks: `tests/delivery.test.ts`.
+Release model, observation protocol and bounded reconciliation. No provider adapter ships: an observer is an operator-run process with its own credential, and runtime identity must be independently measured (a self-report or unknown identity refuses). Checks: `tests/delivery.test.ts`.
 
 ## D4 — Operate runners and recover delivery failures
 
-Capacity reporting and backpressure, an S3-compatible artifact backend with verified retention and migration, and an authorized, fenced, observed rollback workflow. Nothing relaxes D2's execution-resource guarantees. Checks: `tests/recovery.test.ts`.
+Capacity reporting and backpressure, an S3-compatible artifact backend with verified retention and migration, and a fenced, observed rollback workflow. Checks: `tests/recovery.test.ts`.
 
 ## D6 — Evidence replay, compatible reuse and analytics
 
-Replay reports coverage and never authorizes live behavior. Reuse requires exact requirement, scenario, policy and oracle-bundle revisions; only the newest compatible attempt counts, and unknown scope never widens applicability. Cost stays observed, estimated or unavailable. Checks: `tests/evidence-reuse.test.ts`.
+Replay reports coverage and never authorizes live behavior. Reuse requires exact requirement, scenario, policy and oracle-bundle revisions; only the newest compatible attempt counts. Cost stays observed, estimated or unavailable. Checks: `tests/evidence-reuse.test.ts`.
 
 ## Remaining work
 
 - More deployment-provider adapters behind the D3 observation interface; until then production verification is a manual proof.
-- Walkthroughs on an unprepared machine (Railway, Compose) and the first real PR on a fresh installation remain operator-witnessed manual proofs.
+- Unprepared-machine walkthroughs and the first real PR on a fresh installation remain operator-witnessed manual proofs.
 - The real two-host Herdr exercise is GY-2.

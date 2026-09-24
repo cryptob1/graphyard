@@ -1,9 +1,9 @@
-<!-- page: Start here | 0 | the one command, the agent-executable runbook behind it, and the App-permission migration an upgrade can require. -->
+<!-- page: Start here | 0 | the one command, its agent-executable runbook, and upgrade migrations. -->
 # Install Graphyard
 
 One command installs a complete control plane (Postgres, container, HTTPS URL, credentials,
-GitHub App, webhook, branch protection, agent profiles, verification). An agent or a person
-executes this runbook from one instruction:
+GitHub App, webhook, branch protection, agent profiles). An agent or person runs this runbook
+from one instruction:
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
@@ -40,7 +40,7 @@ once; **Approval of the printed plan**. Never invent a fifth.
 | `docker-host` | `ssh USER@HOST docker version` | `ssh USER@HOST 'curl -fsSL https://get.docker.com \| sh'` | Needs `--ssh-host` and `--domain` |
 | `compose` | `docker compose version` | `curl -fsSL https://get.docker.com \| sh` | Loopback only, for evaluation |
 
-A missing CLI is not a reason to stop: install it and rerun. Only the billed account is the
+A missing CLI is not a reason to stop: install it and rerun; only the billed account is the
 human's. `--domain` must already resolve to the host.
 
 ## Step 1 — print the plan
@@ -79,7 +79,7 @@ force pushes and deletion forbidden), and registers agent profiles.
 ## Step 4 — the GitHub App confirmation
 
 The installer prints `Open http://127.0.0.1:4311 ...` (over SSH: `ssh -L 4311:127.0.0.1:4311
-USER@HOST`). The human registers and installs the App; `--reviewer` adds a second confirmation.
+USER@HOST`); the human registers and installs the App (`--reviewer` adds a second).
 **Verification:** the page reports *App registered and installation verified*.
 
 ## Step 5 — read the summary
@@ -97,8 +97,8 @@ Create a small item with real criteria and dispatch it ([the first PR](first-pr.
 
 ## Re-running the installer
 
-`--plan` and `--apply` are idempotent. Done actions show `"satisfied"`; differing values are
-reported in `drift` (secrets by fingerprint); credentials are never rotated by a re-run.
+`--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differing values appear
+in `drift` (secrets by fingerprint), and credentials are never rotated.
 
 ## Upgrading an existing installation
 
@@ -111,9 +111,8 @@ A release needing a new App permission raises an attention item (in `doctor`, th
 node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
 ```
 
-Confirm `doctor` shows `appPermissions.missing` empty and `heldJobs` `0`. Unset capacity
-limits are derived from the principals; `doctor` reports `delegationLimits` drift such as
-`Set GRAPHYARD_MAX_REVIEWERS=N on the deployment`, and a re-run sets it. Confirm `/healthz`
+Confirm `doctor` shows `appPermissions.missing` empty and `heldJobs` `0`; `delegationLimits`
+drift such as `Set GRAPHYARD_MAX_REVIEWERS=N on the deployment` is fixed by a re-run. Confirm `/healthz`
 reports the deployed `commit` ([production observation](deployment.md#production-deployment-observation)).
 
 ## Failure handling

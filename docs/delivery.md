@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 6 | releases, approvals, and observed production delivery. -->
+<!-- page: Build integrations | 6 | releases, approvals, and production observation. -->
 # Releases and observed production delivery
 
 Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured running. An observer is a process you run with its own `producer` credential; unmeasurable identity shows as unknown. Rollback: [recovery](recovery.md#rollback).

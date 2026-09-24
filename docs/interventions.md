@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 12 | interventions as product feedback. -->
+<!-- page: Operate Graphyard | 12 | what counts as an intervention. -->
 # Interventions as product feedback
 
 Each time someone has to step in, the product failed to handle something. See **Shipped → Interventions**, `GET /api/interventions?window=7|30|90`, or `master status` under `interventions`.

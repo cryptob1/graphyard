@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 8 | dependencies, requirement revisions, overlap, and shared resources. -->
 # Coordinating independent agents
 
-Graphyard owns assignment authority and evidence admissibility. Herdr owns session processes. Git owns source history. Terms follow the [glossary](glossary.md).
+Graphyard owns assignment and evidence admissibility; Herdr owns session processes; Git owns source history. Terms: [glossary](glossary.md).
 
 ## Start with an observable requirement
 
@@ -39,11 +39,11 @@ graphyard master approver GY-N DECISION                            # the indepen
 }
 ```
 
-The revision replaces the whole document (omitted criteria are removed and their IDs retired). Stop the worker first. Previous evidence, review and merge authorization become inapplicable and submitted work needs a new attempt; delivered work needs a follow-up item. To withdraw specific runs instead, [revoke the evidence](protocol/evidence.md#revocation).
+The revision replaces the whole document (omitted criteria are removed, their IDs retired). Stop the worker first. Previous evidence, review and merge authorization lapse; submitted work needs a new attempt, delivered work a follow-up item. To withdraw specific runs instead, [revoke the evidence](protocol/evidence.md#revocation).
 
 ## Detect overlap
 
-`plannedFiles` holds exact repository-relative paths or directory prefixes ending in `/`, `/*` or `/**` (all include descendants). Graphyard compares planned paths and observed PR files against other unfinished work and shows overlaps on cards. Overlap never blocks a claim.
+`plannedFiles` holds exact repository-relative paths or directory prefixes ending in `/`, `/*` or `/**` (all include descendants). Planned paths and observed PR files are compared against other unfinished work, with overlaps shown on cards. Overlap never blocks a claim.
 
 ### Schedule by overlap, smallest scope first
 
@@ -51,7 +51,7 @@ Overlap blocks *dispatch*, advisorily and for a bounded time, against items in f
 
 - Before a candidate exists, `plannedFiles` are compared; afterwards, only the files the candidate actually changed.
 - Name files, not directories. A root-level directory (`src/`, `docs/`, `tests/`, `/`) is flagged `highConflict`, and `master create`, `master requirements` and `master scope` refuse it unless `--allow-broad-scope` records the exception. Broad scopes serialise the fleet.
-- `master dispatch` and the loop hold an overlapping item and name the item ahead, the paths and the hold age. A hold older than two hours (`dispatchHoldBoundMs`) stops holding and becomes an attention item. `master dispatch GY-N PROFILE --allow-overlap` overrides; it lifts nothing else.
+- `master dispatch` and the loop hold an overlapping item, naming the item ahead, the paths and the hold age. After two hours (`dispatchHoldBoundMs`) the hold lapses into an attention item. `master dispatch GY-N PROFILE --allow-overlap` overrides; it lifts nothing else.
 - Ready items dispatch smallest planned scope first within a priority.
 - `master status` lists open candidates git cannot merge together (`git merge-tree`) and a fewest-conflicts-first sequence ([conflict avoidance](master-agent-reference.md#conflict-avoidance)).
 
@@ -65,13 +65,13 @@ Overlap blocks *dispatch*, advisorily and for a bounded time, against items in f
 
 - Files inside scope pass, as do new files nobody shipped.
 - Every other file must match the bound base byte-for-byte. A deletion, revert, rewrite, rename away or differing binary is refused, and so is a file that could not be compared.
-- `complete` refuses with the file list and the delivered items that shipped each path. After acceptance the same refusal appears in the `build` gate, the `Graphyard / merge` check and `diagnose`.
+- `complete` refuses with the file list and the delivered items that shipped each path; after acceptance the same refusal shows in the `build` gate, the `Graphyard / merge` check and `diagnose`.
 
 A worker cannot widen `plannedFiles`; only an audited [requirements revision](#revise-requirements-explicitly) or `master scope` can. A master returning a refused candidate requests a two-party `rework` decision quoting the file list.
 
 ### The landing re-check
 
-Each observation, including the guarded merge's final one, re-runs the judgement against the commit the candidate would actually land on and records it as `landing`: `landing.files` catches deletions the PR diff cannot show, `landing.carried` a head carrying another candidate's commits without their content. A landing regression refuses the `build` gate and ejects a queued entry.
+Each observation, including the guarded merge's final one, re-judges against the commit the candidate would land on, recorded as `landing`: `landing.files` catches deletions the PR diff cannot show, `landing.carried` a head carrying another candidate's commits without their content. A landing regression refuses the `build` gate and ejects a queued entry.
 
 ### Keep current with `graphyard sync`
 
@@ -83,19 +83,13 @@ Merges `origin/BASE` (never a rebase), regenerates [generated files](#generated-
 
 ### Generated files never conflict
 
-- `docs/README.md` and `docs/protocol.md` are generated in full by `npm run docs:check -- --write` from each page's `<!-- page: … -->` line; `node scripts/check-docs.mjs --manifest` lists them, and `sync` regenerates them after every merge.
+- `docs/README.md` and `docs/protocol.md` are generated by `npm run docs:check -- --write` ([development](development.md)); `sync` regenerates them after every merge.
 - The managed `AGENTS.md` blocks are rendered by `graphyard init` and `master init`; `sync` re-renders them on conflict.
-- The regression guard classifies a generated file as `generated`, not an out-of-scope rewrite, when the control plane's `GRAPHYARD_GENERATED_FILES` lists it — for this repository `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`. Deleting one is still refused.
+- The regression guard classifies files in `GRAPHYARD_GENERATED_FILES` (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, not out-of-scope rewrites; deleting one is still refused.
 
 ## Ship in under thirty minutes
 
-Target for a routine item: submit→merge p50 at most 30 minutes and p90 at most 60, judged over at least ten deliveries, with at most one rework round and no wait on a master or operator except a real finding or human-only decision. The mechanisms, none of which weakens a gate:
-
-1. **Regression guard and `sync`** remove the most common rework round.
-2. **Automatic dispatch at submit** launches review and producers within 30 seconds of the build gate passing ([master guide](master-agent.md#automatic-dispatch-at-submit)).
-3. **Proofs in CI** publish `unit:*` and `integration:*` evidence on the queue tip ([GitHub guide](github.md#proofs-in-ci)).
-4. **Conflict avoidance**: overlap holds, smallest scope first, generated files.
-5. **Measurement**: `master status` reports submit→merge p50/p90 ([pipeline speed](master-agent-reference.md#pipeline-speed)).
+Target for a routine item: submit→merge p50 at most 30 minutes and p90 at most 60, over at least ten deliveries, with at most one rework round ([pipeline speed](master-agent-reference.md#pipeline-speed)). None of the mechanisms weakens a gate: the regression guard and `sync`, [automatic dispatch at submit](master-agent.md#automatic-dispatch-at-submit), [proofs in CI](github.md#proofs-in-ci) on the queue tip, and conflict avoidance.
 
 ## Explain stalls
 
@@ -107,13 +101,11 @@ Explains dependencies, blockers, ownership, resources, stale PRs, integration fa
 
 ## Two-machine operational drill
 
-Run with two real hosts and two worker principals; the [`integration:herdr-recovery` contract](herdr.md#automated-recovery-contract) is not evidence of this drill.
+Use two real hosts and two worker principals; the [`integration:herdr-recovery` contract](herdr.md#automated-recovery-contract) is not evidence of this drill.
 
-1. Connect both hosts with `graphyard init --herdr --token-stdin`; confirm distinct host and principal IDs.
-2. Claim one item from both hosts concurrently: one winner, one refusal.
-3. Run the winner under `watch`, cut its connection, and confirm the supervisor kills the child.
-4. After lease expiry, claim from the other host; record the higher epoch.
-5. Restore the first connection: its old-epoch heartbeat, workspace registration and submission must all refuse.
-6. Submit from the new owner; push after review and confirm the old approval no longer authorizes the new head.
-7. Exercise duplicate and delayed webhooks and an integration outage.
-8. Finish through normal gates and record hosts, epochs, logs, CI and PR URLs honestly.
+1. Connect both hosts (`graphyard init --herdr --token-stdin`) with distinct host and principal IDs.
+2. Claim one item from both at once: one winner, one refusal.
+3. Cut the winner's connection under `watch`; the supervisor kills the child.
+4. After expiry, claim from the other host at a higher epoch; the first host's old-epoch heartbeat, registration and submission must refuse.
+5. Submit from the new owner; a push after review must void the old approval.
+6. Exercise duplicate and delayed webhooks and an integration outage, finish through normal gates, and record hosts, epochs, logs, CI and PR URLs.

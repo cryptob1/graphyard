@@ -29,7 +29,7 @@ node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply
 ```
 
-One command sets up Postgres, the application, HTTPS, credentials, the GitHub App, branch protection and agent profiles. `--plan` changes nothing; `--apply` is idempotent. Providers: `railway`, `hetzner`, `docker-host`, `compose`. **[docs/install.md](docs/install.md) is the primary install path**, written so a coding agent can follow it; [deployment](docs/deployment.md) is the provider reference. To evaluate locally, use `--provider compose` and the [quickstart](docs/quickstart.md).
+One command sets up Postgres, the application, HTTPS, credentials, the GitHub App, branch protection and agent profiles; `--plan` changes nothing and `--apply` is idempotent. **[docs/install.md](docs/install.md) is the primary install path**, written for a coding agent to follow; [deployment](docs/deployment.md) is the provider reference. To evaluate locally, use `--provider compose` ([quickstart](docs/quickstart.md)).
 
 ## Contribute
 

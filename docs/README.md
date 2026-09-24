@@ -7,7 +7,7 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 
 ## Start here
 
-1. [Install Graphyard](install.md) — the one command, the agent-executable runbook behind it, and the App-permission migration an upgrade can require.
+1. [Install Graphyard](install.md) — the one command, its agent-executable runbook, and upgrade migrations.
 2. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model, with diagrams.
 3. [Glossary](glossary.md) — one definition per term, who decides, diagram legend.
 4. [Onboard a repository](onboarding.md) — the human prompts, more machines, the master, and the first PR.
@@ -15,33 +15,33 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 
 ## Operate Graphyard
 
-- [Deployment](deployment.md) — provider reference behind the installer: versioned images, the variables table, a manual fallback for Railway, Docker Compose and the Helm chart, backups, upgrades, and restores.
+- [Deployment](deployment.md) — images, variables, manual Railway, Compose and Helm, backups and restores.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
-- [Reading the dashboard](dashboard.md) — the dashboard page by page: what each number, sentence and marker means, and where everything else moved.
+- [Reading the dashboard](dashboard.md) — what each number, sentence and marker means.
 - [Herdr integration](herdr.md) — worker setup and multiple machines.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
-- [Master-agent reference](master-agent-reference.md) — master commands, executors, GitHub administration, conflict avoidance, and recovery.
-- [Master-agent sessions](master-agent-sessions.md) — master install, worker, reviewer and producer profiles, provider accounts, and how sessions launch.
+- [Master-agent reference](master-agent-reference.md) — commands, executors, GitHub administration, and recovery.
+- [Master-agent sessions](master-agent-sessions.md) — install, profiles, accounts, and launches.
 - [Slice-lead delegation](delegation.md) — bounded product, infrastructure, and docs/experience coordination.
 - [Operations and recovery](operations.md) — daily checklist, incident tree, recovery recipes.
-- [Operations reference](operations-reference.md) — every procedure in full, credentials, proof authority, drift, and scale limits.
+- [Operations reference](operations-reference.md) — every procedure in full, credentials, proof authority, and limits.
 - [Coordinating independent agents](coordination.md) — dependencies, requirement revisions, overlap, and shared resources.
 - [Scoped operator-agent automation](operator-automation.md) — operator agents and two-party decisions.
 - [Shipping pulse](shipping-pulse.md) — repository throughput and time to production.
 - [Flow analytics](flow-analytics.md) — where delivery waits, and for how long.
-- [Interventions as product feedback](interventions.md) — interventions as product feedback.
+- [Interventions as product feedback](interventions.md) — what counts as an intervention.
 
 ## Build integrations
 
 - [Agent protocol and HTTP API](protocol.md) — roles, requests, work commands, leases, workspaces, evidence, and the webhook, one topic per page.
 - [E2E test-case registry](test-cases.md) — versioned E2E scenarios.
 - [Validation candidates and runner protocol](validation.md) — candidates, dispatch, attempts, and trusted results.
-- [The packaged Playwright runner and collector](runner-setup.md) — the packaged Playwright runner, host attestor, and collector.
+- [The packaged Playwright runner and collector](runner-setup.md) — runner, host attestor, and collector.
 - [Report adapters](report-adapters.md) — supported report formats and what they prove.
-- [Releases and observed production delivery](delivery.md) — releases, approvals, and observed production delivery.
+- [Releases and observed production delivery](delivery.md) — releases, approvals, and production observation.
 - [Candidate-to-deployment attribution](attribution.md) — manifests, exact targets, re-anchoring, metrics.
 - [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner diagnostics, artifact storage, and fenced rollback.
-- [Evidence replay, scoped reuse and execution analytics](evidence-reuse.md) — scoped evidence reuse, replay, and execution analytics.
+- [Evidence replay, scoped reuse and execution analytics](evidence-reuse.md) — scoped reuse, replay, and execution analytics.
 
 ## Understand or contribute
 

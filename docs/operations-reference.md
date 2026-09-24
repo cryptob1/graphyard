@@ -1,18 +1,12 @@
-<!-- page: Operate Graphyard | 7 | every procedure in full, credentials, proof authority, drift, and scale limits. -->
+<!-- page: Operate Graphyard | 7 | every procedure in full, credentials, proof authority, and limits. -->
 # Operations reference
 
 The detail behind the [operations page](operations.md). Terms follow the [glossary](glossary.md).
 
 ## Perpetual master loop
 
-Keep a master coordinator cycling (status, dispatch, review and proof, guarded merge,
-deployment verification) until (1) every in-scope item is Done or has a genuinely external
-blocker recorded in Graphyard, and (2) every merged change is deployed and live-verified against
-the exact deployed release, or a deployment blocker is recorded as a follow-up item naming the
-delivered item, its merge commit and the external cause. Review findings, rework, idle workers
-and proof setup are not stopping conditions.
-
-Verify each delivery with `master verify-deployment GY-N` after the merge. Refusals:
+The master cycles until its [two stopping conditions](master-agent.md#operate) hold. Verify
+each delivery with `master verify-deployment GY-N` after the merge. Refusals:
 *unobserved* (configure `master init --deployment-url` or wait), *stale* (rerun), *does not serve
 the merge yet* (keep cycling), *local checkout* (check out the deployed commit cleanly),
 *already records deployment* (use a follow-up item).
@@ -25,8 +19,7 @@ the merge yet* (keep cycling), *local checkout* (check out the deployed commit c
 
 - **Health:** `master status` → `daemon` (`running`, `lagMs`, `unresolved`, `escalations`);
   `journalctl --user -u graphyard-master` has the log.
-- **Restart** freely; never edit the cursor file. A second loop refuses while the first lives; a
-  lost host's lock clears after three intervals.
+- **Restart** freely; never edit the cursor file. A second loop refuses while the first lives.
 - **Stuck at a stage:** the loop holds only the coordinator credential; see `escalations`.
 - **Deployment lag:** `daemon.deployment` lists `pending` deliveries; `unavailable` means no probe answered.
 - **Post-deploy proof:** with `deploySmoke`, `delivered` shows `awaiting-deployment`,
@@ -44,36 +37,32 @@ the merge yet* (keep cycling), *local checkout* (check out the deployed commit c
 
 ## Lost worker before submission
 
-The lease expires after 120 seconds without a heartbeat; a new worker claims with a higher
-epoch. Keep the old worktree; use a new branch and path. A lapse explained by a `blocked` report
-or a `--previous-worker-stopped` attestation is plain history; an unexplained one raises
-`lease-loss`, which blocks merge. Settle it with
+The lease expires 120 seconds after the last heartbeat; a new worker claims with a higher
+epoch, keeping the old worktree and using a new branch and path. A lapse explained by a `blocked`
+report or `--previous-worker-stopped` is history; an unexplained one raises `lease-loss`, blocking merge. Settle it with
 `graphyard resolve GY-N lease-loss --attestation stopped-worker|blocked "reason"`
 ([who may settle what](delegation.md#who-may-settle-what)).
 
 ## Supervisor died leaving a containment quarantine
 
-The fence stays up on purpose. On the worker's machine run
-`graphyard master settle-containment GY-N "reason"`; it verifies the lease and launch authority
-expired and no process survives (`master status` → `containment.held` lists survivors). If it
-refuses or the host is unreachable, confirm the stop yourself, then
+The fence stays up on purpose. On the worker's machine, `graphyard master settle-containment GY-N "reason"`
+verifies the lease and launch authority expired and no process survives (`containment.held` lists
+survivors). If it refuses or the host is unreachable, confirm the stop, then
 `graphyard rework GY-N --previous-worker-stopped "reason"` (undelivered) or
 `graphyard recover-containment GY-N --previous-worker-stopped "reason"` (delivered). Never attest
 a stop you have not confirmed.
 
 ## Blocked item with no owner
 
-`graphyard unblock GY-N "reason"` clears a blocker; `graphyard ready GY-N "reason"` releases
-backlog work. An escalation is cleared per trigger with `graphyard resolve GY-N TRIGGER "reason"`
+`graphyard unblock GY-N "reason"` clears a blocker; `graphyard ready GY-N "reason"` releases backlog. An escalation is cleared per trigger with `graphyard resolve GY-N TRIGGER "reason"`
 by a `sessionKind: "human"` credential (the `lease-loss` citation above excepted).
 `security-concern`, `requirement-weakening` and `evidence-policy-conflict` stay human-only.
 
 ## Submitted implementation needs rework
 
-The active owner may push more commits. To reassign: stop the worker, then
-`graphyard rework GY-N --previous-worker-stopped "reason"`. A new worker claims with a higher
-epoch, registers the existing PR branch in a fresh workspace, and resubmits the same PR. Merged
-work needs a follow-up item.
+The active owner may push more commits. To reassign, stop the worker, then
+`graphyard rework GY-N --previous-worker-stopped "reason"`; a new worker claims, registers the
+existing PR branch in a fresh workspace, and resubmits the same PR. Merged work needs a follow-up item.
 
 ## Accepted evidence turns out to be wrong
 
@@ -87,12 +76,12 @@ graphyard revoke GY-N revoke.json
 
 Run as `admin` or the producer whose [grant](#proof-authority-grants) covers the proof. The gate
 closes at once, merge authorization drops and the [merge queue](github.md#merge-queue) ejects the
-entry; a new candidate is what lands. Delivered work needs a follow-up item.
+entry. Delivered work needs a follow-up item.
 
 ## Worktree creation failed
 
 The reservation is retained. Inspect Git state; use a new attempt and path if ownership expired.
-Never bulk-delete worktrees on worker machines.
+Never bulk-delete worktrees.
 
 ## GitHub job fails
 
@@ -108,9 +97,8 @@ Observation spends the App installation's hourly limit by state, webhook-first.
 
 ### The live budget
 
-From `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` the plane tracks
-remaining requests, reset, `perMinute`, `projectedExhaustionAt` and `exhaustsBeforeReset`. `304`
-answers are free. `master status` warns when the projection lands before the reset.
+From the `x-ratelimit-remaining`, `-limit` and `-reset` headers the plane projects
+`projectedExhaustionAt`; `master status` warns when it lands before the reset. `304` answers are free.
 
 ### Observation cadence by state
 
@@ -132,31 +120,26 @@ wakes and merge verification continue.
 
 ### What an observation costs
 
-About ten requests uncached; unchanged candidates usually cost none thanks to `ETag`s
-(`githubBudget.observations.meanRequests`).
+About ten requests uncached; unchanged candidates usually cost none thanks to `ETag`s.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pauses every request until the reset. `master status` shows one
-attention item: requests are paused, until when, what spent the budget, and that
-gates read stale until it lifts. Nothing merges on observations older than two minutes.
+A rate-limit `403`/`429` pauses every request until the reset; one `master status` attention
+item says until when, what spent the budget, and that gates read stale until it lifts. Nothing merges on observations older than two minutes.
 
 ### Reading the budget
 
-- `graphyard status` (or `GET /api/status`) → `githubBudget`: `remaining`, `limit`, `resetAt`,
-  `perMinute`, `projectedExhaustionAt`, `reserve`, `paused`, `steadyState`, `deferrals`.
-- `master status` → attention items with subject `github`.
+`graphyard status` (or `GET /api/status`) → `githubBudget` (remaining, reset, rate, reserve,
+pause, deferrals); `master status` → attention items with subject `github`.
 
 ### Webhook liveness
 
-`/api/status` → `webhooks` (`lastDeliveryAt`, `lastHour`). With no delivery for an hour while PRs
-are open, `master status` names the App settings page (`https://github.com/settings/apps/APP-SLUG`)
-and the URL `https://YOUR-HOST/api/github/webhook`.
+`/api/status` → `webhooks`. With no delivery for an hour while PRs are open, `master status`
+names the App settings page (`https://github.com/settings/apps/APP-SLUG`) and the webhook URL.
 
 ## Control-plane resources
 
-`master status` → `resources.summary` and `resources.readings`; the registry is in the
-[master-agent guide](master-agent-reference.md#resource-observation).
+`master status` → `resources`; see the [registry](master-agent-reference.md#resource-observation).
 
 - **`review-ledger` / `producer-ledger`:** `graphyard master run --once` reclaims settled records.
 - **`agent-names:PROFILE`:** confirm the finished pane posted its result, then `herdr pane close PANE`.
@@ -176,8 +159,8 @@ its work item; restrict other merge identities in repository rules.
 
 ## Bootstrap mode for a self-proving change
 
-When a change introduces the harness its own proof needs, the human operator marks that one
-criterion (requires `policy:bootstrap`):
+When a change introduces the harness its own proof needs, the operator marks that criterion
+(requires `policy:bootstrap`):
 
 ```json
 {
@@ -194,22 +177,21 @@ criterion (requires `policy:bootstrap`):
 }
 ```
 
-Apply with `graphyard requirements GY-N revision.json`. `e2e:` proofs cannot be deferred. Review,
-checks and other proofs stay in force. The deferred proof becomes an obligation inherited by the
-next item touching the contract paths; list them with `graphyard obligations`.
+Apply with `graphyard requirements GY-N revision.json`. `e2e:` proofs cannot be deferred; review,
+checks and other proofs stay in force. The deferred proof is an obligation of the next item
+touching the contract paths (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
 The item stays Done, marked **delivered with failure**, with `rollback` guidance in `master
-status`. Roll back the deployment or revert through a new work item; never backfill evidence.
-Graphyard does not execute rollbacks itself.
+status`. Roll back or revert through a new work item; never backfill evidence. Graphyard does not
+roll back itself.
 
 ## Merged but not deployed
 
 A merge production never served becomes a `delivery.deployment-incident`
-([observation](deployment.md#production-deployment-observation)). Read the provider's failure,
-fix the deployment (e.g. `set GRAPHYARD_MAX_REVIEWERS=4 on the deployment`), and the incident
-recovers when a release serves the merge. `deploy main first` from `master merge` means deploy
+([observation](deployment.md#production-deployment-observation)). Fix the deployment from the
+provider's failure; the incident recovers when a release serves the merge. `deploy main first` from `master merge` means deploy
 main and retry.
 
 ## Capacity variables no longer cover the principals
@@ -224,8 +206,7 @@ create a follow-up item.
 
 ## Credentials
 
-Add or rotate principals in `GRAPHYARD_PRINCIPALS`, then redeploy; use a unique ID and secret per
-principal. Scoped operator agents use the [credential registry](operator-automation.md), never an
+Add or rotate principals in `GRAPHYARD_PRINCIPALS` (unique ID and secret each), then redeploy. Scoped operator agents use the [credential registry](operator-automation.md), never an
 `admin` entry. The `coordinator` credential may only read, run the bounded merge, settle verified
 containment and record deployment observations. If a secret is committed, revoke it first.
 
@@ -240,8 +221,8 @@ graphyard grants history ci
 ```
 
 Only an `admin` grants or revokes. Patterns: an exact name, `kind:*`, or `manual:gy-43/*`.
-`worker`, `reader`, `coordinator` and `operator-agent` principals can never hold a grant.
-`GRAPHYARD_PRINCIPALS[].proofs` only seeds grants once; the grant ledger then decides.
+`worker`, `reader`, `coordinator` and `operator-agent` principals never hold a grant;
+`GRAPHYARD_PRINCIPALS[].proofs` only seeds grants.
 
 ## Readiness checklist per completion profile
 
@@ -251,20 +232,18 @@ requirement with what was observed and the command that fixes a `missing` or `un
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json` (checks, commands, proofs,
-environment topology, profiles, App registration) and changes nothing else.
-`graphyard init --scan --apply` applies exactly the reviewed proposal, idempotently, and refuses
-if the repository changed since. Drift is reported by later scans and `doctor`, never auto-repaired.
+`graphyard init --scan` only writes `.graphyard/setup-proposal.json` (checks, commands, proofs,
+environments, profiles, App registration); `--apply` applies exactly that proposal, idempotently,
+refusing if the repository changed since. Drift is reported by later scans and `doctor`, never auto-repaired.
 
 ## Scale limits
 
 Four provider jobs per tick per replica; the event API returns the latest 300 events. Watch
-latency, lock wait, job lag and the [GitHub request budget](#github-request-budget) before scaling.
+latency, lock wait, job lag and the [request budget](#github-request-budget) before scaling.
 
 ### Concurrent reconciliation
 
-A stale snapshot during observation is rejected and retried after two seconds; it is not shown as
-an integration error.
+A stale snapshot during observation is retried after two seconds, not shown as an error.
 
 ## Coordination diagnosis and recovery drills
 

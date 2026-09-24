@@ -6,8 +6,7 @@ Graphyard uses a dedicated GitHub App that observes the repository and publishes
 
 ## Create and install the App
 
-`graphyard github-setup HTTPS_URL` registers it through a local manifest flow (the installer
-does this). Manually: webhook `https://YOUR-HOST/api/github/webhook` with a random secret,
+The installer runs `graphyard github-setup HTTPS_URL`, a local manifest flow. Manually: webhook `https://YOUR-HOST/api/github/webhook` with a random secret,
 exactly the [declared permissions](#app-permissions), events Pull request, Pull request review,
 Check run, Check suite, Issue comment and Push, installed only on the managed repository. Set
 `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`,
@@ -15,8 +14,8 @@ Check run, Check suite, Issue comment and Push, installed only on the managed re
 
 ## App permissions
 
-Every permission is declared once in `src/github-permissions.ts`; the manifest, these tables,
-the preflight and the migration all read it. The control-plane App holds:
+Every permission is declared once in `src/github-permissions.ts`, which the manifest, these
+tables, the preflight and the migration read. The control-plane App holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -40,8 +39,8 @@ worker identities are not Apps at all. A reviewer App holds:
 
 ### Preflight and holds
 
-At startup, every five minutes and after any 403 the server compares granted permissions with
-the declaration. A shortfall appears under `appPermissions` in `GET /api/status`, the dashboard
+At startup, every five minutes and after any 403, granted permissions are compared with the
+declaration. A shortfall appears under `appPermissions` in `GET /api/status`, the dashboard
 and `master status`, and jobs needing it are **held, not retried** (`heldJobs`; `diagnose GY-N`
 shows `integration-held`). An unexplained 401/403 retries three times, then holds for thirty
 minutes. Holds never weaken a gate.
@@ -52,18 +51,15 @@ minutes. Holds never weaken a gate.
 node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600
 ```
 
-It prints the remaining steps (set the permission at
-`https://github.com/settings/apps/APP-SLUG/permissions`, accept the request at
-`https://github.com/settings/installations/ID`) and exits nonzero until done; the next preflight
-releases held jobs. The master does these itself with `graphyard master browser app-permissions`
-and `graphyard master browser installation-accept`
+It prints the remaining steps (set the permission on the App's settings page, accept the
+installation's request) and exits nonzero until done; the next preflight releases held jobs. The
+master does both with `graphyard master browser app-permissions` and `installation-accept`
 ([browser administration](master-agent-reference.md#github-administration-through-the-browser)).
 `--reviewer NAME` checks a reviewer App for excess grants.
 
 ## The reviewer App
 
-Independent review uses a second reviewer App, separate from the control-plane App, which can
-never review what it gates. Create it with `graphyard master reviewer setup` (Metadata read,
+Independent review uses a second App, since the control-plane App can never review what it gates. Create it with `graphyard master reviewer setup` (Metadata read,
 Contents read, Pull requests write, Issues read), then
 `graphyard master reviewer bind FILE --key-stdin`; binding refuses an installation that can write
 code, checks or administration. Each `graphyard master review GY-N` mints a token limited to
@@ -92,20 +88,18 @@ settings; `graphyard master browser protection` does it on the settings page whe
 
 A candidate enters when its own gates pass; nobody can insert, reorder or bypass entries. The
 head predicts against the base branch, each later entry against the validated tip ahead of it.
-Graphyard merges the predicted base into the candidate branch, so the speculative tip is pushed
-onto the candidate branch, published under `refs/graphyard/queue/KEY`, and every check, review
-and proof must bind that exact commit. Base-tree-identical advances (an earlier queue merge) keep
+The speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch
+and published under `refs/graphyard/queue/KEY`; every check, review and proof must bind it. Base-tree-identical advances (an earlier queue merge) keep
 bindings (`queue.base-carried`); any other base change re-validates.
 
-Ejection reasons: a failed required check, requested changes, a failed or revoked proof, a merge
-conflict, a policy revision, or rework. Pending validation never ejects; a repaired candidate
-re-enters at the back. `master status` and `diagnose GY-N` show position, predicted base and
+A failed required check, requested changes, a failed or revoked proof, a merge conflict, a policy
+revision or rework ejects; pending validation never does. A repaired candidate re-enters at the back. `master status` and `diagnose GY-N` show position, predicted base and
 bindings ([master-agent](master-agent.md#merge-queue)).
 
 ### Base refresh for in-flight candidates
 
-When the base moves under an unqueued candidate, the candidate stays bound to its base while the
-branch still contains it, and the reconciliation job merges the base into the PR branch. The
+When the base moves under an unqueued candidate, it stays bound to its base while the branch
+contains it, and reconciliation merges the base into the PR branch. The
 approval carries when the base changed no reviewed file; each proof carries when its `scopeFiles`
 are disjoint from the change; CI always re-runs. A conflict writes nothing and returns the item
 to `build` for the worker.
@@ -124,8 +118,7 @@ through the same reviewer App. Decisions are recorded as `queue.carry` events.
 node scripts/verify-enforcement.mjs GY-N [PR_NUMBER]
 ```
 
-A read-only report joining GitHub and Graphyard state; the verdict is `refused` or `permitted`.
-It is not evidence and authorizes nothing.
+A read-only `refused`/`permitted` report joining GitHub and Graphyard state; not evidence.
 
 ## Trusted test producers
 
@@ -143,9 +136,8 @@ so the workflow and secrets come from the default branch:
 2. **exercise** runs one secret-free job per proof against the candidate merged with its base.
 3. **publish** submits each report through the CI producer with a `ciRun` binding the plane verifies.
 
-A queue tip is committed onto the pull-request branch, so the tip gets the same run. `~/.npm`,
-the Postgres image and candidate image layers are cached. Manual proofs stay producer sessions
-and the deploy smoke proof runs after delivery. Keep `graphyard-reporting` restricted to the
+A queue tip is committed onto the pull-request branch, so it gets the same run; `~/.npm` and
+images are cached. Manual proofs stay producer sessions; the deploy smoke proof runs after delivery. Keep `graphyard-reporting` restricted to the
 default branch; never expose the producer secret to PR code.
 
 ## Post-deployment smoke proof
@@ -164,8 +156,8 @@ marks the item **delivered with failure**
 
 ## Enforcement boundary
 
-No transaction spans GitHub and Postgres. The master narrows the gap with a short-lived merge
-execution, a final re-observation and an exact-head merge call; [revocation](protocol/evidence.md#revocation)
+No transaction spans GitHub and Postgres. A short-lived merge execution, a final
+re-observation and an exact-head merge call narrow the gap; [revocation](protocol/evidence.md#revocation)
 cancels an execution until its commit point. Delivery counts only for a merge following that
 authority; other merges are permanent violations. Check runs are commit-scoped, so restrict other
 merge identities in repository rules. A worker can still push its own branch after losing its
@@ -211,12 +203,12 @@ Select ordered profiles ([examples/reviewer-profiles.json](../examples/reviewer-
 graphyard reviewpolicy GY-N agent CURRENT_POLICY_REVISION "Adopt identity-bound agent review" --profiles examples/reviewer-profiles.json
 ```
 
-The reviewer replies, as its App, with one line:
+The reviewer replies as its App with one line:
 
 ```
 <!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->
 ```
 
 `verdict:changes-requested` reports findings; `verdict:usage-limit` or silence past
-`timeoutSeconds` fails over to the next profile. When every profile is exhausted the gate stays
-closed; `graphyard rereview GY-N` restarts at the first profile.
+`timeoutSeconds` fails over to the next profile. With every profile exhausted the gate stays
+closed until `graphyard rereview GY-N`.
