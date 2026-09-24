@@ -15,7 +15,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { baseHasPath, findingScope, namesPath, readReviewFindings } from '../src/review-scope.js';
-import type { Principal, ScopeFile, Work } from '../src/model.js';
+import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
 // records the ask as structured state; the master loop asks the control plane to decide it on the
@@ -478,6 +478,38 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   const answered = await call(master.token, 'POST', `work/${asked.id}/requirements`, answeringWidening(asked, asked.scopeRequest!, ['src/merge-queue.ts', 'src/cli/master-status.ts'], 'the open request'));
   assert.equal(answered.status, 200, JSON.stringify(answered.body));
   assert.ok(answered.body.lease, 'the attempt keeps its lease');
+
+  // A push during the reads replaces the head the findings were read for, with the request and the
+  // lease both still standing: the reviewer's change request is another head's, so nothing widens.
+  const observed = (item: Work, sha: string): Observation => ({ clockOffset: { min: 0, max: 0 },
+    candidate: { sha, baseSha: 'b'.repeat(40), pr: item.submission!.pr, branch: item.workspaces.at(-1)!.branch, author: implementer.id },
+    checks: [], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: [layout], scopeFiles: [], at: new Date().toISOString() });
+  let pushed = await claimed('head moves during the finding reads');
+  pushed = await engine.execute(implementer, 'submit', pushed.id, { epoch: pushed.epoch, pr: 164_001 }, randomUUID());
+  pushed = await engine.observe(pushed.id, pushed.revision, observed(pushed, 'a'.repeat(40)));
+  pushed = await engine.execute(operator, 'rework', pushed.id, { reason: 'Review finding to address', previousWorkerStopped: true }, randomUUID());
+  pushed = await engine.execute(implementer, 'claim', pushed.id, {}, randomUUID());
+  pushed = await engine.execute(implementer, 'workspace', pushed.id, { epoch: pushed.epoch, host: 'scope-host', path: `/tmp/auto-scope/${pushed.id}-${pushed.epoch}`, branch: pushed.workspaces.at(-1)!.branch }, randomUUID());
+  await request(pushed, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const readFor: string[] = [];
+  const moving: Partial<DaemonEffects> = { ...racing,
+    reviewFindings: async item => {
+      if (item.id === pushed.id) {
+        readFor.push(item.candidate!.sha);
+        const current = await reload(pushed.id);
+        await engine.observe(pushed.id, current.revision, observed(current, 'c'.repeat(40)));
+      }
+      return findings;
+    } };
+  await cycle(state, moving);
+  pushed = await reload(pushed.id);
+  assert.deepEqual(readFor, ['a'.repeat(40)], 'the findings were read for the head the request stood against');
+  assert.equal(pushed.candidate!.sha, 'c'.repeat(40));
+  assert.ok(pushed.lease && pushed.scopeRequest, 'the lease and the request both still stand');
+  assert.ok(!pushed.plannedFiles.includes('src/merge-queue.ts'), `not widened: ${pushed.plannedFiles}`);
+  const moved = state.actions[`${scopeKey(pushed, pushed.scopeRequest!)}:finding:${pushed.policyRevision}`];
+  assert.equal(moved.state, 'failed');
+  assert.match(moved.detail, /read for aaaaaaaaaaaa, which is no longer the item's head/);
 });
 
 test('unit:review-finding-scope — only a file a finding names literally is granted; a directory, a longer path, or a missing file the finding does not ask to create is not', async () => {

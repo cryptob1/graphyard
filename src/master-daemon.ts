@@ -462,13 +462,14 @@ export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action'
 export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${request.epoch}:${request.at}`;
 /**
  * The requirements revision that widens `work` by `paths` in answer to `request`. It names the
- * request it answers, so the control plane refuses it once a claim or a lease end has cleared that
- * request while the loop was still reading the findings it is grounded on.
+ * request it answers and the head its findings were read for, so the control plane refuses it once a
+ * claim or a lease end has cleared that request, or a push has replaced that head, while the loop
+ * was still reading the findings it is grounded on.
  */
 export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => ({
   expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
   plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
-  reason, answers: { epoch: request.epoch, at: request.at } });
+  reason, answers: { epoch: request.epoch, at: request.at, sha: work.candidate?.sha ?? null } });
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
