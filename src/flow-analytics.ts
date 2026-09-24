@@ -291,7 +291,7 @@ export async function projectFlow(store: Store, options: { batch?: number; batch
 
 export interface FlowQuery {
   days: FlowWindow; type?: string | null; stage?: string | null; slice?: string | null; asOf?: string | null; limit?: number; productionEnvironment?: string;
-  /** The production watch's report (`ProductionWatch.status()`), when this process runs one. */
+  /** The production watch's report (`ProductionWatch.status()`); absent, the one status last recorded. */
   production?: unknown;
 }
 export interface FlowDataset {
@@ -356,7 +356,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const observedAt = query.asOf && time(query.asOf) !== null && time(query.asOf)! <= time(clock)! ? new Date(time(query.asOf)!).toISOString() : clock;
   const to = observedAt, from = new Date(time(observedAt)! - query.days * day).toISOString();
   // The watch's report is what production serves now; a report as of an earlier instant has none.
-  const production = query.asOf ? noProductionHold : productionHold(query.production);
+  const production = query.asOf ? noProductionHold : productionHold(query.production !== undefined ? query.production : recordedProductionReport());
   // One extra work item and one extra deployment probe their own scan bounds, so an
   // exhausted bound is reported as partial coverage instead of silently dropping the
   // newest records.
@@ -1088,6 +1088,21 @@ export function productionHold(report: any): ProductionHold {
     failed: new Set(keys((Array.isArray(report.incidents) ? report.incidents : []).map((incident: any) => incident?.key))),
     observedAt: time(report.observedAt),
   };
+}
+
+/**
+ * The production watch's report as this process last read it for status (`recordProductionReport`,
+ * called by the status route every dashboard poll), so the flow read holds merges at Deploy
+ * exactly where the board it is shown beside does. A report older than `productionReportFreshMs`
+ * says nothing: the flow then reads as with no production observation.
+ */
+export const productionReportFreshMs = 5 * 60_000;
+let productionReport: { report: unknown; at: number } | null = null;
+export function recordProductionReport(report: unknown, at = Date.now()) {
+  productionReport = report ? { report, at } : null;
+}
+export function recordedProductionReport(now = Date.now()): unknown {
+  return productionReport && now - productionReport.at <= productionReportFreshMs ? productionReport.report : null;
 }
 
 /**

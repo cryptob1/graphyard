@@ -28,7 +28,7 @@ import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
 import WorkersPage, { roleWords, shortShas } from '../web/pages/workers.js';
 import { CandidateSha } from '../web/candidate.js';
-import { computeFlow, deliveredAt, flowDrilldown, gateFactStep, productionHold, releaseObservedAt, servedAt, stepMoves } from '../src/flow-analytics.js';
+import { computeFlow, deliveredAt, flowDrilldown, gateFactStep, productionHold, productionReportFreshMs, recordProductionReport, recordedProductionReport, releaseObservedAt, servedAt, stepMoves } from '../src/flow-analytics.js';
 
 // GY-161: the dashboard, rendered over the board fixture the browser suite also serves
 // (browser-tests/ui-board.ts): an item parked on a human-only decision, one blocked, items building,
@@ -692,6 +692,13 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   const heldRows = flowDrilldown(heldData, computeFlow(heldData, { days: 30 }), { metric: 'steps', key: null, authorized: true }).rows;
   for (const key of keys.slice(0, 2)) assert.ok(!heldRows.some(row => row.workKey === key && row.detail === 'deploy to outside'), `${key} stays at Deploy in the history`);
   assert.ok(heldRows.some(row => row.workKey === keys[2] && row.detail === 'deploy to outside'), `${keys[2]} is not held`);
+  // The server's flow read takes that report from the one the status route last read (every poll),
+  // and not once it is stale.
+  assert.match(await read('src/server/routes/status.ts'), /recordProductionReport\(production\?\.status\(\) \?\? null\)/);
+  recordProductionReport(watch, NOW);
+  assert.equal(recordedProductionReport(NOW + productionReportFreshMs), watch);
+  assert.equal(recordedProductionReport(NOW + productionReportFreshMs + 1), null);
+  recordProductionReport(null);
   // Merges the watch holds at Deploy (Moving, Blocked) are still merged and not yet seen live: the footer counts them.
   const watched = home(dashboard({ work, status: { ...boardStatus(), production: watch } as any }));
   assert.equal(Number(/data-unreleased="(\d+)"/.exec(watched)?.[1]), unseen);

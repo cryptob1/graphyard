@@ -14,7 +14,7 @@ import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
 import { eventStats } from '../../store/snapshot-delta.js';
-import { productionEnvironmentFromEnv } from '../../flow-analytics.js';
+import { productionEnvironmentFromEnv, recordProductionReport } from '../../flow-analytics.js';
 
 // Read once at boot, as the flow analytics route does, so the dashboard reads a release as live
 // under the same production environment the flow report ends its production phase on.
@@ -26,6 +26,8 @@ export const statusRoutes = defineRoutes('status', [
     method: 'GET', path: '/api/status',
     async handle({ actor, req, url, services, operatorVisible }) {
       const { engine, github, repository, principals, limits, build, production } = services;
+      // The flow read holds merges at Deploy from the same watch report the board is grouped by.
+      recordProductionReport(production?.status() ?? null);
       const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error,held_until FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
       const githubRepository = github ? await github.reviewRepository() : null;
       const githubPermissions = github ? await github.reviewPermissions() : {};
