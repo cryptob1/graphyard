@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { Store, save, wakeJob } from './store.js';
+import { Store, save, wakeJob, withLatestDelta } from './store.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
@@ -1705,8 +1705,10 @@ export class Engine {
         // repository clock still counts, but that allowance admits no post-merge record (GY-94):
         // a snapshot whose own observation already reports this pull request merged was written
         // after the merge, whatever its timestamp, and carries the merge's consequences.
-        const past = authorizedSnapshot ? undefined : (await db.query(`SELECT payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work'
-          AND NOT COALESCE((payload->'work'->'observation'->>'merged')::boolean AND (payload->'work'->'observation'->'candidate'->>'pr')::int=$3, false) ORDER BY seq DESC LIMIT 1`, [id, new Date(cutoff), observation.candidate.pr])).rows[0]?.work as Work | undefined;
+        // A routine row written on that snapshot carries only its clocks (store/snapshot-delta.ts);
+        // the freshest of them before the cutoff is the observation the record then held.
+        const past = authorizedSnapshot ? undefined : await withLatestDelta(db, id, (await db.query(`SELECT seq, payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work'
+          AND NOT COALESCE((payload->'work'->'observation'->>'merged')::boolean AND (payload->'work'->'observation'->'candidate'->>'pr')::int=$3, false) ORDER BY seq DESC LIMIT 1`, [id, new Date(cutoff), observation.candidate.pr])).rows[0], new Date(cutoff));
         const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
         if (!authorizedSnapshot && past && executionValid && !historical.length) {
           authorizedSnapshot = past; authorizationRevision = boundedExecution?.authorizationRevision ?? past.revision;

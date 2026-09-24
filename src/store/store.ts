@@ -4,6 +4,9 @@ import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { migration } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
+import { appendSave } from './snapshot-delta.js';
+
+export * from './snapshot-delta.js';
 
 export class Store {
   pool: pg.Pool;
@@ -132,5 +135,6 @@ export async function save(db: pg.PoolClient, work: Work, actor: string, kind: s
   work.revision++;
   work.updatedAt = now.toISOString();
   await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
-  await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor, kind, JSON.stringify({ work, details })]);
+  // Routine rows that change only a clock are stored as a delta on the last full snapshot.
+  await appendSave(db, work, actor, kind, details);
 }

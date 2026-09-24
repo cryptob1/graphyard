@@ -134,7 +134,12 @@ test('integration:reconciliation-snapshot-precedes-merge — GY-81 exactly: a wh
   // carrying its consequences — the violation, no authorization, and a merge gate that only
   // reports the queue position the merge left behind.
   const poisoned = await snapshotsReporting(work.id, mergeSha);
-  assert.equal(poisoned.length, 2);
+  // The second post-merge pass changed only its clock, so it is a delta row on the first poisoned
+  // snapshot (store/snapshot-delta.ts): it carries that snapshot's merged observation and is never
+  // carried onto a pre-merge record.
+  assert.equal(poisoned.length, 1);
+  const repeated = (await store.pool.query("SELECT created_at, payload->'delta' AS delta FROM events WHERE work_id=$1 AND payload ? 'delta' AND seq>(SELECT max(seq) FROM events WHERE work_id=$1 AND payload->'work'->'observation'->>'mergeSha'=$2)", [work.id, mergeSha])).rows;
+  assert.equal(repeated.length, 1); assert.ok(repeated[0].created_at.getTime() < oldCutoff);
   for (const snapshot of poisoned) {
     assert.ok(snapshot.created_at.getTime() < oldCutoff, `post-merge snapshot at ${snapshot.created_at.toISOString()} falls inside the old cutoff window ending ${new Date(oldCutoff).toISOString()}`);
     assert.ok(snapshot.work.observation!.merged); assert.equal(snapshot.work.mergeAuthorization, null);
