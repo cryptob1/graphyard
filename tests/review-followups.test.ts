@@ -67,6 +67,8 @@ test('unit:review-criteria-only-prompt — the reviewer launch prompt states the
     // The closing lines.
     '"Resolved threads: ID1 ID2"', '"Follow-up threads: ID3 ID4"', 'End the review body with two lines',
     'files the Follow-up threads as one backlog item',
+    // A finding with no thread is not filed, and the prompt says where it goes instead.
+    'a FOLLOW-UP finding of your own that has no thread is not filed', '"Unfiled follow-ups:"',
   ]) assert.ok(prompt.includes(fragment), `the prompt must state: ${fragment}`);
   assert.match(prompt, /never weaken a requirement/);
   // The thread section repeats the classification for the listed threads.
@@ -108,10 +110,10 @@ test('unit:review-criteria-only-prompt — the Follow-up line is parsed exactly 
 });
 
 /** GitHub as the loop's own gh sees it: the approval, the PR's threads, replies and resolves. */
-function github(body: string, options: { failReply?: string[] } = {}) {
+function github(body: string, options: { failReply?: string[]; paths?: Record<string, string>; extra?: string[] } = {}) {
   const calls: string[][] = [], resolved: string[] = [], replies: { thread: string; body: string }[] = [];
   const failReply = new Set(options.failReply ?? []);
-  const thread = (id: string, createdAt: string, path = 'src/a.ts') => ({ id, isResolved: resolved.includes(id), isOutdated: false, path, line: 3,
+  const thread = (id: string, createdAt: string, path = 'src/a.ts') => ({ id, path: options.paths?.[id] ?? path, isResolved: resolved.includes(id), isOutdated: false, line: 3,
     comments: { nodes: [{ author: { login: 'chatgpt-codex-connector' }, body: `finding on ${id}`, createdAt, url: `https://github.com/owner/project/pull/64#discussion_${id}` }] } });
   const run = (command: string, args: string[]) => {
     calls.push([command, ...args]);
@@ -127,7 +129,7 @@ function github(body: string, options: { failReply?: string[] } = {}) {
     if (query.includes('resolveReviewThread')) { resolved.push(target!); return JSON.stringify({ data: { resolveReviewThread: { thread: { id: target, isResolved: true } } } }); }
     if (query.includes('reviewThreads')) return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
       thread('PRRT_fixed0001', '2026-09-24T11:00:00Z'), thread('PRRT_follow001', '2026-09-24T11:00:00Z', 'src/b.ts'), thread('PRRT_follow002', '2026-09-24T11:10:00Z'),
-      thread('PRRT_unnamed01', '2026-09-24T11:00:00Z'), thread('PRRT_later0001', '2026-09-24T12:30:00Z')] } } } } });
+      thread('PRRT_unnamed01', '2026-09-24T11:00:00Z'), thread('PRRT_later0001', '2026-09-24T12:30:00Z'), ...(options.extra ?? []).map(id => thread(id, '2026-09-24T11:00:00Z'))] } } } } });
     throw new Error(`unexpected gh ${args.join(' ')}`);
   };
   return { run, calls, resolved, replies };
@@ -137,12 +139,14 @@ function creator() {
   const create = async (item: any, key: string) => { created.push({ item, key }); return { key: 'GY-201' }; };
   return { create, created };
 }
+/** The threads the review's launch prompt listed: those open before the approval. */
+const shown = ['PRRT_fixed0001', 'PRRT_follow001', 'PRRT_follow002', 'PRRT_unnamed01'].map(id => ({ id, author: 'chatgpt-codex-connector', path: 'src/a.ts', line: 3, outdated: false, excerpt: `finding on ${id}`, createdAt: '2026-09-24T11:00:00Z' }));
 const approvalBody = 'AC-1 met. AC-2 met.\nResolved threads: PRRT_fixed0001\nFollow-up threads: PRRT_follow001 PRRT_follow002 PRRT_later0001';
 
 test('unit:review-followups-filed — one backlog item for the approval, a reply and resolve on each named follow-up thread only, idempotent across cycles', async () => {
   const { root, cleanup } = await boundMaster();
   try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
     const gh = github(approvalBody), items = creator();
     const config = await loadMasterConfig(root);
     const settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
@@ -182,7 +186,7 @@ test('unit:review-followups-filed — one backlog item for the approval, a reply
 test('unit:review-followups-filed — a failure is recorded and retried without a second item or a second reply', async () => {
   const { root, cleanup } = await boundMaster();
   try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
     const config = await loadMasterConfig(root);
     // First pass: the create is refused. Nothing is replied to or resolved, and the failure is kept.
     const gh = github(approvalBody, { failReply: ['PRRT_follow002'] });
@@ -207,6 +211,52 @@ test('unit:review-followups-filed — a failure is recorded and retried without 
   } finally { await cleanup(); }
 });
 
+test('unit:review-followups-filed — a named thread the reviewer was not shown at launch is never answered or resolved', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    // PRRT_unshown01 is open and predates the approval, but the launch did not list it (past the bound, or quoted from an excerpt).
+    const gh = github('Criteria met.\nResolved threads: none\nFollow-up threads: PRRT_follow001 PRRT_unshown01', { extra: ['PRRT_unshown01'] }), items = creator();
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.deepEqual(gh.replies.map(reply => reply.thread), ['PRRT_follow001']);
+    assert.ok(!items.created[0].item.description.includes('PRRT_unshown01'));
+    assert.ok(!gh.calls.some(call => call.includes('thread=PRRT_unshown01')), 'the unshown thread is never touched');
+    assert.ok(settled.reviews[0].followUps!.refused.some(entry => entry.startsWith('PRRT_unshown01: not listed to the reviewer at launch')));
+    assert.deepEqual([...followUpThreadIds(settled.reviews, [work()]).get('GY-64') ?? []], ['PRRT_follow001'], 'nor set aside from rework');
+  } finally { await cleanup(); }
+  // A launch that could not read the threads showed its reviewer none: its approval files nothing.
+  const blind = await boundMaster();
+  try {
+    await launchReview(blind.root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => { throw new Error('gh: HTTP 502'); } });
+    const gh = github(approvalBody), items = creator();
+    await reconcileReviews(blind.root, await loadMasterConfig(blind.root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.equal(items.created.length, 0);
+    assert.equal(gh.replies.length, 0);
+  } finally { await blind.cleanup(); }
+});
+
+test('unit:review-followups-filed — a thread path past the ledger bound is recorded within it, so the retry record survives the filing', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const path = `src/${'deep/'.repeat(300)}file.ts`;
+    const gh = github(approvalBody, { paths: { PRRT_follow001: path } }), items = creator(), config = await loadMasterConfig(root);
+    const settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    const filing = (await readReviewLedger(root)).reviews[0].followUps!;
+    assert.equal(filing.item, 'GY-201');
+    assert.deepEqual(filing.resolved, ['PRRT_follow001', 'PRRT_follow002']);
+    const recorded = filing.threads.find(thread => thread.id === 'PRRT_follow001')!.path;
+    assert.ok(recorded.length <= 1000 && recorded.endsWith('file.ts'), `${recorded.length} characters`);
+    assert.ok(items.created[0].item.description.includes('file.ts:3'));
+    assert.equal(settled.reviews[0].followUps?.item, 'GY-201');
+    // The next cycle reads the record and files, replies and resolves nothing again.
+    const before = gh.calls.length;
+    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.equal(items.created.length, 1);
+    assert.equal(gh.calls.length, before);
+  } finally { await cleanup(); }
+});
+
 test('unit:review-followups-filed — nothing is filed for a change request, a stale head, or an approval naming no follow-up', async () => {
   for (const scenario of [
     { name: 'changes requested', verdict: verdict('CHANGES_REQUESTED'), work: work(), body: approvalBody },
@@ -216,7 +266,7 @@ test('unit:review-followups-filed — nothing is filed for a change request, a s
   ]) {
     const { root, cleanup } = await boundMaster();
     try {
-      await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+      await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
       const gh = github(scenario.body), items = creator();
       await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => scenario.verdict, work: [scenario.work], threadsRun: gh.run, createFollowUpItem: items.create });
       assert.equal(items.created.length, 0, scenario.name);
@@ -248,7 +298,7 @@ test('unit:review-followups-filed — the loop requests no thread rework for thr
   const { root, cleanup } = await boundMaster();
   let followUps: Map<string, Set<string>>;
   try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
     const gh = github(approvalBody), items = creator();
     const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
     followUps = followUpThreadIds(settled.reviews, [work()]);
@@ -270,7 +320,7 @@ test('unit:review-followups-filed — the loop requests no thread rework for thr
 test('unit:review-followups-filed — a filed thread reopened before the merge returns to rework instead of staying set aside', async () => {
   const { root, cleanup } = await boundMaster();
   try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
     const gh = github(approvalBody), items = creator();
     const { reviews } = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
     const filedAt = Date.parse(reviews[0].followUps!.at);
@@ -316,7 +366,7 @@ test('unit:review-followups-filed — the item lists every follow-up thread with
 test('unit:review-followups-filed — follow-up threads return to rework once filing has failed on every retry', async () => {
   const { root, cleanup } = await boundMaster();
   try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
     const gh = github(approvalBody), config = await loadMasterConfig(root);
     const refusing = async () => { throw new Error('Graphyard refused the follow-up item (503): unavailable'); };
     let reviews = (await readReviewLedger(root)).reviews;
@@ -337,7 +387,7 @@ test('unit:review-followups-filed — follow-up threads return to rework once fi
 test('unit:review-followups-filed — a filing still being retried sets nothing aside once the head moves past its approval', async () => {
   const { root, cleanup } = await boundMaster();
   try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
     const gh = github(approvalBody), config = await loadMasterConfig(root);
     const refusing = async () => { throw new Error('Graphyard refused the follow-up item (503): unavailable'); };
     const { reviews } = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: refusing });

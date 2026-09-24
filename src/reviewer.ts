@@ -879,6 +879,17 @@ function approvesCurrentHead(record: ReviewRecord, work: Work[]): boolean {
   return item.candidate.sha === record.sha || !!carried && carried.originalSha === record.sha && (carried.reviewId === undefined || carried.reviewId === verdict.reviewId);
 }
 
+/**
+ * A filed thread within the ledger schema's bounds. The record is saved after the item, replies and
+ * resolutions have happened on GitHub, so a field past its bound must never refuse the save: that
+ * would lose the retry record of actions already taken.
+ */
+function ledgerThread(thread: LaunchThread): LaunchThread {
+  const { url, createdAt, ...rest } = thread;
+  return { ...rest, author: thread.author.slice(0, 200), path: thread.path.length <= 1000 ? thread.path : `…${thread.path.slice(-999)}`, excerpt: thread.excerpt.slice(0, 300),
+    ...(createdAt && createdAt.length <= 40 ? { createdAt } : {}), ...(url && url.length <= 1000 ? { url } : {}) };
+}
+
 /** The approved records whose follow-up threads the loop files on this pass; each outcome is kept on the record. */
 async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, create: CreateFollowUpItem | undefined, now: Date) {
   const events: string[] = [];
@@ -890,8 +901,9 @@ async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, 
     const previous: FollowUpFiling | undefined = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
     if (previous && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
     const workId = work.find(entry => entry.key === record.key)!.id;
-    const outcome = await fileFollowUpThreads({ repository, key: record.key, workId, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous }, run, create, now);
-    record.followUps = { ...outcome, threads: outcome.threads.map(thread => ({ ...thread, excerpt: thread.excerpt.slice(0, 300) })), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
+    const outcome = await fileFollowUpThreads({ repository, key: record.key, workId, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
+      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, create, now);
+    record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
     if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} as ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
     for (const id of outcome.resolved.filter(id => !previous?.resolved.includes(id))) events.push(`resolved follow-up review thread ${id} on ${record.key} PR #${record.pr} with a reply naming ${outcome.item}`);

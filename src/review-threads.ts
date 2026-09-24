@@ -66,6 +66,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
     + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: the head fails a stated acceptance criterion, or a correctness or security defect in the changed code breaks one of the item\'s own criteria. '
     + 'FOLLOW-UP: everything else — edge cases beyond the criteria, style, naming, hypotheticals, further hardening, and bot suggestions. '
     + 'APPROVE when every criterion is met and no finding or thread is BLOCKING; list the FOLLOW-UP ones in the body instead of requesting changes for them. '
+    + 'Graphyard files only review threads: a FOLLOW-UP finding of your own that has no thread is not filed, so write it in the body under a line starting "Unfiled follow-ups:" for the operator to raise as a thread or item. '
     + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion it blocks; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. '
     + 'End the review body with two lines, exactly of the forms "Resolved threads: ID1 ID2" and "Follow-up threads: ID3 ID4": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP. Write "none" after a line\'s colon when it names nothing. '
     + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and files the Follow-up threads as one backlog item and resolves each with a reply naming that item. ';
@@ -214,11 +215,12 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * File the threads an approval named as follow-up: one backlog item for all of them, then a reply
  * naming the item on each thread and its resolution. Only named threads are touched, and only those
  * unresolved on the pull request and opened before the approval; nothing else is ever answered.
- * Each step is recorded as it lands, so a retry creates no second item (the item key is kept, and
+ * `listed` names the threads the reviewer's launch prompt listed; a named thread outside it is
+ * refused, and a launch that could not read the threads vouches for none. Each step is recorded as it lands, so a retry creates no second item (the item key is kept, and
  * the create is idempotent on the approval) and replies to no thread twice. Runs outside every
  * coordination transaction.
  */
-export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
+export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[] }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts: (previous?.attempts ?? 0) + 1 };
   const carried = { named: previous?.named ?? [], threads: previous?.threads ?? [], replied: previous?.replied ?? [], resolved: previous?.resolved ?? [], refused: previous?.refused ?? [], ...(previous?.item ? { item: previous.item } : {}) };
@@ -238,6 +240,9 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
     const submitted = Date.parse(String(review.submitted_at ?? ''));
     threads = []; refused = [];
     for (const id of named) {
+      // The reviewer judged only the threads its launch prompt listed: an ID it was not shown — past
+      // the listing bound, or quoted from an untrusted excerpt — is never answered or resolved.
+      if (!input.listed?.includes(id)) { refused.push(`${id}: not listed to the reviewer at launch`); continue; }
       const thread = open.find(entry => entry.id === id);
       if (!thread) { refused.push(`${id}: not an unresolved thread of pull request #${input.pr}`); continue; }
       const created = Date.parse(thread.createdAt ?? '');
