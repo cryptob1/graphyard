@@ -1,6 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -9,11 +10,11 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
-import { emptyDaemonState, runCycle, scopeBudget, scopeKey, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
+import { emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
-import { findingScope, namesPath, readReviewFindings } from '../src/review-scope.js';
+import { baseHasPath, findingScope, namesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
@@ -400,9 +401,23 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.equal(work.scopeRequest!.decision!.state, 'refused');
   assert.ok(work.blocker?.startsWith(scopeRefusalBlocker));
   assert.ok(escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)));
-  // A standing refusal is judged against the findings once per policy revision, not every cycle.
-  await cycle(state, overrides);
+  // A standing refusal is not re-read from GitHub every cycle...
+  let reads = 0;
+  const counted: Partial<DaemonEffects> = { ...overrides, reviewFindings: async () => { reads++; return findings; } };
+  await cycle(state, counted);
   assert.equal(widened.length, 1);
+  assert.equal(reads, 0, 'a fresh refusal on the findings is not judged again within findingRecheckMs');
+  // ...but it is judged again once the findings may have changed: unchanged findings stay refused,
+  // and a trusted thread naming the file that lands after the refusal widens it.
+  await cycle(state, counted, findingRecheckMs + 1_000);
+  assert.equal(reads, 1);
+  assert.equal(widened.length, 1, 'the same findings are the same refusal');
+  findings.push({ ground: 'review thread PRRT_later02', text: 'src/server/routes/work.ts:40 still returns the stale revision' });
+  await cycle(state, counted, 2 * findingRecheckMs + 2_000);
+  work = await reload(work.id);
+  assert.equal(widened.length, 2, 'a finding posted after the refusal widens the request');
+  assert.ok(work.plannedFiles.includes('src/server/routes/work.ts'));
+  assert.match(widened[1].reason, /PRRT_later02/);
 });
 
 test('unit:review-finding-scope — only a file a finding names literally is granted; a directory, a longer path, or a missing file the finding does not ask to create is not', async () => {
@@ -422,6 +437,11 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   assert.match((elsewhere('src/missing.ts is wrong. Please create src/new-helper.ts instead.') as { refusal: string }).refusal, /does not ask for it to be created/);
   assert.deepEqual(elsewhere('Fix src/merge-queue.ts:12 and add src/missing.ts for the helper'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
   assert.deepEqual(elsewhere('src/missing.ts should be added next to the queue'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
+  // A negated creation verb forbids the very file it names.
+  for (const text of ['Do not create src/missing.ts; update src/merge-queue.ts instead', "Don't add src/missing.ts", 'src/missing.ts should not be added', 'Never introduce src/missing.ts',
+    'No need to create src/missing.ts', "You shouldn't create src/missing.ts here", 'Fix src/merge-queue.ts without adding src/missing.ts'])
+    assert.match((elsewhere(text) as { refusal: string }).refusal, /does not ask for it to be created/, text);
+  assert.deepEqual(elsewhere("Don't change src/merge-queue.ts, but add src/missing.ts"), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, 'a negation of another verb does not reach past the conjunction');
   assert.deepEqual(findingScope(['src/missing.ts'], [{ ground: 'review 10', text: 'src/missing.ts is wrong' }, { ground: 'review 11', text: 'create src/missing.ts' }], exists),
     { grounds: [{ path: 'src/missing.ts', ground: 'review 11' }] }, 'the finding that asks for the file is its grounds');
 
@@ -435,6 +455,19 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
     return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
       { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' }]]);
   };
+  // Existence on the base: only a genuine absence is false; a missing base ref or failing git throws, so the loop retries.
+  const repo = await mkdtemp(join(tmpdir(), 'gy-finding-base-'));
+  const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  git(['-C', repo, 'init', '-q']); await mkdir(join(repo, 'src')); await writeFile(join(repo, 'src', 'present.ts'), 'export {};\n');
+  git(['-C', repo, 'add', '.']); git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base']);
+  git(['-C', repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  const gitRun = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(await baseHasPath(repo, 'main', 'src/present.ts', gitRun), true);
+  assert.equal(await baseHasPath(repo, 'main', 'src/absent.ts', gitRun), false);
+  await assert.rejects(baseHasPath(repo, 'gone', 'src/present.ts', gitRun), 'a missing base ref is a failure, not an absent file');
+  await assert.rejects(baseHasPath(repo, 'main', 'src/present.ts', () => { throw new Error('git timed out'); }), /timed out/);
+  await rm(repo, { recursive: true, force: true });
+
   const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: ['chatgpt-codex-connector[bot]'] }, run);
   assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', 'review 1']);
   assert.equal(read[0].text, 'fix src/a.ts', 'a comment by an untrusted author in a trusted thread is not a finding');

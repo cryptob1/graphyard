@@ -13,7 +13,7 @@ These need judgement:
 
 ## Items, scope and human waits
 
-A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`: documentation, files the criteria name and, for an item planning all of `docs/`, single files under `web/` and `browser-tests/` widen automatically; the loop re-decides a refused request once per policy revision. A refused additive request widens, as the operator-agent, for a file named literally by an unresolved thread from the reviewer or a `run.awaitReviewers` bot, or the reviewer's `CHANGES_REQUESTED` review of the head, citing its id; never a directory, nor a missing file its clause does not ask to create. One needing a human-only decision runs `park GY-N EPOCH KIND NEEDED -- REASON`, and the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`: documentation, files the criteria name and, for an item planning all of `docs/`, single files under `web/` and `browser-tests/` widen automatically; the loop re-decides a refused request once per policy revision. A refused additive request widens, as operator-agent, for files named literally by an unresolved reviewer or `run.awaitReviewers` bot thread, or the reviewer's `CHANGES_REQUESTED` review of the head, citing its id (rechecked every two minutes); never a directory, nor a missing file its clause does not ask, unnegated, to create. One needing a human-only decision runs `park GY-N EPOCH KIND NEEDED -- REASON`, and the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 

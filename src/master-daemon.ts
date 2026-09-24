@@ -23,7 +23,7 @@ import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
-import { findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
+import { baseHasPath, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
@@ -1394,6 +1394,8 @@ async function record(state: DaemonState, key: string, action: Omit<DaemonAction
 
 /** One preservation per attempt: the record an interrupted attempt leaves for the next one. */
 export const preserveKey = (work: Pick<Work, 'id'>, epoch: number) => `preserve:${work.id}:${epoch}`;
+/** How long a refusal on the review findings stands before the loop reads the findings again. */
+export const findingRecheckMs = 120_000;
 /** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
 export const launchAppearanceMs = 120_000;
 /**
@@ -1657,7 +1659,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // 2a. A refused request for files a review finding on the item's own change names. The finding
   //     is the grounds the item's criteria lack: the loop reads it with its own GitHub access and
   //     widens by exactly those files as the master's own additive intent, once per request and
-  //     policy revision; anything the findings do not name stays refused and escalated.
+  //     policy revision; anything the findings do not name stays refused and escalated. Findings
+  //     change while the request and revision stand — a bot's thread lands after the refusal — so
+  //     a refusal on the findings is judged again every findingRecheckMs, never cached for good.
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<boolean> => {
     if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return false;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return false;
@@ -1665,15 +1669,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!paths.length) return false;
     const key = `${scopeKey(item, request)}:finding:${item.policyRevision}`;
     const previous = state.actions[key];
-    if (previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return previous.state === 'done' && /^Widened /.test(previous.detail);
-    const attempts = (previous?.attempts ?? 0) + 1;
+    if (previous?.state === 'done' && /^Widened /.test(previous.detail)) return true;
+    const judged = previous?.state === 'done';
+    if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return false;
+    const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
     try {
       const findings = await effects.reviewFindings(item);
       const existing = new Set<string>();
       for (const path of paths) if (await effects.baseHasPath?.(path)) existing.add(path);
       const scoped = findingScope(paths, findings, path => existing.has(path));
       if ('refusal' in scoped) {
-        await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: `Not widened on a review finding: ${scoped.refusal}`, attempts, cycle: state.cycle }, now(), effects.persist);
+        const detail = `Not widened on a review finding: ${scoped.refusal}`;
+        const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
+        // An unchanged refusal is the same decision read again, not a new action.
+        if (judged && previous.detail !== detail) performed.push(entry);
         return false;
       }
       const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
@@ -2871,7 +2880,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
-    baseHasPath: async path => { try { await run('git', ['-C', root, 'cat-file', '-e', `origin/${current().baseBranch}:${path}`]); return true; } catch { return false; } },
+    baseHasPath: path => baseHasPath(root, current().baseBranch, path, run),
     get widenScope() {
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) => asOperatorAgent('POST', `work/${work.id}/requirements`, { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
         plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason }) : undefined;

@@ -63,17 +63,24 @@ export const namesPath = (text: string, path: string) => new RegExp(`(^|[^A-Za-z
 // sentence punctuation left off.
 const fileToken = /[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\/[A-Za-z0-9_./-]*|\.[A-Za-z][A-Za-z0-9]{0,7})/g;
 const creationVerb = /\b(create[sd]?|creating|add(?:s|ed|ing)?|new file|introduce[sd]?|introducing)\b/gi;
+// A negation governing a creation verb: "do not create", "src/a.ts should not be added", "no new
+// file". It reaches back to the nearest comma, colon or conjunction before the verb, so "don't
+// change src/a.ts, but add src/b.ts" still asks for src/b.ts.
+const negation = /\b(?:not|never|no|without|avoid(?:s|ing)?|instead of|rather than)\b|n[’']t\b/i;
+const negated = (clause: string, at: number) => negation.test(clause.slice(0, at).split(/[,:]|\b(?:but|and|then|so)\b/i).at(-1)!);
 
 /**
  * Whether `text` asks for `path` to be created: some clause naming the path has a creation verb
  * whose nearest file named in that clause is `path` itself, so a verb about another file — "create
- * src/b.ts; src/a.ts is wrong", "add a case to src/b.ts next to src/a.ts" — grants nothing for it.
+ * src/b.ts; src/a.ts is wrong", "add a case to src/b.ts next to src/a.ts" — grants nothing for it,
+ * and neither does a negated one: "do not create src/a.ts" forbids exactly the file it names.
  */
 export function asksToCreate(text: string, path: string): boolean {
   for (const clause of text.split(/[;!?\n]|\.(?=\s|$)/)) {
     if (!namesPath(clause, path)) continue;
     const files = [...clause.matchAll(fileToken)].map(match => ({ at: match.index!, end: match.index! + match[0].length, name: match[0].replace(/\.+$/, '') }));
     for (const verb of clause.matchAll(creationVerb)) {
+      if (negated(clause, verb.index!)) continue;
       const at = verb.index!, distance = (file: { at: number; end: number }) => file.at >= at ? file.at - at : at - file.end;
       const nearest = files.reduce<(typeof files)[number] | null>((best, file) => !best || distance(file) < distance(best) ? file : best, null);
       if (nearest?.name === path) return true;
@@ -98,4 +105,15 @@ export function findingScope(paths: readonly string[], findings: readonly Review
     grounds.push({ path, ground: finding.ground });
   }
   return { grounds };
+}
+
+/**
+ * Whether `path` exists on `origin/<baseBranch>`. Only a genuine absence answers false: a missing
+ * base ref, a timed-out or failing git fails the call, so the caller retries instead of judging an
+ * existing file absent and recording that as its decision.
+ */
+export async function baseHasPath(root: string, baseBranch: string, path: string, run: ChildRun): Promise<boolean> {
+  const ref = `origin/${baseBranch}`;
+  await run('git', ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`]);
+  return String(await run('git', ['-C', root, 'ls-tree', '-z', '--name-only', ref, '--', path])).split('\0').includes(path);
 }
