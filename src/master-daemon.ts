@@ -23,8 +23,9 @@ import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
+import { findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 
@@ -1262,6 +1263,15 @@ export interface DaemonEffects {
    * waits for the operator exactly as it did before.
    */
   decideScope?: (work: Work) => Promise<Work>;
+  /**
+   * The review findings standing against the item's head — its unresolved threads and its
+   * reviewer's latest change request (review-scope.ts) — read outside every transaction.
+   */
+  reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
+  /** Whether a file exists on the base branch in this checkout. */
+  baseHasPath?: (path: string) => Promise<boolean>;
+  /** The master's own additive scope widening — the revision `master scope` applies — with its audited reason. */
+  widenScope?: (work: Work, paths: string[], reason: string) => Promise<unknown>;
   merge: (work: Work) => Promise<unknown>;
   /**
    * The deployed release and which deliveries it serves. The containment the previous observation
@@ -1643,11 +1653,45 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //    What this pass decides is kept, so the budget below measures what is still waiting rather
   //    than what has just been answered.
   const settled = new Map<string, Work>();
+  // 2a. A refused request for files a review finding on the item's own change names. The finding
+  //     is the grounds the item's criteria lack: the loop reads it with its own GitHub access and
+  //     widens by exactly those files as the master's own additive intent, once per request and
+  //     policy revision; anything the findings do not name stays refused and escalated.
+  const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<boolean> => {
+    if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return false;
+    if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return false;
+    const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).includes(path));
+    if (!paths.length) return false;
+    const key = `${scopeKey(item, request)}:finding:${item.policyRevision}`;
+    const previous = state.actions[key];
+    if (previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return previous.state === 'done' && /^Widened /.test(previous.detail);
+    const attempts = (previous?.attempts ?? 0) + 1;
+    try {
+      const findings = await effects.reviewFindings(item);
+      const existing = new Set<string>();
+      for (const path of paths) if (await effects.baseHasPath?.(path)) existing.add(path);
+      const scoped = findingScope(paths, findings, path => existing.has(path));
+      if ('refusal' in scoped) {
+        await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: `Not widened on a review finding: ${scoped.refusal}`, attempts, cycle: state.cycle }, now(), effects.persist);
+        return false;
+      }
+      const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
+      const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
+        `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+      await effects.widenScope(item, paths, reason);
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: `Widened ${item.key} with ${paths.join(', ')} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      return true;
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: `Could not widen ${item.key} on a review finding: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      return false;
+    }
+  };
   for (const item of open) {
     const request = item.scopeRequest;
     // A refusal is reconsidered only when the rules as they stand now would approve it — once per
     // policy revision of the item, backing off on failure — so a standing refusal never churns.
     const redecide = !!request?.decision && redecidableScopeRefusal(item);
+    if (request?.decision?.state === 'refused' && !redecide) { await widenOnFindings(item, request); continue; }
     if (!effects.decideScope || !request || (request.decision && !redecide)) continue;
     // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) continue;
@@ -1669,6 +1713,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
           ? `Widened ${item.key} with ${request.paths.join(', ')} ${waited}: ${decision.reason}`
           : `Refused ${item.key}'s scope request for ${request.paths.join(', ') || 'no path'} ${waited}: ${decision.reason}`,
         attempts, cycle: state.cycle }, now(), effects.persist));
+      if (decision.state === 'refused' && await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision })) continue;
       if (decision.state === 'refused') {
         const escalationKey = `escalation:scope:${item.id}:${request.at}`;
         performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
@@ -2821,6 +2866,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
     recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
     decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+    // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
+    reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null }, run) : [],
+    baseHasPath: async path => { try { await run('git', ['-C', root, 'cat-file', '-e', `origin/${current().baseBranch}:${path}`]); return true; } catch { return false; } },
+    get widenScope() {
+      return current().operatorAgent ? async (work: Work, paths: string[], reason: string) => asOperatorAgent('POST', `work/${work.id}/requirements`, { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
+        plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason }) : undefined;
+    },
     requestProof: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,

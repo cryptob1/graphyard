@@ -13,6 +13,7 @@ import { emptyDaemonState, runCycle, scopeBudget, scopeKey, type DaemonEffects, 
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
+import { findingScope, namesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
@@ -366,4 +367,62 @@ test('integration:scope-redecision — a refusal the current rules would approve
   assert.equal((await reload(work.id)).policyRevision, work.policyRevision);
   const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
   assert.equal(again.status, 404, JSON.stringify(again.body));
+});
+
+test('integration:scope-from-review-finding — a refused request for a file a review finding on the item names is widened by the loop, as the master, with the finding as its grounds', async () => {
+  let work = await claimed('finding names the file');
+  const state = emptyDaemonState(loopConfig());
+  const widened: { paths: string[]; reason: string }[] = [];
+  const findings = [{ ground: 'review thread PRRT_finding01', text: 'Not fixed: `src/merge-queue.ts:85-97` still marks every item with blocking threads; see also src/cli/master-status.ts:128.' }];
+  const widen = async (item: Work, paths: string[], reason: string) => {
+    widened.push({ paths, reason });
+    return ok(master.token, 'POST', `work/${item.id}/requirements`, { expectedPolicyRevision: item.policyRevision, criteria: item.criteria, dependencies: item.dependencies,
+      plannedFiles: [...new Set([...item.plannedFiles, ...paths])], exclusiveResources: item.exclusiveResources ?? [], producerProofs: item.producerProofs ?? [], reason });
+  };
+  const overrides: Partial<DaemonEffects> = { reviewFindings: async () => findings, baseHasPath: async path => path !== 'src/new-helper.ts', widenScope: widen };
+
+  // Named by the finding: the control plane refuses it (no criterion names it), and the loop widens it.
+  await request(work, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  await cycle(state, overrides);
+  work = await reload(work.id);
+  assert.ok(work.plannedFiles.includes('src/merge-queue.ts'), `widened: ${work.plannedFiles}`);
+  assert.equal(work.scopeRequest, null, 'the answered request is cleared');
+  assert.equal(work.blocker, null, 'the item is not left blocked on scope');
+  assert.ok(work.lease, 'the attempt keeps its lease');
+  assert.match(widened[0].reason, /review thread PRRT_finding01/);
+  assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)), 'nothing is escalated to a master session');
+
+  // Not named by any finding: it stays refused and escalated, and the loop does not widen.
+  await request(work, { paths: ['src/server/routes/work.ts'], reason: 'Easier to change here too' });
+  await cycle(state, overrides);
+  work = await reload(work.id);
+  assert.equal(widened.length, 1, 'no widening without a finding naming the file');
+  assert.equal(work.scopeRequest!.decision!.state, 'refused');
+  assert.ok(work.blocker?.startsWith(scopeRefusalBlocker));
+  assert.ok(escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)));
+  // A standing refusal is judged against the findings once per policy revision, not every cycle.
+  await cycle(state, overrides);
+  assert.equal(widened.length, 1);
+});
+
+test('unit:review-finding-scope — only a file a finding names literally is granted; a directory, a longer path, or a missing file the finding does not ask to create is not', async () => {
+  const findings = [{ ground: 'review 7', text: 'Change `src/merge-queue.ts:85-97` and create src/new-helper.ts; the whole src/ tree is fine.' }];
+  const exists = (path: string) => path !== 'src/new-helper.ts' && path !== 'src/missing.ts';
+  assert.deepEqual(findingScope(['src/merge-queue.ts'], findings, exists), { grounds: [{ path: 'src/merge-queue.ts', ground: 'review 7' }] });
+  assert.deepEqual(findingScope(['src/new-helper.ts'], findings, exists), { grounds: [{ path: 'src/new-helper.ts', ground: 'review 7' }] }, 'a new file the finding asks to create');
+  assert.match((findingScope(['src/'], findings, exists) as { refusal: string }).refusal, /directory scope/);
+  assert.match((findingScope(['src/merge-queue.tsx'], findings, exists) as { refusal: string }).refusal, /no unresolved review finding on the head names/);
+  assert.match((findingScope(['src/other.ts'], findings, exists) as { refusal: string }).refusal, /no unresolved review finding/);
+  assert.match((findingScope(['src/missing.ts'], [{ ground: 'review 8', text: 'src/missing.ts is wrong' }], exists) as { refusal: string }).refusal, /does not exist on the base branch/);
+  assert.ok(namesPath('see src/a.ts.', 'src/a.ts') && namesPath('(src/a.ts:12)', 'src/a.ts') && !namesPath('lib/src/a.ts', 'src/a.ts') && !namesPath('src/a.ts.bak', 'src/a.ts'));
+
+  // The read: unresolved threads' comments, and the configured reviewer's latest change request on the head only.
+  const run = (_command: string, args: string[]) => {
+    if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts' }] } }, { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts' }] } }] } } } } });
+    return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
+      { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' }]]);
+  };
+  const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]' }, run);
+  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review 1']);
 });
