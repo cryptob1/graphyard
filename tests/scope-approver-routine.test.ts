@@ -204,6 +204,46 @@ test('unit:scope-approver-routine — an approval is refused once the asking att
   assert.equal(work.lease!.epoch, asked.epoch + 1);
 });
 
+test('unit:scope-approver-routine — a refusal answers only the request it names: the same paths asked again with a better reason go to the approver again', async () => {
+  let work = await claimed('re-asked after refusal');
+  const first = await ask(work, [helper], 'Would be tidier');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [refused] = await standing(work);
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: refused.id, reason: 'Tidiness is no ground; name what AC-1 needs' });
+  await loop.cycle(state);
+  // The worker withdraws the refused ask and asks again for the same paths, with the grounds.
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: first.epoch, paths: [], reason: 'Withdrawn by the worker' });
+  const again = await ask(await reload(work.id), [helper], 'AC-1 renders every breakpoint, and the breakpoints are measured only in the helper');
+  assert.notEqual(again.scopeRequest!.at, first.scopeRequest!.at);
+  await loop.cycle(state);
+  assert.equal(loop.about(work).decided.length, 2, 'the new request is put to the approver, not settled by the old refusal');
+  assert.deepEqual(loop.about(work).decided[1].input.answers, { epoch: again.epoch, at: again.scopeRequest!.at });
+  const second = (await standing(work)).find((decision: any) => decision.state === 'requested');
+  assert.ok(second, 'a decision stands for the new request');
+  assert.equal(loop.launched.length, 2, 'and the approver is launched for it');
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: second.id, reason: 'The helper is where AC-1 is measured' });
+  work = await reload(work.id);
+  assert.deepEqual(work.plannedFiles, [layout, helper]);
+});
+
+test('unit:scope-approver-routine — a refusal that arrives after the asking lease expired writes nothing onto the attempt', async () => {
+  let work = await claimed('late refusal');
+  await ask(work, ['src/server/routes/work.ts'], 'The route would be easier to change here too');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [requested] = await standing(work);
+  const before = await reload(work.id);
+  // The lease lapses before reconciliation has run.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [work.id, new Date(Date.now() - 60_000).toISOString()]);
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: requested.id, reason: 'The route belongs to another item' });
+  work = await reload(work.id);
+  assert.equal(work.scopeDecision!.decidedBy, 'graphyard', "the rule's refusal stands; the approver's is not written onto the lapsed attempt");
+  assert.equal(work.scopeRequest!.decision!.decidedBy, 'graphyard');
+  assert.equal(work.blocker, before.blocker, 'no approver blocker is written');
+  assert.equal((await events(work)).filter(entry => entry.kind === 'scope.refused').length, 0);
+});
+
 test('unit:scope-approver-routine — a root-level directory scope is requested as the broad-scope exception, granted only with a stated reason', async () => {
   let work = await claimed('broad scope');
   await ask(work, ['tests/'], 'Every fixture under tests/ pins the layout text');
@@ -270,6 +310,11 @@ test('unit:scope-outcome-delivered — the worker reads the outcome in its sessi
   assert.match(heard.text, /src\/widget\/measure\.ts/);
   await approved.cycle(approvedState);
   assert.equal(scopeRequestOutcome(await reload(work.id), { epoch: asked.epoch, at: asked.scopeRequest!.at, paths: [helper] }).state, 'approved', 'and it stays readable after the loop moves on');
+  // An approval clears the request: a worker that only starts waiting afterwards still hears it.
+  assert.equal((await reload(work.id)).scopeRequest, null);
+  const late = await own(await reload(work.id));
+  assert.equal(late.state, 'approved', 'waiting after the approval reads the decided outcome, not an error');
+  assert.match(late.text, /The helper is AC-1 spelled out/);
 
   // Refused: the approver's reason, and that the worker stays inside plannedFiles.
   work = await claimed('outcome refused');

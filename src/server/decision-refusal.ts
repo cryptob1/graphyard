@@ -68,8 +68,11 @@ export async function withdrawDecision(services: Services, caller: Principal, id
  */
 async function answerScopeRequest(db: Parameters<typeof save>[0], work: Work, decision: { id: string; action: string; input: any }, actor: Principal, reason: string, now: Date) {
   const answers = decision.action === 'requirements' ? decision.input?.answers : undefined, request = work.scopeRequest;
-  if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || work.lease?.epoch !== answers.epoch) return;
-  work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at };
+  // The same liveness the approval path demands: a lease that has expired, reconciled or not, is
+  // no attempt to answer, and its item is not written to on that attempt's behalf.
+  const live = !!work.lease && work.lease.epoch === answers?.epoch && Date.parse(work.lease.expiresAt) > now.getTime();
+  if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || !live) return;
+  work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
   work.scopeRequest = { ...request, decision: work.scopeDecision };
   work.blocker = `${scopeRefusalBlocker} by the independent approver ${actor.id} (decision ${decision.id}): ${reason}`.slice(0, 2000);
   await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: request.epoch, requestedAt: request.at, paths: request.paths, approver: actor.id, reason });

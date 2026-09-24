@@ -74,6 +74,8 @@ export interface ScopeDecision {
   paths: string[];
   requestedBy: string;
   requestedAt: string;
+  /** The attempt that asked: an answered request is cleared, and its worker still reads the outcome here. */
+  epoch?: number;
 }
 
 /**

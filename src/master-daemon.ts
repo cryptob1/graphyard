@@ -2171,10 +2171,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (standing && decision.action === 'resolve' && decision.escalation && !resolveCovers(standing, decision.escalation)) {
         throw new Error(`resolve decision ${standing.id} is ${standing.state} for ${String(standing.input?.trigger)}, not the ${decision.escalation.trigger} raised at ${decision.escalation.at}; the control plane holds one resolve at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
-      // An approver already refused this very widening (a cursor lost since, or a restart): that is
+      // An approver already refused this very request (a cursor lost since, or a restart): that is
       // its judgement, not a request to repeat — the server would refuse the repeat on every retry.
+      // The refusal answers the request it names (`answers`): a worker that withdraws a refused ask
+      // and asks again for the same paths with a better reason makes a new request, and it is asked.
       const judged = decision.action === 'requirements' ? history.find(entry => entry.action === 'requirements' && entry.state === 'refused'
-        && JSON.stringify(entry.input?.plannedFiles) === JSON.stringify(decision.input?.plannedFiles) && entry.input?.expectedPolicyRevision === item.policyRevision) : undefined;
+        && JSON.stringify(entry.input?.plannedFiles) === JSON.stringify(decision.input?.plannedFiles) && entry.input?.expectedPolicyRevision === item.policyRevision
+        && JSON.stringify(entry.input?.answers) === JSON.stringify(decision.input?.answers)) : undefined;
       if (judged) {
         const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: judged.id, requestedAt: stamp, settledAt: stamp, scope: decision.scope ?? null });
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${judged.id} for this widening was already refused by ${judged.refusal?.approver ?? 'its approver'}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));

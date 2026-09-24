@@ -42,11 +42,13 @@ export const scopeRequestCommand: CliCommand = {
  * The outcome of this attempt's open scope request, read from the item as the control plane holds
  * it (GY-176): the worker's own command reads durable state, so nothing is pasted into its session.
  * Polls until the request is decided or no longer open, or the wait (bounded under a shell tool's
- * ten-minute limit) runs out, and reports it pending then.
+ * ten-minute limit) runs out, and reports it pending then. An approval clears the request, so one
+ * decided before the worker waits is read from the decision this attempt's request received.
  */
 export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: Work, epoch: number, options: { waitMs?: number; everyMs?: number; cli?: string } = {}) {
-  const request = work.scopeRequest?.epoch === epoch ? work.scopeRequest : null;
-  if (!request) throw new Error(`${work.key} has no open scope request for epoch ${epoch}; ask with scope-request ${work.key} ${epoch} PATH... -- REASON`);
+  const decided = work.scopeDecision?.epoch === epoch ? work.scopeDecision : null;
+  const request = work.scopeRequest?.epoch === epoch ? work.scopeRequest : decided && { at: decided.requestedAt, paths: decided.paths };
+  if (!request) throw new Error(`${work.key} has no scope request for epoch ${epoch}; ask with scope-request ${work.key} ${epoch} PATH... -- REASON`);
   const ask = { epoch, at: request.at, paths: request.paths }, cli = options.cli ?? 'graphyard';
   const deadline = Date.now() + (options.waitMs ?? 540_000);
   for (let item = work; ; ) {

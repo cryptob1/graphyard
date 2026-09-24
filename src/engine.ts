@@ -194,7 +194,7 @@ export async function readAttestations(db: { query: (text: string, values: unkno
 function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
-    waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at };
+    waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
   work.scopeDecision = decision;
   // An applied request is answered and cleared, exactly as an operator widening clears it;
   // a refused one stays open, carrying its refusal, because someone still has to decide it.
@@ -561,7 +561,7 @@ export class Engine {
           // A widening that answers the request is its decision, kept where the asking worker's own
           // `status` and `scope-request --wait` read it (GY-176): approved, and by whom and why.
           if (data.answers) work.scopeDecision = { state: 'approved', reason: data.reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(work.scopeRequest.at)),
-            paths: work.scopeRequest.paths, requestedBy: work.scopeRequest.requestedBy, requestedAt: work.scopeRequest.at };
+            paths: work.scopeRequest.paths, requestedBy: work.scopeRequest.requestedBy, requestedAt: work.scopeRequest.at, epoch: work.scopeRequest.epoch };
           work.scopeRequest = null;
           if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
         }
