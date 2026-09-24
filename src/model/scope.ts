@@ -178,3 +178,58 @@ export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]
   return !!request && request.decision?.state === 'refused' && !!item.blocker?.startsWith(scopeRefusalBlocker)
     && decideScopeRequest(item, request).state === 'approved';
 }
+
+// ---------------------------------------------------------------------------
+// Routing what the rules cannot ground to the independent approver (GY-176).
+//
+// A request the implication rule refuses and no review finding grounds is still, most of the time,
+// the item's own scope: the worker's reason and the criteria justify it without naming the file.
+// On 2026-09-24 a master granted between three and five of those by hand while each item sat idle
+// until the next master cycle. Deciding one is a judgement, not a rule, so the loop does not
+// decide it: it requests a `requirements` decision as the master's operator-agent identity — the
+// same additive revision `master scope` applies — and the independent approver judges it, exactly
+// as it judges rework, recovery, resolution and merge. The requester is never the approver.
+// ---------------------------------------------------------------------------
+
+/** The additive widening a refused request asks the approver for, or null when there is none to route. */
+export function routableScopeRequest(item: { plannedFiles?: readonly string[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
+  const request = item.scopeRequest;
+  if (!request || request.decision?.state !== 'refused' || request.remove?.length || request.criteria?.length) return null;
+  // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
+  if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
+  const paths = [...new Set(request.paths)].filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+  return paths.length ? { request, paths, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] } : null;
+}
+
+/** One requested decision per request: the instant the worker recorded it identifies the ask. */
+export const scopeDecisionBinding = (request: Pick<ScopeRequestState, 'epoch' | 'at'>) => `scope:${request.epoch}:${request.at}`;
+
+/**
+ * What the approver is asked to judge, within the control plane's 2000-character reason bound: the
+ * worker's own reason and the exact paths, why the rules could not decide it, and the item's
+ * criteria. A widening that introduces a root-level directory carries the broad-scope exception
+ * (`broad`, the text `guardBroadScope` records): the approver may grant it only with a stated
+ * reason, which the control plane writes into the applied revision beside this one.
+ */
+export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState, 'requestedBy' | 'reason' | 'decision'>, criteria: readonly ScopeCriterion[], paths: readonly string[], broad: string | null, max = 2000) {
+  const cut = (text: string, room: number) => text.length <= room ? text : `${text.slice(0, Math.max(0, room - 1))}…`;
+  const rules = ` The implication rule refused it and no review finding on the item's own change names it, so it is the approver's judgement: approve an additive widening the item's criteria justify (the worker keeps its lease), refuse with the reason otherwise.`;
+  const exception = broad ? ` ${cut(broad, 300)} It needs the broad-scope flag (--allow-broad-scope): grant it only with a stated reason why narrower paths will not do.` : '';
+  const asked = cut(`${key}: ${request.requestedBy} asks to widen plannedFiles with ${cut(paths.join(', '), 400)} because ${request.reason}.`, 800);
+  const refusal = cut(` Rule refusal: ${request.decision?.reason ?? 'none recorded'}.`, 250);
+  const named = ` Criteria: ${criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
+  const head = asked + rules + exception + refusal;
+  return head + cut(named, max - head.length);
+}
+
+/**
+ * What the worker is told in its session once the approver has judged its request: carry on, or
+ * the approver's reason and that the attempt stays inside plannedFiles — withdrawing the ask, which
+ * lifts the refusal holding the item, rather than waiting on a master that will not come.
+ */
+export function scopeOutcomeMessage(key: string, epoch: number, outcome: { state: 'approved' | 'refused'; paths: readonly string[]; approver: string | null; reason: string | null }, cli = 'graphyard') {
+  const paths = outcome.paths.join(', '), approver = `the independent approver${outcome.approver ? ` ${outcome.approver}` : ''}`;
+  return outcome.state === 'approved'
+    ? `Graphyard: your scope request on ${key} (epoch ${epoch}) was approved by ${approver}${outcome.reason ? `: ${outcome.reason}` : ''}. plannedFiles now include ${paths} and you keep your lease: continue the work.`
+    : `Graphyard: your scope request on ${key} (epoch ${epoch}) for ${paths} was refused by ${approver}: ${outcome.reason ?? 'no reason recorded'}. Stay inside plannedFiles: withdraw the request with ${cli} scope-request ${key} ${epoch} - and finish the work without those files, or record a blocker if the criteria cannot be met without them.`;
+}

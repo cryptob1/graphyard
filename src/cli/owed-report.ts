@@ -3,6 +3,7 @@ import type { Work } from '../model.js';
 import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
 import { decideScopeRequest } from '../model/scope.js';
 import { elapsed } from '../model/sessions.js';
+import { routedScopeRequests } from './status-attention.js';
 
 /**
  * What `master status` says about work that is waiting on a judgement rather than on capacity
@@ -23,13 +24,15 @@ import { elapsed } from '../model/sessions.js';
  * widening, with no master session and no command. Naming those here asked a master to run
  * `master scope` for a verdict already determined, and an item one file short of finishing waited
  * on that line being read. The verdict is recomputed from the item itself, never taken from the
- * request; a request from a lease that ended is never surfaced.
+ * request; a request from a lease that ended is never surfaced. Nor is one the loop has routed to
+ * the independent approver (its `approvals` watch, GY-176): that is being decided, and the worker is told.
  */
-export function scopeRequestAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
+export function scopeRequestAttention(snapshot: { work: Work[]; now: string }, approvals: Parameters<typeof routedScopeRequests>[0] = []): AttentionItem[] {
+  const routed = routedScopeRequests(approvals);
   return snapshot.work.flatMap(work => {
     const request = work.scopeRequest;
     const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
-    if (!live) return [];
+    if (!live || routed(work)) return [];
     const decision = request.decision ?? decideScopeRequest(work, request);
     if (decision.state === 'approved') return [];
     return [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}. The widening rule refuses it: ${decision.reason}`,

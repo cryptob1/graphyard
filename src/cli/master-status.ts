@@ -132,8 +132,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
-  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot), ...consentHoldItems(trees, snapshot)];
-  // A session past its role's maximum: running but making no progress is as visible as one that died.
+  const scopeRequests = [...scopeRequestAttention(snapshot, cycling?.approvals), ...agentRequestAttention(snapshot), ...consentHoldItems(trees, snapshot)];
+  // A session past its role's maximum: running with no progress is as visible as one that died.
   const overlong = overlongSessionAttention(snapshot, { ...runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
   // refused, and nothing will launch again until it is named here with the command that answers it.
