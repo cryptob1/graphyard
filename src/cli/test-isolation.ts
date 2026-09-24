@@ -139,11 +139,13 @@ export function abnormalTestExit(tap: string, status: number | null, signal: Nod
  * devDependencies (typescript, tsx, playwright) while npm still exits 0, an omit=optional in an
  * .npmrc would skip the platform packages (esbuild's binary for tsx, @embedded-postgres/*) that
  * the lockfile check tolerates as missing, and an inherited
- * npm_config_dry_run (or dry-run in an .npmrc) would install nothing and exit 0.
+ * npm_config_dry_run (or dry-run in an .npmrc) would install nothing and exit 0. An
+ * ignore-scripts or bin-links=false setting would likewise exit 0 with a matching hidden lockfile
+ * while skipping install scripts (esbuild, embedded Postgres) or node_modules/.bin (tsc, tsx).
  */
-export const npmCiArgs = ['ci', '--include=dev', '--include=optional', '--no-dry-run', '--no-audit', '--no-fund'];
+export const npmCiArgs = ['ci', '--include=dev', '--include=optional', '--no-dry-run', '--ignore-scripts=false', '--bin-links', '--no-audit', '--no-fund'];
 export function npmCiEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const clean: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(env)) if (!/^(npm_config_(omit|only|production|also|dev|include|dry_run|dry-run)|NODE_ENV)$/i.test(name)) clean[name] = value;
+  for (const [name, value] of Object.entries(env)) if (!/^(npm_config_(omit|only|production|also|dev|include|dry_run|dry-run|ignore_scripts|ignore-scripts|bin_links|bin-links)|NODE_ENV)$/i.test(name)) clean[name] = value;
   return clean;
 }

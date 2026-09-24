@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment } from '../src/cli/test-isolation.js';
+import { abnormalTestExit, isolatedTestEnvironment, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
 import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
@@ -84,7 +84,9 @@ test('unit:test-isolation two concurrent test runs on one host both pass', async
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 test('holds its database port', async () => {
-  assert.deepEqual(Object.keys(process.env).filter(name => /^(GRAPHYARD|HERDR)_/.test(name)).sort(), ['GRAPHYARD_EVENTS_TEST_PORT', 'GRAPHYARD_TEST_PORT']);
+  // Harness controls the caller set on purpose (CI's timing record) pass; nothing else of the session's does.
+  const controls = new Set(${JSON.stringify(passedTestControls)});
+  assert.deepEqual(Object.keys(process.env).filter(name => /^(GRAPHYARD|HERDR)_/.test(name) && !controls.has(name)).sort(), ['GRAPHYARD_EVENTS_TEST_PORT', 'GRAPHYARD_TEST_PORT']);
   const port = Number(process.env.GRAPHYARD_TEST_PORT) + 7;
   const server = createServer();
   await new Promise<void>((ok, fail) => { server.once('error', fail); server.listen({ port, host: '127.0.0.1', exclusive: true }, () => ok()); });
@@ -92,7 +94,7 @@ test('holds its database port', async () => {
   await new Promise(done => server.close(done));
 });
 `);
-    const environment = { ...process.env, GRAPHYARD_TOKEN: 'session-credential', GRAPHYARD_TOKEN_FILE: '/run/credential', HERDR_PANE: 'w1:p1', GRAPHYARD_TEST_PORT: '15438' };
+    const environment = { ...process.env, GRAPHYARD_TOKEN: 'session-credential', GRAPHYARD_TOKEN_FILE: '/run/credential', HERDR_PANE: 'w1:p1', GRAPHYARD_TEST_PORT: '15438', GRAPHYARD_TIMING_RECORD: join(project, 'timing.jsonl') };
     const runs = await Promise.all([0, 1].map(() => runTests({ cwd: project, environment, stdio: 'pipe', ports: { span: 20 } })));
     for (const run of runs) assert.equal(run.code, 0, run.stdout + run.stderr);
     assert.notEqual(runs[0].base, runs[1].base, 'each run held its own window');
@@ -120,7 +122,7 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
   try {
     const worktree = join(root, '.graphyard', 'worktrees', 'GY-1-1');
     await mkdir(join(root, 'node_modules'), { recursive: true }); await mkdir(worktree, { recursive: true });
-    const lock = (version: string) => ({ name: 'app', lockfileVersion: 3, packages: { '': { name: 'app' }, 'node_modules/left-pad': { version, integrity: `sha512-${version}` }, 'node_modules/@esbuild/darwin-arm64': { version: '0.1.0', optional: true } } });
+    const lock = (version: string) => ({ name: 'app', lockfileVersion: 3, packages: { '': { name: 'app' }, 'node_modules/left-pad': { version, integrity: `sha512-${version}` }, 'node_modules/@esbuild/aix-ppc64': { version: '0.1.0', optional: true, os: ['aix'], cpu: ['ppc64'] } } });
     await writeFile(join(root, 'node_modules', '.package-lock.json'), JSON.stringify({ name: 'app', lockfileVersion: 3, packages: { 'node_modules/left-pad': { version: '1.0.0', integrity: 'sha512-1.0.0' } } }));
     const installs: string[] = [];
     // As npm ci does, the installer leaves the checkout's lockfile as the install's hidden lockfile.
@@ -171,13 +173,25 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.equal(installMatchesLockfile(git('aaa'), git('aaa')), true);
     assert.match(String(installMatchesLockfile(git('bbb'), git('aaa'))), /node_modules\/dep is installed from .*#aaa, package-lock.json names .*#bbb/);
     assert.match(String(installMatchesLockfile({ packages: { 'node_modules/dep': { version: '1.0.0', resolved: '../dep', link: true } } }, git('aaa'))), /installed as a package, package-lock.json names a link/);
+    // An optional package this host's platform admits must be installed (an omit=optional install or a discarded optional
+    // build leaves tsx or embedded Postgres without its binary); one for another platform, or an optional peer, may be absent.
+    const platformLock = { packages: { 'node_modules/@esbuild/linux-x64': { version: '0.1.0', optional: true, os: ['linux'], cpu: ['x64'] }, 'node_modules/@esbuild/linux-x64-musl': { version: '0.1.0', optional: true, os: ['linux'], cpu: ['x64'], libc: ['musl'] }, 'node_modules/@esbuild/not-win': { version: '0.1.0', optional: true, os: ['!win32'] }, 'node_modules/peer-extra': { version: '1.0.0', optional: true, peer: true } } };
+    const linuxGlibc = { os: 'linux', cpu: 'x64', libc: 'glibc' };
+    assert.match(String(installMatchesLockfile(platformLock, { packages: {} }, linuxGlibc)), /@esbuild\/linux-x64 is an optional package for this platform \(linux x64 glibc\) named by package-lock.json but not installed/);
+    const heldForLinux = { packages: { 'node_modules/@esbuild/linux-x64': { version: '0.1.0' }, 'node_modules/@esbuild/not-win': { version: '0.1.0' } } };
+    assert.equal(installMatchesLockfile(platformLock, heldForLinux, linuxGlibc), true, 'the musl-only package and the optional peer may be absent on glibc');
+    assert.match(String(installMatchesLockfile(platformLock, heldForLinux, { os: 'linux', cpu: 'x64', libc: 'musl' })), /linux-x64-musl is an optional package for this platform/);
+    assert.equal(installMatchesLockfile(platformLock, { packages: {} }, { os: 'win32', cpu: 'arm64', libc: null }), true, 'nothing in it is for win32 arm64');
     // The install always takes the full tree: an inherited production/omit config would skip devDependencies while npm exits 0.
     assert.ok(npmCiArgs.includes('--include=dev'));
     // Optional dependencies too: an .npmrc omit=optional would skip platform packages (esbuild's binary, which tsx loads; @embedded-postgres/*) while npm exits 0, and the lockfile check accepts a missing optional entry.
     assert.ok(npmCiArgs.includes('--include=optional'), 'an .npmrc omit=optional is overridden');
     assert.match(await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8'), /'--include=dev', '--include=optional'/, 'the trusted unit runner installs optional dependencies too');
     assert.ok(npmCiArgs.includes('--no-dry-run'), 'a dry-run from an .npmrc is overridden too');
-    const cleared = npmCiEnvironment({ PATH: '/bin', NODE_ENV: 'production', npm_config_omit: 'dev', NPM_CONFIG_PRODUCTION: 'true', npm_config_dry_run: 'true', 'npm_config_dry-run': 'true' });
+    // So are settings that let npm exit 0 with a matching hidden lockfile but no install scripts run or no .bin links made.
+    assert.ok(npmCiArgs.includes('--ignore-scripts=false') && npmCiArgs.includes('--bin-links'), 'ignore-scripts and bin-links=false are overridden');
+    assert.match(await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8'), /'--no-dry-run', '--ignore-scripts=false', '--bin-links'/, 'the trusted unit runner overrides them too');
+    const cleared = npmCiEnvironment({ PATH: '/bin', NODE_ENV: 'production', npm_config_omit: 'dev', NPM_CONFIG_PRODUCTION: 'true', npm_config_dry_run: 'true', 'npm_config_dry-run': 'true', npm_config_ignore_scripts: 'true', npm_config_bin_links: 'false' });
     assert.deepEqual(cleared, { PATH: '/bin' });
 
     // A refused lease heartbeat stops the install and fails the worktree command.

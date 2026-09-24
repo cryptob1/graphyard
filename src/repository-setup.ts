@@ -530,9 +530,11 @@ export async function executorSupervisionStatus(root: string, run: SystemctlRunn
  * install actually holds is npm's hidden lockfile, `node_modules/.package-lock.json`: every
  * installed package with its version and integrity. The install answers for a checkout when every
  * package it holds is the one the checkout's lockfile names and every package the lockfile requires
- * (all but platform-optional ones) is installed.
+ * is installed: an optional package too when its os, cpu and libc admit this host (esbuild's binary,
+ * @embedded-postgres/*), since an omit=optional install or a discarded optional build leaves the
+ * tree unable to run; only an optional package for another platform, or an optional peer, may be absent.
  */
-export function installMatchesLockfile(lockfile: { packages?: Record<string, any> }, installed: { packages?: Record<string, any> } | null): true | string {
+export function installMatchesLockfile(lockfile: { packages?: Record<string, any> }, installed: { packages?: Record<string, any> } | null, host: InstallHost = currentInstallHost()): true | string {
   if (!installed?.packages) return 'the install records no hidden lockfile (node_modules/.package-lock.json)';
   const wanted = lockfile.packages ?? {}, held = installed.packages;
   for (const [name, entry] of Object.entries(held)) {
@@ -544,8 +546,29 @@ export function installMatchesLockfile(lockfile: { packages?: Record<string, any
     if (Boolean(want.link) !== Boolean(entry.link)) return `${name} is installed ${entry.link ? 'as a link' : 'as a package'}, package-lock.json names ${want.link ? 'a link' : 'a package'}`;
     if ((!want.integrity || !entry.integrity) && (want.resolved ?? null) !== (entry.resolved ?? null)) return `${name} is installed from ${entry.resolved ?? 'no recorded source'}, package-lock.json names ${want.resolved ?? 'no recorded source'}`;
   }
-  for (const [name, entry] of Object.entries(wanted)) if (name && !entry.optional && !held[name]) return `${name} is named by package-lock.json but not installed`;
+  for (const [name, entry] of Object.entries(wanted)) {
+    if (!name || held[name]) continue;
+    if (!entry.optional && !entry.devOptional) return `${name} is named by package-lock.json but not installed`;
+    if (!entry.peer && platformAdmits(entry, host)) return `${name} is an optional package for this platform (${host.os} ${host.cpu}${host.libc ? ` ${host.libc}` : ''}) named by package-lock.json but not installed`;
+  }
   return true;
+}
+
+export interface InstallHost { os: string; cpu: string; libc: string | null }
+function currentInstallHost(): InstallHost {
+  const header = process.platform === 'linux' ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header : undefined;
+  return { os: process.platform, cpu: process.arch, libc: process.platform === 'linux' ? (header?.glibcVersionRuntime ? 'glibc' : 'musl') : null };
+}
+/** npm's rule for a package's os/cpu/libc lists: a `!value` excludes, and any plain value makes the list an allowlist. */
+function platformAdmits(entry: { os?: string[]; cpu?: string[]; libc?: string[] }, host: InstallHost) {
+  const admits = (list: string[] | undefined, value: string | null) => {
+    if (!list?.length) return true;
+    if (value === null) return false;
+    if (list.includes(`!${value}`)) return false;
+    const allowed = list.filter(item => !item.startsWith('!'));
+    return !allowed.length || allowed.includes(value);
+  };
+  return admits(entry.os, host.os) && admits(entry.cpu, host.cpu) && (!entry.libc?.length || admits(entry.libc, host.libc));
 }
 
 /** The dependency tree the runtime resolves from `worktree`: its own, the install its mirror links to, or the nearest one above it. */
