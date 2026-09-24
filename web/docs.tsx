@@ -2,18 +2,12 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 const pages = [
-  ['README', 'Documentation home'], ['onboarding', 'Onboard a repository'], ['quickstart', 'Local quickstart'], ['how-graphyard-works', 'How Graphyard works'], ['glossary', 'Glossary'], ['dashboard', 'Reading the dashboard'],
-  ['deployment', 'Deploy Graphyard'], ['install', 'Install & upgrade'], ['github', 'GitHub enforcement'], ['herdr', 'Herdr integration'], ['master-agent', 'Master-agent setup'],
-  ['delegation', 'Slice-lead delegation'],
-  ['architecture', 'Architecture reference'], ['protocol', 'Agent protocol & API'],
-  ['operations', 'Operations & recovery'], ['operations-reference', 'Operations reference'], ['development', 'Development & dogfooding'],
-  ['operator-automation', 'Operator automation'],
-  ['coordination', 'Coordination & recovery drills'],
-  ['flow-analytics', 'Flow analytics'],
-  ['test-cases', 'E2E test cases'], ['validation', 'Validation runner protocol'], ['runner-setup', 'Runner preparation & artifacts'], ['report-adapters', 'Report adapters'], ['delivery', 'Releases & observed delivery'], ['attribution', 'Candidate-to-deployment attribution'], ['recovery', 'Runner capacity & delivery recovery'],
-  ['first-pr', 'Graphyard repository bootstrap'],
-  ['turnkey-delivery-roadmap', 'Turnkey E2E & delivery roadmap'],
-  ['shipping-pulse', 'Shipping pulse'],
+  ['README', 'Documentation home'], ['install', 'Install & upgrade'], ['how-graphyard-works', 'How Graphyard works'], ['glossary', 'Glossary'], ['onboarding', 'Onboard a repository'],
+  ['deployment', 'Deploy Graphyard'], ['github', 'GitHub enforcement'], ['dashboard', 'Reading the dashboard'],
+  ['master-agent', 'Master-agent operating mode'], ['master-agent-sessions', 'Master-agent sessions'], ['master-agent-reference', 'Master-agent reference'],
+  ['operations', 'Operations & recovery'], ['operations-reference', 'Operations reference'], ['coordination', 'Coordinating agents'], ['delegation', 'Slice-lead delegation'],
+  ['protocol', 'Agent protocol & API'], ['validation', 'E2E validation'], ['runner-setup', 'Runner & collector'], ['delivery', 'Releases & delivery'], ['recovery', 'Runner capacity & rollback'], ['evidence-reuse', 'Evidence reuse & replay'],
+  ['development', 'Development & dogfooding'],
 ];
 const sources = import.meta.glob('../docs/**/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 // Repo-native diagrams live beside the Markdown so GitHub renders them from the same relative

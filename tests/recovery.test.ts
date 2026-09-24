@@ -17,7 +17,7 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 
 /**
- * D4 acceptance checks from docs/turnkey-delivery-roadmap.md, one test per check, named
+ * D4 acceptance checks of the turnkey delivery roadmap, one test per check, named
  * "D4-N". Runner capacity and diagnostics, execution-resource safety under partitions,
  * artifact backends and retention, and the rollback workflow all run against a disposable
  * real Postgres database; the S3-compatible store is an in-process HTTP stub that behaves

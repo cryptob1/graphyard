@@ -15,7 +15,7 @@ import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import type { Principal, Work, Observation } from '../src/model.js';
 
 /**
- * D3 acceptance checks from docs/turnkey-delivery-roadmap.md, one test per check, named
+ * D3 acceptance checks of the turnkey delivery roadmap, one test per check, named
  * "D3-N". Every test runs against a disposable real Postgres database; nothing here talks
  * to a deployment provider, because what is under test is what Graphyard does with what an
  * authenticated adapter reports — and what it refuses to do without one.

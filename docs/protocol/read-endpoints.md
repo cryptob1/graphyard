@@ -1,34 +1,13 @@
-<!-- page: Agent protocol | 3 | status, snapshots, events, analytics and delivery reads. -->
+<!-- page: Agent protocol | 2 | status, snapshots and events. -->
 # Read endpoints
 
-| Method and path | Result |
-| --- | --- |
-| `GET /healthz` | Database reachability, no token |
-| `GET /api/status` | Principal, integration configuration, App permission preflight (`appPermissions`), held and failed jobs, server time |
-| `GET /api/work-snapshot` | `{ work, now }` from one database snapshot, including each item's `autoDispatch` requests; age leases against its `now` |
-| `GET /api/work` | Work aggregates, in creation order |
-| `GET /api/events?work=UUID` | One item's events, newest first; omit `work` for the whole ledger |
-| `GET /api/analytics/flow`, `/drilldown`, `/export` | Bounded [flow analytics](../flow-analytics.md) (not for operator agents) |
-| `GET /api/deployments` | Latest deployment-provider observations |
-| `GET /api/delegation` | Slices, leads, workers, reviewers and bottlenecks |
-| `GET /api/proof-grants`, `/ID/history` | Live proof authority and its append-only history |
-| `GET /api/delivery`, `/api/delivery/observations?environment=ID` | Release and delivery state ([delivery](../delivery.md)); mutations are `POST /api/delivery/{build,release,approve,select,lease,observe,notify,sweep}` |
+- `GET /healthz`: health, no token.
+- `GET /api/status`: principal, integration configuration, `appPermissions`, held and failed jobs, `githubBudget`, server time.
+- `GET /api/work-snapshot`: `{ work, now }` from one database snapshot, including each item's `autoDispatch` requests; age leases against its `now`.
+- `GET /api/work`: every aggregate, in creation order.
+- `GET /api/events?work=UUID`: one item's events, newest first.
+- `GET /api/analytics/flow` and `/api/analytics/attribution`: bounded analytics.
+- `GET /api/deployments`: provider observations recorded by `POST /api/deployments` (`producer` or `admin`; `state` `succeeded`, `failed` or `rolled_back`; they never move a gate).
+- `GET /api/delegation`, `GET /api/proof-grants`, `GET /api/delivery`: slices, live proof authority, release state.
 
-[Validation](../validation.md) requests are inspected with `graphyard validation`.
-
-## Reading an item's history
-
-Routine `github.observed` and `heartbeat` rows are excluded by default and summarised.
-
-| Parameter | Meaning |
-| --- | --- |
-| `kind` | Only these kinds (naming a routine kind selects it) |
-| `since`, `until` | Half-open range on the recorded instant |
-| `order` | `desc` (default) or `asc` |
-| `limit` | 1–1000 (default 300) |
-| `cursor` | The previous page's last `seq` |
-| `routine` | `exclude` (default) or `include` |
-| `payload` | `full`, `details` or `none` |
-| `view` | `rows`, `history` (adds `page` and the `routine` summary) or `page` |
-
-`graphyard events GY-N --all` walks an item's whole life with `order=asc`; `--kind`, `--since`, `--until`, `--routine` and `--payload` map to the parameters.
+Event reads exclude routine `github.observed` and `heartbeat` rows unless `routine=include`; page with `limit` (default 300) and `cursor` (the last `seq`), filter with `kind`, `since` and `until`. `graphyard events GY-N --all` walks an item's whole life.

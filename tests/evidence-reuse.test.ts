@@ -16,7 +16,7 @@ import { currentEvidence } from '../src/model.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 
 /**
- * D6 acceptance checks from docs/turnkey-delivery-roadmap.md, one test per check, named
+ * D6 acceptance checks of the turnkey delivery roadmap, one test per check, named
  * "D6-N": scoped evidence reuse, the durable attempt order, replay coverage and the
  * redaction and retention rules on replay, plus the cost/duration analytics they feed.
  * Everything runs against a disposable real Postgres database.

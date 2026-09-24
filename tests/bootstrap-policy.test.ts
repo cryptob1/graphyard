@@ -437,7 +437,7 @@ test('integration:bootstrap-policy-authority refuses a declaration outside the a
 // ---------------------------------------------------------------------------
 
 test('manual:bootstrap-policy-docs-ui documents the mode and its audit trail for operators', async () => {
-  for (const page of ['docs/protocol/bootstrap-mode.md', 'docs/operations.md']) {
+  for (const page of ['docs/operations-reference.md']) {
     const text = await readFile(new URL(`../${page}`, import.meta.url), 'utf8');
     assert.match(text, /## Bootstrap/i, `${page} must document bootstrap mode`);
     assert.match(text, /contractPaths/, `${page} must name the contract the obligation binds to`);
