@@ -179,7 +179,14 @@ async function validated(repo: Repo, github: GitHub, work: Work) {
   repo.approve(work.submission!.pr, head);
   work = await cycle(github, work);
   assert.equal(work.candidate!.sha, head);
-  return engine.execute(producer, 'evidence', work.id, { proof: 'unit:queue', sha: head, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/queue.ts'] }, randomUUID());
+  return proven(work);
+}
+/**
+ * The mechanical proof passing on the observed candidate. A review is requested only once a head's
+ * mechanical proofs pass (GY-115), so a scenario that expects a fresh review proves the head first.
+ */
+function proven(work: Work) {
+  return engine.execute(producer, 'evidence', work.id, { proof: 'unit:queue', sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/queue.ts'] }, randomUUID());
 }
 async function clearQueue() { await store.pool.query("UPDATE work_items SET document=(document-'queue')||'{\"stage\":\"done\"}' WHERE document->>'stage'<>'done'"); }
 const dismissedReview = (work: Work) => work.observation!.reviews.find(review => review.state === 'DISMISSED')!;
@@ -339,6 +346,7 @@ test('integration:tip-publication-keeps-approval — publishing a tip that chang
       assert.deepEqual(speculation.carry!.evidence.map(entry => entry.carried), [false], 'evidence proved on X does not carry onto F either');
       item = await cycle(forgedProvider, item);
       assert.equal(item.candidate!.sha, speculation.tip);
+      item = await proven(item);
       assert.equal(gate(item, 'review').passed, false);
       assert.equal(item.autoDispatch!.review?.state, 'requested', 'a fresh review is requested for the tip');
     }
@@ -386,7 +394,7 @@ test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unch
   let withdrawn = await submitted(repo, 'Verdict withdrawn', () => repo.commit([main], 'feat: other'));
   const other = repo.refs.get(`heads/${branchOf(withdrawn)}`)!;
   repo.approve(withdrawn.submission!.pr, other);
-  withdrawn = await cycle(github, withdrawn);
+  withdrawn = await proven(await cycle(github, withdrawn));
   assert.ok(gate(withdrawn, 'review').passed);
   repo.dismiss(withdrawn.submission!.pr, 'Please re-check the migration before this lands.', null, 'alice');
   withdrawn = await cycle(github, withdrawn);
@@ -401,7 +409,7 @@ test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unch
   // a person withdrawing it: only GitHub's exact message is GitHub's dismissal, and nothing is restored.
   let mentioned = await submitted(repo, 'Merge base mentioned', () => repo.commit([main], 'feat: mentioned'));
   repo.approve(mentioned.submission!.pr, repo.refs.get(`heads/${branchOf(mentioned)}`)!);
-  mentioned = await cycle(github, mentioned);
+  mentioned = await proven(await cycle(github, mentioned));
   assert.ok(gate(mentioned, 'review').passed);
   repo.dismiss(mentioned.submission!.pr, 'merge base moved, will re-review after rebase', null, 'alice');
   mentioned = await cycle(github, mentioned);
@@ -418,7 +426,7 @@ test('unit:merge-base-dismissal-classified — a merge-base dismissal on an unch
   let changes = await submitted(repo, 'Change request dismissed', () => repo.commit([main], 'feat: changes'));
   const changesHead = repo.refs.get(`heads/${branchOf(changes)}`)!;
   const changesId = repo.requestChanges(changes.submission!.pr, changesHead);
-  changes = await cycle(github, changes);
+  changes = await proven(await cycle(github, changes));
   assert.equal(gate(changes, 'review').passed, false);
   assert.ok(gate(changes, 'review').reasons.includes('Outstanding change requests must be resolved through a new review'));
   repo.dismiss(changes.submission!.pr, mergeBaseMessage, null, 'owner');
