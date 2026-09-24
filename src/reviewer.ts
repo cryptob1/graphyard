@@ -437,10 +437,11 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: 
  * it already judged — or, for a session that never took up its request (GY-93), the request
  * itself, from the launcher that sent it, so the message is complete whichever the case is.
  */
-export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout'>>) {
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout'>>, criteria?: { id: string; text: string }[]) {
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now, bound to that exact commit: gh api --method POST repos/${repository}/pulls/${record.pr}/reviews -f commit_id=${record.sha} -f event=APPROVE -f body=YOUR_JUSTIFICATION (use event=REQUEST_CHANGES instead when the change is not acceptable). `
     + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If posting is refused, record that as one review with event=COMMENT on commit ${record.sha} (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
-    + (record.baseSha && record.policyRevision !== undefined ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined)}` : '');
+    // The request is repeated only with the item's criteria: the criteria-only rule without them would leave nothing to judge.
+    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria)}` : '');
 }
 
 async function writeReviewerSession(directory: string, token: string) {
@@ -805,7 +806,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
         if (!record.idleSince) {
           record.idleSince = now.toISOString(); changed++;
           if (agent && !record.repromptedAt) markReprompted(record, now.getTime());
-          try { await retry(record, reviewRetryPrompt(config.repository, record)); }
+          const item = dependencies.work?.find(entry => entry.key === record.key && entry.policyRevision === record.policyRevision);
+          try { await retry(record, reviewRetryPrompt(config.repository, record, item?.criteria)); }
           catch { /* the grace period records the session as failed when the prompt cannot reach it */ }
         }
         else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
@@ -925,7 +927,12 @@ export function followUpThreadIds(records: ReviewRecord[], work: Work[], pending
       if (filing.failure && filing.attempts >= threadResolutionAttempts || !approvesCurrentHead(record, work)) continue;
       // Every thread the approval named, but one it could not have judged: opened after it, or not open then.
       const refused = filing.refused.map(entry => entry.slice(0, entry.indexOf(':')));
-      add(record.key, [...filing.named, ...filing.threads.map(thread => thread.id)].filter(id => !refused.includes(id)));
+      // A thread the loop resolved that an observation taken after the filing shows unresolved again
+      // was reopened: the filing never answers it twice, so it returns to rework instead of sitting aside.
+      const observation = work.find(entry => entry.key === record.key)?.observation, observedAt = Date.parse(observation?.at ?? '');
+      const reopened = Number.isFinite(observedAt) && observedAt > Date.parse(filing.at)
+        ? (observation!.conversations?.unresolved ?? []).map(thread => thread.id).filter((id): id is string => !!id && filing.resolved.includes(id)) : [];
+      add(record.key, [...filing.named, ...filing.threads.map(thread => thread.id)].filter(id => !refused.includes(id) && !reopened.includes(id)));
       continue;
     }
     if (!pending || !record.threadsListed?.length || record.verdict && record.verdict.state !== 'APPROVED' || filing && filing.reviewId === record.verdict?.reviewId) continue;

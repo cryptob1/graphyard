@@ -59,7 +59,8 @@ export const listedThreadLimit = 100;
  * reason to hold the change. `criteria` are the item's own, written by its operator.
  */
 export function criteriaRuleSection(key: string, sha: string, criteria: { id: string; text: string }[] = []) {
-  const listed = criteria.slice(0, 50).map(criterion => `[${criterion.id}] ${criterion.text.replace(/\s+/g, ' ').trim().slice(0, 1200)}`).join(' ');
+  // Each criterion whole: a condition cut from its tail would be judged FOLLOW-UP and silently dropped.
+  const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text.replace(/\s+/g, ' ').trim()}`).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
     + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `
     + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: the head fails a stated acceptance criterion, or a correctness or security defect in the changed code breaks one of the item\'s own criteria. '
@@ -169,8 +170,8 @@ export interface FollowUpItem { title: string; description: string; type: 'chore
 export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ key: string }>;
 
 const replyMutation = 'mutation($thread:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread,body:$body}){comment{id}}}';
-/** The bound on a work item's description (`src/model/work.ts`). */
-const descriptionMax = 20000;
+/** The bounds on a work item's description and on each plannedFiles entry (`src/model/work.ts`). */
+const descriptionMax = 20000, plannedPathMax = 500;
 const clipEnd = (text: string, max: number) => text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
 const clipStart = (text: string, max: number) => text.length <= max ? text : `…${text.slice(text.length - Math.max(0, max - 1))}`;
 /**
@@ -203,7 +204,8 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
     description: [intro, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget))].join('\n'),
     type: 'chore', priority: 2, dependencies: [input.workId],
     criteria: [{ id: 'AC-1', text: `Each follow-up thread listed in the description is addressed in code, or declined with a recorded reason.`, proofs: ['manual:review-followups-triaged'] }],
-    plannedFiles: [...new Set(threads.map(thread => thread.path).filter(path => path !== '(no path)'))].slice(0, 100),
+    // A path past the work schema's 500-character bound on an entry would refuse the whole item; it stays listed in the description.
+    plannedFiles: [...new Set(threads.map(thread => thread.path).filter(path => path !== '(no path)' && path.length <= plannedPathMax))].slice(0, 100),
     reason: `Follow-up threads named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,
   };
 }

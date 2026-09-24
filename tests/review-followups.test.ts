@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { followUpItem, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
-import { bindReviewer, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, threadResolutionAttempts } from '../src/reviewer.js';
+import { bindReviewer, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts } from '../src/reviewer.js';
 import { routineDecision, setAsideFollowUpThreads, threadResolutionGraceMs } from '../src/master-daemon.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -71,10 +71,19 @@ test('unit:review-criteria-only-prompt — the reviewer launch prompt states the
   assert.match(prompt, /never weaken a requirement/);
   // The thread section repeats the classification for the listed threads.
   assert.match(threadSection(H, [thread]), /BLOCKING — REQUEST_CHANGES citing the thread and the criterion it blocks — or FOLLOW-UP, named on the Follow-up threads line/);
-  // The rule stands with no thread listed, and with no criteria at hand (the retry prompt's case).
+  // The rule stands with no thread listed.
   const bare = reviewPrompt({ repository: 'owner/project' }, binding);
   assert.match(bare, /Review against the acceptance criteria of GY-64\. .*APPROVE when every criterion is met/);
   assert.doesNotMatch(bare, /unresolved review thread/);
+  // A criterion as long as the schema allows is stated whole: a condition in its tail is never judged FOLLOW-UP for want of being shown.
+  const long = [{ id: 'AC-1', text: `${'The widget counts every frob. '.repeat(66)}TAIL-CONDITION holds.`.slice(-2000) }];
+  assert.ok(reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, long).includes(`[AC-1] ${long[0].text.trim()}`));
+  // The retry prompt repeats the request with the item's criteria, and never states the rule without them.
+  const record = { key: 'GY-64', pr: 64, sha: H, baseSha: B, policyRevision: 1 };
+  const retry = reviewRetryPrompt('owner/project', record, criteria);
+  assert.match(retry, /If you have not reviewed it at all/);
+  for (const fragment of ['[AC-1] The widget counts every frob.', '[AC-2] The count is shown on the dashboard.', 'APPROVE when every criterion is met']) assert.ok(retry.includes(fragment), fragment);
+  assert.doesNotMatch(reviewRetryPrompt('owner/project', record), /If you have not reviewed it at all|Review against the acceptance criteria/);
 });
 
 test('unit:review-criteria-only-prompt — the Follow-up line is parsed exactly like the Resolved line', () => {
@@ -256,6 +265,35 @@ test('unit:review-followups-filed — the loop requests no thread rework for thr
   assert.equal(other?.binding, `${H}:threads:PRRT_later0001`);
   // Another item's follow-ups set nothing aside here.
   assert.equal(decide(item(['PRRT_follow001']), new Map([['GY-99', new Set(['PRRT_follow001'])]]))?.action, 'rework');
+});
+
+test('unit:review-followups-filed — a filed thread reopened before the merge returns to rework instead of staying set aside', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    const gh = github(approvalBody), items = creator();
+    const { reviews } = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    const filedAt = Date.parse(reviews[0].followUps!.at);
+    const open = (at: number, ids: string[]) => work({}, { at: new Date(at).toISOString(), reviews: [{ reviewer, sha: H, state: 'APPROVED', id: 77, submittedAt }], conversations: { required: true, unresolved: ids.map(id => ({ id, author: 'codex', path: 'src/a.ts', line: 3, outdated: false })) } } as Partial<Observation>);
+    // An observation from before the filing still shows the threads open: they stay set aside.
+    assert.deepEqual([...followUpThreadIds(reviews, [open(filedAt - 1000, ['PRRT_follow001', 'PRRT_follow002'])]).get('GY-64') ?? []].sort(), ['PRRT_follow001', 'PRRT_follow002']);
+    // One observed open after the loop resolved it was reopened: it is no longer set aside, so the cycle sends it to rework.
+    const reopened = open(filedAt + 1000, ['PRRT_follow001']);
+    const ids = followUpThreadIds(reviews, [reopened]);
+    assert.deepEqual([...ids.get('GY-64') ?? []], ['PRRT_follow002']);
+    const at = Date.parse(submittedAt) + threadResolutionGraceMs;
+    const decision = routineDecision(setAsideFollowUpThreads({ work: [reopened] }, ids).work[0], { autoMerge: true }, Math.max(at, filedAt + 1000));
+    assert.equal(decision?.action, 'rework');
+    assert.equal(decision?.binding, `${H}:threads:PRRT_follow001`);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a thread path past the plannedFiles bound is left out of plannedFiles and kept in the description', () => {
+  const path = `src/${'deep/'.repeat(120)}file.ts`;
+  const threads = [{ id: 'PRRT_longpath01', author: 'codex', path, line: 1, outdated: false, excerpt: 'finding' }, { id: 'PRRT_short0001', author: 'codex', path: 'src/a.ts', line: 2, outdated: false, excerpt: 'finding' }];
+  const item = followUpItem({ key: 'GY-64', workId: 'work-64', pr: 64, sha: H, reviewId: 77 }, threads);
+  assert.deepEqual(item.plannedFiles, ['src/a.ts']);
+  assert.ok(item.description.includes('PRRT_longpath01'));
 });
 
 test('unit:review-followups-filed — the item lists every follow-up thread within the description bound, however many and however long', () => {
