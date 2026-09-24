@@ -4,16 +4,46 @@ import type { ShippingPulse as Pulse } from '../src/shipping-pulse';
 const STALE_AFTER_MS = 120_000;
 const hours = (value: number | null) => value === null ? 'Unavailable' : `${value}h`;
 
+const isNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+// A number the page may show as unavailable: durations, proof totals, and a delivery's pull request number.
+const isHours = (value: unknown) => value === null || isNumber(value);
+const isString = (value: unknown): value is string => typeof value === 'string';
+const isObject = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
+
 /**
- * Whether a body read from /api/shipping-pulse has the shape the page draws: counts, weeks and
- * recent, and a production metric that says whether it is configured and carries a numeric or
- * null median. Anything else reads as unavailable instead of breaking the page.
+ * Whether a body read from /api/shipping-pulse has every field the page draws: the headline
+ * reads the production median, and Show details reads the counts, the nested production
+ * metric (split, exclusions, coverage), the weeks and the recent deliveries. Anything else
+ * reads as unavailable instead of breaking the page. Fields a server before them did not
+ * send (`configured`, `sources`, `dominantExclusion`, `unconfiguredReason`) may be absent,
+ * and the view reads their absence as it always has.
  */
 export function wellFormedPulse(body: any): body is Pulse {
-  const production = body?.prToProduction;
-  return !!body && typeof body === 'object' && !!body.counts && Array.isArray(body.weeks) && Array.isArray(body.recent)
-    && !!production && typeof production === 'object' && typeof production.configured === 'boolean'
-    && (production.medianHours === null || typeof production.medianHours === 'number');
+  if (!isObject(body)) return false;
+  const { counts, intentToMerge, prToProduction: production, range, weeks, recent } = body;
+  if (body.completeness !== 'complete' && body.completeness !== 'partial') return false;
+  if (body.partialReason != null && !isString(body.partialReason)) return false;
+  if (!isString(body.generatedAt) || !isObject(range) || !isString(range.start) || !isString(range.end)) return false;
+  if (!isObject(counts) || !isNumber(counts.days7) || !isNumber(counts.days30)) return false;
+  if (!isObject(intentToMerge) || !isHours(intentToMerge.medianHours) || !isNumber(intentToMerge.sampleSize) || !isNumber(intentToMerge.excluded)) return false;
+  if (!isObject(production)) return false;
+  if (production.configured !== undefined && typeof production.configured !== 'boolean') return false;
+  if (production.sparse !== undefined && typeof production.sparse !== 'boolean') return false;
+  if (production.unconfiguredReason != null && !isString(production.unconfiguredReason)) return false;
+  if (![production.averageHours, production.medianHours, production.p90Hours].every(isHours)) return false;
+  if (![production.sampleSize, production.eligible, production.excluded, production.coveragePercent].every(isNumber)) return false;
+  if (!isObject(production.split) || !isHours(production.split.prToMergeAverageHours) || !isHours(production.split.mergeToProductionAverageHours)) return false;
+  if (!isObject(production.exclusions) || !Object.values(production.exclusions).every(isNumber)) return false;
+  if (production.sources != null && (!isObject(production.sources) || !isNumber(production.sources.verifiedDeliveries))) return false;
+  if (production.dominantExclusion != null && (!isObject(production.dominantExclusion) || !isString(production.dominantExclusion.reason) || !isNumber(production.dominantExclusion.count))) return false;
+  if (!Array.isArray(weeks) || !weeks.every(week => isObject(week) && isString(week.start) && isNumber(week.count))) return false;
+  // The weekly chart labels its first and last week, so deliveries need at least one week to draw.
+  if (!Array.isArray(recent) || (recent.length > 0 && weeks.length === 0)) return false;
+  return recent.every(item => isObject(item) && isString(item.key) && isString(item.title) && isHours(item.pullRequest)
+    && isString(item.mergeSha) && isString(item.mergedAt) && isObject(item.quality)
+    && isHours(item.quality.passingProofs) && isHours(item.quality.requiredProofs)
+    && Array.isArray(item.quality.violations) && item.quality.violations.every(isString)
+    && (item.quality.unavailableReason == null || isString(item.quality.unavailableReason)));
 }
 
 /**

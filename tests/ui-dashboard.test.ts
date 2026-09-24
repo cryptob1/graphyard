@@ -8,7 +8,7 @@ import type { Work } from '../src/model.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
-import { flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { fixtureApi, flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
 import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../web/pr-steps.js';
 import { noRelease, releaseView } from '../web/release.js';
@@ -22,7 +22,7 @@ import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
-import { wellFormedPulse } from '../web/shipping-pulse.js';
+import { ShippingPulseView, wellFormedPulse } from '../web/shipping-pulse.js';
 import InsightsFlow, { Headline, InsightsDetails, ReplayLane, readFlow } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
 import Sidebar from '../web/components/sidebar.js';
@@ -1130,7 +1130,27 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
     assert.match(kpi({ pulse: { prToProduction }, unavailable: false, elapsed: 0, stale: false }), /<strong>Unavailable<\/strong>/);
     assert.equal(wellFormedPulse({ counts: {}, weeks: [], recent: [], prToProduction }), false);
   }
-  assert.equal(wellFormedPulse({ counts: {}, weeks: [], recent: [], ...measured }), true);
+  // A pulse is accepted only whole: Show details renders every field the validator lets through.
+  const whole = {
+    generatedAt: new Date(NOW).toISOString(), range: { start: '2026-06-29T00:00:00.000Z', end: new Date(NOW).toISOString(), weeks: 12, semantics: 'repository-utc-inclusive' },
+    completeness: 'complete', truncated: false, counts: { days7: 3, days30: 8 }, intentToMerge: { medianHours: 12.5, sampleSize: 7, excluded: 1 },
+    // No `configured`: servers before that field sent none, and the view reads its absence as configured.
+    prToProduction: { averageHours: 30, medianHours: 24, p90Hours: 48, sampleSize: 6, eligible: 8, excluded: 2, coveragePercent: 75, sparse: false, exclusions: { 'no-verifiable-production-deployment': 2 }, split: { prToMergeAverageHours: 18, mergeToProductionAverageHours: 12 } },
+    weeks: [{ start: '2026-09-14T00:00:00.000Z', end: '2026-09-20T00:00:00.000Z', count: 1 }],
+    recent: [{ key: 'GY-9', title: 'Exact delivery', pullRequest: 42, mergeSha: 'abcdef1234567890abcdef1234567890abcdef12', mergedAt: '2026-09-15T12:00:00.000Z', quality: { passingProofs: 4, requiredProofs: 4, violations: [] } }],
+  };
+  assert.equal(wellFormedPulse(whole), true, 'a pulse from a server before `configured` is not refused');
+  assert.equal(wellFormedPulse(fixtureApi('shipping-pulse')), true, 'the dashboard fixture pulse is whole');
+  assert.equal(wellFormedPulse({ ...whole, prToProduction: { ...whole.prToProduction, configured: false, unconfiguredReason: null } }), true);
+  assert.match(markup(createElement(ShippingPulseView, { pulse: whole as any, stale: false, elapsed: 0, onRefresh: noop })), /6 included of 8/);
+  assert.equal(wellFormedPulse({ ...whole, ...measured }), false, 'a production metric with only its median would crash Show details');
+  const production = whole.prToProduction as Record<string, unknown>;
+  for (const broken of [{ split: undefined }, { exclusions: null }, { sampleSize: '6' }, { eligible: undefined }, { excluded: null }, { coveragePercent: undefined }, { configured: 'yes' }, { dominantExclusion: { count: 2 } }]) {
+    assert.equal(wellFormedPulse({ ...whole, prToProduction: { ...production, ...broken } }), false, `refused: ${JSON.stringify(broken)}`);
+  }
+  for (const broken of [{ counts: {} }, { weeks: [] }, { recent: [{ key: 'GY-9' }] }, { intentToMerge: null }, { completeness: undefined }]) {
+    assert.equal(wellFormedPulse({ ...whole, ...broken }), false, `refused: ${JSON.stringify(broken)}`);
+  }
   // Show details: exactly one toggle on the page, collapsed, and nothing of the detail read or drawn until it opens.
   assert.equal(page.match(/Show details/g)?.length, 1, 'one Show details toggle');
   assert.match(page, /<details class="insight-details"><summary>Show details<\/summary><\/details>/, 'collapsed and empty until opened');
