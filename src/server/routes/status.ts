@@ -14,6 +14,11 @@ import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
 import { eventStats } from '../../store/snapshot-delta.js';
+import { productionEnvironmentFromEnv } from '../../flow-analytics.js';
+
+// Read once at boot, as the flow analytics route does, so the dashboard reads a release as live
+// under the same production environment the flow report ends its production phase on.
+const productionEnvironment = productionEnvironmentFromEnv();
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -51,7 +56,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null,
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment,
         // What the timeline reconstruction has done in this process, and any failure it hit.
         pipelineBackfill: pipelineBackfillState(observedAt.getTime()),
         // The fleet as the registry holds it: each account's runtime, model, role eligibility, live

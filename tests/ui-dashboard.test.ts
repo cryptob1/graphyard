@@ -727,7 +727,7 @@ test('unit:ui-workers-finish — agent names and roles never break mid-word, Hea
   assert.match(await read('browser-tests/screenshots.spec.ts'), /\.sessions-table \.agent-name, \.sessions-table td\[data-label=Role\][\s\S]*getClientRects[\s\S]*toEqual\(\[\]\)/);
 });
 
-test('GY-161 review: where the production watch observes production, a merge waits at Deploy until it is served (a failed deployment is Blocked); the configured production environment decides Live; the item page reads its checks from the test gate', () => {
+test('GY-161 review: where the production watch observes production, a merge waits at Deploy until it is served (a failed deployment is Blocked); the configured production environment decides Live; the item page reads its checks from the test gate', async () => {
   const real = realDeliveredWork() as unknown as Work[];
   const [waiting, failing, deployed] = real;
   const status = (production: unknown, productionEnvironment?: string) => ({ ...boardStatus('admin'), production, ...(productionEnvironment ? { productionEnvironment } : {}) });
@@ -762,6 +762,8 @@ test('GY-161 review: where the production watch observes production, a merge wai
   const live = { ...waiting, releaseDeliveries: [verified('graphyard / production')] } as Work;
   const named = releaseView(status(observed, 'graphyard / production'));
   assert.equal(named.environment, 'graphyard / production');
+  // The server reads that name the way the flow analytics route does and carries it on status.
+  assert.match(await read('src/server/routes/status.ts'), /const productionEnvironment = productionEnvironmentFromEnv\(\);[\s\S]*production\?\.status\(\) \?\? null, productionEnvironment,/);
   assert.equal(releasedAt(live, named), NOW - hour); assert.equal(prSteps(live, NOW, named).label, 'Live');
   assert.equal(groupOf(live, NOW, undefined, undefined, named), 'shipped', 'a verified release outranks a pending watch entry');
   assert.equal(releasedAt(live), null, 'under the default name it is not live');
