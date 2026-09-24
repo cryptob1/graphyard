@@ -23,6 +23,7 @@ import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
 import { ShippingPulseView, wellFormedPulse } from '../web/shipping-pulse.js';
+import { wellFormedFlowReport } from '../web/flow-analytics.js';
 import InsightsFlow, { Headline, InsightsDetails, ReplayLane, readFlow } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
 import Sidebar from '../web/components/sidebar.js';
@@ -1168,6 +1169,17 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   assert.match(opened, /Shipping pulse unavailable/);
   assert.match(opened, /<h2 id="flow-analytics-title">Flow analytics<\/h2>[\s\S]*Where work is waiting[\s\S]*Cumulative flow[\s\S]*Coverage, exclusions and definitions/);
   assert.doesNotMatch(opened, /Show details|<details class="flow-details"|<h1>/, 'the detail is not a page of its own and folds nothing again');
+  // A flow report is accepted only whole, like the pulse: a shaped but malformed body would throw on render under Show details.
+  assert.equal(wellFormedFlowReport(report), true, 'the fixture report, from computeFlow, is whole');
+  assert.equal(wellFormedFlowReport(flowApi([])('analytics/flow?window=30')), true, 'an empty window is whole');
+  assert.equal(wellFormedFlowReport({ coverage: { workItems: 1 }, bottleneck: { categories: [] } }), false, 'the shape the reviewer named is refused');
+  const flowWhole = report as Record<string, any>;
+  for (const [field, broken] of [['coverage', { ...flowWhole.coverage, projection: undefined }], ['window', null], ['bottleneck', { ...flowWhole.bottleneck, scope: {} }],
+    ['bottleneck', { ...flowWhole.bottleneck, unclassified: 'none' }], ['cumulativeFlow', { ...flowWhole.cumulativeFlow, buckets: ['not a day'] }], ['wip', []],
+    ['phases', [{ phase: 1, n: 0, medianMs: null, p90Ms: null, unknown: {} }]], ['operations', { ...flowWhole.operations, deployments: { ...flowWhole.operations.deployments, latency: null } }],
+    ['definitions', { leadTime: { label: 'Lead time', formula: 'x' } }], ['privacy', { statement: { text: 'an object is no text' } }], ['availableTypes', 'feature']] as const) {
+    assert.equal(wellFormedFlowReport({ ...flowWhole, [field]: broken }), false, `refused: ${field} ${JSON.stringify(broken)?.slice(0, 80)}`);
+  }
   // The former tabs are gone from the registry; Validation and Releases moved under Shipped.
   for (const id of ['pulse', 'flow']) assert.ok(!views.some(view => view.id === id), id);
   for (const id of ['validation', 'releases']) assert.equal(views.find(view => view.id === id)!.section, 'shipped', id);

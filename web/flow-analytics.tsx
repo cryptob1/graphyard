@@ -24,6 +24,64 @@ function duration(ms: number | null | undefined) {
 function count(value: number | null | undefined) { return value === null || value === undefined ? '—' : String(value); }
 function label(bucket: string) { return new Date(bucket).toISOString().slice(5, 10); }
 
+/**
+ * The shape of every field this page reads from /api/analytics/flow. A string is a leaf, which
+ * must be present and drawable as text (a primitive or null); `day` is a bucket the tables label
+ * with its date; `text` is a string the page edits; `[shape]` is an array of that shape and `[]`
+ * any array; an object needs each named field, and `{}` is any object.
+ */
+type Shape = 'leaf' | 'text' | 'day' | Shape[] | { [field: string]: Shape };
+const leaves = (...fields: string[]) => Object.fromEntries(fields.map(field => [field, 'leaf' as const]));
+const flowShape: Shape = {
+  ...leaves('generatedAt', 'timezone'),
+  window: leaves('from', 'to', 'boundaries'),
+  coverage: {
+    ...leaves('workItems', 'facts', 'truncated', 'workItemsTruncated', 'deploymentsTruncated', 'deploymentMergesTruncated', 'sliceFilterTruncated', 'sparse', 'scanLimit', 'workItemScanLimit', 'deploymentScanLimit', 'withObservedCandidate', 'providerTimestamps', 'controlPlaneTimestamps'),
+    projection: leaves('stale', 'pendingEvents'), slices: leaves('observed', 'declared', 'unclassified', 'limit', 'truncatedInRepository'),
+  },
+  bottleneck: { ...leaves('narrative', 'observedAt'), categories: [leaves('id', 'label', 'count', 'definition')], scope: leaves('undelivered', 'workItems'), unclassified: ['leaf'] },
+  cumulativeFlow: { buckets: ['day'], series: [{ stage: 'leaf', counts: ['leaf'] }] },
+  leadTime: { bands: leaves('n', 'medianMs', 'p75Ms', 'p90Ms', 'sparse', 'outliers'), trend: [{ ...leaves('n', 'medianMs', 'p75Ms', 'p90Ms'), bucket: 'day' }] },
+  throughput: [leaves('delivered')],
+  stageDwell: [leaves('stage', 'sparse', 'n', 'averageMs', 'medianMs', 'p90Ms')],
+  wip: [leaves('count', 'oldestMs')],
+  queueVsActive: leaves('queueMs', 'activeMs', 'openMs'),
+  mergeReadyDwell: { ...leaves('medianMs', 'n'), current: [] },
+  phases: [{ ...leaves('n', 'medianMs', 'p90Ms'), phase: 'text', unknown: {} }],
+  ci: leaves('runs', 'failures', 'retries', 'medianMs', 'precision'),
+  evidence: { ...leaves('recorded', 'trusted', 'expired', 'superseded'), wait: leaves('medianMs', 'n') },
+  operations: {
+    blockers: [leaves('reason', 'count')], refusals: [leaves('reason', 'count')],
+    criticalPath: { length: 'leaf', chain: ['leaf'] }, unblocked: { count: 'leaf', items: ['leaf'] },
+    review: { ...leaves('approvals', 'independentApprovals', 'findings', 'reworkRequests', 'candidates', 'reworkRate'), rounds: leaves('median') },
+    leases: leaves('claims', 'reassignments', 'losses', 'expirations', 'utilizationRatio', 'idleCapacityMs'),
+    queues: [leaves('queue', 'averageDepth', 'maxDepth', 'definition')],
+    deployments: { ...leaves('observations', 'succeeded', 'failed', 'rollbacks', 'perDay'), environments: ['leaf'], latency: leaves('medianMs', 'n'), pullRequestsPerDeployment: leaves('max') },
+  },
+  unavailable: [leaves('metric', 'reason')],
+  exclusions: [{ ...leaves('reason', 'count'), items: ['leaf'] }],
+  privacy: leaves('statement'),
+};
+function fits(value: unknown, shape: Shape): boolean {
+  if (shape === 'leaf') return value === null || (value !== undefined && typeof value !== 'object');
+  if (shape === 'text') return typeof value === 'string';
+  if (shape === 'day') return (typeof value === 'string' || typeof value === 'number') && Number.isFinite(new Date(value).getTime());
+  if (Array.isArray(shape)) return Array.isArray(value) && (shape.length === 0 || value.every(entry => fits(entry, shape[0])));
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.entries(shape).every(([field, inner]) => fits((value as any)[field], inner));
+}
+
+/**
+ * Whether a body read from /api/analytics/flow has every field this page draws, so a malformed
+ * body reads as unavailable instead of breaking Insights, which mounts it under Show details.
+ * The stage table reads the work in progress row by row beside the dwell rows, so it needs as many.
+ */
+export function wellFormedFlowReport(body: any): boolean {
+  if (!fits(body, flowShape) || body.wip.length < body.stageDwell.length) return false;
+  if (![body.availableTypes, body.availableSlices].every(list => list === undefined || fits(list, ['leaf']))) return false;
+  return !!body.definitions && typeof body.definitions === 'object'
+    && Object.values(body.definitions).every(definition => fits(definition, { ...leaves('label', 'formula'), sources: ['leaf'] }));
+}
+
 export const toMerged = ['pr-created-to-review-start', 'review-start-to-review-complete', 'review-complete-to-evidence-complete', 'evidence-complete-to-merge-authorized', 'merge-authorized-to-merged'];
 /**
  * Handed in to merged, per merged commit, from the phase drill-down rows: the sum of the five
@@ -118,7 +176,7 @@ export default function FlowAnalytics({ request, token, canAudit, initial, folde
     try {
       const [value, merged] = await Promise.all([request(`analytics/flow?${query}`), mergeTime(request, query)]);
       // Insights shows this report beside the shipping pulse, so a malformed body reads as unavailable instead of breaking the page.
-      if (!value || typeof value !== 'object' || !value.coverage || !value.bottleneck) throw new Error('The flow analytics report is malformed');
+      if (!wellFormedFlowReport(value)) throw new Error('The flow analytics report is malformed');
       if (current === version.current) { setReport(value); setMerge(merged); setError(''); }
     }
     catch (e) { if (current === version.current) setError((e as Error).message); }
@@ -129,7 +187,10 @@ export default function FlowAnalytics({ request, token, canAudit, initial, folde
     if (!drill) { setRows(null); setDrillError(''); setExported(''); return; }
     let active = true;
     void request(`analytics/flow/drilldown?${query}&metric=${drill.metric}${drill.key ? `&key=${encodeURIComponent(drill.key)}` : ''}`)
-      .then(value => { if (active) setRows(value); })
+      .then(value => {
+        if (!value || !Array.isArray(value.columns) || !Array.isArray(value.rows)) throw new Error('The drill-down records are malformed');
+        if (active) setRows(value);
+      })
       .catch(e => { if (active) setDrillError((e as Error).message); });
     return () => { active = false; };
   }, [drill, query]);
