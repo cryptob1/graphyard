@@ -100,7 +100,7 @@ export async function main() {
       if (preflight) await announcePreflight(preflight);
       await step('processJob', () => Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))));
     }
-  });
+  }, 2000);
   http.listen(Number(process.env.PORT ?? 4310), process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${process.env.PORT ?? 4310}; GitHub ${github ? 'connected' : 'not configured'}`));
   const shutdown = () => { reconciliation.stop(); watching.stop(); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
