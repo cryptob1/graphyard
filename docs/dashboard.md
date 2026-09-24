@@ -26,4 +26,4 @@ Moving rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy
 
 ## Insights
 
-**Flow** shows each item's step and replays the last day. **Shipping pulse** measures PR-to-production time from provider observations (`POST /api/production-observations`) or `master verify-deployment`. **Flow analytics** shows where work waits. **Interventions** counts each time someone stepped in; with `GRAPHYARD_INTERVENTION_PATTERNS=1`, a repeated pattern opens a `bug` item. Missing values read `Unavailable`, never zero.
+**Pipeline** shows each item's step and replays the last day. **Shipping pulse** measures PR-to-production time from provider observations (`POST /api/production-observations`) or `master verify-deployment`. **Flow analytics** shows where work waits. **Interventions** counts each time someone stepped in; with `GRAPHYARD_INTERVENTION_PATTERNS=1`, a repeated pattern opens a `bug` item. Missing values read `Unavailable`, never zero.

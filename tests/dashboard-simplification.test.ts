@@ -155,7 +155,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
   assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Insights', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
-  for (const page of ['Flow', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'insights', page);
+  for (const page of ['Pipeline', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'insights', page);
   for (const page of ['Test cases', 'Proof authority', 'Operator automation', 'Agent fleet']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
@@ -163,7 +163,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
   assert.equal(sidebar.match(/class="nav planned"/g)?.length, 1);
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs(dashboard(), 'flow'), ['Flow', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']);
+  assert.deepEqual(tabs(dashboard(), 'flow'), ['Pipeline', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'grants'), ['Test cases', 'Proof authority', 'Operator automation', 'Agent fleet']);
   assert.deepEqual(tabs(dashboard(), 'work'), [], 'a section with one page draws no tab row');
   assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
@@ -177,7 +177,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   const probed = await probeFeatures(async path => path === 'operator-agents' ? [] : { environments: [], releases: [], requests: [], candidates: [] }, true, false);
   assert.deepEqual(probed.features, { releases: false, validation: false, automation: false });
   const none = dashboard({}, 'admin', probed.features);
-  assert.deepEqual(tabs(none, 'flow'), ['Flow', 'Shipping pulse', 'Flow analytics']);
+  assert.deepEqual(tabs(none, 'flow'), ['Pipeline', 'Shipping pulse', 'Flow analytics']);
   assert.deepEqual(tabs(none, 'grants'), ['Test cases', 'Proof authority', 'Agent fleet']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: null, automation: null }, 'an outage never hides a page');
@@ -320,7 +320,7 @@ test('plain-language support for manual:plain-language-review — every visible 
     assert.deepEqual(bare(html), [], `${name}: every technical word a newcomer cannot guess carries its definition in place`);
   }
   // The item view's commit and pull request are the glossary's, not a bare identifier.
-  assert.match(itemView('GY-16'), /<abbr class="term" title="[^"]*forty letters[^"]*"[^>]*><code class="sha" title="e{40}">e{40}<\/code><\/abbr>/);
+  assert.match(itemView('GY-16'), /<abbr class="term" title="[^"]*forty letters[^"]*"[^>]*><code class="sha" title="e{40}">e{8}<\/code><\/abbr>/);
   assert.match(home(), /<abbr class="term" title="The proposed code change on GitHub[^"]*"[^>]*>PR<\/abbr> #42/);
   assert.match(form, /A proof name starts with its kind/);
   for (const example of ['unit:login-rejects-bad-password', 'integration:claim-safety', 'e2e:checkout', 'manual:copy-review']) assert.ok(form.includes(example), example);

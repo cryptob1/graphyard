@@ -64,9 +64,10 @@ export const views: readonly View[] = [
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
   // What shipping cost people (GY-98): every intervention, and the operator's judgement about what shipped, as a tab beside the delivered list.
   { id: 'interventions', icon: '☝', label: 'Interventions', section: 'shipped', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <InterventionsPage {...dashboard}/> },
-  // The Flow panel (GY-161): where every open item is now, the last day replayed, landed per day and where the time goes.
+  // The Pipeline panel (GY-161): where every open item is now, the last day replayed, landed per day and where the time goes.
+  // Named apart from Flow analytics (GY-168), so no two tabs read "Flow…".
   // It reads the flow analytics routes, which an operator agent's scoped API refuses, so that role is not offered it.
-  { id: 'insights', icon: '◷', label: 'Flow', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <InsightsFlow {...dashboard}/> },
+  { id: 'insights', icon: '◷', label: 'Pipeline', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <InsightsFlow {...dashboard}/> },
   { id: 'pulse', icon: '∿', label: 'Shipping pulse', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <ShippingPulse token={dashboard.token} repository={dashboard.status?.repository}/> },
   { id: 'flow', icon: '◷', label: 'Flow analytics', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <FlowAnalytics request={dashboard.api} token={dashboard.token} canAudit={['admin', 'coordinator', 'producer'].includes(role(dashboard))}/> },
   { id: 'validation', icon: '↻', label: 'Validation', section: 'insights', visible: dashboard => configured(dashboard.features.validation), render: dashboard => <ValidationView api={dashboard.api} work={dashboard.work}/> },

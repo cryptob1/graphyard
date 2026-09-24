@@ -17,6 +17,7 @@ import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-repl
 import { jargon } from '../web/plain-status.js';
 import { formatAge } from '../web/duration.js';
 import { primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
+import { endedItemIdleMs, workersView } from '../web/workers-view.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
@@ -133,7 +134,8 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   assert.ok(!servedThisWeek(pending).includes('GY-18'));
   assert.equal(shippedLine(pendingPage), servedThisWeek(pending).length);
   assert.ok(rowsOf(pendingPage, 'moving').includes('GY-18'), 'the pending merge is counted once, in Moving');
-  assert.doesNotMatch(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /GY-18/);
+  // The footer names it only as the latest merge (GY-168), never as shipped.
+  assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · merged /);
   // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
   const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
   assert.ok(classify(stalled, NOW).byGroup.blocked.some(item => item.key === 'GY-15'));
@@ -559,9 +561,9 @@ test('unit:ui-review-polish — step names sit over their segments, commits show
   // Validate starts at the hand-in, Deploy at the merge, when no recorded move says otherwise.
   const handed = { ...testing, pipeline: { attempts: [], submittedAt: new Date(NOW - 7 * hour).toISOString(), resubmittedAt: new Date(NOW - 2 * hour).toISOString(), reworkRounds: 1, interventions: { blocked: 0, requirements: 0 } }, gates: testing.gates.map(gate => gate.name === 'build' ? { ...gate, passed: false, reasons: ['Pull request has not been independently observed'] } : gate) } as unknown as Work;
   assert.equal(prSteps(handed, NOW).current, 'validate'); assert.equal(stepSince(handed, NOW), new Date(NOW - 2 * hour).toISOString());
-  // Commits show 8 characters; the whole SHA stays in the text, so selecting it copies the exact commit.
+  // Commits show 8 characters as their text (GY-168); the whole SHA stays in the title and the link.
   const sha = 'abcdef1234567890abcdef1234567890abcdef12';
-  assert.match(markup(createElement(CandidateSha, { repository: 'fixture/shop', sha })), new RegExp(`<code class="sha" title="${sha}">${sha}</code>`));
+  assert.match(markup(createElement(CandidateSha, { repository: 'fixture/shop', sha })), new RegExp(`href="[^"]*/commit/${sha}"[\\s\\S]*<code class="sha" title="${sha}">${sha.slice(0, 8)}</code>`));
   assert.match(css, /code\.sha\{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;/);
   const sources = ['web', 'web/pages', 'web/components'].flatMap(dir => readdirSync(new URL(`${dir}/`, root)).filter(name => /\.tsx?$/.test(name)).map(name => `${dir}/${name}`));
   for (const path of sources) for (const [, count] of (await read(path)).matchAll(/(?:[sS]ha|[tT]ip|[bB]ase)!?\)?\.slice\(0, ?(\d+)\)/g)) assert.equal(count, '8', `${path} shows ${count} characters of a commit`);
@@ -627,14 +629,14 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   for (const key of keys) assert.ok(!rowsOf(page, 'moving').includes(key) && !page.includes(`data-row="${key}"`), `${key} has no Work row`);
   assert.equal(tileCount(page, 'moving'), byGroup.moving.length);
   // Shipped this week counts only what the release was seen serving this week (AGENTS.md: a delivery
-  // stays pending until the release serves it); the merges not yet seen live are counted apart.
+  // stays pending until the release serves it); the merges not yet seen live are counted apart, from
+  // the production observation (GY-168) — with none, the page claims no count.
   const week = 7 * 24 * hour;
   assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(page)?.[1]), work.filter(item => groupOf(item, NOW) === 'shipped' && releasedAt(item) !== null && NOW - releasedAt(item)! <= week).length);
-  const unseen = work.filter(item => item.stage === 'done' && !item.closure && !!item.delivery && releasedAt(item) === null && NOW - mergedAt(item) <= week).length;
-  assert.ok(real.filter(item => NOW - mergedAt(item) <= week).length >= 3 && unseen >= 3);
-  assert.equal(Number(/data-unreleased="(\d+)"/.exec(page)?.[1]), unseen);
-  assert.match(page, new RegExp(`${unseen} merged, not yet seen live\\.`));
-  for (const key of keys) assert.doesNotMatch(page.slice(page.indexOf('aria-label="Shipped this week"')), new RegExp(`>${key}<`), `${key} is not counted as shipped`);
+  assert.ok(real.filter(item => NOW - mergedAt(item) <= week).length >= 3);
+  assert.doesNotMatch(page, /data-unreleased=|not yet seen live/);
+  // None of them is counted as shipped; the newest merge is named only as the latest merge (GY-168).
+  for (const key of keys) assert.doesNotMatch(page.slice(page.indexOf('aria-label="Shipped this week"')).replace(new RegExp(`data-latest="${key}"><span class="mono">${key}</span>[\\s\\S]*?</button> · merged `), ''), new RegExp(`>${key}<`), `${key} is not counted as shipped`);
   const live = home(dashboard({ work: [...board(), ...real.map(item => item.key === real[0].key ? released : item)] }));
   assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(live)?.[1]), Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(page)?.[1]) + 1, 'seen live, it counts');
   // Insights: none of them is a Now dot, none is counted in the flow, and the replay takes each out of Deploy.
@@ -697,7 +699,7 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   assert.match(await read('src/server/routes/flow-analytics.ts'), /production: production\?\.status\(\) \?\? null/);
   // Merges the watch holds at Deploy (Moving, Blocked) are still merged and not yet seen live: the footer counts them.
   const watched = home(dashboard({ work, status: { ...boardStatus(), production: watch } as any }));
-  assert.equal(Number(/data-unreleased="(\d+)"/.exec(watched)?.[1]), unseen);
+  assert.equal(Number(/data-unreleased="(\d+)"/.exec(watched)?.[1]), 2, `${keys[0]} pending and ${keys[1]} failed`);
   // A production incident blocks at Deploy and says so, on the row and the item page — never "Shipped".
   assert.equal(groupOf(stale, NOW, undefined, undefined, failing), 'blocked');
   const row = markup(createElement(WorkCard, { item: stale, now: NOW, onOpen: noop, release: failing }));
@@ -831,9 +833,9 @@ test('GY-161 review: where the production watch observes production, a merge wai
   const before = Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(home(dashboard({ work: [...board(), waiting], status: namedStatus })))?.[1]);
   const withLive = home(dashboard({ work: [...board(), live], status: namedStatus }));
   assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(withLive)?.[1]), before + 1);
-  // The footer's "Latest" dates the release under that same name, not from the Unix epoch.
+  // The footer's "Latest" is the newest merge, dated from that merge, not from the Unix epoch (GY-168).
   const footer = /aria-label="Shipped this week">[\s\S]*$/.exec(withLive)![0];
-  assert.match(footer, new RegExp(`${live.key}</span> <span data-title="true">[^<]*</span></button> · ${formatAge(NOW - hour, NOW)} ago`), footer.slice(0, 600));
+  assert.match(footer, new RegExp(`data-latest="${live.key}"><span class="mono">${live.key}</span> <span data-title="true">[^<]*</span></button> · merged ${formatAge(mergedAt(live), NOW)} ago`), footer.slice(0, 600));
   // The item page's Checks line reads each check as the test gate does: only the trusted App's runs
   // count, so a newer untrusted run of the same name neither passes nor fails a check.
   const handedIn = find('GY-22');
@@ -1011,4 +1013,152 @@ test('GY-161 review: a step entered before the drill-down window still starts it
   const cut = computeFlow(truncated, { days: 30 });
   assert.ok(!(flowDrilldown(truncated, cut, { metric: 'steps', key: null, authorized: true }).rows as { detail: string }[]).some(row => row.detail === 'deploy to outside'), 'nor a drill-down row');
   assert.equal(cut.stepDwell.find(entry => entry.step === 'deploy')?.n ?? 0, 0, 'nor a completed Deploy stay');
+});
+
+// GY-168: the follow-ups from the browser review of GY-161's merge.
+
+/** Hex runs long enough to be a commit SHA (at least one letter, so a numeric id is not one). */
+const longHex = (text: string) => [...text.matchAll(/\b[0-9a-f]{9,}\b/gi)].map(match => match[0]).filter(hex => /[a-f]/i.test(hex));
+
+test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page text of the item page and every other page; only a title, link or copy action carries the whole SHA', () => {
+  const head = '23d8dfbf674cbc8586cc98238acac9143a1765fa', base = '9c41be07d2f5a8e6b3c0d1f47e2a9b8c6d5e4f30', deployed = 'b7e1f0a2c3d4e5f60718293a4b5c6d7e8f901234';
+  const real = realDeliveredWork() as unknown as Work[];
+  const reviewing = find('GY-22');
+  const at = (ago: number) => new Date(NOW - ago).toISOString();
+  // An open item whose recorded text names full SHAs everywhere the control plane writes one.
+  const loaded = { ...reviewing, candidate: { ...reviewing.candidate!, sha: head, baseSha: base },
+    blocker: `Rebase onto ${base}`, violations: [`Commit ${head} was pushed after review`],
+    gates: reviewing.gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: [`Independent approval of ${head} is required`] }
+      : gate.name === 'merge' ? { ...gate, passed: false, reasons: [`Speculative tip on predicted base ${base} is stale`] } : gate),
+    observation: { ...reviewing.observation!, agentReview: { reason: `Reviewed ${head} against ${base}` } },
+    nextAction: { kind: 'review', gate: 'review', refusal: `Independent approval of ${head} is required`, reason: `review the head ${head}`, llmRole: null },
+    actionQueue: { actions: [{ id: 'a1', kind: 'review', state: 'pending', claim: null, requestedBy: 'graphyard', requestedAt: at(hour), attempts: 1, resolution: `reviewed ${base}`,
+      history: [{ at: at(hour), event: 'requested', reason: `review ${head}`, result: null, executor: null, requester: 'graphyard' }] }], history: [] },
+    queueEjection: { at: at(2 * hour), reason: `Speculative tip ${base} was stale` },
+    agentRequests: [{ id: 'q1', type: 'scope', state: 'open', requestedBy: 'worker-1', reason: `Widen scope for ${head}`, paths: ['web/'], decider: { who: 'Master agent', command: null }, at: at(hour), releasedLease: false }],
+    sessions: [
+      { id: 'r22', kind: 'review', principal: 'reviewer-1', epoch: null, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: 'w1:r22', agentName: null, role: 'review', head,
+        attach: 'herdr pane attach w1:r22', transcript: null, subject: `GY-22: review ${head}`, startedAt: at(10 * 60_000), updatedAt: at(60_000), endedAt: null, state: 'running', outcome: null },
+      { id: 'r22b', kind: 'review', principal: 'reviewer-1', epoch: null, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: 'w1:r22b', agentName: null, role: 'review', head: base,
+        attach: null, transcript: null, subject: `GY-22: review ${base}`, startedAt: at(3 * hour), updatedAt: at(2 * hour), endedAt: at(2 * hour), state: 'finished', outcome: `superseded: ${base} was replaced by ${head}` }],
+  } as unknown as Work;
+  // A merge the release was observed serving, and one a post-deployment check records a deployment for.
+  const merged = { ...real[0], delivery: { ...real[0].delivery!, mergeSha: head } } as Work;
+  const smoked = { ...real[1], policy: { ...real[1].policy, deploySmoke: true }, delivery: { ...real[1].delivery!, mergeSha: base,
+    deployment: { sha: deployed, covers: 'descendant', source: 'railway', observedAt: at(hour), observer: 'master' } } } as unknown as Work;
+  const work = [...board().filter(item => item.id !== reviewing.id), loaded, merged, smoked, ...real.slice(2)];
+  const status = { ...boardStatus(), production: { observedAt: at(0), serving: deployed, error: null, deployed: [merged.key], pending: [smoked.key], incidents: [] } };
+  const d = dashboard({ work, status: status as any });
+  // All rendered text, folded sections included; attributes (a title, a link, a copy action) are not text.
+  const text = (html: string) => html.replace(/<[^>]*>/g, ' ');
+  // Every item page: no whole SHA, and no hex run longer than 8, in what a reader sees.
+  for (const item of work) {
+    const page = markup(createElement(WorkDetails, { ...d, item }));
+    assert.deepEqual(longHex(text(page)), [], `${item.key} item page text`);
+  }
+  const itemText = text(markup(createElement(WorkDetails, { ...d, item: loaded })));
+  for (const sha of [head, base]) assert.ok(itemText.includes(sha.slice(0, 8)), `${sha.slice(0, 8)} is shown`);
+  assert.ok(!itemText.includes(head) && !itemText.includes(base));
+  const mergePage = markup(createElement(WorkDetails, { ...d, item: smoked }));
+  assert.ok(text(mergePage).includes(deployed.slice(0, 8)) && !text(mergePage).includes(deployed), 'the deployed commit is 8 characters too');
+  // The whole SHA is still reachable, as the commit's title and link (never its text).
+  const commit = markup(createElement(CandidateSha, { repository: 'fixture/shop', sha: head }));
+  assert.match(commit, new RegExp(`href="https://github.com/fixture/shop/commit/${head}"`));
+  assert.match(commit, new RegExp(`<code class="sha" title="${head}">${head.slice(0, 8)}</code>`));
+  // Every other page the dashboard draws, over the same items.
+  for (const view of visibleViews(d)) assert.deepEqual(longHex(text(markup(createElement(() => view.render(d) as ReactElement)))), [], `${view.label} page text`);
+  for (const item of work) assert.deepEqual(longHex(text(markup(createElement(WorkCard, { item, now: NOW, onOpen: noop, release: releaseView(status) })))), [], `${item.key} card text`);
+  // Numbers are not SHAs: a review or run id stays whole.
+  assert.equal(shortShas(`review 5303188884 on ${head}`), `review 5303188884 on ${head.slice(0, 8)}`);
+});
+
+test('unit:ui-insights-tabs-and-ended-sessions — the Insights tabs have distinct, self-explanatory names (no two called Flow…), and Workers hides sessions not seen for over an hour on delivered or closed items behind a collapsed Ended group', () => {
+  // Insights: every tab named apart, and at most one of them starts "Flow".
+  const configured = { validation: true, releases: true, automation: true };
+  const d = dashboard({ features: configured });
+  const tabs = [...markup(createElement(TopBar, { ...d, view: 'insights' })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
+  assert.deepEqual(tabs, ['Pipeline', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']);
+  assert.equal(new Set(tabs).size, tabs.length, 'distinct names');
+  const firstWords = tabs.map(tab => tab.split(' ')[0].toLowerCase());
+  assert.equal(new Set(firstWords).size, tabs.length, 'no two tabs share a first word');
+  assert.ok(tabs.filter(tab => /^Flow/i.test(tab)).length <= 1, 'no two tabs called Flow…');
+  assert.equal(views.find(view => view.id === 'insights')!.label, 'Pipeline');
+  // The page under the tab carries the same name.
+  assert.match(markup(createElement(InsightsFlow, d)), /<h1>Pipeline<\/h1>/);
+
+  // Workers: sessions recorded running but not seen for more than an hour, on a delivered or a closed item.
+  const real = realDeliveredWork() as unknown as Work[];
+  const at = (ago: number) => new Date(NOW - ago).toISOString();
+  const running = (id: string, subject: string, seenAgo: number) => ({ id, kind: 'implementation', principal: `worker-${id}`, epoch: 1, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: `w1:${id}`,
+    agentName: `claude-${id}`, role: null, head: null, attach: `herdr pane attach w1:${id}`, transcript: null, subject, startedAt: at(seenAgo + hour), updatedAt: at(seenAgo), endedAt: null, state: 'running', outcome: null });
+  const delivered = { ...real[0], sessions: [running('d1', 'Implement GY-163', 3 * hour), running('d2', 'Prove GY-163', 30 * 60_000)] } as unknown as Work;
+  const closedItem = { ...find('GY-22'), stage: 'done', closure: { kind: 'obsolete', ref: null, reason: 'No longer needed', by: 'operator', at: at(5 * hour), from: 'review' },
+    sessions: [running('c1', 'Review GY-22', 2 * hour)] } as unknown as Work;
+  const openItem = find('GY-12');
+  const idle = { ...openItem, sessions: [...(openItem.sessions ?? []), running('o1', 'Implement GY-12 again', 3 * hour)] } as unknown as Work;
+  const work = [...board().filter(item => ![closedItem.id, openItem.id].includes(item.id)), closedItem, idle, delivered, ...real.slice(1)];
+  const view = workersView(work, new Date(NOW));
+  const ids = (rows: { id: string }[]) => rows.map(row => row.id);
+  // Over an hour unseen on a finished item: filed with the ended sessions, saying why.
+  for (const id of ['d1', 'c1']) { assert.ok(!ids(view.running).includes(id), `${id} is not open`); assert.ok(ids(view.finished).includes(id), `${id} is ended`); }
+  assert.equal(view.finished.find(row => row.id === 'd1')!.leftOn, 'delivered'); assert.equal(view.finished.find(row => row.id === 'c1')!.leftOn, 'closed');
+  // Under an hour, or on an open item, it stays in the open table (marked stale, never live).
+  for (const id of ['d2', 'o1', 's12']) assert.ok(ids(view.running).includes(id), `${id} stays open`);
+  assert.equal(view.running.find(row => row.id === 'o1')!.leftOn, null);
+  assert.equal(endedItemIdleMs, hour);
+  // The principal of a left-over session is idle, not on the finished item.
+  assert.equal(view.principals.find(entry => entry.principal === 'worker-d1')!.current, null);
+  const html = markup(createElement(WorkersPage, dashboard({ work })));
+  const open = html.slice(html.indexOf('aria-label="Agent sessions"'), html.indexOf('<details class="finished-sessions"'));
+  const ended = /<details class="finished-sessions"><summary>Ended <span class="count">(\d+)<\/span><\/summary>([\s\S]*?)<\/details>/.exec(html)!;
+  for (const id of ['d1', 'c1']) { assert.doesNotMatch(open, new RegExp(`data-session="${id}"`)); assert.match(ended[2], new RegExp(`data-session="${id}"`)); }
+  for (const id of ['d2', 'o1']) assert.match(open, new RegExp(`data-session="${id}"`));
+  assert.equal(Number(ended[1]), view.finished.length);
+  // The Ended group is collapsed: none of its rows is in the visible text.
+  const visible = visibleWords(html).join(' ');
+  assert.ok(!visible.includes('claude-d1') && !visible.includes('claude-c1'), 'folded away');
+  assert.ok(visible.includes('claude-d2') && visible.includes('claude-o1'));
+  // The heading counts neither as open nor as not seen recently.
+  const staleOpen = view.running.filter(row => row.stale).length;
+  assert.match(html, new RegExp(`${view.running.length - staleOpen} agent sessions? open\\. ${staleOpen} not seen recently\\. ${view.finished.length} ended\\.`));
+  const row = /data-session="d1"[\s\S]*?<\/tr>/.exec(html)![0];
+  assert.match(row, /data-health="ended"[^>]*>.*Not seen for 3h 00m 00s · its item is delivered/);
+  assert.doesNotMatch(row, /Copy local|Copy remote/, 'no attach command offered for a left-over session');
+});
+
+test('unit:ui-shipped-strip-latest — the shipped strip names the most recently merged item as latest, and its not-yet-live count comes from the production observation: zero when production serves the newest merge', () => {
+  const real = realDeliveredWork() as unknown as Work[];
+  // Real-shaped deliveries: most carry no delivery.deployment and no verified release.
+  assert.ok(real.filter(item => !item.delivery!.deployment).length > real.length / 2);
+  assert.ok(real.every(item => !item.releaseDeliveries?.length));
+  const work = [...board(), ...real];
+  const merges = work.filter(item => item.stage === 'done' && !item.closure && item.delivery);
+  const newest = merges.reduce((last, item) => mergedAt(item) > mergedAt(last) ? item : last);
+  assert.equal(newest.key, 'GY-163');
+  // The newest merge is not the newest release, so ordering by release would name another item.
+  const released = merges.filter(item => releasedAt(item) !== null).sort((a, b) => releasedAt(b)! - releasedAt(a)!);
+  assert.ok(released.length > 0 && released[0].key !== newest.key);
+  const strip = (production: unknown) => { const page = home(dashboard({ work, status: { ...boardStatus(), production } as any })); return page.slice(page.indexOf('aria-label="Shipped this week"')); };
+  const latestOf = (html: string) => /Latest: <button type="button" class="text-button" data-latest="([^"]+)"><span class="mono">([^<]+)<\/span>/.exec(html)?.slice(1);
+  const unreleased = (html: string) => Number(/data-unreleased="(\d+)"/.exec(html)?.[1] ?? 0);
+  // Production serves the newest merge (and so everything merged before it): latest is the newest merge, and nothing is waiting to go live.
+  const serving = { observedAt: new Date(NOW).toISOString(), serving: newest.delivery!.mergeSha, servingSource: 'provider', error: null, deployed: merges.map(item => item.key), pending: [], incidents: [] };
+  const live = strip(serving);
+  assert.deepEqual(latestOf(live), [newest.key, newest.key]);
+  assert.match(live, new RegExp(`· merged ${formatAge(mergedAt(newest), NOW)} ago`));
+  assert.equal(unreleased(live), 0); assert.doesNotMatch(live, /not yet seen live/);
+  // The count is the observation's: a merge it reports pending or failed, or one merged after its last pass, is not yet live.
+  assert.equal(unreleased(strip({ ...serving, deployed: [], pending: [newest.key] })), 1);
+  assert.match(strip({ ...serving, pending: [newest.key, real[1].key] }), /data-unreleased="2"> 2 merged, not yet seen live\./);
+  assert.equal(unreleased(strip({ ...serving, deployed: [], incidents: [{ key: newest.key }] })), 1);
+  assert.equal(unreleased(strip({ ...serving, observedAt: new Date(NOW - 3 * hour).toISOString() })), 1, 'merged 2h ago, after a pass 3h ago');
+  // With no production observation the page claims no count, and latest is still the newest merge.
+  for (const none of [null, { ...serving, serving: null }, { ...serving, error: 'Railway API answered 500' }]) {
+    const page = strip(none);
+    assert.deepEqual(latestOf(page), [newest.key, newest.key]); assert.equal(unreleased(page), 0);
+  }
+  // A closed item never counts as a merge, even the newest.
+  const closed = { ...newest, closure: { kind: 'obsolete', ref: null, reason: 'Reverted', by: 'operator', at: new Date(NOW).toISOString(), from: 'merge' } } as unknown as Work;
+  const withClosed = home(dashboard({ work: [...work.filter(item => item.id !== newest.id), closed] }));
+  assert.notEqual(latestOf(withClosed.slice(withClosed.indexOf('aria-label="Shipped this week"')))?.[0], newest.key);
 });

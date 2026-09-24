@@ -96,7 +96,7 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const landed: { bucket: string; delivered: number }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7);
   const peak = Math.max(1, ...landed.map(day => day.delivered));
   return <>
-    <div className="page-heading"><div><h1>Flow</h1><p className="summary">Build to live, one column per step. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
+    <div className="page-heading"><div><h1>Pipeline</h1><p className="summary">Build to live, one column per step. {now7.length} {now7.length === 1 ? 'item is' : 'items are'} in the flow now.</p></div></div>
     {error && <p className="notice" role="status">The recorded history could not be read: {error}. The Now view below is live.</p>}
     <section className="flow-panel" aria-label="Flow">
       <div className="flow-columns-head">{stepIds.map(step => <div key={step} className={step === slowest ? 'flow-step slowest' : 'flow-step'}>
