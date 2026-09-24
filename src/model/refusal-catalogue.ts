@@ -96,6 +96,8 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'merge', id: 'tip-awaited', match: /^Waiting for \S+ to publish its speculative tip$/, example: 'Waiting for GY-1 to publish its speculative tip', kinds: ['merge'] },
   { gate: 'merge', id: 'ejected', match: /^Ejected from the merge queue: /, kinds: ['request-rework'],
     example: 'Ejected from the merge queue: Pull request was closed without merging; a new candidate re-enters at the back of the queue' },
+  { gate: 'merge', id: 'unresolved-threads', match: /^Branch protection requires conversation resolution and \d+ review threads? (is|are) unresolved on /, kinds: ['request-rework'],
+    example: 'Branch protection requires conversation resolution and 1 review thread is unresolved on 0123456789ab: chatgpt-codex-connector on docs/a.md:1' },
   { gate: 'merge', id: 'not-entered', match: /^Candidate has not entered the merge queue$/, example: 'Candidate has not entered the merge queue', kinds: ['merge'] },
 ];
 
