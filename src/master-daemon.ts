@@ -10,7 +10,7 @@ import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, s
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { baseRefreshConflict, pendingBaseRefresh } from './merge-queue.js';
+import { baseRefreshConflict, pendingBaseRefresh, unresolvedThreadRefusal } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
@@ -721,6 +721,10 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: work.candidate!.sha };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: work.candidate!.sha };
+  // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
+  // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a human.
+  const threads = !work.reworkRequested && work.candidate ? unresolvedThreadRefusal(work) : null;
+  if (threads) return { action: 'rework', reason: `${work.key}: ${threads}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`, binding: work.candidate!.sha };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
 }
