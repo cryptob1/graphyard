@@ -48,6 +48,14 @@ export function releasedAt(work: Work, release: ReleaseView = noRelease): number
   return at === null || Number.isNaN(Date.parse(at)) ? null : Date.parse(at);
 }
 
+/**
+ * Shipped this week: delivered items the release was seen serving in the last seven days, dated
+ * from that observation. The Work page's footer and the Insights headline read this one count.
+ */
+export function shippedThisWeek(work: Work[], now: number, release: ReleaseView = noRelease): Work[] {
+  return work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped' && releasedAt(w, release) !== null && now - releasedAt(w, release)! <= 7 * 24 * 60 * 60 * 1000);
+}
+
 /** When a delivered item merged. */
 export function mergedAt(work: Work): number {
   return Date.parse(work.delivery?.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt);

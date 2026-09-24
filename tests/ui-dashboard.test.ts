@@ -22,7 +22,7 @@ import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
-import InsightsFlow, { ReplayLane, readFlow } from '../web/pages/insights-flow.js';
+import InsightsFlow, { InsightsDetails, ReplayLane, readFlow } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
 import Sidebar from '../web/components/sidebar.js';
 import TopBar from '../web/components/top-bar.js';
@@ -178,7 +178,7 @@ test('unit:ui-design-system — one navigation and one design system: every stat
   const d = dashboard();
   // One navigation: the sidebar. The sub-page row under a section never repeats a sidebar entry.
   const sidebarLabels = sections.map(section => section.label);
-  for (const view of views) assert.ok(!sidebarLabels.includes(view.label as any) || view.id === 'work' || view.id === 'workers', `${view.label} is not a second entry for a sidebar item`);
+  for (const view of views) assert.ok(!sidebarLabels.includes(view.label as any) || view.id === 'work' || view.id === 'workers' || view.id === 'insights', `${view.label} is not a second entry for a sidebar item`);
   for (const view of visibleViews(d)) {
     const tabs = [...markup(createElement(TopBar, { ...d, view: view.id }) as any).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
     for (const tab of tabs) assert.ok(!sidebarLabels.includes(tab as any), `${view.id}: tab ${tab} overlaps the sidebar`);
@@ -1072,19 +1072,48 @@ test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page 
   assert.equal(shortShas(`review 5303188884 on ${head}`), `review 5303188884 on ${head.slice(0, 8)}`);
 });
 
-test('unit:ui-insights-tabs-and-ended-sessions — the Insights tabs have distinct, self-explanatory names (no two called Flow…), and Workers hides sessions not seen for over an hour on delivered or closed items behind a collapsed Ended group', () => {
-  // Insights: every tab named apart, and at most one of them starts "Flow".
+test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no tabs, in the design\'s order (headline numbers, Flow with Now and the 24-hour replay, landed per day beside where the time goes), the flow-analytics detail behind one collapsed Show details; Workers hides sessions not seen for over an hour on delivered or closed items behind a collapsed Ended group', async () => {
+  // Insights: one page, so no tab list — neither the section's sub-page row nor one on the page.
   const configured = { validation: true, releases: true, automation: true };
   const d = dashboard({ features: configured });
-  const tabs = [...markup(createElement(TopBar, { ...d, view: 'insights' })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs, ['Pipeline', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']);
-  assert.equal(new Set(tabs).size, tabs.length, 'distinct names');
-  const firstWords = tabs.map(tab => tab.split(' ')[0].toLowerCase());
-  assert.equal(new Set(firstWords).size, tabs.length, 'no two tabs share a first word');
-  assert.ok(tabs.filter(tab => /^Flow/i.test(tab)).length <= 1, 'no two tabs called Flow…');
-  assert.equal(views.find(view => view.id === 'insights')!.label, 'Pipeline');
-  // The page under the tab carries the same name.
-  assert.match(markup(createElement(InsightsFlow, d)), /<h1>Pipeline<\/h1>/);
+  assert.deepEqual(views.filter(view => view.section === 'insights').map(view => view.id), ['insights']);
+  assert.equal(markup(createElement(TopBar, { ...d, view: 'insights' })), '', 'no sub-page row under Insights');
+  assert.ok(primaryEntry(d, views.find(view => view.id === 'insights')!), 'Insights is still its sidebar entry');
+  const page = markup(createElement(InsightsFlow, d));
+  assert.doesNotMatch(page, /role="tab(list)?"|class="tabs?(?: active)?"|aria-label="Pages in this section"/, 'the page draws no tabs');
+  assert.match(page, /<h1>Insights<\/h1>/);
+  // The design's order: headline numbers, the Flow panel (Now, then the replay), the two charts side by side, then Show details.
+  const place = (marker: string) => { const index = page.indexOf(marker); assert.ok(index >= 0, marker); return index; };
+  const order = ['<h1>Insights</h1>', 'aria-label="Headline numbers"', 'aria-label="Flow"', '<h3>Now</h3>', '<h3>Last 24 hours, replayed</h3>', 'class="insight-charts"', 'aria-label="Landed per day"', 'aria-label="Where the time goes"', '<details class="insight-details"'];
+  const positions = order.map(place);
+  assert.deepEqual([...positions].sort((x, y) => x - y), positions, `sections in order: ${order.join(' → ')}`);
+  assert.match(page, /<div class="insight-charts"><section class="panel" aria-label="Landed per day">[\s\S]*?<\/section><section class="panel" aria-label="Where the time goes">/, 'the two charts share one row');
+  // The headline numbers, in order, each counted as the page it replaces or the Work page counts it.
+  const kpis = [...page.matchAll(/<div class="kpi" data-kpi="([^"]+)"><span>([^<]+)<\/span><strong>([^<]*)<\/strong>/g)].map(match => match.slice(1));
+  assert.deepEqual(kpis.map(([id]) => id), ['shipped', 'start-to-live', 'moving', 'waiting-on-people']);
+  assert.deepEqual(kpis.map(([, label]) => label), ['Shipped', 'Start to live, median', 'Moving now', 'Time waiting on people']);
+  const workPage = home(d);
+  assert.equal(kpis[0][2], /<strong>(\d+) shipped this week\.<\/strong>/.exec(workPage)?.[1], 'shipped as the Work page counts it');
+  assert.equal(Number(kpis[2][2]), tileCount(workPage, 'moving'), 'moving now as the Work page counts it');
+  assert.equal(kpis[1][2], '…', 'start to live waits on the shipping pulse read, never a zero');
+  const waiting = classify(d.work, NOW, d.status?.humanOnly, releaseView(d.status)).byGroup['needs-you'];
+  assert.ok(waiting.length > 0);
+  assert.match(page, new RegExp(`data-kpi="waiting-on-people"><span>Time waiting on people</span><strong>\\d[^<]*</strong><small>${waiting.length} items? waits? on you now</small>`));
+  // Show details: exactly one toggle on the page, collapsed, and nothing of the detail read or drawn until it opens.
+  assert.equal(page.match(/Show details/g)?.length, 1, 'one Show details toggle');
+  assert.match(page, /<details class="insight-details"><summary>Show details<\/summary><\/details>/, 'collapsed and empty until opened');
+  assert.doesNotMatch(page, /<details[^>]* open/);
+  for (const hidden of ['Shipping pulse', 'Flow analytics', 'Cumulative flow', 'Where work is waiting']) assert.ok(!visibleWords(page).join(' ').includes(hidden), `${hidden} is behind Show details`);
+  // Opened, it holds the former Shipping pulse and Flow analytics tabs, unfolded: no second Show details inside.
+  const report = flowApi(board())('analytics/flow?window=30');
+  const pulse = { pulse: null, unavailable: true, elapsed: 0, stale: true, refresh: noop };
+  const opened = markup(createElement(InsightsDetails, { pulse, api: d.api, token: 'fixture', canAudit: true, initial: { report, merge: null } }));
+  assert.match(opened, /Shipping pulse unavailable/);
+  assert.match(opened, /<h2 id="flow-analytics-title">Flow analytics<\/h2>[\s\S]*Where work is waiting[\s\S]*Cumulative flow[\s\S]*Coverage, exclusions and definitions/);
+  assert.doesNotMatch(opened, /Show details|<details class="flow-details"|<h1>/, 'the detail is not a page of its own and folds nothing again');
+  // The former tabs are gone from the registry; Validation and Releases moved under Shipped.
+  for (const id of ['pulse', 'flow']) assert.ok(!views.some(view => view.id === id), id);
+  for (const id of ['validation', 'releases']) assert.equal(views.find(view => view.id === id)!.section, 'shipped', id);
 
   // Workers: sessions recorded running but not seen for more than an hour, on a delivered or a closed item.
   const real = realDeliveredWork() as unknown as Work[];

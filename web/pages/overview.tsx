@@ -3,7 +3,7 @@ import WorkCard from '../components/work-card';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../duration';
-import { classify, groupLabel, groupOf, mergedAt, releasedAt, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
+import { classify, groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
 import { leftFlowAt, releaseView } from '../release';
 import { stalledCards } from './actionless';
 import type { Dashboard } from './dashboard';
@@ -31,8 +31,7 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   const humanOnly = humanOnlyIds(work, status?.humanOnly);
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
-  const delivered = work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped');
-  const recent = delivered.filter(w => releasedAt(w, release) !== null && now - releasedAt(w, release)! <= week);
+  const recent = shippedThisWeek(work, now, release);
   // The latest is the newest merge: most real deliveries carry no release record, so ordering by
   // release would name an old item, or none.
   const merged = work.filter(w => w.stage === 'done' && !isClosed(w) && !!w.delivery && Number.isFinite(mergedAt(w)));

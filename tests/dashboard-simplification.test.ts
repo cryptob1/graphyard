@@ -155,7 +155,8 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
   assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Insights', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
-  for (const page of ['Pipeline', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'insights', page);
+  assert.equal(sectionOf.Insights, 'insights');
+  for (const page of ['Delivered', 'Interventions', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
   for (const page of ['Test cases', 'Proof authority', 'Operator automation', 'Agent fleet']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
@@ -163,7 +164,8 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
   assert.equal(sidebar.match(/class="nav planned"/g)?.length, 1);
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs(dashboard(), 'flow'), ['Pipeline', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']);
+  assert.deepEqual(tabs(dashboard(), 'insights'), [], 'Insights is one page with no tabs (GY-168)');
+  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Interventions', 'Validation', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'grants'), ['Test cases', 'Proof authority', 'Operator automation', 'Agent fleet']);
   assert.deepEqual(tabs(dashboard(), 'work'), [], 'a section with one page draws no tab row');
   assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
@@ -177,7 +179,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   const probed = await probeFeatures(async path => path === 'operator-agents' ? [] : { environments: [], releases: [], requests: [], candidates: [] }, true, false);
   assert.deepEqual(probed.features, { releases: false, validation: false, automation: false });
   const none = dashboard({}, 'admin', probed.features);
-  assert.deepEqual(tabs(none, 'flow'), ['Pipeline', 'Shipping pulse', 'Flow analytics']);
+  assert.deepEqual(tabs(none, 'shipped'), ['Delivered', 'Interventions']);
   assert.deepEqual(tabs(none, 'grants'), ['Test cases', 'Proof authority', 'Agent fleet']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: null, automation: null }, 'an outage never hides a page');
@@ -196,7 +198,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.doesNotMatch(markup(createElement(WorkersPage, dashboard())), /Delivery slices/);
   assert.match(markup(createElement(WorkersPage, dashboard({ status: led }))), /Delivery slices/);
   // Operator agents cannot read the analytics pages, so they are not offered.
-  assert.ok(!visibleViews(dashboard({}, 'operator-agent')).some(view => ['pulse', 'flow', 'insights'].includes(view.id)));
+  assert.ok(!visibleViews(dashboard({}, 'operator-agent')).some(view => view.id === 'insights'));
   assert.ok(visibleViews(dashboard({}, 'admin')).some(view => view.id === 'insights'));
   // Nor are their sessions polled for step moves, which read the same refused analytics route.
   assert.match(await read('web/main.tsx'), /useStepMoves\(!!token && !!status && readsFlowAnalytics\(status\.actor\?\.role\)/);
@@ -356,7 +358,7 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   for (const phase of ['not-started', 'needs-worker', 'building', 'review', 'proof', 'shipped'] as const) assert.ok(work.some(w => phaseOf(w, NOW) === phase), phase);
   assert.ok(work.some(w => w.blocker) && work.some(w => w.stage === 'build' && !w.submission && Date.parse(w.lease?.expiresAt ?? '') < NOW), 'a blocked item and a lapsed claim');
   const script = await read('scripts/dashboard-fixture.mjs');
-  for (const view of ['01-home', '02-item-view', '05-flow-analytics', '09-create-form']) assert.ok(script.includes(`'${view}'`), view);
+  for (const view of ['01-home', '02-item-view', '05-insights', '06-flow-analytics', '09-create-form']) assert.ok(script.includes(`'${view}'`), view);
   // The sidebar is a full-height flex column whose contents stick; no later rule pins it to one viewport.
   const css = await read('web/style.css');
   const sidebarRules = [...css.matchAll(/(?:^|[}\s])\.sidebar\{([^}]*)\}/g)].map(match => match[1]);

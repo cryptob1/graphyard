@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Dialog from './dialog';
 import AttributionSection from './attribution';
 import Term from './components/term';
@@ -92,8 +92,12 @@ async function download(token: string, path: string) {
   return { blob: await response.blob(), name: /filename="([^"]+)"/.exec(response.headers.get('content-disposition') ?? '')?.[1] ?? 'graphyard-flow-export' };
 }
 
-/** `initial` renders already-read reports (the fixture tests do); the page refreshes them as usual. */
-export default function FlowAnalytics({ request, token, canAudit, initial }: { request: (path: string) => Promise<any>; token: string; canAudit: boolean; initial?: { report: Report; merge: ReturnType<typeof submitToMerge> | null; attribution?: Report } }) {
+/**
+ * `initial` renders already-read reports (the fixture tests do); the page refreshes them as usual.
+ * `folded` puts everything past the summary behind its own Show details; Insights passes false,
+ * since the whole report already sits behind the page's one Show details toggle (GY-168).
+ */
+export default function FlowAnalytics({ request, token, canAudit, initial, folded = true }: { request: (path: string) => Promise<any>; token: string; canAudit: boolean; initial?: { report: Report; merge: ReturnType<typeof submitToMerge> | null; attribution?: Report }; folded?: boolean }) {
   const [days, setDays] = useState<number>(30);
   const [type, setType] = useState('');
   const [stage, setStage] = useState('');
@@ -113,6 +117,8 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
     const current = ++version.current; setLoading(true);
     try {
       const [value, merged] = await Promise.all([request(`analytics/flow?${query}`), mergeTime(request, query)]);
+      // Insights shows this report beside the shipping pulse, so a malformed body reads as unavailable instead of breaking the page.
+      if (!value || typeof value !== 'object' || !value.coverage || !value.bottleneck) throw new Error('The flow analytics report is malformed');
       if (current === version.current) { setReport(value); setMerge(merged); setError(''); }
     }
     catch (e) { if (current === version.current) setError((e as Error).message); }
@@ -160,8 +166,10 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
     complete: 'Complete: every record in this window is included in the figures below.',
   };
 
-  return <>
-    <div className="page-heading"><h1>Flow analytics</h1></div>
+  // A call, not a component: a component defined here would remount the detail on every refresh.
+  const fold = (children: ReactNode) => folded ? <details className="flow-details"><summary>Show details</summary>{children}</details> : children;
+  return <section className="flow-analytics" aria-labelledby="flow-analytics-title">
+    {folded ? <div className="page-heading"><h1 id="flow-analytics-title">Flow analytics</h1></div> : <div className="section-title"><h2 id="flow-analytics-title">Flow analytics</h2></div>}
 
     <form className="flow-filters" aria-label="Flow analytics filters" onSubmit={event => event.preventDefault()}>
       <label>Window<select value={days} aria-label="Window" onChange={event => setDays(Number(event.target.value))}>{flowWindows.map(value => <option key={value} value={value}>{value} days</option>)}</select></label>
@@ -173,7 +181,7 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
     {report && state !== 'complete' && <p className={`flow-state flow-state-${state}`} data-state={state}>{stateText[state]}</p>}
     {report && <FlowSummary report={report} merge={merge} onDrill={category => setDrill({ metric: 'bottleneck', key: category.id, title: plainWait[category.id] ?? category.label })}/>}
 
-    <details className="flow-details"><summary>Show details</summary>
+    {fold(<>
     <form className="flow-filters" aria-label="More flow analytics filters" onSubmit={event => event.preventDefault()}>
       <label>Work type<select value={type} aria-label="Work type" onChange={event => setType(event.target.value)}><option value="">All types</option>{(report?.availableTypes ?? []).map((value: string) => <option key={value} value={value}>{value}</option>)}</select></label>
       <label>Stage<select value={stage} aria-label="Stage" onChange={event => setStage(event.target.value)}><option value="">All stages</option>{stages.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
@@ -305,7 +313,7 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
         <p className="muted">{report.privacy.statement}</p>
       </section>
     </>}
-    </details>
+    </>)}
 
     {drill && <Dialog onClose={() => setDrill(null)}>
       <section role="dialog" aria-modal="true" aria-label={`${drill.title} drill-down`} className="drawer" onClick={event => event.stopPropagation()}>
@@ -328,5 +336,5 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
         </>}
       </section>
     </Dialog>}
-  </>;
+  </section>;
 }

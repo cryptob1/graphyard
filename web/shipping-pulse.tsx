@@ -4,7 +4,11 @@ import type { ShippingPulse as Pulse } from '../src/shipping-pulse';
 const STALE_AFTER_MS = 120_000;
 const hours = (value: number | null) => value === null ? 'Unavailable' : `${value}h`;
 
-export default function ShippingPulse({ token, repository }: { token: string; repository?: string }) {
+/**
+ * One live read of the shipping pulse: the report, whether the last read failed, and how stale
+ * the figures are. Insights reads it once for its headline numbers and its detail (GY-168).
+ */
+export function usePulse(token: string) {
   const [pulse, setPulse] = useState<Pulse | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   // Staleness is elapsed time since this browser last read the pulse successfully.
@@ -28,9 +32,16 @@ export default function ShippingPulse({ token, repository }: { token: string; re
     void load(); const poll = setInterval(load, 30_000); const tick = setInterval(() => setElapsed(performance.now() - readAt.current), 10_000);
     return () => { active = false; controller.abort(); clearInterval(poll); clearInterval(tick); };
   }, [token, reloads]);
+  return { pulse, unavailable, elapsed, stale: unavailable || elapsed > STALE_AFTER_MS, refresh: () => setReloads(count => count + 1) };
+}
+export type PulseRead = ReturnType<typeof usePulse>;
+
+/** The shipping pulse detail under Insights → Show details, from one read (`usePulse`). */
+export function ShippingPulse({ read, repository }: { read: PulseRead; repository?: string }) {
+  const { pulse, unavailable, elapsed, stale, refresh } = read;
   if (!pulse && !unavailable) return <section className="pulse-state" role="status"><h2>Loading shipping pulse…</h2><p>Reading bounded delivery history from the repository ledger.</p></section>;
   if (!pulse && unavailable) return <section className="pulse-state danger" role="alert"><h2>Shipping pulse unavailable</h2><p>The delivery ledger could not be read. Check the control-plane connection; missing data is not shown as zero.</p></section>;
-  return <ShippingPulseView pulse={pulse!} repository={repository} stale={unavailable || elapsed > STALE_AFTER_MS} elapsed={elapsed} onRefresh={() => setReloads(count => count + 1)}/>;
+  return <ShippingPulseView pulse={pulse!} repository={repository} stale={stale} elapsed={elapsed} onRefresh={refresh}/>;
 }
 
 /**
@@ -53,7 +64,7 @@ export function ShippingPulseView({ pulse, repository, stale, elapsed, onRefresh
   // from reading these as conservative bounds the way the counts can be read.
   const durationSample = pulse.truncated && <p className="muted">Sampled durations: more deliveries fell in this window than the query reads, so these durations come only from the newest ones. Older deliveries in the window were not read and could move these values up or down. Unlike the counts, they are not lower bounds.</p>;
   return <div className="pulse" aria-labelledby="pulse-title">
-    <div className="page-heading"><div><div className="eyebrow">REPOSITORY DELIVERY FLOW</div><h1 id="pulse-title">Shipping pulse</h1><p>Exact observed merges, without individual activity or productivity scoring.</p></div><div className="pulse-actions"><button type="button" onClick={onRefresh}>Refresh</button><span className={`pulse-badge ${state}`}>{state}</span></div></div>
+    <div className="section-title"><div><h2 id="pulse-title">Shipping pulse</h2><p>Exact observed merges, without individual activity or productivity scoring.</p></div><div className="pulse-actions"><button type="button" onClick={onRefresh}>Refresh</button><span className={`pulse-badge ${state}`}>{state}</span></div></div>
     {stale && <div className="notice" role="status"><strong>Data is stale.</strong> This browser last read the pulse {Math.max(1, Math.round(elapsed / 60_000))} minute(s) ago; the repository generated it at {new Date(pulse.generatedAt).toLocaleString()}. Refreshing has not succeeded since, so check the control-plane connection and use Refresh above before relying on these figures.</div>}
     {pulse.completeness === 'partial' && <div className="notice" role="status"><strong>Partial history.</strong> {pulse.partialReason}</div>}
     {empty ? <section className="pulse-state"><h2>No deliveries in this window</h2><p>The ledger was read successfully. No exact observed merges occurred between {new Date(pulse.range.start).toLocaleDateString()} and {new Date(pulse.range.end).toLocaleDateString()} (inclusive, repository UTC).</p></section> : <>
