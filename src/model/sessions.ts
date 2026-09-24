@@ -76,6 +76,8 @@ export const sessionHandleSchema = z.object({
   missedReports: z.number().int().min(0).max(1000).optional(),
 }).strict();
 export type SessionHandleInput = z.infer<typeof sessionHandleSchema>;
+/** The fields only the loop's session report writes; the control plane refuses them from anybody else (`engine.ts`, `command === 'session'`). */
+export const sessionObservationFields = ['observed', 'observedAt', 'missedReports'] as const;
 
 /**
  * How many handles an item keeps, and the ceiling the list never passes.
@@ -125,6 +127,7 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
   const at = now.toISOString();
   const existing = work.sessions.find(handle => handle.id === input.id);
   const reopened = existing?.state === 'finished' && input.state === 'running';
+  const runtimeFacts = reopened ? undefined : existing;
   const handle: SessionHandle = {
     // The owner is fixed at the first record and never moves: a launcher names the session it
     // started, and an ordinary update cannot hand the handle to somebody else.
@@ -136,10 +139,12 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     // The coordinates a launcher registered are kept when a later write omits them: the session
     // itself fills in the tab and transcript only it knows, and must not blank the name and head
     // its launcher recorded — those are what liveness reconciliation matches the runtime against.
-    agentName: input.agentName ?? existing?.agentName ?? null, role: input.role ?? existing?.role ?? null, head: input.head ?? existing?.head ?? null,
-    workspace: input.workspace ?? existing?.workspace ?? null, tab: input.tab ?? existing?.tab ?? null, pane: input.pane ?? existing?.pane ?? null,
-    attach: input.attach ?? existing?.attach ?? null,
-    transcript: input.transcript ?? existing?.transcript ?? null,
+    // A reopened handle is another runtime session: the previous attempt's name, pane, attach
+    // command and transcript say nothing about it, so only what this registration supplies stands.
+    agentName: input.agentName ?? runtimeFacts?.agentName ?? null, role: input.role ?? existing?.role ?? null, head: input.head ?? existing?.head ?? null,
+    workspace: input.workspace ?? runtimeFacts?.workspace ?? null, tab: input.tab ?? runtimeFacts?.tab ?? null, pane: input.pane ?? runtimeFacts?.pane ?? null,
+    attach: input.attach ?? runtimeFacts?.attach ?? null,
+    transcript: input.transcript ?? runtimeFacts?.transcript ?? null,
     subject: input.subject,
     startedAt: reopened ? at : existing?.startedAt ?? at, updatedAt: at,
     endedAt: input.state === 'finished' ? existing?.endedAt ?? at : null,

@@ -28,6 +28,7 @@ import { sessionReport } from '../src/cli/master-status.js';
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const coordinator: Principal = { id: 'executor-a', role: 'coordinator' };
+const producer: Principal = { id: 'producer-a', role: 'producer' };
 const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
 
 let database: EmbeddedPostgres, store: Store, engine: Engine;
@@ -37,7 +38,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
-  engine.principals = [operator, coordinator, worker];
+  engine.principals = [operator, coordinator, worker, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
@@ -71,7 +72,8 @@ test('unit:session-liveness-model — the loop reports every session it sees on 
   // One on another host: this host's runtime is never asked about it, so nothing is concluded.
   await engine.execute(coordinator, 'session', item.id, { id: 'elsewhere', kind: 'coordination', runtime: 'claude', host: 'host-2', pane: 'wX:p9', subject: `${item.key}: elsewhere`, state: 'running' }, randomUUID());
 
-  const start = Date.now();
+  // The simulated clock runs in the past, so every observation it writes is one the control plane's clock has reached.
+  const start = Date.now() - 2 * 3_600_000;
   let clock = start;
   let listing: RuntimeSession[] | null = null;
   const cursor = emptyDispatchCursor(config);
@@ -165,4 +167,48 @@ test('unit:session-liveness-model — the rule itself: what a listed entry says,
   assert.equal(sessionView(handle({ observed: 'working', observedAt: new Date(now.getTime() - sessionObservationFreshMs - 1).toISOString() }), now).live, false, 'stale: not running');
   assert.equal(sessionView(handle({ observed: 'lost', observedAt: now.toISOString() }), now).live, false, 'lost is never running');
   assert.equal(sessionView(handle({ state: 'finished', observed: 'working', observedAt: now.toISOString() }), now).live, false, 'a closed record is never running');
+});
+
+test('unit:session-liveness-model — only the observer writes the observation, a delivered item keeps it fresh, and a reopened record carries none of the previous runtime session', async () => {
+  let item = await engine.execute(operator, 'create', null, { title: 'Observation writes', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed'] }] }, randomUUID());
+  item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
+  const handle = { id: 'owned', kind: 'coordination', role: 'approver', runtime: 'claude', host: 'host-1', principal: producer.id, agentName: 'agent-owned', pane: 'wF:p7',
+    attach: 'herdr pane attach wF:p7 --workspace wF', transcript: '/logs/owned-1.jsonl', subject: `${item.key}: owned`, state: 'running' } as const;
+  await engine.execute(coordinator, 'session', item.id, handle, randomUUID());
+
+  // The session the handle names may fill in its own coordinates, but never what was observed of it.
+  const { principal: _, ...own } = handle;
+  for (const field of [{ observed: 'working' }, { observedAt: new Date().toISOString() }, { missedReports: 0 }])
+    await assert.rejects(engine.execute(producer, 'session', item.id, { ...own, ...field }, randomUUID()), /Only the coordinator that observes sessions, or an admin, records what was observed of one/, JSON.stringify(field));
+  // Not even the observer dates an observation ahead of the control plane's clock, where it would read fresh for good.
+  const before = Date.now();
+  await engine.execute(coordinator, 'session', item.id, { ...handle, observed: 'working', observedAt: new Date(before + 3_600_000).toISOString() }, randomUUID());
+  const clamped = Date.parse((await handleOf(item.id, 'owned')).observedAt!);
+  assert.ok(clamped >= before && clamped <= Date.now(), 'an observation from ahead of the clock is stored as of now');
+  await engine.execute(producer, 'session', item.id, { ...own, tab: 'approver' }, randomUUID());
+  assert.deepEqual([(await handleOf(item.id, 'owned')).observed, (await handleOf(item.id, 'owned')).observedAt], ['working', new Date(clamped).toISOString()], 'its own update keeps the loop\'s observation');
+
+  // Delivered while its session still runs: the report keeps observing it, so no reader shows a live session as unseen.
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{stage}', '"done"') WHERE id = $1`, [item.id]);
+  // The observation is due a refresh, so the tick writes it.
+  await engine.execute(coordinator, 'session', item.id, { ...handle, observed: 'working', observedAt: new Date(Date.now() - sessionObservationRefreshMs - 1_000).toISOString() }, randomUUID());
+  const later = Date.now();
+  const cursor = emptyDispatchCursor(config);
+  const tick = await runDispatchTick(config, cursor, dispatcher(async () => [await reload(item.id)], () => [{ name: 'agent-owned', pane_id: 'wF:p7', agent_status: 'working', agent: 'claude' }], () => later), () => later);
+  assert.equal(tick.sessions?.written, 1, `the observation of a session on a delivered item is written: ${JSON.stringify(tick.sessions?.failures)}`);
+  const observed = await handleOf(item.id, 'owned');
+  assert.deepEqual([observed.state, observed.observed, observed.observedAt], ['running', 'working', new Date(later).toISOString()]);
+  assert.equal(sessionView(observed, new Date(later + sessionObservationFreshMs - 1_000)).live, true, 'and it reads running for as long as the loop sees it');
+  await assert.rejects(engine.execute(coordinator, 'session', item.id, { ...handle, id: 'new-on-delivered' }, randomUUID()), /Delivered work is immutable/, 'a delivered item still takes no new handle');
+  await assert.rejects(engine.execute(producer, 'session', item.id, { ...own, tab: 'other' }, randomUUID()), /Delivered work is immutable/, 'nor an update that is not an observation');
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{stage}', '"ready"') WHERE id = $1`, [item.id]);
+
+  // Closed, then launched again under the same id without its pane yet: nothing of the previous runtime session stands.
+  await engine.execute(coordinator, 'session', item.id, { ...handle, state: 'finished', outcome: 'the approver decided' }, randomUUID());
+  const { agentName: _n, pane: _p, attach: _a, transcript: _t, ...registration } = handle;
+  await engine.execute(coordinator, 'session', item.id, registration, randomUUID());
+  const reopened = await handleOf(item.id, 'owned');
+  assert.deepEqual([reopened.state, reopened.agentName, reopened.pane, reopened.tab, reopened.attach, reopened.transcript, reopened.observed, reopened.outcome],
+    ['running', null, null, null, null, null, undefined, null], 'the retry is not pointed at the previous attempt\'s pane, attach command or transcript');
+  assert.equal(reopened.role, 'approver', 'while the slot it occupies is the same one');
 });

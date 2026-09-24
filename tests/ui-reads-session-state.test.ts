@@ -72,6 +72,8 @@ test('unit:ui-reads-session-state — the Workers page and its counts show a ses
   assert.deepEqual(view.running.filter(row => row.live).map(row => row.id).sort(), ['idle', 'working']);
   assert.deepEqual(view.running.filter(row => !row.live).map(row => row.id), ['stale'], 'an open record not observed inside the bound is not running, however recently it was written');
   assert.deepEqual(view.finished.map(row => [row.id, row.observed]).sort(), [['lost', 'lost'], ['shell', 'ended']]);
+  const current = (principal: string) => view.principals.find(entry => entry.principal === principal)?.current?.key ?? null;
+  assert.deepEqual([current('worker-3'), current('reviewer-a'), current('worker-7')], ['GY-14', 'GY-14', null], 'By account: a principal whose only open record is not seen lately is on nothing, the same reading as its row');
 
   const html = renderToStaticMarkup(createElement(WorkersPage, dashboard(work)));
   assert.match(html, /2 agent sessions open\. 1 not seen recently\. 2 ended\./, 'the counts are the same reading');

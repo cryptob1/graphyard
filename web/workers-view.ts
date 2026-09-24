@@ -140,7 +140,8 @@ export function workersView(all: Pick<Work, 'id' | 'key' | 'sessions'>[], now: D
   const seats = new Map<string, WorkerRow[]>();
   for (const row of rows) if (['worker', 'reviewer', 'producer'].includes(row.roleKind)) seats.set(row.principal, [...seats.get(row.principal) ?? [], row]);
   const principals = [...seats].map(([principal, handles]): PrincipalSummary => {
-    const live = handles.filter(row => row.state === 'running').sort((a, b) => (parsed(b.startedAt) ?? 0) - (parsed(a.startedAt) ?? 0))[0];
+    // What it is on now is what every other reader shows running: an open record observed lately (GY-172).
+    const live = handles.filter(row => row.live).sort((a, b) => (parsed(b.startedAt) ?? 0) - (parsed(a.startedAt) ?? 0))[0];
     const latest = handles.reduce((last, row) => (parsed(row.startedAt) ?? 0) >= (parsed(last.startedAt) ?? 0) ? row : last);
     return { principal, roleKind: (live ?? latest).roleKind,
       current: live ? { key: live.key, workId: live.workId, epoch: live.epoch, sinceMs: live.spentMs } : null,

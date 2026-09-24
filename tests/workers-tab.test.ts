@@ -203,10 +203,10 @@ test('integration:workers-tab-per-principal-summary — running rows first by ti
   assert.equal(byName['reviewer-a'].sessionsLast24h, 2);
   assert.equal(byName['herdr-worker-1'].current, null, 'a producer with only finished sessions is idle');
   assert.equal(byName['herdr-worker-1'].sessionsLast24h, 1);
-  assert.equal(byName['worker-b'].current?.key, 'GY-13');
+  assert.equal(byName['worker-b'].current, null, 'its only open record is not seen lately, so it is on nothing — the same reading as its row (GY-172)');
   assert.ok(!('approver-1' in byName) && !('master-1' in byName), 'approver and master sessions are not seats');
   // Busy principals first, longest first, then idle.
-  assert.deepEqual(view.principals.map(entry => entry.principal), ['graphyard-codex-1', 'worker-b', 'reviewer-a', 'herdr-worker-1']);
+  assert.deepEqual(view.principals.map(entry => entry.principal), ['graphyard-codex-1', 'reviewer-a', 'herdr-worker-1', 'worker-b']);
   const summary = html.slice(html.indexOf('aria-label="Principals"'));
   assert.match(summary, /data-principal="graphyard-codex-1" data-current="GY-14:1"/);
   assert.match(summary, />GY-14<\/button><\/td><td data-label="For">1h 30m 00s<\/td><td data-label="Sessions today">2<\/td>/);
@@ -250,13 +250,13 @@ test('manual:workers-tab-docs-review — docs/dashboard.md documents the Workers
   assert.match(section, /A row is one \[session handle\]/);
   assert.match(section, /not from Herdr/);
   assert.match(section, /\*\*15 minutes\*\* by default, `sessionStaleThresholdMs`/);
-  assert.match(section, /reads \*not seen for <time since updatedAt>\*, never as running, and is not counted among the open sessions/);
+  assert.match(section, /reads \*not seen for <time since that observation>\*, never as running, and is not counted among the open sessions/);
   assert.match(section, /\*\*Copy local\*\*/); assert.match(section, /\*\*Copy remote\*\*/);
   assert.match(section, /`herdr --help` documents `herdr --machine <label-or-id> <command>`/);
   assert.ok(section.includes('`herdr agent attach w1V:pJD`'), 'the local form');
   assert.ok(section.includes('`herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`'), 'the exact remote form');
   assert.match(section, /interactive attachment is not forwarded/);
-  assert.match(section, /GY-113's \[liveness reconciliation\]\(master-agent\.md#session-liveness-is-reconciled-not-trusted\).*is what ends a dead handle/);
+  assert.match(section, /the loop's \[session report\]\(master-agent\.md#session-liveness-is-reconciled-not-trusted\) is what ends a dead handle/);
   assert.match(section, /registered beside Shipped and Insights in `web\/pages\/index\.tsx`/);
   assert.match(docs, /\*\*Workers\*\* is its own sidebar entry/);
   // The anchor the section links to exists, and the page's own copy states the same threshold.

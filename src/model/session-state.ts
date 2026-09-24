@@ -150,7 +150,7 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
     const firstMissedAt = Number.isFinite(first) ? Math.min(first, clock) : clock;
     missing[key] = new Date(firstMissedAt).toISOString();
     // Consecutive misses as the record counts them, or as the previous report left them where the
-    // record could not take the count (a delivered item accepts only a closure).
+    // record could not take the count (a write that failed).
     const missed = Math.max((handle.missedReports ?? 0) + 1, Number.isFinite(first) ? 2 : 1);
     const lastSeen = handle.observedAt ?? handle.updatedAt, lastAt = Date.parse(lastSeen);
     if (missed < lostAfterReports) {

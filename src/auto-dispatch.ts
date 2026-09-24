@@ -540,8 +540,9 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   tick.sessions = { observed: report.entries.length, written: 0, failures: [] };
   for (const entry of report.entries.filter(entry => !entry.closed && entry.changed)) {
     const item = byId.get(entry.workId);
-    // A delivered item takes only a closure; the report's miss count is carried by the cursor there.
-    if (!item || !effects.recordSession || item.stage === 'done') continue;
+    // A delivered item takes the observation too (engine.ts): a session that outlives the delivery
+    // is still one every reader shows, so its record is kept as fresh as any other.
+    if (!item || !effects.recordSession) continue;
     // The observation is the record every reader shows; one that could not be written is
     // retried by the next tick's report, which finds the stored record still behind.
     try { await effects.recordSession(item, reportedHandle(entry)); tick.sessions.written++; }
