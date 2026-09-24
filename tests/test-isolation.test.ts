@@ -173,6 +173,9 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.match(String(installMatchesLockfile({ packages: { 'node_modules/dep': { version: '1.0.0', resolved: '../dep', link: true } } }, git('aaa'))), /installed as a package, package-lock.json names a link/);
     // The install always takes the full tree: an inherited production/omit config would skip devDependencies while npm exits 0.
     assert.ok(npmCiArgs.includes('--include=dev'));
+    // Optional dependencies too: an .npmrc omit=optional would skip platform packages (esbuild's binary, which tsx loads; @embedded-postgres/*) while npm exits 0, and the lockfile check accepts a missing optional entry.
+    assert.ok(npmCiArgs.includes('--include=optional'), 'an .npmrc omit=optional is overridden');
+    assert.match(await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8'), /'--include=dev', '--include=optional'/, 'the trusted unit runner installs optional dependencies too');
     assert.ok(npmCiArgs.includes('--no-dry-run'), 'a dry-run from an .npmrc is overridden too');
     const cleared = npmCiEnvironment({ PATH: '/bin', NODE_ENV: 'production', npm_config_omit: 'dev', NPM_CONFIG_PRODUCTION: 'true', npm_config_dry_run: 'true', 'npm_config_dry-run': 'true' });
     assert.deepEqual(cleared, { PATH: '/bin' });
