@@ -3,8 +3,6 @@
 
 ## Master commands
 
-These need judgement:
-
 | Command | Purpose |
 | --- | --- |
 | `master repair GY-N REASON` | Restore a contaminated branch to its reviewed head |
@@ -43,7 +41,7 @@ The master reconciles protection through the API (`master protection --apply`); 
 | `installation-accept` | Accepts the pending permission request |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/` and appends to `ledger.json`. On *Confirm access* it shows the GitHub Mobile two-digit code; approving it on the device is the human-only part. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/`, appended to `ledger.json`. On *Confirm access* it shows the GitHub Mobile two-digit code; approving it on the device is the human-only part. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
 
 ## Harness permissions
 
@@ -57,11 +55,11 @@ Three consecutive failures with an unchanged reason mark a row stalled rather th
 
 ### Running executors under supervision
 
-`graphyard init` on a coordinator host starts `graphyard-executor@N` systemd user units; `master executors restart` moves them onto the current release.
+`graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release.
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes dependency directories of finished worktrees (`run.reclaimIdleHours`) and raises `disk` attention below `run.diskThresholdGb`.
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). Finished worktrees lose dependency directories after `run.reclaimIdleHours`; `disk` attention starts below `run.diskThresholdGb`.
 
 ### The managed worktree root
 
@@ -69,18 +67,16 @@ Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/shar
 
 ## Recovery
 
-A dead supervisor leaves its item fenced; `containment` lists each surviving process with pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists each surviving process with pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator` and `stopped-by-attestation` lapses are history. Any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
 
-`master escalation GY-N` spawns a handler that answers with `master decide GY-N resolve … --context FINGERPRINT REASON` (`master context GY-N` prints the context).
+`master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`; `master context GY-N` prints the context.
 
 ## Fault classes
 
-Every attention item, escalation and failed loop action carries a `kind` and a `faultClass` from the catalogue in `src/model/fault-classes.ts` (session-liveness, review-convergence, decision, scope, overlap-hold, observation, deployment, configuration, containment, merge, proof, capacity, resources, loop, human-decision, stalled-gate). `master status` groups open problems under `faults`, largest class first; the Work page shows the same counts under Problems by class. An `unclassified` line means the catalogue needs an entry.
-
-The loop records each fault as an instance under `daemon.faults`. When a class reaches `GRAPHYARD_FAULT_CLASS_THRESHOLD` instances (default 3) within `GRAPHYARD_FAULT_CLASS_WINDOW_HOURS` (default 24) and no open item names it, the loop files one backlog item as the master's operator-agent. The item lists the instances and records the class it closes in `origin.faultClass`. Later instances link to that item instead of filing more. Fix the shared cause, not each instance.
+Faults carry `faultClass`, grouped under `master status` `faults`; a class past `GRAPHYARD_FAULT_CLASS_*` (3/24h) files one item later instances link to.
 
 ## Pipeline speed
 
-The target is submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs [--split GY-N] [--record DIR]` records what `manual:speed-target-met` reads. Never trade a gate or proof for the number.
+The target is submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs [--split GY-N] [--record DIR]` records what `manual:speed-target-met` reads.
