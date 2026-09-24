@@ -15,6 +15,7 @@ import { releaseView } from '../web/release.js';
 import ShippedPage from '../web/pages/shipped.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
 import { jargon } from '../web/plain-status.js';
+import { formatAge } from '../web/duration.js';
 import { primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
@@ -434,6 +435,9 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   const rule = /@media \(prefers-reduced-motion: reduce\)\{([^@]*)\}/.exec(css)?.[1] ?? '';
   assert.match(rule, /animation:none!important/); assert.match(rule, /transition:none!important/);
   assert.match(source, /prefers-reduced-motion: reduce/);
+  // Pressing Play cannot start it either: the button is not offered and the frame loop never runs.
+  assert.match(source, /if \(!playing \|\| reducedMotion\(\)\) return;/);
+  assert.match(source, /\{!reducedMotion\(\) && <button[^>]*onClick=\{\(\) => \{ if \(t >= 1\) setT\(0\); setPlaying/);
 });
 
 test('unit:ui-matches-design — the shared tokens and IBM Plex fonts are the only colour and font definitions in web/style.css, and the sidebar lists exactly Work, Workers, Shipped, Tests (planned), Insights and Settings', async () => {
@@ -770,7 +774,11 @@ test('GY-161 review: where the production watch observes production, a merge wai
   const namedStatus = status(null, 'graphyard / production');
   assert.match(markup(createElement(ShippedPage, dashboard({ work: [live], status: namedStatus }))), /data-live="true">Live</);
   const before = Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(home(dashboard({ work: [...board(), waiting], status: namedStatus })))?.[1]);
-  assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(home(dashboard({ work: [...board(), live], status: namedStatus })))?.[1]), before + 1);
+  const withLive = home(dashboard({ work: [...board(), live], status: namedStatus }));
+  assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(withLive)?.[1]), before + 1);
+  // The footer's "Latest" dates the release under that same name, not from the Unix epoch.
+  const footer = /aria-label="Shipped this week">[\s\S]*$/.exec(withLive)![0];
+  assert.match(footer, new RegExp(`${live.key}</span> <span data-title="true">[^<]*</span></button> · ${formatAge(NOW - hour, NOW)} ago`), footer.slice(0, 600));
   // The item page's Checks line reads each check as the test gate does: only the trusted App's runs
   // count, so a newer untrusted run of the same name neither passes nor fails a check.
   const handedIn = find('GY-22');

@@ -68,7 +68,8 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
-    if (!playing) return;
+    // Under reduced motion the replay never animates: the slider steps through it instead.
+    if (!playing || reducedMotion()) return;
     let frame = 0; const started = performance.now() - t * replaySeconds * 1000;
     const tick = (at: number) => { const next = Math.min(1, (at - started) / (replaySeconds * 1000)); setT(next); if (next < 1) frame = requestAnimationFrame(tick); else setPlaying(false); };
     frame = requestAnimationFrame(tick);
@@ -113,7 +114,7 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
         <span>24 h ago</span>
         <input type="range" min={0} max={1000} value={Math.round(t * 1000)} aria-label="Replay position" onChange={e => { setPlaying(false); setT(Number(e.target.value) / 1000); }}/>
         <span>now</span>
-        <button type="button" className="text-button" onClick={() => { if (t >= 1) setT(0); setPlaying(value => !value); }}>{playing ? 'Pause' : 'Play'}</button>
+        {!reducedMotion() && <button type="button" className="text-button" onClick={() => { if (t >= 1) setT(0); setPlaying(value => !value); }}>{playing ? 'Pause' : 'Play'}</button>}
         {truncated && <small>Only the first rows of the recorded history were returned.</small>}
       </div>}
     </section>

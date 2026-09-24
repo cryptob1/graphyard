@@ -67,7 +67,7 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
       {groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Nothing is open.'}</p>}
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
-        <span><strong>{recent.length} shipped this week.</strong>{recent[0] && <> Latest: <button type="button" className="text-button" onClick={() => setSelected(recent[0].id)}><span className="mono">{recent[0].key}</span> <span data-title>{recent[0].title}</span></button> · {formatAge(new Date(releasedAt(recent[0])!).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}</span>
+        <span><strong>{recent.length} shipped this week.</strong>{recent[0] && <> Latest: <button type="button" className="text-button" onClick={() => setSelected(recent[0].id)}><span className="mono">{recent[0].key}</span> <span data-title>{recent[0].title}</span></button> · {formatAge(new Date(releasedAt(recent[0], release)!).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}</span>
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>See what shipped →</button>
       </div>
     </>}
