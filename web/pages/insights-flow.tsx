@@ -56,7 +56,7 @@ export function Headline({ shipped, moving, waiting, now, pulse, requests }: { s
   // A cached median after a failed or late read is marked stale, never shown as current.
   const stale = !!pulse.pulse && pulse.stale ? ` · stale: last read ${formatDuration(pulse.elapsed / 60000)} ago${pulse.unavailable ? ', the latest read failed' : ''}` : '';
   const liveNote = !pulse.pulse ? (pulse.unavailable ? 'the shipping pulse could not be read' : 'reading the shipping pulse')
-    : (!production || typeof production.configured !== 'boolean' ? 'the shipping pulse reported no production metric' : production.configured === false ? 'no production observation is recorded' : `pull request to production · ${production.sampleSize} of ${production.eligible} measured`) + stale;
+    : (!production ? 'the shipping pulse reported no production metric' : production.configured === false ? 'no production observation is recorded' : `pull request to production · ${production.sampleSize} of ${production.eligible} measured`) + stale;
   // An item waits from when it was asked: its oldest open human-only row (status `humanOnly`),
   // else its own parked request; its stage clock only when neither says.
   const asked = (item: Work) => {

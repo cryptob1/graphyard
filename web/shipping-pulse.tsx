@@ -34,7 +34,7 @@ export function wellFormedPulse(body: any): body is Pulse {
   if (![production.sampleSize, production.eligible, production.excluded, production.coveragePercent].every(isNumber)) return false;
   if (!isObject(production.split) || !isHours(production.split.prToMergeAverageHours) || !isHours(production.split.mergeToProductionAverageHours)) return false;
   if (!isObject(production.exclusions) || !Object.values(production.exclusions).every(isNumber)) return false;
-  if (production.sources != null && (!isObject(production.sources) || !isNumber(production.sources.verifiedDeliveries))) return false;
+  if (production.sources != null && (!isObject(production.sources) || !isNumber(production.sources.verifiedDeliveries) || typeof production.sources.providerObservations !== 'boolean')) return false;
   if (production.dominantExclusion != null && (!isObject(production.dominantExclusion) || !isString(production.dominantExclusion.reason) || !isNumber(production.dominantExclusion.count))) return false;
   if (!Array.isArray(weeks) || !weeks.every(week => isObject(week) && isString(week.start) && isNumber(week.count))) return false;
   // The weekly chart labels its first and last week, so deliveries need at least one week to draw.

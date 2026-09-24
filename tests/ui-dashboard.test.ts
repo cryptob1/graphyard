@@ -1143,6 +1143,11 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   assert.equal(wellFormedPulse(fixtureApi('shipping-pulse')), true, 'the dashboard fixture pulse is whole');
   assert.equal(wellFormedPulse({ ...whole, prToProduction: { ...whole.prToProduction, configured: false, unconfiguredReason: null } }), true);
   assert.match(markup(createElement(ShippingPulseView, { pulse: whole as any, stale: false, elapsed: 0, onRefresh: noop })), /6 included of 8/);
+  // The headline reads a legacy pulse (no `configured`) as ShippingPulseView does: configured, its median measured.
+  assert.match(kpi({ pulse: whole, unavailable: false, elapsed: 0, stale: false }), /<strong>24h<\/strong><small>pull request to production · 6 of 8 measured<\/small>/);
+  const sourced = (sources: unknown) => wellFormedPulse({ ...whole, prToProduction: { ...whole.prToProduction, sources } });
+  assert.equal(sourced({ providerObservations: true, verifiedDeliveries: 0 }), true);
+  for (const sources of [{ verifiedDeliveries: 0 }, { providerObservations: 'false', verifiedDeliveries: 0 }]) assert.equal(sourced(sources), false, `refused sources: ${JSON.stringify(sources)}`);
   assert.equal(wellFormedPulse({ ...whole, ...measured }), false, 'a production metric with only its median would crash Show details');
   const production = whole.prToProduction as Record<string, unknown>;
   for (const broken of [{ split: undefined }, { exclusions: null }, { sampleSize: '6' }, { eligible: undefined }, { excluded: null }, { coveragePercent: undefined }, { configured: 'yes' }, { dominantExclusion: { count: 2 } }]) {
