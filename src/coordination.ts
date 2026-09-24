@@ -60,12 +60,12 @@ export function dispatchOverlap(work: Work, all: Work[], now: number): OverlapAh
   // by a directory another item merely declared: its changed files are concrete and the directory
   // is a guess. On 2026-09-24 the priority-0 GY-164, mid-review with PR #155 open, sat held behind
   // the priority-1 GY-161, claimed later over the whole tests/ directory. A named file, or another
-  // candidate's changed file, still excludes.
+  // candidate's changed file, still excludes. A directory is any spelling pathScope reads as one: tests/, tests/* or tests/**.
   return all.filter(w => w.id !== work.id && inFlight(w, now) && w.priority <= work.priority).flatMap(w => {
     const theirs = exclusionPaths(w);
     const paths = mine.filter(path => theirs.some(other => pathScopesOverlap(path, other)));
     if (!paths.length) return [];
-    if (work.candidate && !w.candidate && theirs.filter(other => mine.some(path => pathScopesOverlap(path, other))).every(other => other.endsWith('/'))) return [];
+    if (work.candidate && !w.candidate && theirs.filter(other => mine.some(path => pathScopesOverlap(path, other))).every(other => pathScope(other).prefix)) return [];
     return [{ key: w.key, stage: w.stage, state: claimedNow(w, now) ? 'claimed' as const : 'submitted' as const, paths, theirs: theirs.filter(other => mine.some(path => pathScopesOverlap(path, other))) }];
   });
 }

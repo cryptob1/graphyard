@@ -192,6 +192,8 @@ test('unit:overlap-priority-and-open-pr — work never waits behind lower-priori
   assert.deepEqual(dispatchOverlap(fix, [fix, redesign], clock), [], 'lower priority and only a declared directory: no hold');
   // Same priority, directory only: the open pull request still goes ahead.
   assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-170', ['tests/'], { priority: 0 })], clock), []);
+  // Every directory spelling pathScope recognizes is a declared directory, not a named file.
+  for (const spelling of ['tests/*', 'tests/**', './tests/']) assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-174', [spelling], { priority: 0 })], clock), [], spelling);
   // A claimed item that names the very file the pull request changed still holds it.
   assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-171', ['tests/auto-scope.test.ts'], { priority: 0 })], clock).map(entry => entry.key), ['GY-171']);
   // A fresh item with no pull request is still held behind same- or higher-priority work on its directory.

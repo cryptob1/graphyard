@@ -14,6 +14,7 @@ import { server } from '../src/server.js';
 import { standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
+import { samePin } from '../src/server/decision-ledger.js';
 
 // GY-75: a decision whose approval is refused on a revision race must never stay 'requested'
 // forever. A pinned race settles the decision as stale, resolve and attest are pinned to what
@@ -71,7 +72,7 @@ async function candidate(title: string) {
 let extraId = 8;
 const extraCriterion = (work: Work) => engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [...work.criteria, { id: `AC-${++extraId}`, text: 'Changelog entry', proofs: ['manual:changelog'] }], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'Unrelated policy growth' }, randomUUID());
 /** The exact state a resolve decision is pinned to, mirrored from the server side. */
-const pinOf = (work: Work) => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
+const pinOf = (work: Work) => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, lease: work.lease?.epoch ?? null, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
 const overwrite = async (work: Work, mutate: (document: Work) => void) => {
   const document = await reload(work.id); mutate(document);
   await store.pool.query('UPDATE work_items SET document=$2::jsonb WHERE id=$1', [document.id, JSON.stringify(document)]);
@@ -288,13 +289,53 @@ test('integration:decision-pinning-scope — resolve is pinned to what it acts o
   const lossListed = await ok(master.token, 'GET', `work/${vanished.key}/decisions`);
   const lossSettled = lossListed.decisions.find((entry: any) => entry.id === lossRequest.body.id);
   assert.equal(lossSettled.state, 'stale');
-  assert.deepEqual(lossSettled.race, { expected: lossPin, current: { ...lossPin, epoch: vanished.epoch } });
+  assert.deepEqual(lossSettled.race, { expected: lossPin, current: { ...lossPin, epoch: vanished.epoch, lease: vanished.epoch } });
   const freshLoss = await decide(master.token, vanished, 'resolve', { trigger: 'lease-loss', expectedRevision: vanished.revision }, 'Requested against the loss that stands now');
   assert.equal(freshLoss.status, 200, JSON.stringify(freshLoss.body));
   const freshLossApplied = await approve(approver.token, vanished, freshLoss.body.id, 'The recorded loss is the one reviewed');
   assert.equal(freshLossApplied.status, 200, JSON.stringify(freshLossApplied.body));
   assert.equal(freshLossApplied.body.state, 'applied');
   assert.deepEqual(standingEscalations(await reload(vanished.id)), []);
+  // A resolve the loop asks because a newer attempt holds the item rests on that lease. When it
+  // lapses unexplained before the approval, its own lease-loss is a suppressed repeat and the epoch
+  // does not move, so the held lease is what the pin sees go: the approval refuses rather than
+  // clearing the earlier loss over a replacement that vanished too.
+  let superseded = await created('superseded-lease-loss');
+  superseded = await engine.execute(operator, 'ready', superseded.id, {}, randomUUID());
+  superseded = await engine.execute(implementer, 'claim', superseded.id, {}, randomUUID());
+  superseded = await lapse(superseded);
+  superseded = await engine.execute(replacement, 'claim', superseded.id, {}, randomUUID());
+  superseded = await reload(superseded.id);
+  const supersededLoss = standingEscalations(superseded).find(entry => entry.trigger === 'lease-loss')!;
+  assert.match(supersededLoss.reason, /lost lease epoch 1/);
+  const heldRequest = await decide(master.token, superseded, 'resolve', { trigger: 'lease-loss', expectedRevision: superseded.revision }, 'Epoch 2 holds the lease, so epoch 1 can no longer act');
+  assert.equal(heldRequest.status, 200, JSON.stringify(heldRequest.body));
+  const heldPin = pinOf(await reload(superseded.id));
+  assert.equal(heldPin.lease, 2, 'the pin names the held lease the request rests on');
+  superseded = await engine.execute(replacement, 'heartbeat', superseded.id, { epoch: superseded.epoch }, randomUUID());
+  assert.deepEqual(pinOf(await reload(superseded.id)), heldPin, 'a heartbeat extends the lease without moving the pin');
+  superseded = await lapse(superseded);
+  await engine.reconcile();
+  superseded = await reload(superseded.id);
+  assert.equal(superseded.lease, null, 'reconciliation cleared the lapsed replacement lease');
+  assert.equal(superseded.epoch, heldPin.epoch, 'no claim moved the epoch');
+  assert.deepEqual(standingEscalations(superseded).map(entry => entry.at), [supersededLoss.at], 'the replacement loss was a suppressed repeat');
+  const heldRefused = await approve(approver.token, superseded, heldRequest.body.id, 'Approved against the replacement I read');
+  assert.equal(heldRefused.status, 409);
+  assert.match(heldRefused.body.error, /Task revision changed \(now \d+\)/);
+  const heldSettled = (await ok(master.token, 'GET', `work/${superseded.key}/decisions`)).decisions.find((entry: any) => entry.id === heldRequest.body.id);
+  assert.equal(heldSettled.state, 'stale');
+  assert.deepEqual(heldSettled.race, { expected: heldPin, current: { ...heldPin, lease: null } });
+  assert.deepEqual(standingEscalations(await reload(superseded.id)).map(entry => entry.at), [supersededLoss.at], 'the loss still stands for a human or a verified stop');
+});
+
+test('a resolve pin recorded before it named the held lease is compared on the fields it recorded', () => {
+  const current = { policyRevision: 3, sha: null, baseSha: null, epoch: 2, lease: 2, escalations: [{ trigger: 'lease-loss', at: '2030-01-01T00:00:00.000Z' }] };
+  const { lease, ...recorded } = current;
+  assert.equal(samePin(current, recorded), true);
+  assert.equal(samePin(current, { ...current, lease: null }), false);
+  assert.equal(samePin({ ...current, lease: null }, current), false);
+  assert.equal(samePin(current, null), false);
 });
 
 test('integration:decision-withdraw — the master withdraws its own requested decision with a reason, and master-visible state shows it as withdrawn without blocking a re-request', async () => {
