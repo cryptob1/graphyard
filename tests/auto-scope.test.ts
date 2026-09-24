@@ -316,7 +316,7 @@ test('unit:documentation-consumer-scope — an item planning the whole docs/ tre
   assert.equal(approved.state, 'approved', approved.reason);
   assert.match(approved.reason, /web\/x\.tsx \(web\/x\.tsx renders or tests the documentation this item rewrites\)/);
   assert.match(approved.reason, /browser-tests\/y\.spec\.ts \(browser-tests\/y\.spec\.ts renders or tests/);
-  assert.deepEqual([...documentationConsumerScopes], ['web/', 'browser-tests/']);
+  assert.deepEqual([...documentationConsumerScopes], ['web/', 'browser-tests/', 'integrations/']);
   const other = { plannedFiles: ['docs/one.md', 'src/a.ts'], criteria: docsTree.criteria };
   assert.equal(decideScopeRequest(other, { paths: ['web/x.tsx', 'browser-tests/y.spec.ts'] }).state, 'refused', 'one guide is not the whole tree');
   assert.equal(decideScopeRequest(docsTree, { paths: ['web/'] }).state, 'refused', 'a consumer directory is never implied');
