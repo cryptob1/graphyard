@@ -646,9 +646,21 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // rather than in it: the wait on that read is the reviewer's alone, so no producer request, on
   // its item or a later one, is held behind it, and a read that settles at once launches its
   // reviewer without waiting behind the producer starts ahead of it in the pass. Reviewer launches
-  // take turns with each other, never with producers, so two of them never both count the same
-  // free reviewer slot.
+  // take turns with each other, so two of them never both count the same free reviewer slot, and
+  // with a producer launch only over an agent name both profiles use.
   let reviewTurn: Promise<unknown> = Promise.resolve();
+  // A reviewer launching beside the producer pass must still never take a Herdr name a producer
+  // launch is taking: both read the tick's inventory, and a name joins it only once its launch
+  // returns. A launch holds the agent names of every profile it may fail over to until its name is
+  // in the inventory; a launch sharing none of them never waits on it.
+  const nameTurns = new Map<string, Promise<unknown>>();
+  const reserveNames = <T>(profiles: readonly { agentName: string }[], launch: () => Promise<T>): Promise<T> => {
+    const names = [...new Set(profiles.map(profile => profile.agentName))];
+    const turn = Promise.all(names.map(name => nameTurns.get(name))).then(launch);
+    const held = turn.catch(() => { /* the launcher sees the failure */ });
+    for (const name of names) nameTurns.set(name, held);
+    return turn;
+  };
   const inReviewTurn = (item: Work, review: DispatchRequest) => {
     const turn = reviewTurn.then(() => dispatchReview(item, review));
     reviewTurn = turn.catch(() => { /* the caller of this turn sees the failure */ });
@@ -670,8 +682,12 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
       else {
         try {
-          const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
-          started.push({ name: launchedName(launched.profile, review, launched.result) }); delete cursor.failures[review.id]; delete cursor.capacity.review;
+          const launched = await reserveNames(order, async () => {
+            const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
+            started.push({ name: launchedName(launched.profile, review, launched.result) });
+            return launched;
+          });
+          delete cursor.failures[review.id]; delete cursor.capacity.review;
           // The session is running somewhere; put its coordinates where every Graphyard reader
           // looks, so watching this reviewer never means reading this host's local ledger.
           await effects.recordSession?.(item, launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, review, launched.result) }, launched.profile.kind, config.herdrWorkspace))
@@ -708,8 +724,12 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
           continue;
         }
         try {
-          const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
-          started.push({ name: launchedName(launched.profile, request, launched.result) }); delete cursor.failures[request.id]; delete cursor.capacity.producer;
+          const launched = await reserveNames(usable, async () => {
+            const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
+            started.push({ name: launchedName(launched.profile, request, launched.result) });
+            return launched;
+          });
+          delete cursor.failures[request.id]; delete cursor.capacity.producer;
           await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
             .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
           tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });

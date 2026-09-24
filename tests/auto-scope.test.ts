@@ -14,7 +14,7 @@ import { emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, an
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
-import { baseHasPath, findingScope, namesPath, readReviewFindings } from '../src/review-scope.js';
+import { basePaths, findingScope, namesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
@@ -379,7 +379,7 @@ test('integration:scope-from-review-finding — a refused request for a file a r
     widened.push({ paths, reason });
     return ok(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
   };
-  const overrides: Partial<DaemonEffects> = { reviewFindings: async () => findings, baseHasPath: async path => path !== 'src/new-helper.ts', widenScope: widen };
+  const overrides: Partial<DaemonEffects> = { reviewFindings: async () => findings, basePaths: async paths => new Set(paths.filter(path => path !== 'src/new-helper.ts')), widenScope: widen };
 
   // Named by the finding: the control plane refuses it (no criterion names it), and the loop widens it.
   await request(work, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
@@ -462,7 +462,7 @@ test('integration:scope-from-review-finding — a refused request for a file a r
       if (item.id === raced.id && item.lease) await engine.execute(implementer, 'release', raced.id, { epoch: raced.epoch }, randomUUID());
       return findings;
     },
-    baseHasPath: async () => true,
+    basePaths: async paths => new Set(paths),
     widenScope: async (item, asked, paths, reason) => {
       attempted.push(item.id);
       const answer = await call(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
@@ -572,11 +572,16 @@ test('unit:review-finding-scope — only a file on the base that a finding names
   await writeFile(join(repo, 'src', 'added.ts'), 'export {};\n'); git(['-C', repo, 'rm', '-q', 'src/present.ts']); git(['-C', repo, 'add', '.']);
   git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base moves']);
   const gitRun = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  assert.equal(await baseHasPath(checkout, 'main', 'src/added.ts', gitRun), true, 'a file added to the base since the last fetch exists');
-  assert.equal(await baseHasPath(checkout, 'main', 'src/present.ts', gitRun), false, 'a file deleted from the base since the last fetch is absent');
-  assert.equal(await baseHasPath(checkout, 'main', 'src/absent.ts', gitRun), false);
-  await assert.rejects(baseHasPath(checkout, 'gone', 'src/added.ts', gitRun), 'a missing base branch is a failure, not an absent file');
-  await assert.rejects(baseHasPath(checkout, 'main', 'src/added.ts', () => { throw new Error('git timed out'); }), /timed out/);
+  // One decision is one fetch: however many paths it asks about, they are judged against one pinned tree.
+  const calls: string[][] = [];
+  const counted = (command: string, args: string[]) => { calls.push(args); return gitRun(command, args); };
+  assert.deepEqual([...await basePaths(checkout, 'main', ['src/added.ts', 'src/present.ts', 'src/absent.ts', 'src'], counted)], ['src/added.ts'],
+    'a file added to the base since the last fetch exists; one deleted since, one never there, and a directory are absent');
+  assert.equal(calls.filter(args => args.includes('fetch')).length, 1, `one fetch per decision: ${JSON.stringify(calls)}`);
+  assert.equal(calls.length, 3, `fetch, pin the commit, one ls-tree for every path: ${JSON.stringify(calls)}`);
+  assert.deepEqual([...await basePaths(checkout, 'main', [], () => { throw new Error('no git for no paths'); })], []);
+  await assert.rejects(basePaths(checkout, 'gone', ['src/added.ts'], gitRun), 'a missing base branch is a failure, not an absent file');
+  await assert.rejects(basePaths(checkout, 'main', ['src/added.ts'], () => { throw new Error('git timed out'); }), /timed out/);
   await rm(repo, { recursive: true, force: true }); await rm(checkout, { recursive: true, force: true });
 
   const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: ['chatgpt-codex-connector[bot]'] }, run);

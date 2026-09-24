@@ -23,7 +23,7 @@ import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
-import { baseHasPath, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
+import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
@@ -1279,8 +1279,8 @@ export interface DaemonEffects {
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
    */
   reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
-  /** Whether a file exists on the base branch in this checkout. */
-  baseHasPath?: (path: string) => Promise<boolean>;
+  /** Which of the paths exist on the base branch, read from one fetch of it per decision. */
+  basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
   /**
    * The master's own additive scope widening — the revision `master scope` applies — with its
    * audited reason, bound to the scope request it answers (`answeringWidening`).
@@ -1690,8 +1690,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
     try {
       const findings = await effects.reviewFindings(item);
-      const existing = new Set<string>();
-      for (const path of paths) if (await effects.baseHasPath?.(path)) existing.add(path);
+      const existing = await effects.basePaths?.(paths) ?? new Set<string>();
       const scoped = findingScope(paths, findings, path => existing.has(path));
       if ('refusal' in scoped) {
         const detail = `Not widened on a review finding: ${scoped.refusal}`;
@@ -2895,7 +2894,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
-    baseHasPath: path => baseHasPath(root, current().baseBranch, path, run),
+    basePaths: paths => basePaths(root, current().baseBranch, paths, run),
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;

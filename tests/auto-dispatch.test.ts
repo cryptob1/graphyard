@@ -923,3 +923,24 @@ test('producers launch before any reviewer waits on a bot read: an unanswered re
     assert.ok(producedAt.length >= 2 && producedAt.every(ms => ms < deadline), `no producer waits on the unanswered bot read (${deadline}ms): ${JSON.stringify(producedAt)}`);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('a reviewer launching beside the producer pass takes turns with a producer launch over a shared Herdr agent name, so the later launch sees the earlier name', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-names-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
+    const base = stubEffects(() => [item], log), seen: { kind: string; names: string[] }[] = [];
+    const effects = stubEffects(() => [item], log, {
+      headReviewers: () => new Promise<string[]>(resolve => setTimeout(() => resolve(['chatgpt-codex-connector[bot]']), 20)),
+      launchProducer: async (...args) => { seen.push({ kind: `producer:${args[2].name}`, names: args[3].map(agent => String(agent.name)) }); await new Promise(resolve => setTimeout(resolve, 200)); return base.launchProducer(...args); },
+      launchReview: async (...args) => { seen.push({ kind: 'review', names: args[3].map(agent => String(agent.name)) }); return base.launchReview(...args); },
+    });
+    // Profiles added out of order can share a name: the reviewer took producer-a's.
+    const config = masterConfig(token); config.reviewers[0].agentName = config.producers[0].agentName;
+    await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000);
+    const review = seen.findIndex(entry => entry.kind === 'review'), producer = seen.findIndex(entry => entry.kind === 'producer:producer-a');
+    assert.ok(review >= 0 && producer >= 0, `both launch: ${JSON.stringify(seen)}`);
+    const later = seen[Math.max(review, producer)];
+    assert.ok(later.names.includes(config.producers[0].agentName), `the later launch sees the shared name taken: ${JSON.stringify(seen)}`);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

@@ -93,15 +93,19 @@ export function findingScope(paths: readonly string[], findings: readonly Review
 }
 
 /**
- * Whether `path` exists on the base branch as the remote has it now. The base is fetched first: the
- * daemon's other base fetch is lazy, so a local `origin/<baseBranch>` can be stale by any amount and
- * would judge a file added since absent, and a file deleted since present. Only a genuine absence
- * answers false: a failed fetch, a missing base ref, a timed-out or failing git fails the call, so the
- * caller retries instead of judging an existing file absent and recording that as its decision.
+ * Which of `paths` exist on the base branch as the remote has it now. The base is fetched once per
+ * decision and its commit pinned, so every path is judged against one tree and a request of many
+ * paths costs one network fetch: the daemon's other base fetch is lazy, so a local
+ * `origin/<baseBranch>` can be stale by any amount and would judge a file added since absent, and a
+ * file deleted since present. Only a genuine absence leaves a path out: a failed fetch, a missing
+ * base ref, a timed-out or failing git fails the call, so the caller retries instead of judging an
+ * existing file absent and recording that as its decision.
  */
-export async function baseHasPath(root: string, baseBranch: string, path: string, run: ChildRun): Promise<boolean> {
+export async function basePaths(root: string, baseBranch: string, paths: readonly string[], run: ChildRun): Promise<Set<string>> {
+  if (!paths.length) return new Set();
   const ref = `origin/${baseBranch}`;
   await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/${ref}`]);
-  await run('git', ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`]);
-  return String(await run('git', ['-C', root, 'ls-tree', '-z', '--name-only', ref, '--', path])).split('\0').includes(path);
+  const commit = String(await run('git', ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`])).trim();
+  const listed = new Set(String(await run('git', ['-C', root, 'ls-tree', '-z', '--name-only', commit, '--', ...paths])).split('\0'));
+  return new Set(paths.filter(path => listed.has(path)));
 }
