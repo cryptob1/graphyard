@@ -204,6 +204,21 @@ added beyond an explicit limit refuses start-up.
 An ungated merge is a permanent violation. Never backfill evidence; repair access rules and
 create a follow-up item.
 
+### Direct-merge mode
+
+When the operator merges straight into the base branch, open a direct-merge window instead of
+deciding each merge. Inside the window, a merge that no execution authorized is delivered as
+operator-authorized. The `merge.operator-authorized` event names the window and who set it, and
+no violation is recorded. Only the operator can open a window, in one of two ways:
+
+- `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard operator direct-merges on --since ISO [--until ISO] REASON`
+  (`off REASON` closes it, `status` shows it); these append `policy.direct-merge.set|cleared`.
+- Deployment variables `GRAPHYARD_DIRECT_MERGE_SINCE` (and optional `_UNTIL`), set by
+  `deployment environment`.
+
+Agent identities are refused. Opening a window, startup and every reconciliation tick deliver
+the items already held for a merge inside it. `master status` shows a `directMerge` line while a window is open.
+
 ## Credentials
 
 Add or rotate principals in `GRAPHYARD_PRINCIPALS` (unique ID and secret each), then redeploy. Scoped operator agents use the [credential registry](operator-automation.md), never an

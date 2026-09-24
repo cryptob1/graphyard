@@ -1,7 +1,10 @@
 import { demand } from '../../model.js';
-import { defineRoutes, parseJson } from '../routes.js';
+import { DirectMerges } from '../../direct-merge.js';
+import { defineRoutes, parseJson, type Services } from '../routes.js';
 
-/** Scoped operator automation identities: listing, setup, and credential lifecycle. */
+const directMerges = (services: Services) => new DirectMerges(services.engine.store, () => services.engine.directMergeEnvironment);
+
+/** Scoped operator automation identities: listing, setup, and credential lifecycle; and the admin-only direct-merge mode. */
 export const operatorAgentRoutes = defineRoutes('operator-agents', [
   // The configured roster without credentials: who the server authenticates, in which role, and
   // which of them hold a live lease. A roster rotation is previewed against it so it can never
@@ -26,4 +29,7 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
         : action === 'rotate' ? operatorAgents.rotate(actor, id, data, key) : operatorAgents.revoke(actor, id, data, key);
     },
   },
+  // Direct-merge mode (direct-merge.ts): read by the master and dashboard, set and cleared with an admin credential only.
+  { method: 'GET', path: '/api/direct-merges', handle: ({ actor, services }) => directMerges(services).status(actor) },
+  { method: 'POST', path: /^\/api\/direct-merges\/(on|off)$/, handle: async (context, [action]) => directMerges(context.services).change(context.actor, action as 'on' | 'off', await parseJson(context), context.idempotencyKey()) },
 ]);
