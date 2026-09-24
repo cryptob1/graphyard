@@ -2,14 +2,15 @@ import { deliveryState, isClosed, type Work } from '../src/model';
 import { parkedOnHuman, type HumanRequestRow } from '../src/model/human-request';
 import { phaseOf, plainReason, plainStatus } from './plain-status';
 import { prSteps } from './pr-steps';
+import { servedAt } from '../src/flow-analytics';
 import { stalledCards } from './pages/actionless';
 
 /**
  * The one classification the dashboard uses (GY-161). Every open item is in exactly one group,
  * and every count, tile, list, badge and phone chip is drawn from `classify`, so a number on the
  * page is always the number of rows it filters. Merged work is `shipped` only once the release
- * serves it (its delivery verified, or no post-deployment check asked for); until then it is
- * still moving at Deploy, and a failed post-deployment check is blocked. Closed work is in none.
+ * is recorded serving it (`servedAt`: the verified deployment, and the passing post-deployment
+ * check when one is asked for); until then it is still moving at Deploy, and a failed post-deployment check is blocked. Closed work is in none.
  *
  * - `needs-you`: waits on a decision only the human operator may make (a parked item, or an
  *   approval no agent identity can give). Listed here and nowhere else — never also as Blocked.
@@ -41,8 +42,10 @@ export function humanOnlyIds(work: Work[], rows: HumanRequestRow[] | null | unde
 export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set()): Group | null {
   if (isClosed(work)) return null;
   if (work.stage === 'done') {
-    const state = deliveryState(work);
-    return state === 'awaiting-deployment' || state === 'awaiting-smoke' ? 'moving' : state === 'delivered-with-failure' ? 'blocked' : 'shipped';
+    // Shipped only once the recorded release serves it; a merge alone is still moving at Deploy.
+    // Work merged before delivery records existed has nothing left to wait on.
+    if (!work.delivery || servedAt(work)) return 'shipped';
+    return deliveryState(work) === 'delivered-with-failure' ? 'blocked' : 'moving';
   }
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);

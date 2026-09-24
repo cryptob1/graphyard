@@ -13,6 +13,7 @@ import type { Principal, Work } from '../src/model.js';
 import { predictQueue } from '../src/merge-queue.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { live } from '../browser-tests/ui-board.js';
 import { OVERDUE_MINUTES, formatDuration, statusDuration } from '../web/duration.js';
 import { phaseOf, phaseLabel, statusHeld, statusSince } from '../web/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
@@ -31,7 +32,8 @@ const root = new URL('..', import.meta.url);
 const read = (path: string) => readFile(new URL(path, root), 'utf8');
 const markup = (element: any) => renderToStaticMarkup(element);
 const noop = () => {};
-const fixture = fixtureWork() as unknown as Work[];
+// The fixture's merged items are served by the release (since GY-161 a merge alone is still at Deploy).
+const fixture = (fixtureWork() as unknown as Work[]).map(live);
 const minute = 60_000;
 
 function dashboard(work: Work[], observedAt = NOW, overrides: Partial<Dashboard> = {}): Dashboard {

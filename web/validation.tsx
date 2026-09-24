@@ -100,7 +100,7 @@ export default function ValidationView({ api, work }: { api: (path: string) => P
       const diagnosis = capacity?.requests.find(d => d.requestId === r.id && d.condition in conditionLabel);
       const waitingSettlement = attempt && !attempt.settled && !['queued', 'dispatched', 'running', 'collecting'].includes(r.state);
       return <article className="scenario-card" key={r.id}><div className="card-top"><span>{item?.key ?? r.workId} · {r.proof}</span><strong>{r.state}</strong></div><h2>{item?.title ?? 'Validation request'}</h2>
-        <p>{c ? `${c.environment.id} · source ${c.sourceSha.slice(0,10)} · policy ${c.policyRevision}` : `Candidate ${r.candidateId}`}</p>
+        <p>{c ? `${c.environment.id} · source ${c.sourceSha.slice(0, 8)} · policy ${c.policyRevision}` : `Candidate ${r.candidateId}`}</p>
         <p>Runner: {r.runner.id} · collector: {r.collector.id}</p><p>{attempt ? `Attempt ${attempt.epoch} of ${r.maxAttempts}` : 'Not dispatched'} · deadline {new Date(r.deadline).toLocaleString()}</p>
         {waitingSettlement && <p className="amber">Resources remain reserved. Verify execution has stopped before recovery.</p>}
         {diagnosis && <p className={['running', 'collecting', 'settled'].includes(diagnosis.condition) ? 'muted' : 'amber'}><strong>{conditionLabel[diagnosis.condition]}</strong>{r.state === 'queued' ? ` · waiting ${diagnosis.dwellSeconds}s` : ''} — {diagnosis.nextStep}</p>}

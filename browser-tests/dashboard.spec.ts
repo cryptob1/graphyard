@@ -425,19 +425,17 @@ test('slice view names leads, workers, reviewers and bottlenecks and labels each
   await expect(slices).toContainText('Rowan');
   await expect(slices).toContainText('legacy-proof');
   await expect(slices.getByText('Session kind undeclared', { exact: true })).toHaveCount(1);
-  // The signed-in session states its own kind.
+  // The signed-in summary names who and in which role, and carries no session-kind badge (GY-161, AC-10).
   const session = page.locator('.sidebar-bottom');
   await expect(session).toContainText('fixture · admin');
-  await expect(session.locator('.identity.human')).toHaveCount(1);
-  await expect(session.locator('.identity.ai')).toHaveCount(0);
+  await expect(session.locator('.identity')).toHaveCount(0);
 });
 
-test('an AI session is labelled AI in the signed-in session summary', async ({ page }) => {
+test('an AI session is named in the signed-in summary without a session-kind badge', async ({ page }) => {
   await fixture(page, 'worker'); await login(page);
   const session = page.locator('.sidebar-bottom');
   await expect(session).toContainText('fixture · worker');
-  await expect(session.locator('.identity.ai')).toHaveCount(1);
-  await expect(session.locator('.identity.human')).toHaveCount(0);
+  await expect(session.locator('.identity')).toHaveCount(0);
 });
 
 test('a delayed post-create refresh cannot restore the signed-out session or leak into a new login', async ({ page }) => {
@@ -689,8 +687,8 @@ test('releases view labels verification precisely, shows membership and reports 
   await expect(card).toContainText('production · generation 2');
   await expect(card).toContainText('Running artifacts differ from the expected release');
   await expect(card).toContainText('Instance api-1 of api runs sha256:ffff instead of sha256:1111');
-  await expect(card).toContainText('✓ GY-1 · merge eeeeeeeeeeee');
-  await expect(card).toContainText('× GY-2 · merge ffffffffffff · excluded (reverted) · Reverted');
+  await expect(card).toContainText('✓ GY-1 · merge eeeeeeee');
+  await expect(card).toContainText('× GY-2 · merge ffffffff · excluded (reverted) · Reverted');
   await expect(card).toContainText('Incidents (1)');
   await expect(card).toContainText('Rollbacks (1)');
   await expect(card).toContainText('release-0 r1 → release-1 r1 · applied · automatic · operation op-12345 by railway-rollback (provider fencing, applied) · provider applied it; not complete until the target is observed and verified');
@@ -755,8 +753,8 @@ test('merge queue shows each entry with its position in line, and its predicted 
   await moreDetails(page);
   await expect(drawer.getByRole('heading', { name: 'Merge queue' })).toBeVisible();
   await expect(drawer).toContainText('Position 2 of 2');
-  await expect(drawer).toContainText(`Predicted base ${headSha.slice(0, 12)}`);
-  await expect(drawer).toContainText(`predicted tip ${tipSha.slice(0, 12)}`);
+  await expect(drawer).toContainText(`Predicted base ${headSha.slice(0, 8)}`);
+  await expect(drawer).toContainText(`predicted tip ${tipSha.slice(0, 8)}`);
   await expect(drawer).toContainText('Merge queue position 2 of 2: GY-10 is ahead');
   await expect(drawer).toContainText('refs/graphyard/queue/gy-11');
 });

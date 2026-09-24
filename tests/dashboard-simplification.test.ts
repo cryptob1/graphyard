@@ -9,7 +9,8 @@ import { flowLimits } from '../src/flow-analytics.js';
 import { apiRoutes } from '../src/server/index.js';
 import { computeAttribution } from '../src/attribution.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
-import { busyFixtureWork, fixtureApi, fixtureStatus, fixtureWork, flowApi, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { busyFixtureWork as auditBusyWork, fixtureApi, fixtureStatus, fixtureWork as auditWork, flowApi, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { live } from '../browser-tests/ui-board.js';
 import { jargon, phaseLabel, phaseOf, phases, plainReason, plainStatus } from '../web/plain-status.js';
 import { homeNumbers } from '../web/home-numbers.js';
 import { classify, groupLabel, groups, summarySentence } from '../web/groups.js';
@@ -34,6 +35,9 @@ import ScenarioLibrary from '../web/scenarios.js';
 // titles excluded. Every assertion here is about presentation; gates, authority and the API
 // are the control plane's and are only read.
 
+// The fixture's merged items are served by the release (since GY-161 a merge alone is still at Deploy).
+const fixtureWork = () => auditWork().map(live);
+const busyFixtureWork = (count: number) => auditBusyWork(count).map(live);
 const root = new URL('..', import.meta.url);
 const read = (path: string) => readFile(new URL(path, root), 'utf8');
 const work = fixtureWork() as unknown as Work[];
@@ -93,7 +97,8 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['merge (conflict)', withGates(handedIn, 'merge', ['Pull request is not mergeable against the current base']), 'Stuck: the pull request conflicts with the main branch', 'stuck'],
     ['merge (ready)', { ...withGates(handedIn, 'merge', []), stage: 'merge', gates: find('GY-18').gates }, 'Ready to merge PR #42', 'waiting'],
     ['done', { ...find('GY-18') }, 'Shipped in PR #40', 'shipped'],
-    ['done (awaiting deploy)', { ...find('GY-18'), policy: { ...find('GY-18').policy, deploySmoke: true } as any }, 'Shipped in PR #40 — waiting to be deployed', 'waiting'],
+    ['done (awaiting deploy)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined }, policy: { ...find('GY-18').policy, deploySmoke: true } as any }, 'Shipped in PR #40 — waiting to be deployed', 'waiting'],
+    ['done (merged, release not yet seen)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined } }, 'Shipped in PR #40 — waiting to be deployed', 'waiting'],
     ['blocked', { ...find('GY-17') }, 'Stuck: needs a second Postgres instance', 'stuck'],
   ];
   const seen = new Set<string>();
@@ -222,10 +227,12 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   assert.match(text(review), /Waiting for someone else to approve the latest code/);
   assert.doesNotMatch(text(review), /Proven to work:/, 'later steps are collapsed');
   for (const raw of ['needs trusted passing evidence', 'Policy v', 'Revision ', 'assignment 1', 'GitHub observation missing']) assert.ok(!text(review).includes(raw) && !visible.includes(raw), `no ${raw} by default`);
-  // Each criterion appears once, with one marker per proof.
-  for (const ac of find('GY-16').criteria) assert.equal(visible.split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once`);
+  // Requirements are folded below the first screen (GY-161, AC-10); opened, each criterion appears once, with one marker per proof.
+  assert.match(view, /<details class="panel requirements" aria-label="Requirements">/);
+  const opened = text(view.replace('<details class="panel requirements"', '<details open class="panel requirements"'));
+  for (const ac of find('GY-16').criteria) assert.equal(opened.split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once`);
   assert.equal(view.match(/class="marker-pass"/g)?.length, 2); assert.equal(view.match(/class="marker-pending"/g)?.length, 1);
-  assert.match(visible, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
+  assert.match(opened, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
   assert.match(view, /<li class="marker-pass">✓ <abbr class="term"[^>]*>integration:login-rate-limit<\/abbr> passed<\/li>/);
   // Policy-changing actions sit in a closed, admin-only Edit menu.
   assert.match(view, /<details class="edit-menu"><summary>Edit<\/summary>[\s\S]*Use Codex cloud review[\s\S]*Revise requirements[\s\S]*<\/details>/);
@@ -309,7 +316,7 @@ test('plain-language support for manual:plain-language-review — every visible 
     assert.deepEqual(bare(html), [], `${name}: every technical word a newcomer cannot guess carries its definition in place`);
   }
   // The item view's commit and pull request are the glossary's, not a bare identifier.
-  assert.match(itemView('GY-16'), /<abbr class="term" title="[^"]*forty letters[^"]*"[^>]*><code>e{40}<\/code><\/abbr>/);
+  assert.match(itemView('GY-16'), /<abbr class="term" title="[^"]*forty letters[^"]*"[^>]*><code class="sha" title="e{40}">e{40}<\/code><\/abbr>/);
   assert.match(home(), /<abbr class="term" title="The proposed code change on GitHub[^"]*"[^>]*>PR<\/abbr> #42/);
   assert.match(form, /A proof name starts with its kind/);
   for (const example of ['unit:login-rejects-bad-password', 'integration:claim-safety', 'e2e:checkout', 'manual:copy-review']) assert.ok(form.includes(example), example);

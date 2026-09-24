@@ -495,6 +495,7 @@ export function countSummary(values: number[]) {
 }
 export const metricDefinitions: Record<string, { label: string; formula: string; sources: string[] }> = {
   stageDwell: { label: 'Stage dwell', formula: 'For each completed stage transition in the window, the interval between entering and leaving that stage. Open stages are excluded and counted separately as work in progress.', sources: ['flow_facts:stage.changed'] },
+  stepDwell: { label: 'Step dwell', formula: 'For each of the seven pull-request steps, the interval between an item entering the step and leaving it, from the step each recorded gate fact places it at and the recorded release serving it. Stays still open are excluded.', sources: ['flow_facts:gates.changed', 'work.delivery.deployment'] },
   wip: { label: 'Work in progress and aging', formula: 'Items whose latest durable stage fact places them in a stage and that have no delivered fact. Age is the observation time minus the time that stage was entered.', sources: ['flow_facts:stage.changed', 'flow_facts:delivered'] },
   cumulativeFlow: { label: 'Cumulative flow', formula: 'At each daily boundary in the window, the number of created, not-yet-delivered items in each stage, reconstructed from stage facts.', sources: ['flow_facts:stage.changed', 'flow_facts:work.created'] },
   throughput: { label: 'Throughput', formula: 'Count of delivered facts per daily bucket. A delivered fact is written only when an authorized merge is independently observed.', sources: ['flow_facts:delivered'] },
@@ -572,6 +573,19 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     const values = dataset.facts.filter(fact => fact.kind === 'stage.changed' && scopeIds.has(fact.workId)
       && (!query.stage || fact.details.from === query.stage) && fact.details.from === stage && typeof fact.details.dwellMs === 'number').map(fact => fact.details.dwellMs as number);
     return { stage, ...distribution(values) };
+  });
+
+  // Step dwell: the same step moves the replay plays, completed stays only (entered and left).
+  const stepDwell = flowSteps.map(step => {
+    const values: number[] = [];
+    for (const item of scope) {
+      const moves = stepMoves(dataset, item);
+      moves.forEach((move, index) => {
+        const next = moves[index + 1];
+        if (move.to === step && next) { const ms = time(next.at)! - time(move.at)!; if (ms >= 0) values.push(ms); }
+      });
+    }
+    return { step, ...distribution(values) };
   });
 
   // Work in progress and aging, read back from durable stage facts.
@@ -954,7 +968,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       statement: 'Flow analytics describe observed work, queueing, and capacity. No metric is keyed by a person, and no principal, provider login, or producer identity is stored in a flow fact or returned by this API.',
     },
     coverage, exclusions, unavailable,
-    stageDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, phases, ci, evidence, operations, bottleneck,
+    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, phases, ci, evidence, operations, bottleneck,
   };
 }
 export type FlowReport = ReturnType<typeof computeFlow>;
@@ -985,7 +999,47 @@ export function gateFactStep(details: Record<string, any>): FlowStep | null {
   const building = !unmet.includes('build') ? false : details.firstUnmet === 'build'
     ? (details.reasons ?? []).includes('Worker has not submitted implementation for this attempt') : !details.hasCandidate;
   if (building) return 'build';
+  // A change request sends the work back to its builder: it waits at Build, not at Review.
+  if ((details.reasons ?? []).some((reason: string) => reason.startsWith('Outstanding change requests'))) return 'build';
   return gateStep.find(([gate]) => unmet.includes(gate))?.[1] ?? 'merge';
+}
+
+/**
+ * When the release was recorded serving a merged item, which is when it leaves Deploy: the
+ * deployment `master verify-deployment` recorded, or, when the policy asks for a post-deployment
+ * smoke proof, its passing verdict on that deployed commit. Null while it still waits on either
+ * (a merge alone is not live), and for work closed without delivery.
+ */
+export function servedAt(work: Work): string | null {
+  const delivery = work.delivery;
+  if (work.stage !== 'done' || work.closure || !delivery?.deployment) return null;
+  if (!work.policy.deploySmoke) return delivery.deployment.observedAt;
+  const smoke = delivery.smoke;
+  return smoke?.result === 'pass' && smoke.sha === delivery.deployment.sha && smoke.mergeSha === delivery.mergeSha ? smoke.at : null;
+}
+
+export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | null; pr: number | null; carried: boolean }
+/**
+ * One item's moves between the seven steps, oldest first: the gate fact carried in from before the
+ * window says where it started (`carried`, not a move inside the window), each recorded gate fact
+ * that puts it at a different step is a move, and the recorded release serving it (`servedAt`)
+ * takes it from Deploy out of the flow. The replay and the per-step dwell both read these.
+ */
+export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'>, item: Work): StepMove[] {
+  const moves: StepMove[] = [];
+  const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
+  let at: FlowStep | null = carried ? gateFactStep(carried.details) : null;
+  if (carried && at) moves.push({ at: carried.observedAt, from: null, to: at, pr: carried.details.pr ?? null, carried: true });
+  for (const fact of dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed').sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)) {
+    const step = gateFactStep(fact.details);
+    if (step === at) continue;
+    moves.push({ at: fact.observedAt, from: at, to: step, pr: fact.details.pr ?? null, carried: false });
+    at = step;
+  }
+  const served = servedAt(item);
+  if (at === 'deploy' && served && time(served) !== null && (!moves.length || time(served)! >= time(moves.at(-1)!.at)!))
+    moves.push({ at: served, from: 'deploy', to: null, pr: item.candidate?.pr ?? null, carried: false });
+  return moves;
 }
 export const drilldownCatalog = drilldownMetrics;
 
@@ -1100,20 +1154,12 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     for (const fact of dataset.facts.filter(fact => fact.kind === 'review.submitted' && scopedIds.has(fact.workId) && (!key || fact.details.reviewState === key)))
       row(fact.workKey, String(fact.details.reviewState), fact.observedAt, null, null, fact.details.sha ?? null, `independent=${fact.details.independent}; timestamp=${fact.details.timestampSource}`);
   } else if (metric === 'steps') {
-    // Each item's moves between the seven pull-request steps, from its recorded gate facts: the
-    // fact carried in from before the window says where it started, and only a fact that puts it
-    // at a different step is a move. `key`, when given, is an instant: moves before it are left out.
-    for (const item of scoped) {
-      const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
-      let at: FlowStep | null = carried ? gateFactStep(carried.details) : null;
-      for (const fact of dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed').sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)) {
-        const step = gateFactStep(fact.details);
-        if (step === at) continue;
-        if (!key || time(fact.observedAt)! >= (time(key) ?? -Infinity))
-          row(item.key, step ?? 'outside', fact.observedAt, null, fact.details.pr ?? null, null, `${at ?? 'outside'} to ${step ?? 'outside'}`);
-        at = step;
-      }
-    }
+    // Each item's moves between the seven pull-request steps (`stepMoves`). `key`, when given, is
+    // an instant: moves before it are left out.
+    for (const item of scoped)
+      for (const move of stepMoves(dataset, item))
+        if (!move.carried && (!key || time(move.at)! >= (time(key) ?? -Infinity)))
+          row(item.key, move.to ?? 'outside', move.at, null, move.pr, null, `${move.from ?? 'outside'} to ${move.to ?? 'outside'}`);
   } else if (metric === 'blockers') {
     // The aggregate keys on the bounded reason label; the drill-down must match the same label.
     for (const fact of dataset.facts.filter(fact => fact.kind === 'blocker.set' && scopedIds.has(fact.workId) && (!key || blockerReasonKey(fact) === key)))

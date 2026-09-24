@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { classify } from '../groups';
 import { prSteps, stepIds, stepLabel, type StepId } from '../pr-steps';
-import { positionsAt, replayFrames, replaySeconds, replayWindowMs, stageStep, transitionsFromRows, type ReplayFrame } from '../flow-replay';
+import { positionsAt, replayFrames, replaySeconds, replayWindowMs, transitionsFromRows, type ReplayFrame } from '../flow-replay';
 import { formatDuration } from '../duration';
 import type { Dashboard } from './dashboard';
 
@@ -17,7 +17,7 @@ const minutes = (ms: number | null | undefined) => ms === null || ms === undefin
  * - **Last 24 hours, replayed** plays the recorded step changes (web/flow-replay.ts) in
  *   twenty seconds; a return to Build is rework and is drawn red.
  * - **Landed on main per day** and **where the time goes** are the flow report's own daily
- *   deliveries and per-stage dwell medians, computed from recorded history.
+ *   deliveries and per-step dwell medians, computed from the same recorded step moves.
  *
  * Every animation stops under prefers-reduced-motion: the replay then shows its last frame with
  * a slider to step through it, and the CSS rule turns the dots' movement off.
@@ -56,7 +56,8 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const inFlow = [...byGroup.moving, ...byGroup.blocked];
   const now7 = inFlow.map(item => ({ item, steps: prSteps(item, now) })).filter(entry => entry.steps.current);
   const dwell = new Map<StepId, number | null>();
-  for (const entry of report?.stageDwell ?? []) { const step = stageStep[entry.stage]; if (step) dwell.set(step, entry.medianMs ?? null); }
+  // Per-step medians come from the same recorded step moves the replay plays (the report's stepDwell).
+  for (const entry of report?.stepDwell ?? []) if ((stepIds as readonly string[]).includes(entry.step)) dwell.set(entry.step, entry.medianMs ?? null);
   const shares = stepIds.map(step => ({ step, ms: dwell.get(step) ?? 0 })).filter(entry => entry.ms > 0);
   const total = shares.reduce((sum, entry) => sum + entry.ms, 0);
   const slowest = shares.length ? shares.reduce((a, b) => b.ms > a.ms ? b : a).step : null;

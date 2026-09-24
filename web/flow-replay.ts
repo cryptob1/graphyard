@@ -5,17 +5,13 @@ import { stepIds, type StepId } from './pr-steps';
  * a durable `gates.changed` fact every time an item's gates change (src/flow-analytics.ts
  * `deriveFacts`), and the `steps` drill-down reads those facts through `gateFactStep` — the same
  * rule `prSteps` draws the Now view and the item page with — returning one row per move between
- * steps: the item, the instant, and "from to to". Each row becomes one step transition here, each
+ * steps: the item, the instant, and "from to to" — including the recorded release serving it, which
+ * takes it from Deploy out of the flow (`stepMoves`). Each row becomes one step transition here, each
  * transition one frame of the replay, and nothing is interpolated or invented: a dot only ever
  * stands where a recorded transition put it. A move back to Build from a later step is rework,
  * drawn in the Blocked colour.
  */
 
-/**
- * The step each evaluated stage roughly stands for, used only to label the flow report's
- * per-stage dwell medians ("where the time goes"); positions never come from it.
- */
-export const stageStep: Record<string, StepId | null> = { backlog: null, ready: null, build: 'build', review: 'review', test: 'test', acceptance: 'prove', merge: 'merge', done: 'deploy' };
 /** The replay's length: the last 24 hours played back in this many seconds. */
 export const replaySeconds = 20;
 export const replayWindowMs = 24 * 60 * 60 * 1000;

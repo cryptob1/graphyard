@@ -170,9 +170,9 @@ img.mark{width:26px;height:26px}
 .work-group>summary{cursor:pointer}.work-group>h2 small,.work-group>summary small{font-size:var(--type-small);font-weight:400;color:var(--text-2)}
 .work-group.group-needs-you{border-color:color-mix(in srgb,var(--needs-you) 45%,var(--bg));background:color-mix(in srgb,var(--needs-you) 5%,var(--bg))}
 .work-group.group-blocked{border-color:color-mix(in srgb,var(--blocked) 40%,var(--bg))}
-.row-head,.work-row{display:grid;grid-template-columns:84px minmax(0,1fr) 300px 170px 90px auto;align-items:center;gap:var(--space-4);padding:14px var(--space-4)}
+.row-head,.work-row{display:grid;grid-template-columns:84px minmax(0,1fr) 340px 170px 90px auto;align-items:center;gap:var(--space-4);padding:14px var(--space-4)}
 .row-head{padding-top:0;font-size:var(--type-tiny);color:var(--text-3);align-items:end}
-.step-names{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;font-size:11px}
+.step-names{font-size:10px;line-height:1.2}.step-name{flex:1;min-width:0;text-align:center;white-space:nowrap}
 .work-row{border-top:1px solid var(--border);color:var(--text);cursor:pointer;background:transparent;border-radius:0}
 .work-row:hover{background:var(--raised)}.group-needs-you .work-row{border-top-color:color-mix(in srgb,var(--needs-you) 25%,var(--bg))}
 .row-key{font-size:var(--type-small);color:var(--text-2)}
@@ -244,7 +244,7 @@ img.mark{width:26px;height:26px}
 /* Every animation respects the viewer's reduced-motion setting. */
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.step-seg.current,.now-dot,.now-dot::before,.replay-dot{animation:none;transition:none}}
 
-@media(max-width:1100px){.row-head,.work-row{grid-template-columns:72px minmax(0,1fr) 220px 130px 70px auto}.item-columns,.insight-charts{grid-template-columns:1fr}}
+@media(max-width:1100px){.row-head,.work-row{grid-template-columns:72px minmax(0,1fr) 300px 130px 70px auto}.item-columns,.insight-charts{grid-template-columns:1fr}}
 @media(max-width:1000px){.sidebar{width:200px;min-width:200px}.main{padding:var(--space-5)}}
 /* Phone: the sidebar folds into a menu, tiles become chips, rows become cards. */
 @media(max-width:650px){
@@ -256,7 +256,7 @@ img.mark{width:26px;height:26px}
   .main{padding:20px var(--space-4);gap:var(--space-4)}
   .main .page-heading,.page-heading{flex-direction:column;align-items:stretch}.main .page-heading h1{font-size:24px}
   .heading-tools{flex-wrap:wrap}.search,.search input{width:100%}
-  .tiles{overflow-x:auto;gap:var(--space-2);padding-bottom:2px}.tile{flex:0 0 auto;flex-direction:row;align-items:center;gap:var(--space-2);min-height:36px;padding:0 14px;border-radius:999px}.tile small{display:none}.tile strong{font-size:var(--type-small);font-weight:600}
+  .tiles{flex-wrap:wrap;gap:var(--space-2)}.tile{flex:0 0 auto;flex-direction:row;align-items:center;gap:var(--space-2);min-height:36px;padding:0 14px;border-radius:999px}.tile small{display:none}.tile strong{font-size:var(--type-small);font-weight:600}
   .row-head{display:none}
   .work-group{border:0;border-radius:0;overflow:visible;gap:var(--space-3);background:transparent}.work-group.group-needs-you{background:transparent}.work-group>h2,.work-group>summary{padding:0}
   .work-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"key time" "main main" "steps steps" "who who" "decide decide";gap:var(--space-2);padding:var(--space-4);border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface)}
@@ -271,3 +271,17 @@ img.mark{width:26px;height:26px}
 @media(max-width:650px){.work-group .rows{display:flex;flex-direction:column;gap:var(--space-3)}.work-group>h2 small{display:none}.work-group>h2 .push{font-size:var(--type-tiny)}}
 .candidate-details code{font-size:var(--type-tiny)}
 .guide ul{padding-left:20px;line-height:1.8;color:var(--text-2)}
+/* Workers: one table of agent sessions (design/dashboard/Workers.dc.html); on a phone each row is a card, so no column is cut off. */
+.sessions-table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--border);border-radius:var(--radius-lg);font-size:var(--type-body);color:var(--text)}
+.sessions-table th[scope=col]{font-size:var(--type-small);font-weight:500;color:var(--text-3);text-align:left;padding:12px var(--space-4)}
+.sessions-table td,.sessions-table th[scope=row]{padding:14px var(--space-4);border-top:1px solid var(--border);vertical-align:top;text-align:left;font-weight:400;overflow-wrap:anywhere}
+.sessions-table th[scope=row] .mono{display:block}.sessions-table .attach{display:flex;gap:0 var(--space-3);flex-wrap:wrap}.sessions-table .attach .text-button{padding:2px 0}.sessions-table .copy{font-size:var(--type-tiny)}
+.sessions-table td[data-label=Since]{color:var(--text-2);white-space:nowrap}
+.sessions-table .text-button{font-size:var(--type-body);color:var(--up-next);text-align:left}
+.health,.health.live{display:inline-flex;align-items:center;gap:6px;color:var(--text-2);font-size:var(--type-small)}.health-dot{width:8px;height:8px;border-radius:50%;border:1.5px solid var(--text-2);flex-shrink:0}
+.health.live{color:var(--shipped)}.health.live .health-dot{background:var(--shipped);border-color:var(--shipped)}
+.health.stale{color:var(--needs-you)}.health.stale .health-dot{border-color:var(--needs-you)}
+.workers-note{margin:var(--space-3) 0}
+@media(max-width:650px){.sessions-table,.sessions-table tbody,.sessions-table tr,.sessions-table th[scope=row],.sessions-table td{display:block;width:100%}.sessions-table thead{display:none}.sessions-table tr{border-top:1px solid var(--border);padding:var(--space-2) 0}.sessions-table td,.sessions-table th[scope=row]{border:0;padding:6px var(--space-4)}.sessions-table td::before{content:attr(data-label);display:block;font-size:var(--type-tiny);color:var(--text-3)}}
+/* A commit shows eight characters; the whole SHA stays in the text so a selection copies it. */
+code.sha{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;vertical-align:bottom;font-family:var(--font-mono)}

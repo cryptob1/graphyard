@@ -22,6 +22,9 @@ import InsightsFlow from '../web/pages/insights-flow.js';
 import Sidebar from '../web/components/sidebar.js';
 import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
+import WorkersPage, { roleWords } from '../web/pages/workers.js';
+import { CandidateSha } from '../web/candidate.js';
+import { gateFactStep } from '../src/flow-analytics.js';
 
 // GY-161: the dashboard, rendered over the board fixture the browser suite also serves
 // (browser-tests/ui-board.ts): an item parked on a human-only decision, one blocked, items building,
@@ -104,6 +107,9 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   const awaiting = release({ deployment: null }), checking = release({ deployment, smoke: null }), failed = release({ deployment, smoke: smoke('fail') }), live = release({ deployment, smoke: smoke('pass') });
   assert.equal(groupOf(merged, NOW), 'shipped');
   assert.equal(groupOf(live, NOW), 'shipped');
+  // With no post-deployment check asked for, a merge is still Moving until the release is recorded serving it.
+  const unverified = { ...merged, delivery: { ...merged.delivery!, deployment: undefined } } as Work;
+  assert.equal(groupOf(unverified, NOW), 'moving'); assert.equal(prSteps(unverified, NOW).current, 'deploy');
   assert.equal(groupOf(awaiting, NOW), 'moving'); assert.equal(groupOf(checking, NOW), 'moving'); assert.equal(groupOf(failed, NOW), 'blocked');
   const releasing = classify(work.map(item => item.key === 'GY-18' ? awaiting : item), NOW);
   assert.ok(releasing.byGroup.moving.some(item => item.key === 'GY-18'), 'a merge waiting on its release stays on the Work page');
@@ -264,7 +270,10 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     ['proofs pending', find('GY-16', work), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
     ['merging', find('GY-21', work), 'merge', 'Merging · Graphyard is merging it', 'Graphyard (automatic)'],
     ['queued to merge', withReasons(find('GY-21', work), { merge: ['Merge queue position 2 of 3: GY-5 is ahead'] }), 'merge', 'Merging · 2nd in line, after GY-5', 'Graphyard (automatic)'],
-    ['deploying', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true } } as Work, 'deploy', 'Deploying · waiting for the live release to serve it', 'Graphyard (automatic)'],
+    ['deploying', { ...find('GY-18', work), delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'deploy', 'Deploying · waiting for the live release to serve it', 'Graphyard (automatic)'],
+    ['checking the live release', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true } } as Work, 'deploy', 'Deploying · checking the live release', 'Prover agent'],
+    // A change request sends it back to the builder: the item waits at Build, not at Review.
+    ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'build', 'Building · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
   ];
   for (const [name, item, current, label, who] of cases) {
     const steps = prSteps(item, NOW);
@@ -327,6 +336,19 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   const { byGroup: flowGroups } = classify(board(), NOW);
   for (const item of [...flowGroups.moving, ...flowGroups.blocked]) assert.equal(replayed.get(item.key)?.step, prSteps(item, NOW).current, `${item.key} replays to its true step`);
   assert.equal(replayed.get('GY-22')?.step, 'test');
+  // The recorded release serving a merge takes its dot from Deploy out of the flow, as the Now view drops it.
+  const shipped = board().filter(item => groupOf(item, NOW) === 'shipped');
+  assert.ok(shipped.length > 0);
+  for (const item of shipped) assert.equal(replayed.get(item.key), undefined, `${item.key} is out of the flow`);
+  // (GY-9's fixture history records its creation after its merge, so only GY-18 and GY-19 leave Deploy at their release.)
+  for (const key of ['GY-18', 'GY-19'])
+    assert.ok(recorded.rows.some(row => row.workKey === key && row.detail === 'deploy to outside' && row.observedAt === find(key).delivery!.deployment!.observedAt), `${key} leaves Deploy when the release serves it`);
+  // Time per step is measured over those same moves: Validate and Deploy get their own time, and
+  // Deploy's is the wait from the merge to the recorded release (ten minutes on this board).
+  const report = boardApi('analytics/flow?window=7') as { stepDwell: { step: string; n: number; medianMs: number | null }[] };
+  assert.deepEqual(report.stepDwell.map(entry => entry.step), [...stepIds]);
+  const deploy = report.stepDwell.find(entry => entry.step === 'deploy')!;
+  assert.ok(deploy.n >= 2); assert.equal(deploy.medianMs, 10 * 60_000);
   const since = new Date(NOW - 3 * hour).toISOString();
   const recent = boardApi(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(since)}`) as typeof recorded;
   assert.ok(recent.rows.length < recorded.rows.length && recent.rows.every(row => Date.parse(row.observedAt!) >= Date.parse(since)), 'the key leaves out moves before the instant');
@@ -334,7 +356,7 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   const source = await read('web/pages/insights-flow.tsx');
   assert.match(source, /analytics\/flow\/drilldown\?window=7&metric=steps&key=/);
   assert.match(source, /replayFrames\(transitionsFromRows\(rows\?\.rows \?\? \[\]\), now\)/);
-  assert.match(source, /analytics\/flow\?window=7/); assert.match(source, /report\?\.throughput/); assert.match(source, /report\?\.stageDwell/);
+  assert.match(source, /analytics\/flow\?window=7/); assert.match(source, /report\?\.throughput/); assert.match(source, /report\?\.stepDwell/); assert.doesNotMatch(source, /stageDwell|stageStep/);
   const page = markup(createElement(InsightsFlow, dashboard()));
   for (const text of ['Now', 'Last 24 hours, replayed', 'Landed on main per day', 'Where the time goes']) assert.ok(page.includes(text), text);
   const now = [...page.matchAll(/class="now-dot[^"]*" data-step="([\w-]+)" data-key="([^"]+)"/g)].map(match => [match[2], match[1]]);
@@ -377,3 +399,91 @@ test('unit:ui-matches-design — the shared tokens and IBM Plex fonts are the on
   const system = await read('design/dashboard/System.dc.html');
   for (const value of Object.values(tokens)) assert.ok(system.includes(value), `the design system defines ${value}`);
 });
+
+/** The part of a page a reader sees without opening anything: every closed <details> reduced to its summary. */
+const unopened = (html: string) => html.replace(/<details(?![^>]*\sopen)[^>]*>(<summary>[\s\S]*?<\/summary>)[\s\S]*?<\/details>/g, '$1');
+
+test('unit:ui-workers-page — Workers is one table of agent sessions (agent, role in plain words, item, doing now, since, health); a session the runtime no longer reports is never running; no jargon paragraph and no Principals table on the first screen; no column cut off at 1440px or 390px', async () => {
+  const d = dashboard();
+  const html = markup(createElement(WorkersPage, d));
+  const first = unopened(html);
+  // One table on the first screen, with exactly the design's columns.
+  assert.equal((first.match(/<table/g) ?? []).length, 1, 'one table');
+  assert.match(first, /<table class="sessions-table" aria-label="Agent sessions">/);
+  assert.deepEqual([...first.matchAll(/<th scope="col">([^<]+)<\/th>/g)].map(match => match[1]), ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health']);
+  // The per-account summary and the ended sessions are folded away below it.
+  assert.doesNotMatch(first, /aria-label="Principals"/); assert.match(html, /aria-label="Principals"/);
+  // Each role in plain words; the item by key and title; what it is doing; since when; health.
+  const row = (id: string) => { const start = first.indexOf(`data-session="${id}"`); assert.ok(start >= 0, id); return first.slice(start, first.indexOf('</tr>', start)); };
+  assert.deepEqual(Object.values(roleWords).slice(0, 4), ['Builds code', 'Reviews code', 'Proves requirements', 'Approves decisions']);
+  const builder = row('s14');
+  assert.match(builder, /<td data-label="Role">Builds code<\/td>/);
+  assert.match(builder, /<span class="mono">GY-14<\/span> Export monthly reports as CSV<\/button>/);
+  assert.match(builder, new RegExp(`<td data-label="Doing now">${prSteps(find('GY-14'), NOW).label}</td>`));
+  assert.match(builder, /<td data-label="Since"[^>]*>18m 00s<\/td>/);
+  assert.match(builder, /data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Active 1m ago/);
+  assert.match(row('r15'), /<td data-label="Role">Reviews code<\/td>/);
+  // Recorded running but not seen for forty minutes: stale, in plain words, never running or active.
+  const stale = row('s12');
+  assert.match(stale, /data-health="stale"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Not seen since/);
+  assert.doesNotMatch(stale, /running|Active/i);
+  assert.match(first, /3 agent sessions open: 2 working, 1 not seen recently\. 2 ended\./);
+  // A session the runtime stopped reporting is ended, in plain words, and is not in the open table.
+  assert.doesNotMatch(first, /data-session="p16"/);
+  assert.match(html, /data-session="p16"[\s\S]*?Ended · stopped responding/);
+  assert.match(html, /data-session="a15"[\s\S]*?<td data-label="Role">Approves decisions<\/td>[\s\S]*?<td data-label="Doing now">Approved the rework request<\/td>/);
+  // No explanatory jargon on the first screen.
+  const words = visibleWords(first).join(' ');
+  for (const term of ['principal', 'handle', 'liveness', 'sweep', 'epoch', 'lease', 'pane', 'reconcil']) assert.ok(!new RegExp(term, 'i').test(words), `"${term}" on the first screen: ${words}`);
+  // No column is cut off: the table fills its width and wraps its cells, and on a phone each row is a card of labelled cells.
+  const css = await read('web/style.css');
+  assert.match(css, /\.sessions-table\{width:100%;/);
+  assert.match(css, /\.sessions-table td,\.sessions-table th\[scope=row\]\{[^}]*overflow-wrap:anywhere/);
+  const phone = /@media\(max-width:650px\)\{\.sessions-table,[^\n]*/.exec(css)?.[0] ?? '';
+  assert.match(phone, /display:block;width:100%/); assert.match(phone, /\.sessions-table thead\{display:none\}/); assert.match(phone, /td::before\{content:attr\(data-label\)/);
+  for (const label of ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health']) assert.match(builder, new RegExp(`data-label="${label}"`));
+  // The browser suite measures it at both widths.
+  assert.match(await read('browser-tests/screenshots.spec.ts'), /sessions-table[\s\S]*scrollWidth/);
+});
+
+test('unit:ui-review-polish — step names sit over their segments, commits show 8 characters, the current step is where the item waits, no session-kind badge in the sidebar, every phone chip is reachable, and requirements stay collapsed below the first screen', async () => {
+  const css = await read('web/style.css');
+  // The step names above the Moving rows are the same track as each row's bar: same grid column, same element, one equal share per step.
+  const page = home();
+  const head = /<div class="row-head"[\s\S]*?<\/div>/.exec(page)?.[0] ?? '';
+  assert.match(head, /<span class="row-steps"><span class="steps-track step-names" aria-hidden="true">/);
+  assert.deepEqual([...head.matchAll(/class="step-name" data-step="(\w+)">(\w+)</g)].map(match => match[1]), [...stepIds]);
+  assert.match(markup(createElement(WorkCard, { item: find('GY-15'), now: NOW, onOpen: noop })), /<span class="row-steps"><span class="steps-bar"[^>]*><span class="steps-track"/);
+  assert.match(css, /\.row-head,\.work-row\{display:grid;grid-template-columns:/);
+  assert.match(css, /\.steps-track\{display:flex;gap:3px\}\.step-seg\{flex:1;/); assert.match(css, /\.step-name\{flex:1;min-width:0;text-align:center/);
+  // Commits show 8 characters; the whole SHA stays in the text, so selecting it copies the exact commit.
+  const sha = 'abcdef1234567890abcdef1234567890abcdef12';
+  assert.match(markup(createElement(CandidateSha, { repository: 'fixture/shop', sha })), new RegExp(`<code class="sha" title="${sha}">${sha}</code>`));
+  assert.match(css, /code\.sha\{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;/);
+  const sources = ['web', 'web/pages', 'web/components'].flatMap(dir => readdirSync(new URL(`${dir}/`, root)).filter(name => /\.tsx?$/.test(name)).map(name => `${dir}/${name}`));
+  for (const path of sources) for (const [, count] of (await read(path)).matchAll(/(?:[sS]ha|[tT]ip|[bB]ase)!?\)?\.slice\(0, ?(\d+)\)/g)) assert.equal(count, '8', `${path} shows ${count} characters of a commit`);
+  // After a change request the item waits on its builder: the current step is Build, not Review — on the item and in the recorded history.
+  const changes = { ...find('GY-15'), gates: find('GY-15').gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] } : gate) } as Work;
+  assert.equal(prSteps(changes, NOW).current, 'build');
+  assert.equal(prSteps(changes, NOW).steps.find(step => step.id === 'review')!.state, 'pending');
+  assert.equal(gateFactStep({ stage: 'review', unmet: ['review'], firstUnmet: 'review', reasons: ['Outstanding change requests must be resolved through a new review'], hasCandidate: true }), 'build');
+  assert.equal(gateFactStep({ stage: 'review', unmet: ['review'], firstUnmet: 'review', reasons: ['Independent approval of the current commit is required'], hasCandidate: true }), 'review');
+  // No session-kind badge in the sidebar, for a human or an AI session.
+  for (const kind of ['human', 'ai']) {
+    const d = dashboard({ status: { ...boardStatus(), actor: { id: 'someone', role: 'admin', sessionKind: kind } } });
+    const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(d, view)), dashboard: d }));
+    assert.doesNotMatch(sidebar, /class="identity|Human|\bAI\b|Session kind/, kind);
+    assert.match(sidebar, /someone · admin/);
+  }
+  // On a phone the group chips wrap, so every one is reachable.
+  const phone = css.slice(css.indexOf('/* Phone: the sidebar folds into a menu'));
+  assert.match(phone, /\.tiles\{flex-wrap:wrap;/);
+  assert.doesNotMatch(/\.tiles\{[^}]*\}/.exec(phone)![0], /overflow-x|nowrap/);
+  // Requirements are collapsed below the first screen: a closed <details> after where it is now and what is left.
+  const item = itemPage('GY-16');
+  assert.match(item, /<details class="panel requirements" aria-label="Requirements"><summary><h2>Requirements <small>3 · 2 of 3 proofs passed<\/small><\/h2><\/summary>/);
+  assert.ok(item.indexOf('aria-label="Where it is now"') < item.indexOf('aria-label="What is left"') && item.indexOf('aria-label="What is left"') < item.indexOf('aria-label="Requirements"'));
+  const shown = visibleWords(firstScreen(item)).join(' ');
+  for (const ac of find('GY-16').criteria) assert.ok(!shown.split(' ').includes(ac.id), `${ac.id} is folded away`);
+});
+

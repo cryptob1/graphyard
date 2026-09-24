@@ -15,6 +15,17 @@ const allPassed = () => ['ready', 'build', 'review', 'test', 'acceptance', 'merg
 const refusing = (reasons: Record<string, string[]>) => allPassed().map(gate => reasons[gate.name]?.length ? { ...gate, passed: false, reasons: reasons[gate.name] } : gate);
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
+/**
+ * A merged fixture item as live: the release was recorded serving its merge ten minutes after it
+ * landed, so it is Shipped, not still at Deploy (web/groups.ts, `servedAt`).
+ */
+export function live<T>(item: T): T {
+  const work = item as any;
+  if (work.stage !== 'done' || !work.delivery || work.delivery.deployment) return item;
+  const observedAt = new Date(Date.parse(work.delivery.mergedAt) + 10 * minute).toISOString();
+  return { ...work, delivery: { ...work.delivery, deployment: { sha: work.delivery.mergeSha, mergeSha: work.delivery.mergeSha, source: 'endpoint', covers: 'exact', observedAt, at: observedAt, observer: 'master' } } };
+}
+
 /** Every item on the board, in the shape `GET /api/work-snapshot` returns. */
 export function boardWork(): any[] {
   const audit = fixtureWork() as any[];
@@ -26,8 +37,21 @@ export function boardWork(): any[] {
   const merging = sha('m'), testing = sha('t');
   const humanRequest = { id: '11111111-2222-4333-8444-555555555555', kind: 'money-or-accounts', reason: 'The live install proof needs a cloud account with a spending cap.',
     needed: 'Approve a spending cap for test installs and add a cloud API token', requestedBy: 'worker-3', epoch: 1, at: at(-10 * hour) };
+  // Agent sessions for the Workers page: a builder at work, a reviewer, one recorded running but
+  // not seen for forty minutes, and two that ended (one the runtime stopped reporting).
+  const session = (id: string, kind: string, principal: string, agentName: string, subject: string, started: number, seen: number, extra: Record<string, unknown> = {}) =>
+    ({ id, kind, principal, epoch: null, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: `w1:${id}`, agentName, role: kind === 'coordination' ? 'approver' : null, head: null,
+      attach: `herdr pane attach w1:${id}`, transcript: null, subject, startedAt: at(started), updatedAt: at(seen), endedAt: null, state: 'running', outcome: null, ...extra });
+  const sessions: Record<string, unknown[]> = {
+    'GY-14': [session('s14', 'implementation', 'worker-3', 'claude-1', 'Implement GY-14', -18 * minute, -minute)],
+    'GY-15': [session('r15', 'review', 'reviewer-1', 'reviewer-gy-15', 'Review PR #42', -6 * minute, -minute),
+      session('a15', 'coordination', 'approver-1', 'approver-gy-15', 'Approve the rework request', -40 * minute, -20 * minute, { state: 'finished', endedAt: at(-20 * minute), outcome: 'Approved the rework request', transcript: '/work/transcripts/a15.md' })],
+    'GY-12': [session('s12', 'implementation', 'worker-7', 'codex-2', 'Implement GY-12', -2 * hour, -40 * minute)],
+    'GY-16': [session('p16', 'proof', 'producer-1', 'producer-gy-16', 'Prove integration:login-latency', -3 * hour, -2 * hour, { state: 'finished', endedAt: at(-2 * hour),
+      outcome: `vanished: the claude runtime on build-1 has not reported pane w1:p16 for 70s, 130s after its last observed activity at ${at(-2 * hour - 130_000)}` })],
+  };
   return [
-    ...audit,
+    ...audit.map(live).map(item => sessions[item.key] ? { ...item, sessions: sessions[item.key] } : item),
     make(20, 'Prove the one-command install on a real cloud host', { stage: 'build', stageEnteredAt: at(-10 * hour), epoch: 1, humanRequest,
       blocker: `Waiting on a human-only decision (spending money or opening third-party accounts): ${humanRequest.needed}`,
       gates: refusing({ ready: [`Waiting on a human-only decision (spending money or opening third-party accounts): ${humanRequest.needed}`], build: ['Worker has not submitted implementation for this attempt'], review: ['Independent approval of the current commit is required'] }) }),

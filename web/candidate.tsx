@@ -21,13 +21,26 @@ export function CandidatePr({ repository, candidate, workKey }: { repository: un
     : <span>PR #{pr}</span>;
 }
 
+/** How many characters of a commit SHA the dashboard shows (the operator's review of PR #156). */
+export const shaChars = 8;
+/**
+ * A commit SHA as the dashboard shows it: its first eight characters on screen (the element is
+ * clipped to `shaChars` monospace characters in web/style.css), and the whole SHA still its text,
+ * title and link, so selecting or copying it gives the exact commit. Anything that is not a commit
+ * SHA is shown as it is.
+ */
+export function ShortSha({ sha }: { sha: string }) {
+  if (!/^[0-9a-f]{9,64}$/i.test(sha)) return <code>{sha}</code>;
+  return <code className="sha" title={sha}>{sha}</code>;
+}
+
 export function CandidateSha({ repository, sha, workKey }: { repository: unknown; sha: unknown; workKey?: string }) {
-  // The whole candidate SHA stays on screen: an operator reads, selects, and copies
-  // the exact commit the gates decided on, never an abbreviation of it.
+  // Eight characters on screen; the exact commit the gates decided on is what a reader selects,
+  // copies and follows (ShortSha keeps the rest of it in the text).
   const text = String(sha);
   const label = `${text}, open commit${workKey ? ` for ${workKey}` : ''} in GitHub`;
   const href = candidateCommitUrl(repository, sha);
   return href
-    ? <a className="candidate-link" href={href} aria-label={label} onClick={event => event.stopPropagation()} {...external}><Term term="commit" focusable={false}><code>{text}</code></Term></a>
-    : <code>{text}</code>;
+    ? <a className="candidate-link" href={href} aria-label={label} onClick={event => event.stopPropagation()} {...external}><Term term="commit" focusable={false}><ShortSha sha={text}/></Term></a>
+    : <ShortSha sha={text}/>;
 }

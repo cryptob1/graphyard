@@ -1,5 +1,6 @@
 import { deliveryState, type Gate, type Work } from '../src/model';
 import { latestCheck } from '../src/merge-queue';
+import { servedAt } from '../src/flow-analytics';
 import { assignment } from './assignment';
 import { plainReason } from './plain-status';
 
@@ -40,12 +41,15 @@ export interface PrSteps {
 const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
 const pendingCheck = new Set(['', 'pending', 'queued', 'in_progress', 'waiting', 'requested', 'expected']);
 
+/** True while the review gate refuses on a reviewer's request for changes. */
+export const changesRequested = (work: Work) => !!work.gates.find(gate => gate.name === 'review')?.reasons.some(reason => reason.startsWith('Outstanding change requests'));
+
 /** What the current step waits on, and who acts next, in plain words. */
 function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number): { detail: string; who: string } {
   const reasons = gate?.reasons ?? [];
   switch (step) {
     case 'build':
-      if (work.reworkRequested) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
+      if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
       return assignment(work, now).active ? { detail: 'the builder is writing the code', who: 'Builder agent' } : { detail: 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
     case 'validate': {
       const first = reasons[0] ?? '';
@@ -64,7 +68,7 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number):
       return { detail: `${required.filter(finished).length} of ${required.length} checks done`, who: 'Automated checks' };
     }
     case 'review':
-      return reasons.some(reason => reason.startsWith('Outstanding change requests')) ? { detail: 'the reviewer asked for changes', who: 'Builder agent' } : { detail: 'waiting for the reviewer', who: 'Reviewer agent' };
+      return { detail: 'waiting for the reviewer', who: 'Reviewer agent' };
     case 'prove': {
       const total = work.criteria.filter(c => !c.bootstrap).flatMap(c => c.proofs).length;
       const open = reasons.filter(reason => /^AC-\d+:/.test(reason)).length;
@@ -97,12 +101,13 @@ export function prSteps(work: Work, now: number): PrSteps {
     label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who,
   });
   if (work.stage === 'done') {
-    const state = deliveryState(work);
-    if (!state || state === 'delivered' || state === 'smoke-passed') return make(() => 'done', null, 'Live', 'Nobody — it has shipped');
+    // Live once the recorded release serves it (web/groups.ts reads the same `servedAt`).
+    if (!work.delivery || servedAt(work)) return make(() => 'done', null, 'Live', 'Nobody — it has shipped');
     const { detail, who } = waitsOn('deploy', undefined, work, now);
     return make(id => id === 'deploy' ? 'current' : 'done', 'deploy', detail, who);
   }
-  const handedIn = !!work.submission && !work.reworkRequested;
+  // A change request sends the work back to its builder, so it waits at Build, not at Review.
+  const handedIn = !!work.submission && !work.reworkRequested && !changesRequested(work);
   if (!handedIn) {
     const { detail, who } = waitsOn('build', undefined, work, now);
     return make(id => id === 'build' ? 'current' : 'pending', 'build', detail, who);

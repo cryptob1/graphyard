@@ -9,7 +9,7 @@ import { localAttachCommand, remoteAttachCommand, sessionRoleKind, sessionStaleT
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { views, visibleViews } from '../web/pages/index.js';
-import WorkersPage, { spent } from '../web/pages/workers.js';
+import WorkersPage, { roleWords, spent } from '../web/pages/workers.js';
 import TopBar from '../web/components/top-bar.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 
@@ -111,9 +111,10 @@ test('integration:workers-tab-lists-every-session — a top-level Workers tab li
   for (const { work: item, handle } of handles) {
     const row = rowOf(html, handle.id);
     assert.ok(row.includes(`data-work="${item.key}"`), `${handle.id} names ${item.key}`);
-    assert.match(row, new RegExp(`>${item.key}${handle.epoch !== null ? ` · epoch ${handle.epoch}` : ''}<`), `${handle.id} links to its item and epoch`);
+    assert.match(row, new RegExp(`<span class="mono">${item.key}</span> ${item.title}</button>`), `${handle.id} links to its item`);
     const role = expectedRole[handle.kind] ?? (handle.role === 'approver' ? 'approver' : 'master');
-    assert.ok(row.includes(`data-role="${role}"`) && row.includes(`<td>${role}`), `${handle.id} is a ${role}`);
+    // The role in plain words (GY-161): builds code, reviews code, proves requirements, approves decisions.
+    assert.ok(row.includes(`data-role="${role}"`) && row.includes(`<td data-label="Role">${roleWords[role as keyof typeof roleWords]}</td>`), `${handle.id} is a ${role}`);
     assert.ok(row.includes(handle.subject), `${handle.id} shows its subject`);
     assert.ok(row.includes(handle.host) && row.includes(handle.principal), `${handle.id} shows host and principal`);
     const spentMs = handle.state === 'running' ? NOW - Date.parse(handle.startedAt) : Date.parse(handle.endedAt!) - Date.parse(handle.startedAt);
@@ -130,8 +131,8 @@ test('integration:workers-tab-lists-every-session — a top-level Workers tab li
   const page = await read('web/pages/workers.tsx');
   assert.match(page, /setInterval\(\(\) => setTick/);
   assert.match(page, /const now = useLiveNow\(observedAt\)/);
-  // Every column the requirement names is a heading, in one table per group.
-  for (const column of ['Agent', 'Role', 'Item', 'Subject', 'Host', 'State', 'Started', 'Time spent', 'Attach']) assert.ok(html.includes(`<th scope="col">${column}</th>`), column);
+  // The columns of the Workers design (GY-161): agent, role, the item, what it is doing, since when, health.
+  for (const column of ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health']) assert.ok(html.includes(`<th scope="col">${column}</th>`), column);
   // Nothing on the page names a runtime as its source, and it reads as prose to a newcomer.
   assert.ok(visibleWords(html).length > 0);
 });
@@ -184,13 +185,14 @@ test('integration:workers-tab-per-principal-summary — running rows first by ti
   assert.ok(view.running.every((row, i) => i === 0 || row.spentMs <= view.running[i - 1].spentMs), 'time spent descending');
   assert.deepEqual(view.finished.map(row => row.id), ['proof-gy-15', 'review-gy-13', 'graphyard-codex-1:gy-13', 'master-1', 'graphyard-codex-1:old']);
   const html = render(work);
-  // Drawn in that order: running rows in the Running table, finished rows inside a collapsed <details> with the count.
+  // Drawn in that order: open rows in the one sessions table, ended rows inside a collapsed <details> with the count.
   const order = [...view.running, ...view.finished].map(row => html.indexOf(`data-session="${row.id}"`));
   assert.ok(order.every((index, i) => index > 0 && (i === 0 || index > order[i - 1])), `rows in order: ${order}`);
-  assert.match(html, /<h2>Running <span class="count">4<\/span><\/h2>/);
-  assert.match(html, /<details class="finished-sessions"><summary>Finished <span class="count">5<\/span><\/summary>/);
-  assert.ok(html.indexOf('<details') < html.indexOf('data-session="proof-gy-15"'), 'finished rows are inside the collapsed section');
-  assert.ok(html.indexOf('aria-label="Principals"') < html.indexOf('aria-label="Running sessions"'), 'the summary is on top');
+  assert.match(html, /4 agent sessions open: 3 working, 1 not seen recently\. 5 ended\./);
+  assert.match(html, /<details class="finished-sessions"><summary>Ended <span class="count">5<\/span><\/summary>/);
+  assert.ok(html.indexOf('<details') < html.indexOf('data-session="proof-gy-15"'), 'ended rows are inside the collapsed section');
+  // The per-account summary is folded below the sessions table, never a second table on the first screen (GY-161, AC-9).
+  assert.ok(html.indexOf('aria-label="Agent sessions"') < html.indexOf('<details class="finished-sessions accounts">') && html.indexOf('<details class="finished-sessions accounts">') < html.indexOf('aria-label="Principals"'), 'the summary is folded below');
   // One line per worker, reviewer or producer principal: the one with two finished sessions and one running is on the running one.
   const byName = Object.fromEntries(view.principals.map(entry => [entry.principal, entry]));
   assert.deepEqual(Object.keys(byName).sort(), ['graphyard-codex-1', 'herdr-worker-1', 'reviewer-a', 'worker-b']);
@@ -205,11 +207,11 @@ test('integration:workers-tab-per-principal-summary — running rows first by ti
   assert.ok(!('approver-1' in byName) && !('master-1' in byName), 'approver and master sessions are not seats');
   // Busy principals first, longest first, then idle.
   assert.deepEqual(view.principals.map(entry => entry.principal), ['graphyard-codex-1', 'worker-b', 'reviewer-a', 'herdr-worker-1']);
-  const summary = html.slice(html.indexOf('aria-label="Principals"'), html.indexOf('aria-label="Running sessions"'));
+  const summary = html.slice(html.indexOf('aria-label="Principals"'));
   assert.match(summary, /data-principal="graphyard-codex-1" data-current="GY-14:1"/);
-  assert.match(summary, />GY-14 · epoch 1<\/button><\/td><td>1h 30m 00s<\/td><td>2<\/td>/);
+  assert.match(summary, />GY-14<\/button><\/td><td data-label="For">1h 30m 00s<\/td><td data-label="Sessions today">2<\/td>/);
   assert.match(summary, /data-principal="herdr-worker-1" data-current="idle"/);
-  assert.match(summary, /idle<\/span><\/td><td>—<\/td><td>1<\/td>/);
+  assert.match(summary, /idle<\/span><\/td><td data-label="For">—<\/td><td data-label="Sessions today">1<\/td>/);
 });
 
 test('unit:stale-session-marked — a running handle not seen inside the threshold is badged as recorded running, not seen since its updatedAt; one seen two minutes ago is not; a handle the liveness sweep ended shows the outcome and why', () => {
@@ -223,18 +225,21 @@ test('unit:stale-session-marked — a running handle not seen inside the thresho
 
   const html = render(fixture());
   const stale = rowOf(html, 'worker-b:2');
-  assert.match(stale, new RegExp(`<span class="pulse-badge stale" data-stale="worker-b:2">recorded running, not seen since ${new Date(at(-40 * minute)).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</span>`));
+  // Stale in plain words, never "running" (GY-161, AC-9).
+  assert.match(stale, new RegExp(`<span class="health stale" data-health="stale" data-stale="worker-b:2"><span class="health-dot" aria-hidden="true"></span>Not seen since ${new Date(at(-40 * minute)).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</span>`));
+  assert.doesNotMatch(stale, /running|Active/i);
   assert.ok(stale.startsWith('data-session="worker-b:2" data-work="GY-13" data-role="worker" class="stale"'), 'the row itself is marked');
   const fresh = rowOf(html, 'graphyard-codex-1:1');
-  assert.doesNotMatch(fresh, /pulse-badge stale|not seen since/);
-  assert.match(fresh, /<span class="green-text">running<\/span>/);
-  assert.match(html, /<span class="amber" role="status">1 recorded running but not seen recently<\/span>/);
-  // Ended by liveness reconciliation: the recorded outcome and the rule that closed it.
+  assert.doesNotMatch(fresh, /data-stale|not seen since/i);
+  assert.match(fresh, /<span class="health live" data-health="live"><span class="health-dot" aria-hidden="true"><\/span>Active 2m ago<\/span>/);
+  assert.match(html, /1 not seen recently/);
+  // Ended by liveness reconciliation: said in plain words, the rule that closed it on the element and the recorded outcome in its title.
   const reconciled = rowOf(html, 'review-gy-13');
-  assert.match(reconciled, /finished · <span class="amber" data-reconciled="vanished">ended by liveness reconciliation \(vanished\): vanished: the herdr runtime on vishrog has not reported pane w1V:p9 for 95s/);
-  // A session that ended on its own shows its outcome without that attribution.
-  assert.match(rowOf(html, 'proof-gy-15'), /finished · evidence submitted/);
-  assert.doesNotMatch(rowOf(html, 'proof-gy-15'), /liveness reconciliation/);
+  assert.match(reconciled, /data-health="ended" data-reconciled="vanished" title="vanished: the herdr runtime on vishrog has not reported pane w1V:p9 for 95s[^"]*"><span class="health-dot" aria-hidden="true"><\/span>Ended · stopped responding<\/span>/);
+  // A session that ended on its own shows its outcome as what it did, without that attribution.
+  assert.match(rowOf(html, 'proof-gy-15'), /<td data-label="Doing now">evidence submitted<\/td>/);
+  assert.match(rowOf(html, 'proof-gy-15'), />Finished<\/span>/);
+  assert.doesNotMatch(rowOf(html, 'proof-gy-15'), /data-reconciled/);
   assert.equal(sessionRoleKind({ kind: 'coordination', role: 'escalation' }), 'escalation handler');
 });
 
@@ -245,7 +250,7 @@ test('manual:workers-tab-docs-review — docs/dashboard.md documents the Workers
   assert.match(section, /A row is one \[session handle\]/);
   assert.match(section, /not from Herdr/);
   assert.match(section, /\*\*15 minutes\*\* by default, `sessionStaleThresholdMs`/);
-  assert.match(section, /recorded running, not seen since/);
+  assert.match(section, /reads \*not seen since <updatedAt>\*, never as running/);
   assert.match(section, /\*\*Copy local\*\*/); assert.match(section, /\*\*Copy remote\*\*/);
   assert.match(section, /`herdr --help` documents `herdr --machine <label-or-id> <command>`/);
   assert.ok(section.includes('`herdr agent attach w1V:pJD`'), 'the local form');

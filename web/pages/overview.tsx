@@ -1,5 +1,6 @@
 import { isClosed, isDelivered, type Work } from '../../src/model';
 import WorkCard from '../components/work-card';
+import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../duration';
 import { classify, groupLabel, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
@@ -29,7 +30,7 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>
-    {group === 'moving' && <div className="row-head" aria-hidden="true"><span/><span/><span className="step-names">{['Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge', 'Deploy'].map(step => <span key={step}>{step}</span>)}</span><span>Who acts next</span><span>In step</span></div>}
+    {group === 'moving' && <div className="row-head" aria-hidden="true"><span/><span/><span className="row-steps"><StepNames/></span><span>Who acts next</span><span>In step</span></div>}
     <div className="rows">{byGroup[group].map(w => row(w, group))}</div>
   </section>;
   const admin = status?.actor?.role === 'admin';

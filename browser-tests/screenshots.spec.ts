@@ -39,6 +39,12 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
     // No page may scroll sideways at either width.
     const bounds = await page.evaluate(() => ({ content: document.documentElement.scrollWidth, width: document.documentElement.clientWidth }));
     expect(bounds.content, `${name} fits the ${viewport.name} width`).toBeLessThanOrEqual(bounds.width);
+    // No column of the Workers sessions-table is cut off, and every group chip is on screen (GY-161, AC-9 and AC-10).
+    const cut = await page.evaluate(() => [...document.querySelectorAll('.sessions-table th, .sessions-table td, [data-tile]')].filter(element => {
+      const box = element.getBoundingClientRect();
+      return box.width > 0 && (element.scrollWidth > element.clientWidth + 1 || box.right > document.documentElement.clientWidth + 1 || box.left < -1);
+    }).map(element => element.textContent?.trim().slice(0, 40)));
+    expect(cut, `${name}: nothing cut off at ${viewport.name} width`).toEqual([]);
     await page.screenshot({ path: `${out}/${name}-${viewport.name}.png`, fullPage: true });
   };
   // Every sidebar entry this session may open, and every page under it, as the dashboard lists them.

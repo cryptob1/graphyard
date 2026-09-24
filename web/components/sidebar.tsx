@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import SessionBadge from './session-badge';
 import { sections, viewFor, type primaryEntry } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
 
@@ -42,7 +41,7 @@ export default function Sidebar({ entries, dashboard }: { entries: (Entry | null
     <div className="sidebar-bottom">
       {status?.repository && <span className="mono repository">{status.repository}</span>}
       <span className="connection"><span className={`dot ${connected ? 'live' : ''}`}/>{connected ? `Live · updated ${lastUpdated ?? 'now'}` : `Disconnected · last updated ${lastUpdated ?? 'never'}`}</span>
-      {actor && <span className="signed-in" title="Signed in as">{actor.id} · {actor.role}{(actor.sessionKind === 'human' || actor.sessionKind === 'ai') && <> <SessionBadge kind={actor.sessionKind}/></>}</span>}
+      {actor && <span className="signed-in" title="Signed in as">{actor.id} · {actor.role}</span>}
       <span className="sidebar-links"><button type="button" className="text-button" onClick={() => go('guide')}>Help</button><a className="docs-link" href="/docs">Documentation ↗</a><button type="button" className="text-button" onClick={signOut}>Sign out</button></span>
     </div>
   </div></aside>;
