@@ -12,7 +12,7 @@ The dashboard answers three questions first: what is being worked on, what is st
 | **Insights** | Shipping pulse, Flow analytics, Validation and Releases, as tabs. |
 | **Settings** | Test cases, Proof authority and Operator automation, as tabs. |
 
-Unconfigured pages are hidden. The **Agent fleet** page, opened from the fleet line under the Work heading, shows the [agent registry](master-agent.md#the-agent-registry): roles, accounts, runtimes, quota, and why an account cannot launch; admin and coordinator sessions can edit it ([onboarding](onboarding.md#configure-the-fleet)).
+Unconfigured pages are hidden. The **Agent fleet** page, opened from the fleet line under the Work heading, shows the [agent registry](master-agent-sessions.md#the-agent-registry): roles, accounts, runtimes, quota, and why an account cannot launch; admin and coordinator sessions can edit it ([onboarding](onboarding.md#configure-the-fleet)).
 
 ## Needs you
 
@@ -27,7 +27,7 @@ The list is derived from the human-only rules in `src/model/human-request.ts` (`
 
 **Work → Workers** lists every agent session with a handle, across every item: worker, reviewer, producer, approver, escalation handler and master. It is a tab of the Work section, registered beside Shipped and Insights in `web/pages/index.tsx`.
 
-A row is one [session handle](master-agent.md#session-handles), the record a launcher writes on the item. The data comes from the handles on polled work items, not from Herdr. Running sessions come first, longest first; finished ones are collapsed. A per-principal summary shows what each principal holds.
+A row is one [session handle](master-agent-reference.md#session-handles), the record a launcher writes on the item. The data comes from the handles on polled work items, not from Herdr. Running sessions come first, longest first; finished ones are collapsed. A per-principal summary shows what each principal holds.
 
 A handle recorded running whose `updatedAt` is older than **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *recorded running, not seen since <updatedAt>* with an amber badge, never as live. Nothing here ends a session: GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
 

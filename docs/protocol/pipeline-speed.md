@@ -30,4 +30,4 @@ Items older than the timeline are backfilled from the ledger by a bounded catch-
 | `sinceSubmitMs` | First submission to now, while in flight |
 | `routine` | At most one rework round and no intervention |
 
-`coverage` is `measured`, `awaiting-backfill`, `events-pruned` or `no-submission`. The top-level `speed` is the [periodic measurement](../master-agent.md#pipeline-speed): p50/p90 submit→merge, rework distribution and coverage, naming every unmeasured delivery.
+`coverage` is `measured`, `awaiting-backfill`, `events-pruned` or `no-submission`. The top-level `speed` is the [periodic measurement](../master-agent-reference.md#pipeline-speed): p50/p90 submit→merge, rework distribution and coverage, naming every unmeasured delivery.

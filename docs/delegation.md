@@ -66,7 +66,7 @@ Raising an escalation or blocking ruling fences any in-flight merge execution in
 
 ## Ownership and worktrees
 
-Each claimed item is held by one worker identity under one lease epoch, in one registered worktree, while its `watch` supervisor renews the lease; any other identity, epoch or worktree is refused. After `complete`, renewals are refused. A worker may hold several items in a slice. A standing escalation does not stop a replacement being dispatched ([master-agent](master-agent.md#a-concern-carried-beside-the-work)).
+Each claimed item is held by one worker identity under one lease epoch, in one registered worktree, while its `watch` supervisor renews the lease; any other identity, epoch or worktree is refused. After `complete`, renewals are refused. A worker may hold several items in a slice. A standing escalation does not stop a replacement being dispatched ([master-agent](master-agent-reference.md#a-concern-carried-beside-the-work)).
 
 ## Capacity and identity
 

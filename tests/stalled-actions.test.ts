@@ -16,6 +16,7 @@ import { assertDispatchable } from '../src/master.js';
 import { actionReport, stalledActionAttention } from '../src/cli/master-status.js';
 import { plainStatus, stalledStep } from '../web/plain-status.js';
 import WorkCard from '../web/components/work-card.js';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 /**
  * GY-110: an action that keeps failing for the same reason is a stall, not a retry.
@@ -298,7 +299,7 @@ test('manual:stall-visibility-docs-review — docs state that a repeated identic
   // Read as prose, not as source: emphasis and line wrapping are the author's, and an assertion
   // about either would fail on a reflow that changed no statement.
   const prose = async (page: string) => (await readFile(new URL(`../docs/${page}`, import.meta.url), 'utf8')).replace(/[*`_]/g, '').replace(/\s+/g, ' ');
-  const architecture = await prose('architecture.md'), master = await prose('master-agent.md');
+  const architecture = await prose('architecture.md'), master = (await readMasterGuide()).replace(/[*`_]/g, '').replace(/\s+/g, ' ');
   const numbers: Record<number, string> = { 1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five' };
   const threshold = new RegExp(`(${actionStallThreshold}|${numbers[actionStallThreshold]}) (consecutive )?(failures|identical failures)`, 'i');
   for (const [name, text] of [['architecture.md', architecture], ['master-agent.md', master]] as const) {

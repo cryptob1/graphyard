@@ -150,7 +150,7 @@ A pre-upgrade hook runs `graphyard db migrate`; `backup.enabled` adds a backup C
 Hosts running `graphyard master run` keep checkouts under
 `$GRAPHYARD_DATA_HOME/worktrees/REPOSITORY-ID` (override with `run.worktreeRoot`). Never on a
 tmpfs; `master init` refuses one or less than `run.worktreeRootMinFreeGb` (default 2) free.
-Allow about 200 MB per proof session. See [the managed worktree root](master-agent.md#the-managed-worktree-root).
+Allow about 200 MB per proof session. See [the managed worktree root](master-agent-reference.md#the-managed-worktree-root).
 
 ## Replicas and availability
 

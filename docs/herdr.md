@@ -22,7 +22,7 @@ Paste the token, Enter, Ctrl-D. Setup updates the managed `AGENTS.md` section an
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-On Windows `watch` stops only the direct child. Master-created foreground launches need Linux with a systemd user manager. For several workers use the [master agent](master-agent.md); Muse is `kind: "muse"` in a launch profile ([Muse](master-agent.md#muse)).
+On Windows `watch` stops only the direct child. Master-created foreground launches need Linux with a systemd user manager. For several workers use the [master agent](master-agent.md); Muse is `kind: "muse"` in a launch profile ([Muse](master-agent-sessions.md#muse)).
 
 ## Multiple machines
 

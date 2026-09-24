@@ -20,6 +20,8 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 - [Reading the dashboard](dashboard.md) — the dashboard page by page: what each number, sentence and marker means, and where everything else moved.
 - [Herdr integration](herdr.md) — worker installation and multi-machine use.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
+- [Master-agent reference](master-agent-reference.md) — master commands, executors, GitHub administration, conflict avoidance, and recovery.
+- [Master-agent sessions](master-agent-sessions.md) — master install, worker, reviewer and producer profiles, provider accounts, and how sessions launch.
 - [Slice-lead delegation](delegation.md) — bounded product, infrastructure, and docs/experience coordination.
 - [Operations and recovery](operations.md) — daily checklist, incident decision tree, and recovery recipes in three minutes.
 - [Operations reference](operations-reference.md) — every procedure in full, credentials, proof authority, drift, and scale limits.

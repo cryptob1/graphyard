@@ -53,7 +53,7 @@ Overlap blocks *dispatch*, advisorily and for a bounded time, against items in f
 - Name files, not directories. A root-level directory (`src/`, `docs/`, `tests/`, `/`) is flagged `highConflict`, and `master create`, `master requirements` and `master scope` refuse it unless `--allow-broad-scope` records the exception. Broad scopes serialise the fleet.
 - `master dispatch` and the loop hold an overlapping item and name the item ahead, the paths and the hold age. A hold older than two hours (`dispatchHoldBoundMs`) stops holding and becomes an attention item. `master dispatch GY-N PROFILE --allow-overlap` overrides; it lifts nothing else.
 - Ready items dispatch smallest planned scope first within a priority.
-- `master status` lists open candidates git cannot merge together (`git merge-tree`) and a fewest-conflicts-first sequence ([conflict avoidance](master-agent.md#conflict-avoidance)).
+- `master status` lists open candidates git cannot merge together (`git merge-tree`) and a fewest-conflicts-first sequence ([conflict avoidance](master-agent-reference.md#conflict-avoidance)).
 
 ## Reserve explicitly shared resources
 
@@ -95,7 +95,7 @@ Target for a routine item: submit→merge p50 at most 30 minutes and p90 at most
 2. **Automatic dispatch at submit** launches review and producers within 30 seconds of the build gate passing ([master guide](master-agent.md#automatic-dispatch-at-submit)).
 3. **Proofs in CI** publish `unit:*` and `integration:*` evidence on the queue tip ([GitHub guide](github.md#proofs-in-ci)).
 4. **Conflict avoidance**: overlap holds, smallest scope first, generated files.
-5. **Measurement**: `master status` reports submit→merge p50/p90 ([pipeline speed](master-agent.md#pipeline-speed)).
+5. **Measurement**: `master status` reports submit→merge p50/p90 ([pipeline speed](master-agent-reference.md#pipeline-speed)).
 
 ## Explain stalls
 

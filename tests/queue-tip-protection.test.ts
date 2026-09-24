@@ -11,6 +11,7 @@ import { GitHub, processJob } from '../src/github.js';
 import { baseRefreshConflict, branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, ejectedTipRestore, pendingBaseRefresh, pendingRestore, restoredApproval, reviewDismissal, tipReplacesHead, type IdentityCarryInput } from '../src/merge-queue.js';
 import { CHECK_NAME, Refusal, carriedApproval, exactApproval, type Evidence, type Principal, type Work } from '../src/model.js';
 import { branchReport, buildMasterStatus, masterConfigSchema, repostCarriedApproval, runAutonomyCommand, type MasterConfig } from '../src/master.js';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof (GY-127).
@@ -646,7 +647,7 @@ test('integration:contaminated-branch-repaired — a branch already carrying ano
 });
 
 test('manual:queue-tip-protection-docs-review — docs/ states how speculative tips interact with branch protection, why an approval must survive a publication, what a merge-base dismissal means, and how a contaminated branch is repaired', async () => {
-  const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
+  const guide = await readMasterGuide();
   assert.match(guide, /### Speculative tips and branch protection/);
   assert.match(guide, /\*\*An approval must survive a tip publication\.\*\*/);
   assert.match(guide, /\*\*A merge-base dismissal is not a reviewer withdrawing a verdict\.\*\*/);

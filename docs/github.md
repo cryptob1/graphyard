@@ -57,7 +57,7 @@ It prints the remaining steps (set the permission at
 `https://github.com/settings/installations/ID`) and exits nonzero until done; the next preflight
 releases held jobs. The master does these itself with `graphyard master browser app-permissions`
 and `graphyard master browser installation-accept`
-([browser administration](master-agent.md#github-administration-through-the-browser)).
+([browser administration](master-agent-reference.md#github-administration-through-the-browser)).
 `--reviewer NAME` checks a reviewer App for excess grants.
 
 ## The reviewer App

@@ -72,7 +72,7 @@ plugin. Every concurrent session needs a different worker identity and host ID.
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**, and that the one later paste it may receive — the loop's single re-prompt of an inactive session, or the reviewer's reminder to post a verdict it already judged — comes from the same launcher and is to be acted on without confirmation.
 
-Herdr types through bracketed paste, which an agent rightly treats as untrusted data (a prompt injection defence); with the request on the command line ([details](master-agent.md#the-request-is-the-sessions-first-message)), sessions start without anybody sending `go`. A Claude Code session launched under a role file loads only user settings, so the launcher writes the statement to `.graphyard/launch/NAME.role` and loads it with `--append-system-prompt-file`. Nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
+Herdr types through bracketed paste, which an agent rightly treats as untrusted data (a prompt injection defence); with the request on the command line ([details](master-agent-sessions.md#the-request-is-the-sessions-first-message)), sessions start without anybody sending `go`. A Claude Code session launched under a role file loads only user settings, so the launcher writes the statement to `.graphyard/launch/NAME.role` and loads it with `--append-system-prompt-file`. Nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -148,7 +148,7 @@ node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a 
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --reason "Review on a different model than the author"
 ```
 
-Each launch runs on the first eligible account of its role (on this host, logged in, within quota and limits), and the choice is recorded. See [the agent registry](master-agent.md#the-agent-registry).
+Each launch runs on the first eligible account of its role (on this host, logged in, within quota and limits), and the choice is recorded. See [the agent registry](master-agent-sessions.md#the-agent-registry).
 
 ### Size review and proof capacity
 
@@ -172,7 +172,7 @@ An item may list yes-or-no proofs in `closedQuestions`. Before launching a produ
 
 ### Profiles by hand
 
-Templates: [Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [existing Herdr session](../examples/master/existing-worker.json); add one with `master worker add PROFILE`. Launch profiles default to `"approvals": "auto"` so sessions never block on a permission prompt — the trade-off is an unattended session; `"approvals": "prompt"` is the opt out ([approval modes](master-agent.md#approval-modes)). Local profiles need Linux with a systemd user manager; otherwise run workers on other machines whose GitHub identities cannot merge the base branch.
+Templates: [Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [existing Herdr session](../examples/master/existing-worker.json); add one with `master worker add PROFILE`. Launch profiles default to `"approvals": "auto"` so sessions never block on a permission prompt — the trade-off is an unattended session; `"approvals": "prompt"` is the opt out ([approval modes](master-agent-sessions.md#approval-modes)). Local profiles need Linux with a systemd user manager; otherwise run workers on other machines whose GitHub identities cannot merge the base branch.
 
 ## 4. Start the master
 
@@ -191,7 +191,7 @@ node "$GRAPHYARD_CLI" master init \
   --token-stdin < ~/.config/graphyard/INSTALL/tokens/INSTALL-master.token
 ```
 
-The master never stores or exports its cookies ([details](master-agent.md#github-administration-through-the-browser)); you only approve *Confirm access* in GitHub Mobile with the code `master status` shows.
+The master never stores or exports its cookies ([details](master-agent-reference.md#github-administration-through-the-browser)); you only approve *Confirm access* in GitHub Mobile with the code `master status` shows.
 
 ### Executors, supervised
 
@@ -201,7 +201,7 @@ Executors claim each item's next action and run it. From the coordinator checkou
 { "version": 1, "count": 2, "kinds": null, "intervalSeconds": 5 }
 ```
 
-Change it with `node scripts/graphyard-executor.mjs --install --count 2`. See [running executors under supervision](master-agent.md#running-executors-under-supervision).
+Change it with `node scripts/graphyard-executor.mjs --install --count 2`. See [running executors under supervision](master-agent-reference.md#running-executors-under-supervision).
 
 `master start claude` writes the master's harness permissions to `.claude/settings.local.json`; review them with `master harness claude` (no merge path, no credential read). For Codex, `master harness codex` prints the trust block to add yourself.
 
@@ -235,7 +235,7 @@ cd .graphyard/worktrees/GY-1-EPOCH
 node "$GRAPHYARD_CLI" watch GY-1 EPOCH -- YOUR_AGENT_COMMAND
 ```
 
-The worker pushes its branch, opens a PR and runs `complete GY-1 EPOCH PR_NUMBER`. It never force-pushes; to restore a contaminated tip it uses `restore-branch` ([worker push rights](master-agent.md#worker-push-rights)). Review starts automatically; `master review GY-1` is the recovery path. Evidence comes from a `producer` token in protected CI or from a producer session; a `manual:` proof is attested through an approved decision ([evidence](protocol/evidence.md)).
+The worker pushes its branch, opens a PR and runs `complete GY-1 EPOCH PR_NUMBER`. It never force-pushes; to restore a contaminated tip it uses `restore-branch` ([worker push rights](master-agent-reference.md#worker-push-rights)). Review starts automatically; `master review GY-1` is the recovery path. Evidence comes from a `producer` token in protected CI or from a producer session; a `manual:` proof is attested through an approved decision ([evidence](protocol/evidence.md)).
 
 When `Graphyard / merge` appears, add it to branch protection with "require branches to be up to date" off ([merge queue](github.md#merge-queue)), then `master merge GY-1`. Done means Graphyard observed the authorized merge, not that it is deployed.
 

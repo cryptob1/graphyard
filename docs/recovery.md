@@ -3,7 +3,7 @@
 
 A reservation opens only on verified settlement, and a lost heartbeat releases nothing. A rollback is complete only when the target is observed running and [verifies](delivery.md#verification).
 
-Agent-account exhaustion is handled by the master loop, not by hand: see [exhaustion in the middle of a session](master-agent.md#exhaustion-in-the-middle-of-a-session).
+Agent-account exhaustion is handled by the master loop, not by hand: see [exhaustion in the middle of a session](master-agent-sessions.md#exhaustion-in-the-middle-of-a-session).
 
 ## Runner capacity and request diagnostics
 

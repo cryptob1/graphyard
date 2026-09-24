@@ -8,6 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, readAttestations } from '../src/engine.js';
 import { attestationFor, attestationsFromLedger, classifyLeaseLapse, leaseLapseCause, leaseLossAutoSettlement, leaseLossReason, leaseLossSettlementNote, settleableLeaseLoss, standingEscalations, type Attestation, type Escalation, type Principal, type Work } from '../src/model.js';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to
 // one executed case per required proof.
@@ -362,7 +363,7 @@ test('integration:lease-loss-backlog-attested: standing reconcile-raised lease-l
 
 test('manual:escalation-docs: the delegation, master-agent and lease docs describe the lapse classification and who may settle what', async () => {
   const delegation = await readFile(new URL('../docs/delegation.md', import.meta.url), 'utf8');
-  const masterGuide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
+  const masterGuide = await readMasterGuide();
   const leases = await readFile(new URL('../docs/protocol/leases.md', import.meta.url), 'utf8');
   // The escalation table names what raises lease-loss and what is history instead.
   assert.match(delegation, /\| `lease-loss` \|[^\n]*no submission, no carried `blocked` report[^\n]*no stopped-worker attestation/);

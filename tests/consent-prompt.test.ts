@@ -14,6 +14,7 @@ import { consentHoldItems } from '../src/cli/consent-holds.js';
 import { assignmentSurrender, consentHoldProbe, supervise } from '../src/supervisor.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 // GY-130: a runtime that stops on a first-run consent prompt is not a started session. The
 // launcher reads the prompt off the pane, answers only the prompts on its allow-list with their
@@ -429,7 +430,7 @@ test('integration:unconsented-session-releases-its-slot — the watch supervisor
 });
 
 test('manual:consent-prompt-docs-review — docs/master-agent.md states that a runtime may stop on a first-run consent prompt, which prompts the launcher answers and with what option, which it escalates, and how a held slot is released', async () => {
-  const guide = await readFile(join(repositoryRoot, 'docs/master-agent.md'), 'utf8');
+  const guide = await readMasterGuide();
   for (const fragment of ['#### First-run consent prompts', 'awaiting consent', 'hooks-continue-untrusted', 'Continue without trusting', 'telemetry-decline', 'never one that grants hook execution or a sandbox escape',
     'credential', 'payment', 'herdr pane attach', '**15 minutes**', '.graphyard/launch/NAME.consent', 'stops renewing', 'dispatchable']) {
     assert.ok(guide.includes(fragment), `docs/master-agent.md states ${fragment}`);

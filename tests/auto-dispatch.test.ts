@@ -17,6 +17,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveRev
 import { assertProducerCandidate, independentProducerProfiles, launchProducer, producerIdleGraceMs, producerPrompt, proofOutcome, readProducerLedger, reconcileProducers, summarizeProducers, type ProducerRecord } from '../src/producer.js';
 import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, watchInstantExit, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { exhaustionReportSchema } from '../src/model/capacity.js';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof: unit:auto-dispatch-binding, integration:auto-dispatch-review,
@@ -544,7 +545,7 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
 
 test('manual:auto-dispatch-status — the master guide, the generated instructions, the protocol pages and the coordination guide describe the automatic lifecycle', async () => {
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
-  const [masterAgent, coordination, workCommands, webhook, readEndpoints, help] = await Promise.all([read('docs/master-agent.md'), read('docs/coordination.md'), read('docs/protocol/work-commands.md'), read('docs/protocol/github-webhook.md'), read('docs/protocol/read-endpoints.md'), read('src/cli/master.ts')]);
+  const [masterAgent, coordination, workCommands, webhook, readEndpoints, help] = await Promise.all([readMasterGuide(), read('docs/coordination.md'), read('docs/protocol/work-commands.md'), read('docs/protocol/github-webhook.md'), read('docs/protocol/read-endpoints.md'), read('src/cli/master.ts')]);
   for (const fragment of ['## Automatic dispatch at submit', 'master producer add', 'within 30 seconds', 'never launches reviews or producers by hand', 'producerProofs', '.graphyard/producers.json', 'run.reviewerProfile', 'dispatchIntervalSeconds', 'one producer session per proof group', 'examples/master/claude-producer.json', 'autoDispatch']) assert.ok(masterAgent.includes(fragment), `docs/master-agent.md must document: ${fragment}`);
   const instructions = managedMasterInstructions('');
   for (const fragment of ['within\n30 seconds', 'never launch reviews or producers by hand', 'what is requested, what is running and since when', 'Keep cycling: status, dispatch ready work, shepherd review and proof collection']) assert.ok(instructions.includes(fragment), `the generated instructions must state: ${fragment}`);
@@ -821,7 +822,7 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
 });
 
 test('manual:dispatcher-state-docs-review — the master guide states that the dispatcher bounds and repairs its own state, how a persist failure is surfaced, and how a session that exits at launch is classified', async () => {
-  const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
+  const guide = await readMasterGuide();
   for (const fragment of ["### The dispatcher's own state", 'bounds its own state where it composes it', 'marked with an ellipsis', 'repaired, not fatal', 'logged once with the', 'path that failed',
     'A tick failure is attributed and surfaced', 'dispatch.lastFailure', 'Three consecutive failures raise one attention item', 'no reviewer or producer session is being launched for any item',
     'A session that exits at launch is classified from its pane', 'agent_not_found', 'herdr pane read', 'provider limit notice', 'fails over exactly as a mid-session', "the pane's last words", 'exits **at launch**']) assert.ok(guide.includes(fragment), `docs/master-agent.md must state: ${fragment}`);

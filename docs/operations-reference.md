@@ -156,7 +156,7 @@ and the URL `https://YOUR-HOST/api/github/webhook`.
 ## Control-plane resources
 
 `master status` → `resources.summary` and `resources.readings`; the registry is in the
-[master-agent guide](master-agent.md#resource-observation).
+[master-agent guide](master-agent-reference.md#resource-observation).
 
 - **`review-ledger` / `producer-ledger`:** `graphyard master run --once` reclaims settled records.
 - **`agent-names:PROFILE`:** confirm the finished pane posted its result, then `herdr pane close PANE`.
@@ -164,7 +164,7 @@ and the URL `https://YOUR-HOST/api/github/webhook`.
 - **`github-budget`:** wait for the reset; merges need fresh observations.
 - **`executor-liveness` / `loaded-revision`:** `graphyard master restart`.
 - **`database-capacity`:** grow the volume, raise `GRAPHYARD_DATABASE_MAX_BYTES`.
-- **`worktree-disk`:** see [worktree disk](master-agent.md#worktree-disk).
+- **`worktree-disk`:** see [worktree disk](master-agent-reference.md#worktree-disk).
 
 `/healthz` `healthy: false` lists `causes` (writes refused, or a resource at its bound); the loop
 dispatches nothing until healthy. Alert on `/healthz?strict` (503).
