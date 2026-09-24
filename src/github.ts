@@ -802,7 +802,7 @@ export class GitHub {
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
-      baseTip: branch.tip, baseTree: branch.tree, baseTipContained, scopeFiles,
+      baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
     };
   }
@@ -1232,7 +1232,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const baseTree = await this.commitTree(placement.predictedBase!);
     const ref = queueRef(work.key);
     // Re-binding a published tip to a tree-identical prediction: recorded, never republished.
-    const rebound = treeIdenticalPrediction(work, placement.predictedBase!, baseTree);
+    // Never for the queue head whose branch lacks the base tip commit itself (GY-145): GitHub would
+    // dismiss the approval as a merge-base change on the merge attempt, so it is merged in.
+    const tipCarried = treeIdenticalPrediction(work, placement.predictedBase!, baseTree);
+    const rebound = tipCarried && (placement.position > 0 || await this.contains(placement.predictedBase!, pr.head.sha)) ? tipCarried : null;
     // The re-bound record keeps its carry (see keptTipCarry) and names the entries now ahead of it.
     if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), predecessors: placement.predecessors,
       carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() } };

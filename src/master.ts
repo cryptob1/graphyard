@@ -25,6 +25,7 @@ import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPr
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
 import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, unresolvedThreadRefusal, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
+import { mergeBaseDismissal, mergeBaseDismissalAttention, missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
 import { allocateSessionCheckout, inspectWorktreeRoot, reclaimCommand, removeSessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootConcerns, worktreeRootMinFreeBytes, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout, type WorktreeRootHealth } from './install/worktree-root.js';
 import { pipelineSpeed, pipelineSpeedSummary } from './pipeline-speed.js';
@@ -1829,8 +1830,11 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'hold-overdue' | 'contaminated' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'hold-overdue' | 'contaminated' | 'merge-base-dismissed' | 'gate'): AttentionOwner {
   const key = work.key;
+  if (cause === 'merge-base-dismissed') return agentOwner('master', missingBaseAncestry(work)
+    ? `Nothing to run: the merge queue republishes ${key}'s tip onto the base branch tip and the merge broker refuses it until then; graphyard master status shows the new head`
+    : `Nothing to run: the approval is restored on the unchanged head and re-posted before the merge`);
   // A branch carrying another item's unlanded commits is the control plane's to restore (GY-127):
   // an ejected tip is restored on its own, any other contaminated head on the coordinator's
   // request, and a head nothing can move goes back to a worker as a fresh attempt.
@@ -2400,7 +2404,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const restore = currentRestore(work);
     const contamination = contaminated || restore?.restore ? { head: contaminated?.head ?? restore!.restore!.contaminated, foreign: contaminated?.foreign ?? restore!.restore!.foreign, source: contaminated?.source ?? [],
       restore: restore?.restore ? { cause: restore.restore.cause, requested: restore.restore.requested, performedAt: restore.restore.performedAt, outcome: restore.restore.outcome, own: restore.restore.own, head: restore.head, conflict: restore.conflict } : null } : null;
-    const restored = restoredApproval(work);
+    const restored = restoredApproval(work), baseDismissal = mergeBaseDismissal(work);
     const approvalRestored = restored ? { reviewer: restored.reviewer, reviewId: restored.reviewId ?? null, sha: restored.sha, dismissal: restored.dismissal, at: restored.at,
       line: `${restored.reviewer}'s approval of ${restored.sha.slice(0, 12)} was dismissed by GitHub for a merge-base change while the head was unchanged (${restored.dismissal.reason ?? 'reason unread'}${restored.dismissal.at ? ` at ${restored.dismissal.at}` : ''}); the control plane restored it as the binding approval, requested no review, spent no attempt, and re-posts it through the reviewer App before the merge` } : null;
     // A role with no account left is one line for the whole repository (`capacity` below), never a
@@ -2440,6 +2444,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : retrying ? [`${retrying.group ? `Producer session for ${retrying.group} proofs` : 'Reviewer session'} of ${work.key} ${retrying.session!.state} after attempt ${retrying.retry!.attempts} of ${retrying.retry!.limit}: ${retrying.session!.resolution ?? 'no reason recorded'}; ${retrying.retry!.exhausted ? 'no further automatic attempt' : `next attempt at ${retrying.retry!.nextAt}`}`, retrying.group ? 'launch-producer' : 'launch-review']
       : unacknowledged ? [`${unacknowledged.group ? `Producer session for ${unacknowledged.group} proofs` : 'Reviewer session'} of ${work.key} (${unacknowledged.session!.agentName}) is awaiting acknowledgement: no activity since its launch at ${unacknowledged.session!.requestedAt}, re-prompted once at ${unacknowledged.session!.repromptedAt}; the loop records it as never started if it stays quiet`, unacknowledged.group ? 'launch-producer' : 'launch-review']
       : baseConflict ? [baseConflict, 'base-conflict']
+      // An approval GitHub withdrew for a merge-base change is named with its time and commits (GY-145).
+      : baseDismissal ? [mergeBaseDismissalAttention(work.key, baseDismissal), 'merge-base-dismissed']
       // An item the control plane is bringing onto a moved base is not waiting for anybody. It
       // used to be the commonest attention line on this list — one per open candidate, every
       // merge — and answering it cost a rework round for a change that was a clean fast-forward.
@@ -3270,6 +3276,10 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
   await assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
+  // A head without the base tip in its history is refused before any approval is re-posted: GitHub
+  // would dismiss it again as a merge-base change on this very attempt (GY-145).
+  const unancestored = missingBaseAncestry(current);
+  if (unancestored) throw new Error(`${work.key} merge refused: ${missingAncestryReason(unancestored)}`);
   // An approval the control plane carried onto its authored tip is re-posted through the
   // reviewer App before any authority is acquired, so a native review requirement that GitHub
   // re-armed on the tip publication is met by the same identity that gave the approval.

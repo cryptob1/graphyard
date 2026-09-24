@@ -3,6 +3,7 @@ import { evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, ty
 import { reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { queuedRegressions } from './regression-guard.js';
+import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -525,11 +526,14 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     // position (GY-100): a tip push replaces the head, and GitHub dismisses its approval with it,
     // so an entry whose prediction moved only in sha must not be republished either.
     const predictedBaseTree = position === 0 ? work.observation?.baseTree ?? null : placements[position - 1].tipTree ?? null;
-    const treeEquivalent = !onPrediction && published && !!predictedBaseTree && predictedBaseTree === speculation!.baseTree;
+    // The queue head lands on the base branch tip itself, and GitHub dismisses the approval of a
+    // head that does not contain that exact commit, whatever its tree (GY-145): no carry for it.
+    const unancestored = position === 0 && !onPrediction && published && predictedBase === work.observation?.baseTip ? missingBaseAncestry(work) : null;
+    const treeEquivalent = !unancestored && !onPrediction && published && !!predictedBaseTree && predictedBaseTree === speculation!.baseTree;
     // The same tree identity as the publisher itself found it, when it declined to republish and
     // recorded the advance on the speculation instead (see treeIdenticalPrediction). Read for a
     // tip published before tips carried their own tree, where the prediction's tree is unknown here.
-    const carriedToPrediction = !onPrediction && published && !!predictedBase
+    const carriedToPrediction = !unancestored && !onPrediction && published && !!predictedBase
       && speculation!.carriedBase?.sha === predictedBase && speculation!.carriedBase!.tree === speculation!.baseTree;
     // Only a Graphyard-published tip may land. Publication is what proves the validated commit
     // already contains its predicted base, so the merge result is that commit's tested tree even
@@ -538,7 +542,8 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     const reasons: string[] = [];
     if (position > 0) reasons.push(`Merge queue position ${position + 1} of ${entries.length}: ${entries[position - 1].key} is ahead`);
     if (!current) reasons.push(predictedBase
-      ? `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published and validated for this candidate`
+      ? unancestored ? `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published onto that exact commit: ${missingAncestryReason(unancestored)}`
+      : `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published and validated for this candidate`
       : `Waiting for ${entries[position - 1]?.key ?? 'the queue head'} to publish its speculative tip`);
     placements.push({
       id: work.id, key: work.key, position, size: entries.length, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,

@@ -53,7 +53,7 @@ A queued candidate's tip is its reviewed head merged onto the predicted base, pu
 
 **An approval must survive a tip publication.** It carries onto the tip when the predecessor changed no reviewed file; `master merge` re-posts it through the reviewer App.
 
-**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head that GitHub dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`, `restoredApproval`); no other dismissal is.
+**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head that GitHub dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`, `restoredApproval`); no other dismissal is. Status names it; a queue head lacking the base tip commit is republished.
 
 **A branch must never keep another item's unlanded commits.** Tips are built from the reviewed head, and an ejection restores the branches it leaves behind (`baseRefresh.restore`).
 
@@ -75,7 +75,7 @@ The master never drives the profile outside these flows, never stores, exports o
 
 ## Harness permissions
 
-A harness command classifier (Claude Code's auto mode) would refuse routine administration. `master harness claude --apply` writes rules to `.claude/settings.local.json`, and `master harness codex` prints a trust block. The rules allow the master's CLI, `herdr`, read-only `gh`, protection reads and subresource `PATCH`, `master config`, and restarts of the `graphyard-master.service` unit. They deny merges, verdicts, token minting, `git push`, direct `agent-browser` and credential reads. Other sessions never inherit these rules; each Claude session runs with `--setting-sources user --settings .graphyard/harness/ROLE-PROFILE.json`. A harness allowlist is a prompt policy; branch protection and the App-bound check are the enforcement.
+A harness command classifier would refuse routine administration. `master harness claude --apply` writes rules to `.claude/settings.local.json`, and `master harness codex` prints a trust block. The rules allow the master's CLI, `herdr`, read-only `gh`, protection reads and subresource `PATCH`, `master config`, and restarts of the `graphyard-master.service` unit. They deny merges, verdicts, token minting, `git push`, direct `agent-browser` and credential reads. Each other Claude session runs with `--setting-sources user --settings .graphyard/harness/ROLE-PROFILE.json`. A harness allowlist is a prompt policy; branch protection and the App-bound check are the enforcement.
 
 ## Typed next actions and stateless executors
 
@@ -135,7 +135,7 @@ A worker pushes only its assigned branch (`git push origin BRANCH`, `-u`, `HEAD:
 
 ### Dead worker or provider change
 
-A lease that lapsed with no explanation raises `lease-loss`. Other lapses are history with their cause: `submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, or `exhausted-capacity`. Reconciliation settles a `lease-loss` once a stopped-worker attestation (an applied `rework` decision) is recorded, or an admin settles it with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`. Anything else is resolved by a two-party `resolve` decision. To replace a dead worker: stop it, settle its quarantine, request `rework` if it submitted, and dispatch afresh. See [operations](operations.md) and [restarting the loop](operations-reference.md#master-coordination-loop).
+A lease that lapsed with no explanation raises `lease-loss`. Other lapses record their cause: `submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, or `exhausted-capacity`. Reconciliation settles a `lease-loss` once a stopped-worker attestation (an applied `rework` decision) is recorded, or an admin runs `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`. Anything else is resolved by a two-party `resolve` decision. To replace a dead worker: stop it, settle its quarantine, request `rework` if it submitted, and dispatch afresh. See [operations](operations.md) and [restarting the loop](operations-reference.md#master-coordination-loop).
 
 ## Escalation context
 
