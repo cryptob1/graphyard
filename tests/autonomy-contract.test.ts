@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { autonomyContract, withAutonomyContract } from '../src/autonomy.js';
-import { assertLaunchRecipe, launchPlan, LaunchRefusedError, nonInteractiveLaunch, refusedLaunchKinds } from '../src/harness.js';
+import { assertLaunchRecipe, launchPlan, LaunchRefusedError, registryContractRefusal, nonInteractiveLaunch, refusedLaunchKinds } from '../src/harness.js';
 import { accountLaunch, agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, launchRoleContracts, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
@@ -171,6 +171,24 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
         (error: unknown) => error instanceof LaunchRefusedError && error.message.includes(kind));
       assert.deepEqual(calls, [], `${kind}: refused before anything reached Herdr`);
     }
+    // A runtime the agent registry adds (GY-91) brings its own launch contract: its registered
+    // arguments are its no-approval mode, so a kind with no built-in recipe still launches from it.
+    const registryAccount = (args: string[]) => ({ name: 'aider-a', kind: 'aider', home: null, fleet: { runtime: 'aider', model: 'gpt', modelId: null, session: 's-1', reason: 'chosen',
+      contract: { kind: 'aider', args, environment: {}, homeVariable: 'AIDER_HOME', modelFlag: null, login: null, loginFile: null } } });
+    const registered = accountLaunch({ kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }, registryAccount(['--yes-always']));
+    assert.equal(registered.kind, 'aider'); assert.deepEqual(registered.args, ['--yes-always']);
+    const aider = herdr();
+    const started = await startAgentSession('registry-aider', registered.kind!, 'pane-aider', registered.args, 'Implement GY-184', aider.run, { directory, attempts: 1, contract: registered.contract });
+    assert.equal(started.command.includes('--yes-always'), true, 'the registry runtime starts with its registered no-approval arguments');
+    assert.equal(aider.typed.length, 1);
+    // The same kind without that contract, or with one that registers nothing to suppress its prompts, is refused before launch.
+    const unregistered: string[][] = [];
+    await assert.rejects(startAgentSession('registry-none', 'aider', 'pane-r', [], 'Implement GY-184', (_command, args) => { unregistered.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory }),
+      (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'aider' && error.message.includes('the aider runtime'));
+    const bare = accountLaunch({ kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }, registryAccount([]));
+    await assert.rejects(startAgentSession('registry-bare', 'aider', 'pane-r', bare.args, 'Implement GY-184', (_command, args) => { unregistered.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory, contract: bare.contract }),
+      (error: unknown) => error instanceof LaunchRefusedError && error.message === registryContractRefusal('aider'));
+    assert.deepEqual(unregistered, [], 'refused before anything reached Herdr');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

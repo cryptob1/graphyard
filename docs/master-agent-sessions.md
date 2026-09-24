@@ -15,7 +15,7 @@ Each session records a handle on its item (runtime, host, pane, transcript, atta
 
 ### Approval modes
 
-Sessions run in their runtime's no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions` (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen, Kimi); `--allow-all-tools --allow-all-paths` (Copilot); `--dangerously-allow-all` (Amp); `--approval-mode never --trust-workspace` (Muse); Pi never asks. `"prompt"` and recipe-less runtimes (`refusedLaunchKinds`) never start.
+Sessions run in their runtime's no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions` (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen, Kimi); `--allow-all-tools --allow-all-paths` (Copilot); `--dangerously-allow-all` (Amp); `--approval-mode never --trust-workspace` (Muse); Pi never asks. `"prompt"` and recipe-less runtimes (`refusedLaunchKinds`) never start; a [registry](onboarding.md#configure-the-fleet) runtime starts with its contract's registered arguments and is refused when it registers none.
 
 ### Worker sandbox
 

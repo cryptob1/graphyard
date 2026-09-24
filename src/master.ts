@@ -15,7 +15,7 @@ import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, d
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
-import { assertLaunchRecipe, assertNoApprovalOptOut, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { assertLaunchable, assertNoApprovalOptOut, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule, type RegisteredLaunch } from './harness.js';
 import { withAutonomyContract } from './autonomy.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
@@ -1040,7 +1040,7 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
     }
   }
   const extra = kind === 'codex' && plan.applied ? ['-c', 'sandbox_workspace_write.network_access=true', ...(reach.writable ?? []).flatMap(path => ['--add-dir', path])] : [];
-  return { kind, args: [...plan.args, ...extra], environment, plan, account: account?.name ?? null };
+  return { kind, args: [...plan.args, ...extra], environment, plan, account: account?.name ?? null, contract };
 }
 
 /** The Git directory every worktree of the repository commits into. */
@@ -1330,12 +1330,13 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
  * attempted and the command that retries the launch, rather than reaching the caller as whatever
  * the runtime says about its arguments (GY-101).
  */
-export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string }
+export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
   assertSessionName(name, options.retry);
   // A runtime Graphyard cannot start without its own approval prompts is refused here, before
   // anything is typed, rather than launched into a session that waits for a keypress (GY-184).
-  assertLaunchRecipe(kind);
+  // A registry runtime's own launch contract is its recipe when it registers one.
+  assertLaunchable(kind, options.contract);
   const delivery = launchDelivery(kind);
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
   // otherwise at the start of its first request, pasted or not (GY-184).
@@ -3019,7 +3020,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true });
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract });
     // A worker stopped on a prompt the launcher does not answer is held for a human rather than
     // closed: its record beside the launch files is what master status raises and what the watch
     // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
@@ -3876,7 +3877,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract }));
   } catch (error) {
     if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);

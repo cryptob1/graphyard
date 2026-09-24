@@ -558,7 +558,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         pane = created.pane; tabId = created.tab;
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();

@@ -54,6 +54,20 @@ export function assertLaunchRecipe(kind: string): LaunchRecipe {
   return recipe;
 }
 /**
+ * The launch contract a registry runtime brings with it (model/registry.ts): its own startup
+ * arguments and environment are that runtime's no-approval mode, registered by the operator who
+ * added it, so a kind Graphyard has no built-in recipe for still launches from it. A registry
+ * contract that registers neither names no way past the runtime's prompts and is refused like a
+ * runtime without a recipe, naming the runtime and the fix.
+ */
+export interface RegisteredLaunch { args: string[]; environment?: Record<string, string> }
+export const registryContractRefusal = (kind: string) => `Graphyard refuses to launch the ${kind} runtime: its agent-registry launch contract registers no arguments or environment, so nothing suppresses its own approval or trust prompts and the session would wait for a human. Register the flags that start ${kind} without approvals with graphyard master registry runtime set NAME --kind ${kind} --arg=FLAG --reason REASON.`;
+export function assertLaunchable(kind: string, registered: RegisteredLaunch | null = null) {
+  if (nonInteractiveLaunch[kind]) return;
+  if (!registered) throw new LaunchRefusedError(kind);
+  if (!registered.args.length && !Object.keys(registered.environment ?? {}).length) throw new LaunchRefusedError(kind, registryContractRefusal(kind));
+}
+/**
  * A profile with `approvals: "prompt"` would start its runtime without the recipe above and wait at
  * the runtime's own approval prompts for a human in the session tab. No launched session may wait
  * on a human (GY-184), so such a profile is refused before launch, naming the runtime and the fix;
