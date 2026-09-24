@@ -79,10 +79,11 @@ const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const pathPattern = (path: string, flags = '') => new RegExp(`(^|[^A-Za-z0-9_./-])(${escape(path)})(?=$|[^A-Za-z0-9_./-]|\\.(?:$|\\s))`, flags);
 export const namesPath = (text: string, path: string) => pathPattern(path).test(text);
 
-// A file-like token: a path with a directory or an extension, with any `:line` suffix and trailing
-// sentence punctuation left off. The requested path itself is matched literally as well, so a name
-// this pattern cannot see — `Dockerfile`, `.github/CODEOWNERS` — is still a file of its clause.
-const fileToken = /[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\/[A-Za-z0-9_./-]*|\.[A-Za-z][A-Za-z0-9]{0,7})/g;
+// A file-like token: a path with a directory or an extension, or a dotfile such as `.gitignore`, with
+// any `:line` suffix and trailing sentence punctuation left off. The requested path itself is matched
+// literally as well, so a name this pattern cannot see — `Dockerfile`, `.github/CODEOWNERS` — is
+// still a file of its clause.
+const fileToken = /[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\/[A-Za-z0-9_./-]*|\.[A-Za-z][A-Za-z0-9]{0,7})|(?<![A-Za-z0-9_./-])\.[A-Za-z][A-Za-z0-9_.-]*/g;
 const creationVerb = /\b(create[sd]?|creating|add(?:s|ed|ing)?|new file|introduce[sd]?|introducing)\b/gi;
 // A negation governing a creation verb: "do not create", "src/a.ts should not be added", "no new
 // file", "adding src/a.ts is not needed", "we cannot create src/a.ts". It reaches back to the nearest
@@ -97,13 +98,30 @@ const negated = (clause: string, files: readonly { at: number; end: number }[], 
   return negation.test(masked.slice(0, at).split(boundary).at(-1)!) || negation.test(masked.slice(end).split(boundary)[0]);
 };
 
+// What may stand between a creation verb and the file it acts on. Before the file, in the active
+// voice ("create src/a.ts", "add a new file at `src/a.ts`"), only articles and file nouns; after it,
+// in the passive ("src/a.ts should not be added"), only auxiliaries and negations. Other files the
+// verb is coordinated with ("create src/a.ts and src/b.ts") are masked to FILE and may stand there
+// too. Anything else — "add a case to tests/b.ts for the branch src/a.ts takes" — means the verb acts
+// on something other than the file.
+const quoting = /[`'"*()[\]]/g;
+const activeGap = /^(?:\s|,|\b(?:and|or|a|an|the|new|empty|missing|separate|dedicated|file|files|module|at|called|named|as|FILE)\b)*$/i;
+const passiveGap = /^(?:\s|,|:|\b(?:and|or|FILE|should|must|shall|will|would|could|can|cannot|needs?|has|have|had|is|are|was|were|be|been|being|to|still|also|yet|now|not|never|then)\b|\b[a-z]+n[’']t\b)*$/i;
+// A destination after the file: "add src/generated.ts to `.gitignore`", "add src/a.ts into the
+// exports list" puts the file's name somewhere else, it does not create it. A preposition that
+// introduces a quoted name, a path or dotfile, or a list-like noun is a destination; "create
+// src/a.ts to hold the helper" is not.
+const destination = /^\s*(?:to|into|onto|in|inside|within|under)\s+(?:FILE\b|[`'"]|\.?[A-Za-z0-9_-]+[./][A-Za-z0-9_./-]|\.[A-Za-z]|(?:(?:the|its|your|our|this|that|a|an)\s+)?(?:[\w.-]+\s+){0,2}(?:list|file|set|array|config|configuration|manifest|index|exports?|entries|section|table|allowlist|ignore|plannedfiles|scope|glob|patterns?)\b)/i;
+
 /**
- * Whether `text` asks for `path` to be created: a clause naming the path has a creation verb whose
- * nearest file named in that clause is `path` itself, so a verb about another file — "create
- * src/b.ts; src/a.ts is wrong", "add a case to src/b.ts next to src/a.ts" — grants nothing for it.
- * A negated verb — "do not create src/a.ts", "adding src/a.ts is not needed" — forbids exactly the
- * file it names, and the latest such instruction stands: a trusted comment that later writes "do
- * not create src/a.ts" takes back an earlier "create src/a.ts", and a later request renews it.
+ * Whether `text` asks for `path` to be created: a creation verb in a clause naming the path acts on
+ * the path itself — its direct object ("create src/a.ts", "add a new file at src/a.ts") or its
+ * passive subject ("src/a.ts should be added") — and does not put the path somewhere else ("add
+ * src/generated.ts to .gitignore"). A verb about another file — "create src/b.ts; src/a.ts is wrong",
+ * "add a case to src/b.ts next to src/a.ts" — grants nothing for it. A negated verb — "do not create
+ * src/a.ts", "adding src/a.ts is not needed" — forbids exactly the file it names, and the latest such
+ * instruction stands: a trusted comment that later writes "do not create src/a.ts" takes back an
+ * earlier "create src/a.ts", and a later request renews it.
  */
 export const asksToCreate = (text: string, path: string) => creationInstruction(text, path) === true;
 
@@ -112,14 +130,26 @@ function creationInstruction(text: string, path: string): boolean | null {
   let asked: boolean | null = null;
   for (const clause of text.split(/[;!?\n]|\.(?=\s|$)/)) {
     if (!namesPath(clause, path)) continue;
-    const named = [...clause.matchAll(pathPattern(path, 'g'))].map(match => ({ at: match.index! + match[1].length, end: match.index! + match[0].length, name: path }));
-    const files = [...[...clause.matchAll(fileToken)].map(match => ({ at: match.index!, end: match.index! + match[0].length, name: match[0].replace(/\.+$/, '') }))
+    const named = [...clause.matchAll(pathPattern(path, 'g'))].map(match => ({ at: match.index! + match[1].length, end: match.index! + match[0].length }));
+    const files = [...[...clause.matchAll(fileToken)].map(match => ({ at: match.index!, end: match.index! + match[0].replace(/\.+$/, '').length }))
       .filter(token => !named.some(file => token.at < file.end && file.at < token.end)), ...named];
+    // The clause with every file but the requested one masked to FILE, keeping offsets.
+    const others = (from: number, to: number) => {
+      let part = clause.slice(from, to);
+      for (const file of files.filter(file => !named.includes(file) && file.at >= from && file.end <= to).sort((a, b) => b.at - a.at))
+        part = `${part.slice(0, file.at - from)}FILE${part.slice(file.end - from)}`;
+      return part.replace(quoting, ' ');
+    };
+    const placed = (end: number) => destination.test(others(end, clause.length).replace(/^(?:\s*(?:,|\band\b|\bor\b)\s*FILE\b)*/i, ''));
+    const events: { at: number; create: boolean }[] = [];
     for (const verb of clause.matchAll(creationVerb)) {
-      const at = verb.index!, distance = (file: { at: number; end: number }) => file.at >= at ? file.at - at : at - file.end;
-      const nearest = files.reduce<(typeof files)[number] | null>((best, file) => !best || distance(file) < distance(best) ? file : best, null);
-      if (nearest?.name === path) asked = !negated(clause, files, at, at + verb[0].length);
+      const at = verb.index!, end = at + verb[0].length;
+      const governs = named.some(file => file.at >= end
+        ? activeGap.test(others(end, file.at)) && !placed(file.end)
+        : file.end <= at && passiveGap.test(others(file.end, at)) && !placed(end));
+      if (governs) events.push({ at, create: !negated(clause, files, at, end) });
     }
+    for (const event of events.sort((a, b) => a.at - b.at)) asked = event.create;
   }
   return asked;
 }
@@ -150,12 +180,15 @@ export function findingScope(paths: readonly string[], findings: readonly Review
 }
 
 /**
- * Whether `path` exists on `origin/<baseBranch>`. Only a genuine absence answers false: a missing
- * base ref, a timed-out or failing git fails the call, so the caller retries instead of judging an
- * existing file absent and recording that as its decision.
+ * Whether `path` exists on the base branch as the remote has it now. The base is fetched first: the
+ * daemon's other base fetch is lazy, so a local `origin/<baseBranch>` can be stale by any amount and
+ * would judge a file added since absent, and a file deleted since present. Only a genuine absence
+ * answers false: a failed fetch, a missing base ref, a timed-out or failing git fails the call, so the
+ * caller retries instead of judging an existing file absent and recording that as its decision.
  */
 export async function baseHasPath(root: string, baseBranch: string, path: string, run: ChildRun): Promise<boolean> {
   const ref = `origin/${baseBranch}`;
+  await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/${ref}`]);
   await run('git', ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`]);
   return String(await run('git', ['-C', root, 'ls-tree', '-z', '--name-only', ref, '--', path])).split('\0').includes(path);
 }

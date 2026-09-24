@@ -557,6 +557,12 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   assert.deepEqual(findingScope(['.github/CODEOWNERS'], [{ ground: 'review 14', text: 'Add .github/CODEOWNERS so the reviewer is requested' }], absent), { grounds: [{ path: '.github/CODEOWNERS', ground: 'review 14' }] });
   assert.match((findingScope(['Dockerfile'], [{ ground: 'review 15', text: 'Do not add Dockerfile here' }], absent) as { refusal: string }).refusal, /does not ask for it to be created/);
   assert.match((findingScope(['Dockerfile'], [{ ground: 'review 16', text: 'Create src/new-helper.ts; Dockerfile is fine' }], absent) as { refusal: string }).refusal, /does not ask for it to be created/);
+  // The verb has to act on the file itself: adding a file's name to another file or list creates nothing.
+  for (const text of ['Add `src/missing.ts` to `.gitignore`', 'Add src/missing.ts to .gitignore', 'add src/missing.ts to the exports list', 'src/missing.ts should be added to .gitignore',
+    'Add src/merge-queue.ts and src/missing.ts to `.gitignore`', 'Add src/missing.ts into tests/fixtures.json'])
+    assert.match((elsewhere(text) as { refusal: string }).refusal, /does not ask for it to be created/, text);
+  for (const text of ['Create src/missing.ts to hold the helper', 'Create src/new-helper.ts and src/missing.ts', 'Add a new file at `src/missing.ts` for the helper'])
+    assert.deepEqual(elsewhere(text), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, text);
 
   // The read: unresolved threads' comments by trusted authors, and the configured reviewer's latest change request on the head only.
   const run = (_command: string, args: string[]) => {
@@ -578,13 +584,19 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   git(['-C', repo, 'init', '-q']); await mkdir(join(repo, 'src')); await writeFile(join(repo, 'src', 'present.ts'), 'export {};\n');
   git(['-C', repo, 'add', '.']); git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base']);
-  git(['-C', repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  git(['-C', repo, 'branch', '-M', 'main']);
+  // The loop's checkout: its origin/main is read once and then left stale while the remote moves on.
+  const checkout = await mkdtemp(join(tmpdir(), 'gy-finding-checkout-'));
+  git(['clone', '-q', repo, checkout]);
+  await writeFile(join(repo, 'src', 'added.ts'), 'export {};\n'); git(['-C', repo, 'rm', '-q', 'src/present.ts']); git(['-C', repo, 'add', '.']);
+  git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base moves']);
   const gitRun = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  assert.equal(await baseHasPath(repo, 'main', 'src/present.ts', gitRun), true);
-  assert.equal(await baseHasPath(repo, 'main', 'src/absent.ts', gitRun), false);
-  await assert.rejects(baseHasPath(repo, 'gone', 'src/present.ts', gitRun), 'a missing base ref is a failure, not an absent file');
-  await assert.rejects(baseHasPath(repo, 'main', 'src/present.ts', () => { throw new Error('git timed out'); }), /timed out/);
-  await rm(repo, { recursive: true, force: true });
+  assert.equal(await baseHasPath(checkout, 'main', 'src/added.ts', gitRun), true, 'a file added to the base since the last fetch exists');
+  assert.equal(await baseHasPath(checkout, 'main', 'src/present.ts', gitRun), false, 'a file deleted from the base since the last fetch is absent');
+  assert.equal(await baseHasPath(checkout, 'main', 'src/absent.ts', gitRun), false);
+  await assert.rejects(baseHasPath(checkout, 'gone', 'src/added.ts', gitRun), 'a missing base branch is a failure, not an absent file');
+  await assert.rejects(baseHasPath(checkout, 'main', 'src/added.ts', () => { throw new Error('git timed out'); }), /timed out/);
+  await rm(repo, { recursive: true, force: true }); await rm(checkout, { recursive: true, force: true });
 
   const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: ['chatgpt-codex-connector[bot]'] }, run);
   assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', ...Array(3).fill('review thread PRRT_long'), 'review 1'], 'one finding per trusted comment');
