@@ -325,7 +325,7 @@ launches the configured reviewer profile and a producer session for each of them
 \`run.awaitReviewersMinutes\` (default 8, 0 disables) from the request, for the automatic
 bot reviewers in \`run.awaitReviewers\` (default the Codex connector) to review the
 head, so their findings are judged in the same round; the wait is named in \`master
-status\`, and a failed GitHub read launches at once. A head change cancels those
+status\`, and a failed GitHub read, or one unanswered within 5 seconds, launches at once. A head change cancels those
 sessions and requests the new head afresh unless the merge queue carried the
 approval or the proof. You handle
 findings, rework and merges; you never launch reviews or producers by hand. \`master

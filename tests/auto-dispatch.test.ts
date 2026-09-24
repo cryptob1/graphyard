@@ -858,3 +858,25 @@ test('unit:review-waits-for-bot-reviewers — a reviewer launch waits, bounded, 
     assert.equal(reviewLaunches(log).length, 1, 'awaitReviewersMinutes 0 never waits');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('a bot-review read that never settles holds the tick only to its own deadline: producers on the same item and a later one launch in that tick, and the review launches as on a failed read', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-hung-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
+    const requested = Date.parse(first.autoDispatch!.review!.requestedAt);
+    let reads = 0;
+    const effects = stubEffects(() => [first, second], log, { headReviewers: () => { reads++; return new Promise<string[]>(() => { /* GitHub never answers */ }); } });
+    // Room for both items at once, so only the bot read could hold the later item back.
+    const config = masterConfig(token); for (const profile of [...config.reviewers, ...config.producers]) profile.concurrency = 2;
+    const started = Date.now();
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000, undefined, 200);
+    assert.ok(Date.now() - started < 5_000, `the tick is held only to the bot-read deadline, not the read: ${Date.now() - started}ms`);
+    assert.equal(reads, 2, 'each waiting review is read once, all together before any launch');
+    for (const key of [first.key, second.key]) {
+      assert.ok(log.some(entry => entry.startsWith(`producer:${key}:`)), `${key}'s producers launch in the tick: ${JSON.stringify(log)}`);
+      assert.ok(log.some(entry => entry.startsWith(`review:${key}:`)), `${key}'s review launches, the unanswered read counting as a failed one: ${JSON.stringify(log)}`);
+    }
+    assert.equal(tick.launched.filter(entry => entry.kind === 'review').length, 2);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
