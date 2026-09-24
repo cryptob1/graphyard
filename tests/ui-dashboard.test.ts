@@ -8,20 +8,23 @@ import type { Work } from '../src/model.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
-import { flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { fixtureApi, flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
 import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../web/pr-steps.js';
 import { noRelease, releaseView } from '../web/release.js';
 import ShippedPage from '../web/pages/shipped.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
 import { jargon } from '../web/plain-status.js';
-import { formatAge } from '../web/duration.js';
+import { formatAge, formatDuration } from '../web/duration.js';
 import { primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
+import { endedItemIdleMs, workersView } from '../web/workers-view.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
-import InsightsFlow, { ReplayLane, readFlow } from '../web/pages/insights-flow.js';
+import { ShippingPulseView, wellFormedPulse } from '../web/shipping-pulse.js';
+import { mergeTime, wellFormedDrilldown, wellFormedFlowReport } from '../web/flow-analytics.js';
+import InsightsFlow, { Headline, InsightsDetails, ReplayLane, readFlow } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
 import Sidebar from '../web/components/sidebar.js';
 import TopBar from '../web/components/top-bar.js';
@@ -133,7 +136,8 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   assert.ok(!servedThisWeek(pending).includes('GY-18'));
   assert.equal(shippedLine(pendingPage), servedThisWeek(pending).length);
   assert.ok(rowsOf(pendingPage, 'moving').includes('GY-18'), 'the pending merge is counted once, in Moving');
-  assert.doesNotMatch(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /GY-18/);
+  // The footer names it only as the latest merge (GY-168), never as shipped.
+  assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · merged /);
   // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
   const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
   assert.ok(classify(stalled, NOW).byGroup.blocked.some(item => item.key === 'GY-15'));
@@ -176,7 +180,7 @@ test('unit:ui-design-system — one navigation and one design system: every stat
   const d = dashboard();
   // One navigation: the sidebar. The sub-page row under a section never repeats a sidebar entry.
   const sidebarLabels = sections.map(section => section.label);
-  for (const view of views) assert.ok(!sidebarLabels.includes(view.label as any) || view.id === 'work' || view.id === 'workers', `${view.label} is not a second entry for a sidebar item`);
+  for (const view of views) assert.ok(!sidebarLabels.includes(view.label as any) || view.id === 'work' || view.id === 'workers' || view.id === 'insights', `${view.label} is not a second entry for a sidebar item`);
   for (const view of visibleViews(d)) {
     const tabs = [...markup(createElement(TopBar, { ...d, view: view.id }) as any).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
     for (const tab of tabs) assert.ok(!sidebarLabels.includes(tab as any), `${view.id}: tab ${tab} overlaps the sidebar`);
@@ -559,9 +563,9 @@ test('unit:ui-review-polish — step names sit over their segments, commits show
   // Validate starts at the hand-in, Deploy at the merge, when no recorded move says otherwise.
   const handed = { ...testing, pipeline: { attempts: [], submittedAt: new Date(NOW - 7 * hour).toISOString(), resubmittedAt: new Date(NOW - 2 * hour).toISOString(), reworkRounds: 1, interventions: { blocked: 0, requirements: 0 } }, gates: testing.gates.map(gate => gate.name === 'build' ? { ...gate, passed: false, reasons: ['Pull request has not been independently observed'] } : gate) } as unknown as Work;
   assert.equal(prSteps(handed, NOW).current, 'validate'); assert.equal(stepSince(handed, NOW), new Date(NOW - 2 * hour).toISOString());
-  // Commits show 8 characters; the whole SHA stays in the text, so selecting it copies the exact commit.
+  // Commits show 8 characters as their text (GY-168); the whole SHA stays in the title and the link.
   const sha = 'abcdef1234567890abcdef1234567890abcdef12';
-  assert.match(markup(createElement(CandidateSha, { repository: 'fixture/shop', sha })), new RegExp(`<code class="sha" title="${sha}">${sha}</code>`));
+  assert.match(markup(createElement(CandidateSha, { repository: 'fixture/shop', sha })), new RegExp(`href="[^"]*/commit/${sha}"[\\s\\S]*<code class="sha" title="${sha}">${sha.slice(0, 8)}</code>`));
   assert.match(css, /code\.sha\{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;/);
   const sources = ['web', 'web/pages', 'web/components'].flatMap(dir => readdirSync(new URL(`${dir}/`, root)).filter(name => /\.tsx?$/.test(name)).map(name => `${dir}/${name}`));
   for (const path of sources) for (const [, count] of (await read(path)).matchAll(/(?:[sS]ha|[tT]ip|[bB]ase)!?\)?\.slice\(0, ?(\d+)\)/g)) assert.equal(count, '8', `${path} shows ${count} characters of a commit`);
@@ -627,14 +631,14 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   for (const key of keys) assert.ok(!rowsOf(page, 'moving').includes(key) && !page.includes(`data-row="${key}"`), `${key} has no Work row`);
   assert.equal(tileCount(page, 'moving'), byGroup.moving.length);
   // Shipped this week counts only what the release was seen serving this week (AGENTS.md: a delivery
-  // stays pending until the release serves it); the merges not yet seen live are counted apart.
+  // stays pending until the release serves it); the merges not yet seen live are counted apart, from
+  // the production observation (GY-168) — with none, the page claims no count.
   const week = 7 * 24 * hour;
   assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(page)?.[1]), work.filter(item => groupOf(item, NOW) === 'shipped' && releasedAt(item) !== null && NOW - releasedAt(item)! <= week).length);
-  const unseen = work.filter(item => item.stage === 'done' && !item.closure && !!item.delivery && releasedAt(item) === null && NOW - mergedAt(item) <= week).length;
-  assert.ok(real.filter(item => NOW - mergedAt(item) <= week).length >= 3 && unseen >= 3);
-  assert.equal(Number(/data-unreleased="(\d+)"/.exec(page)?.[1]), unseen);
-  assert.match(page, new RegExp(`${unseen} merged, not yet seen live\\.`));
-  for (const key of keys) assert.doesNotMatch(page.slice(page.indexOf('aria-label="Shipped this week"')), new RegExp(`>${key}<`), `${key} is not counted as shipped`);
+  assert.ok(real.filter(item => NOW - mergedAt(item) <= week).length >= 3);
+  assert.doesNotMatch(page, /data-unreleased=|not yet seen live/);
+  // None of them is counted as shipped; the newest merge is named only as the latest merge (GY-168).
+  for (const key of keys) assert.doesNotMatch(page.slice(page.indexOf('aria-label="Shipped this week"')).replace(new RegExp(`data-latest="${key}"><span class="mono">${key}</span>[\\s\\S]*?</button> · merged `), ''), new RegExp(`>${key}<`), `${key} is not counted as shipped`);
   const live = home(dashboard({ work: [...board(), ...real.map(item => item.key === real[0].key ? released : item)] }));
   assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(live)?.[1]), Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(page)?.[1]) + 1, 'seen live, it counts');
   // Insights: none of them is a Now dot, none is counted in the flow, and the replay takes each out of Deploy.
@@ -697,7 +701,7 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   assert.match(await read('src/server/routes/flow-analytics.ts'), /production: production\?\.status\(\) \?\? null/);
   // Merges the watch holds at Deploy (Moving, Blocked) are still merged and not yet seen live: the footer counts them.
   const watched = home(dashboard({ work, status: { ...boardStatus(), production: watch } as any }));
-  assert.equal(Number(/data-unreleased="(\d+)"/.exec(watched)?.[1]), unseen);
+  assert.equal(Number(/data-unreleased="(\d+)"/.exec(watched)?.[1]), 2, `${keys[0]} pending and ${keys[1]} failed`);
   // A production incident blocks at Deploy and says so, on the row and the item page — never "Shipped".
   assert.equal(groupOf(stale, NOW, undefined, undefined, failing), 'blocked');
   const row = markup(createElement(WorkCard, { item: stale, now: NOW, onOpen: noop, release: failing }));
@@ -831,9 +835,9 @@ test('GY-161 review: where the production watch observes production, a merge wai
   const before = Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(home(dashboard({ work: [...board(), waiting], status: namedStatus })))?.[1]);
   const withLive = home(dashboard({ work: [...board(), live], status: namedStatus }));
   assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(withLive)?.[1]), before + 1);
-  // The footer's "Latest" dates the release under that same name, not from the Unix epoch.
+  // The footer's "Latest" is the newest merge, dated from that merge, not from the Unix epoch (GY-168).
   const footer = /aria-label="Shipped this week">[\s\S]*$/.exec(withLive)![0];
-  assert.match(footer, new RegExp(`${live.key}</span> <span data-title="true">[^<]*</span></button> · ${formatAge(NOW - hour, NOW)} ago`), footer.slice(0, 600));
+  assert.match(footer, new RegExp(`data-latest="${live.key}"><span class="mono">${live.key}</span> <span data-title="true">[^<]*</span></button> · merged ${formatAge(mergedAt(live), NOW)} ago`), footer.slice(0, 600));
   // The item page's Checks line reads each check as the test gate does: only the trusted App's runs
   // count, so a newer untrusted run of the same name neither passes nor fails a check.
   const handedIn = find('GY-22');
@@ -1011,4 +1015,294 @@ test('GY-161 review: a step entered before the drill-down window still starts it
   const cut = computeFlow(truncated, { days: 30 });
   assert.ok(!(flowDrilldown(truncated, cut, { metric: 'steps', key: null, authorized: true }).rows as { detail: string }[]).some(row => row.detail === 'deploy to outside'), 'nor a drill-down row');
   assert.equal(cut.stepDwell.find(entry => entry.step === 'deploy')?.n ?? 0, 0, 'nor a completed Deploy stay');
+});
+
+// GY-168: the follow-ups from the browser review of GY-161's merge.
+
+/** Hex runs long enough to be a commit SHA (at least one letter, so a numeric id is not one; a UUID's segments are not one either). */
+const longHex = (text: string) => [...text.replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, 'uuid').matchAll(/\b[0-9a-f]{9,}\b/gi)].map(match => match[0]).filter(hex => /[a-f]/i.test(hex));
+
+test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page text of the item page and every other page; only a title, link or copy action carries the whole SHA', () => {
+  const head = '23d8dfbf674cbc8586cc98238acac9143a1765fa', base = '9c41be07d2f5a8e6b3c0d1f47e2a9b8c6d5e4f30', deployed = 'b7e1f0a2c3d4e5f60718293a4b5c6d7e8f901234';
+  const real = realDeliveredWork() as unknown as Work[];
+  const reviewing = find('GY-22');
+  const at = (ago: number) => new Date(NOW - ago).toISOString();
+  // An open item whose recorded text names full SHAs everywhere the control plane writes one.
+  const loaded = { ...reviewing, candidate: { ...reviewing.candidate!, sha: head, baseSha: base },
+    blocker: `Rebase onto ${base}`, violations: [`Commit ${head} was pushed after review`],
+    gates: reviewing.gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: [`Independent approval of ${head} is required`] }
+      : gate.name === 'merge' ? { ...gate, passed: false, reasons: [`Speculative tip on predicted base ${base} is stale`] } : gate),
+    observation: { ...reviewing.observation!, agentReview: { reason: `Reviewed ${head} against ${base}` } },
+    nextAction: { kind: 'review', gate: 'review', refusal: `Independent approval of ${head} is required`, reason: `review the head ${head}`, llmRole: null },
+    actionQueue: { actions: [{ id: 'a1', kind: 'review', state: 'pending', claim: null, requestedBy: 'graphyard', requestedAt: at(hour), attempts: 1, resolution: `reviewed ${base}`,
+      history: [{ at: at(hour), event: 'requested', reason: `review ${head}`, result: null, executor: null, requester: 'graphyard' }] }], history: [] },
+    queueEjection: { at: at(2 * hour), reason: `Speculative tip ${base} was stale` },
+    // Revoked evidence, whose recorded reason names the commit it no longer binds.
+    evidence: [{ ...board().flatMap(item => item.evidence)[0], id: 'e-revoked', sha: head, revocation: { actor: 'operator', at: at(hour), reason: `Proof run against ${base}, not ${head}` } }],
+    agentRequests: [{ id: 'q1', type: 'scope', state: 'open', requestedBy: 'worker-1', reason: `Widen scope for ${head}`, paths: ['web/'], decider: { who: 'Master agent', command: null }, at: at(hour), releasedLease: false }],
+    sessions: [
+      { id: 'r22', kind: 'review', principal: 'reviewer-1', epoch: null, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: 'w1:r22', agentName: null, role: 'review', head,
+        attach: 'herdr pane attach w1:r22', transcript: null, subject: `GY-22: review ${head}`, startedAt: at(10 * 60_000), updatedAt: at(60_000), endedAt: null, state: 'running', outcome: null },
+      { id: 'r22b', kind: 'review', principal: 'reviewer-1', epoch: null, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: 'w1:r22b', agentName: null, role: 'review', head: base,
+        attach: null, transcript: null, subject: `GY-22: review ${base}`, startedAt: at(3 * hour), updatedAt: at(2 * hour), endedAt: at(2 * hour), state: 'finished', outcome: `superseded: ${base} was replaced by ${head}` }],
+  } as unknown as Work;
+  // A merge the release was observed serving, and one a post-deployment check records a deployment for.
+  const merged = { ...real[0], delivery: { ...real[0].delivery!, mergeSha: head } } as Work;
+  const smoked = { ...real[1], policy: { ...real[1].policy, deploySmoke: true }, delivery: { ...real[1].delivery!, mergeSha: base,
+    deployment: { sha: deployed, covers: 'descendant', source: 'railway', observedAt: at(hour), observer: 'master' } } } as unknown as Work;
+  // A parked item whose human-only request names commits, as its Needs-you card shows it on the item page.
+  const parkedOn = find('GY-20');
+  const asked = { ...parkedOn, humanRequest: { ...parkedOn.humanRequest!, reason: `The live proof of ${head} needs a paid plan`, needed: `A cloud account for ${base}` } } as Work;
+  const work = [...board().filter(item => ![reviewing.id, parkedOn.id].includes(item.id)), loaded, asked, merged, smoked, ...real.slice(2)];
+  const status = { ...boardStatus(), production: { observedAt: at(0), serving: deployed, error: null, deployed: [merged.key], pending: [smoked.key], incidents: [] } };
+  const d = dashboard({ work, status: status as any });
+  // All rendered text, folded sections included; attributes (a title, a link, a copy action) are not text.
+  const text = (html: string) => html.replace(/<[^>]*>/g, ' ');
+  // Every item page: no whole SHA, and no hex run longer than 8, in what a reader sees.
+  for (const item of work) {
+    const page = markup(createElement(WorkDetails, { ...d, item }));
+    assert.deepEqual(longHex(text(page)), [], `${item.key} item page text`);
+  }
+  const askedText = text(markup(createElement(WorkDetails, { ...d, item: asked })));
+  assert.ok(askedText.includes(`The live proof of ${head.slice(0, 8)} needs a paid plan`) && askedText.includes(`A cloud account for ${base.slice(0, 8)}`), 'the Needs-you card shows the request in 8 characters');
+  const itemText = text(markup(createElement(WorkDetails, { ...d, item: loaded })));
+  for (const sha of [head, base]) assert.ok(itemText.includes(sha.slice(0, 8)), `${sha.slice(0, 8)} is shown`);
+  assert.ok(itemText.includes(`Proof run against ${base.slice(0, 8)}, not ${head.slice(0, 8)}`), 'a revocation reason shows its commits in 8 characters');
+  assert.ok(!itemText.includes(head) && !itemText.includes(base));
+  const mergePage = markup(createElement(WorkDetails, { ...d, item: smoked }));
+  assert.ok(text(mergePage).includes(deployed.slice(0, 8)) && !text(mergePage).includes(deployed), 'the deployed commit is 8 characters too');
+  // The whole SHA is still reachable, as the commit's title and link (never its text).
+  const commit = markup(createElement(CandidateSha, { repository: 'fixture/shop', sha: head }));
+  assert.match(commit, new RegExp(`href="https://github.com/fixture/shop/commit/${head}"`));
+  assert.match(commit, new RegExp(`<code class="sha" title="${head}">${head.slice(0, 8)}</code>`));
+  // Every other page the dashboard draws, over the same items.
+  for (const view of visibleViews(d)) assert.deepEqual(longHex(text(markup(createElement(() => view.render(d) as ReactElement)))), [], `${view.label} page text`);
+  for (const item of work) assert.deepEqual(longHex(text(markup(createElement(WorkCard, { item, now: NOW, onOpen: noop, release: releaseView(status) })))), [], `${item.key} card text`);
+  // Numbers are not SHAs: a review or run id stays whole.
+  assert.equal(shortShas(`review 5303188884 on ${head}`), `review 5303188884 on ${head.slice(0, 8)}`);
+  // A UUID names a record, not a commit, and stays whole.
+  assert.equal(shortShas(`overriding refused reconciliation 36fad33a-319f-488b-b94a-c25de44ee705 at ${base}`), `overriding refused reconciliation 36fad33a-319f-488b-b94a-c25de44ee705 at ${base.slice(0, 8)}`);
+});
+
+test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no tabs, in the design\'s order (headline numbers, Flow with Now and the 24-hour replay, landed per day beside where the time goes), the flow-analytics detail behind one collapsed Show details; Workers hides sessions not seen for over an hour on delivered or closed items behind a collapsed Ended group', async () => {
+  // Insights: one page, so no tab list — neither the section's sub-page row nor one on the page.
+  const configured = { validation: true, releases: true, automation: true };
+  const d = dashboard({ features: configured });
+  assert.deepEqual(views.filter(view => view.section === 'insights').map(view => view.id), ['insights']);
+  assert.equal(markup(createElement(TopBar, { ...d, view: 'insights' })), '', 'no sub-page row under Insights');
+  assert.ok(primaryEntry(d, views.find(view => view.id === 'insights')!), 'Insights is still its sidebar entry');
+  const page = markup(createElement(InsightsFlow, d));
+  assert.doesNotMatch(page, /role="tab(list)?"|class="tabs?(?: active)?"|aria-label="Pages in this section"/, 'the page draws no tabs');
+  assert.match(page, /<h1>Insights<\/h1>/);
+  // The design's order: headline numbers, the Flow panel (Now, then the replay), the two charts side by side, then Show details.
+  const place = (marker: string) => { const index = page.indexOf(marker); assert.ok(index >= 0, marker); return index; };
+  const order = ['<h1>Insights</h1>', 'aria-label="Headline numbers"', 'aria-label="Flow"', '<h3>Now</h3>', '<h3>Last 24 hours, replayed</h3>', 'class="insight-charts"', 'aria-label="Landed per day"', 'aria-label="Where the time goes"', '<details class="insight-details"'];
+  const positions = order.map(place);
+  assert.deepEqual([...positions].sort((x, y) => x - y), positions, `sections in order: ${order.join(' → ')}`);
+  assert.match(page, /<div class="insight-charts"><section class="panel" aria-label="Landed per day">[\s\S]*?<\/section><section class="panel" aria-label="Where the time goes">/, 'the two charts share one row');
+  // The headline numbers, in order, each counted as the page it replaces or the Work page counts it.
+  const kpis = [...page.matchAll(/<div class="kpi" data-kpi="([^"]+)"><span>([^<]+)<\/span><strong>([^<]*)<\/strong>/g)].map(match => match.slice(1));
+  assert.deepEqual(kpis.map(([id]) => id), ['shipped', 'start-to-live', 'moving', 'waiting-on-people']);
+  assert.deepEqual(kpis.map(([, label]) => label), ['Shipped', 'Start to live, median', 'Moving now', 'Time waiting on people']);
+  const workPage = home(d);
+  assert.equal(kpis[0][2], /<strong>(\d+) shipped this week\.<\/strong>/.exec(workPage)?.[1], 'shipped as the Work page counts it');
+  assert.equal(Number(kpis[2][2]), tileCount(workPage, 'moving'), 'moving now as the Work page counts it');
+  assert.equal(kpis[1][2], '…', 'start to live waits on the shipping pulse read, never a zero');
+  const waiting = classify(d.work, NOW, d.status?.humanOnly, releaseView(d.status)).byGroup['needs-you'];
+  assert.ok(waiting.length > 0);
+  assert.match(page, new RegExp(`data-kpi="waiting-on-people"><span>Time waiting on people</span><strong>\\d[^<]*</strong><small>${waiting.length} items? waits? on you now</small>`));
+  // An item in Needs you through a human-only row waits from that request, not from when it entered its stage.
+  const requested = { ...waiting[0], humanRequest: null, stageEnteredAt: new Date(NOW - 10 * hour).toISOString() } as unknown as Work;
+  const asked = { id: requested.id, request: { at: new Date(NOW - 30 * 60_000).toISOString() } } as any;
+  const headline = markup(createElement(Headline, { shipped: 0, moving: 0, waiting: [requested], now: NOW, pulse: { pulse: null, unavailable: true, elapsed: 0, stale: true, refresh: noop } as any, requests: [asked] }));
+  assert.match(headline, new RegExp(`<strong>${formatDuration(30)}</strong><small>1 item waits on you now</small>`));
+  // A cached start-to-live median after a failed poll is marked stale on the headline itself, never shown as current.
+  const measured = { prToProduction: { configured: true, medianHours: 5, sampleSize: 3, eligible: 4 } };
+  const kpi = (read: object) => /<div class="[^"]*" data-kpi="start-to-live"[\s\S]*?<\/div>/.exec(markup(createElement(Headline, { shipped: 0, moving: 0, waiting: [], now: NOW, pulse: { refresh: noop, ...read } as any })))![0];
+  const fresh = kpi({ pulse: measured, unavailable: false, elapsed: 5_000, stale: false });
+  assert.match(fresh, /<strong>5h<\/strong><small>pull request to production · 3 of 4 measured<\/small>/);
+  assert.doesNotMatch(fresh, /stale/);
+  const failed = kpi({ pulse: measured, unavailable: true, elapsed: 3 * 60_000, stale: true });
+  assert.match(failed, /class="kpi stale" data-kpi="start-to-live" data-stale="true"/);
+  assert.match(failed, /<small>pull request to production · 3 of 4 measured · stale: last read 3m ago, the latest read failed<\/small>/);
+  assert.match(kpi({ pulse: measured, unavailable: false, elapsed: 4 * 60_000, stale: true }), /· stale: last read 4m ago<\/small>/);
+  // A pulse without a production metric, or a malformed one, never breaks the headline and is refused as a read.
+  for (const prToProduction of [undefined, null, {}, { configured: true, medianHours: '5' }]) {
+    assert.match(kpi({ pulse: { prToProduction }, unavailable: false, elapsed: 0, stale: false }), /<strong>Unavailable<\/strong>/);
+    assert.equal(wellFormedPulse({ counts: {}, weeks: [], recent: [], prToProduction }), false);
+  }
+  // A pulse is accepted only whole: Show details renders every field the validator lets through.
+  const whole = {
+    generatedAt: new Date(NOW).toISOString(), range: { start: '2026-06-29T00:00:00.000Z', end: new Date(NOW).toISOString(), weeks: 12, semantics: 'repository-utc-inclusive' },
+    completeness: 'complete', truncated: false, counts: { days7: 3, days30: 8 }, intentToMerge: { medianHours: 12.5, sampleSize: 7, excluded: 1 },
+    // No `configured`: servers before that field sent none, and the view reads its absence as configured.
+    prToProduction: { averageHours: 30, medianHours: 24, p90Hours: 48, sampleSize: 6, eligible: 8, excluded: 2, coveragePercent: 75, sparse: false, exclusions: { 'no-verifiable-production-deployment': 2 }, split: { prToMergeAverageHours: 18, mergeToProductionAverageHours: 12 } },
+    weeks: [{ start: '2026-09-14T00:00:00.000Z', end: '2026-09-20T00:00:00.000Z', count: 1 }],
+    recent: [{ key: 'GY-9', title: 'Exact delivery', pullRequest: 42, mergeSha: 'abcdef1234567890abcdef1234567890abcdef12', mergedAt: '2026-09-15T12:00:00.000Z', quality: { passingProofs: 4, requiredProofs: 4, violations: [] } }],
+  };
+  assert.equal(wellFormedPulse(whole), true, 'a pulse from a server before `configured` is not refused');
+  assert.equal(wellFormedPulse(fixtureApi('shipping-pulse')), true, 'the dashboard fixture pulse is whole');
+  assert.equal(wellFormedPulse({ ...whole, prToProduction: { ...whole.prToProduction, configured: false, unconfiguredReason: null } }), true);
+  assert.match(markup(createElement(ShippingPulseView, { pulse: whole as any, stale: false, elapsed: 0, onRefresh: noop })), /6 included of 8/);
+  // The headline reads a legacy pulse (no `configured`) as ShippingPulseView does: configured, its median measured.
+  assert.match(kpi({ pulse: whole, unavailable: false, elapsed: 0, stale: false }), /<strong>24h<\/strong><small>pull request to production · 6 of 8 measured<\/small>/);
+  const sourced = (sources: unknown) => wellFormedPulse({ ...whole, prToProduction: { ...whole.prToProduction, sources } });
+  assert.equal(sourced({ providerObservations: true, verifiedDeliveries: 0 }), true);
+  for (const sources of [{ verifiedDeliveries: 0 }, { providerObservations: 'false', verifiedDeliveries: 0 }]) assert.equal(sourced(sources), false, `refused sources: ${JSON.stringify(sources)}`);
+  assert.equal(wellFormedPulse({ ...whole, ...measured }), false, 'a production metric with only its median would crash Show details');
+  const production = whole.prToProduction as Record<string, unknown>;
+  for (const broken of [{ split: undefined }, { exclusions: null }, { sampleSize: '6' }, { eligible: undefined }, { excluded: null }, { coveragePercent: undefined }, { configured: 'yes' }, { dominantExclusion: { count: 2 } }]) {
+    assert.equal(wellFormedPulse({ ...whole, prToProduction: { ...production, ...broken } }), false, `refused: ${JSON.stringify(broken)}`);
+  }
+  for (const broken of [{ counts: {} }, { weeks: [] }, { recent: [{ key: 'GY-9' }] }, { intentToMerge: null }, { completeness: undefined }]) {
+    assert.equal(wellFormedPulse({ ...whole, ...broken }), false, `refused: ${JSON.stringify(broken)}`);
+  }
+  // Show details: exactly one toggle on the page, collapsed, and nothing of the detail read or drawn until it opens.
+  assert.equal(page.match(/Show details/g)?.length, 1, 'one Show details toggle');
+  assert.match(page, /<details class="insight-details"><summary>Show details<\/summary><\/details>/, 'collapsed and empty until opened');
+  assert.doesNotMatch(page, /<details[^>]* open/);
+  for (const hidden of ['Shipping pulse', 'Flow analytics', 'Cumulative flow', 'Where work is waiting']) assert.ok(!visibleWords(page).join(' ').includes(hidden), `${hidden} is behind Show details`);
+  // Opened, it holds the former Shipping pulse and Flow analytics tabs, unfolded: no second Show details inside.
+  const report = flowApi(board())('analytics/flow?window=30');
+  const pulse = { pulse: null, unavailable: true, elapsed: 0, stale: true, refresh: noop };
+  const opened = markup(createElement(InsightsDetails, { pulse, api: d.api, token: 'fixture', canAudit: true, initial: { report, merge: null } }));
+  assert.match(opened, /Shipping pulse unavailable/);
+  assert.match(opened, /<h2 id="flow-analytics-title">Flow analytics<\/h2>[\s\S]*Where work is waiting[\s\S]*Cumulative flow[\s\S]*Coverage, exclusions and definitions/);
+  assert.doesNotMatch(opened, /Show details|<details class="flow-details"|<h1>/, 'the detail is not a page of its own and folds nothing again');
+  // A flow report is accepted only whole, like the pulse: a shaped but malformed body would throw on render under Show details.
+  assert.equal(wellFormedFlowReport(report), true, 'the fixture report, from computeFlow, is whole');
+  assert.equal(wellFormedFlowReport(flowApi([])('analytics/flow?window=30')), true, 'an empty window is whole');
+  assert.equal(wellFormedFlowReport({ coverage: { workItems: 1 }, bottleneck: { categories: [] } }), false, 'the shape the reviewer named is refused');
+  const flowWhole = report as Record<string, any>;
+  for (const [field, broken] of [['coverage', { ...flowWhole.coverage, projection: undefined }], ['window', null], ['bottleneck', { ...flowWhole.bottleneck, scope: {} }],
+    ['bottleneck', { ...flowWhole.bottleneck, unclassified: 'none' }], ['cumulativeFlow', { ...flowWhole.cumulativeFlow, buckets: ['not a day'] }], ['wip', []],
+    ['phases', [{ phase: 1, n: 0, medianMs: null, p90Ms: null, unknown: {} }]], ['operations', { ...flowWhole.operations, deployments: { ...flowWhole.operations.deployments, latency: null } }],
+    ['definitions', { leadTime: { label: 'Lead time', formula: 'x' } }], ['privacy', { statement: { text: 'an object is no text' } }], ['availableTypes', 'feature']] as const) {
+    assert.equal(wellFormedFlowReport({ ...flowWhole, [field]: broken }), false, `refused: ${field} ${JSON.stringify(broken)?.slice(0, 80)}`);
+  }
+  // The drill-down drawer and the handed-in-to-merged figure read each row by column, so a drill-down body is accepted only whole too.
+  const flowRead = flowApi(board());
+  for (const metric of ['bottleneck', 'phase', 'steps']) assert.equal(wellFormedDrilldown(flowRead(`analytics/flow/drilldown?window=30&metric=${metric}`)), true, `the served ${metric} drill-down is whole`);
+  const drillWhole = flowRead('analytics/flow/drilldown?window=30&metric=phase') as Record<string, any>;
+  for (const broken of [{ columns: ['workKey'], rows: [null] }, { rows: [[]] }, { rows: [{ workKey: { key: 'GY-1' } }] }, { columns: [1] }, { columns: ['workKey', 'workKey'] }, { total: '3' }, { total: undefined }, { truncated: 'no' }, { rows: undefined }]) {
+    assert.equal(wellFormedDrilldown({ ...drillWhole, ...broken }), false, `refused drill-down: ${JSON.stringify(broken)}`);
+  }
+  assert.equal(wellFormedDrilldown(null), false);
+  assert.equal(await mergeTime(async () => ({ columns: ['workKey'], rows: [null], total: 1, truncated: false }), 'window=30'), null, 'a malformed phase drill-down leaves the merge figure unread instead of throwing');
+  // The former tabs are gone from the registry; Validation and Releases moved under Shipped.
+  for (const id of ['pulse', 'flow']) assert.ok(!views.some(view => view.id === id), id);
+  for (const id of ['validation', 'releases']) assert.equal(views.find(view => view.id === id)!.section, 'shipped', id);
+
+  // Workers: sessions recorded running but not seen for more than an hour, on a delivered or a closed item.
+  const real = realDeliveredWork() as unknown as Work[];
+  const at = (ago: number) => new Date(NOW - ago).toISOString();
+  const running = (id: string, subject: string, seenAgo: number) => ({ id, kind: 'implementation', principal: `worker-${id}`, epoch: 1, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: `w1:${id}`,
+    agentName: `claude-${id}`, role: null, head: null, attach: `herdr pane attach w1:${id}`, transcript: null, subject, startedAt: at(seenAgo + hour), updatedAt: at(seenAgo), endedAt: null, state: 'running', outcome: null });
+  const delivered = { ...real[0], sessions: [running('d1', 'Implement GY-163', 3 * hour), running('d2', 'Prove GY-163', 30 * 60_000)] } as unknown as Work;
+  const closedItem = { ...find('GY-22'), stage: 'done', closure: { kind: 'obsolete', ref: null, reason: 'No longer needed', by: 'operator', at: at(5 * hour), from: 'review' },
+    sessions: [running('c1', 'Review GY-22', 2 * hour)] } as unknown as Work;
+  const openItem = find('GY-12');
+  const idle = { ...openItem, sessions: [...(openItem.sessions ?? []), running('o1', 'Implement GY-12 again', 3 * hour)] } as unknown as Work;
+  const work = [...board().filter(item => ![closedItem.id, openItem.id].includes(item.id)), closedItem, idle, delivered, ...real.slice(1)];
+  const view = workersView(work, new Date(NOW));
+  const ids = (rows: { id: string }[]) => rows.map(row => row.id);
+  // Over an hour unseen on a finished item: filed with the ended sessions, saying why.
+  for (const id of ['d1', 'c1']) { assert.ok(!ids(view.running).includes(id), `${id} is not open`); assert.ok(ids(view.finished).includes(id), `${id} is ended`); }
+  assert.equal(view.finished.find(row => row.id === 'd1')!.leftOn, 'delivered'); assert.equal(view.finished.find(row => row.id === 'c1')!.leftOn, 'closed');
+  // Its run time stops when it was last seen, not at the page clock.
+  for (const later of [NOW, NOW + 5 * hour]) assert.equal(workersView(work, new Date(later)).finished.find(row => row.id === 'd1')!.spentMs, hour);
+  // Under an hour, or on an open item, it stays in the open table (marked stale, never live).
+  for (const id of ['d2', 'o1', 's12']) assert.ok(ids(view.running).includes(id), `${id} stays open`);
+  assert.equal(view.running.find(row => row.id === 'o1')!.leftOn, null);
+  assert.equal(endedItemIdleMs, hour);
+  // The principal of a left-over session is idle, not on the finished item.
+  assert.equal(view.principals.find(entry => entry.principal === 'worker-d1')!.current, null);
+  const html = markup(createElement(WorkersPage, dashboard({ work })));
+  const open = html.slice(html.indexOf('aria-label="Agent sessions"'), html.indexOf('<details class="finished-sessions"'));
+  const ended = /<details class="finished-sessions"><summary>Ended <span class="count">(\d+)<\/span><\/summary>([\s\S]*?)<\/details>/.exec(html)!;
+  for (const id of ['d1', 'c1']) { assert.doesNotMatch(open, new RegExp(`data-session="${id}"`)); assert.match(ended[2], new RegExp(`data-session="${id}"`)); }
+  for (const id of ['d2', 'o1']) assert.match(open, new RegExp(`data-session="${id}"`));
+  assert.equal(Number(ended[1]), view.finished.length);
+  // The Ended group is collapsed: none of its rows is in the visible text.
+  const visible = visibleWords(html).join(' ');
+  assert.ok(!visible.includes('claude-d1') && !visible.includes('claude-c1'), 'folded away');
+  assert.ok(visible.includes('claude-d2') && visible.includes('claude-o1'));
+  // The heading counts neither as open nor as not seen recently.
+  const staleOpen = view.running.filter(row => row.stale).length;
+  assert.match(html, new RegExp(`${view.running.length - staleOpen} agent sessions? open\\. ${staleOpen} not seen recently\\. ${view.finished.length} ended\\.`));
+  const row = /data-session="d1"[\s\S]*?<\/tr>/.exec(html)![0];
+  assert.match(row, /data-health="ended"[^>]*>.*Not seen for 3h 00m 00s · its item is delivered/);
+  assert.doesNotMatch(row, /Copy local|Copy remote/, 'no attach command offered for a left-over session');
+  // Stage done is not delivered: a merge the production watch still reports pending, and a smoke-gated
+  // merge without its passing check, are still at Deploy, so their idle sessions stay open.
+  const pendingItem = { ...real[1], sessions: [running('p1', 'Watch GY-164 deploy', 3 * hour)] } as unknown as Work;
+  const smokeItem = { ...real[2], policy: { ...real[2].policy, deploySmoke: true }, sessions: [running('s1', 'Smoke GY-165', 3 * hour)] } as unknown as Work;
+  const deploying = [...work.filter(item => ![pendingItem.id, smokeItem.id].includes(item.id)), pendingItem, smokeItem];
+  const status = { ...boardStatus(), production: { observedAt: new Date(NOW).toISOString(), serving: 'f'.repeat(40), error: null, deployed: [], pending: [pendingItem.key], incidents: [] } };
+  const held = workersView(deploying, new Date(NOW), undefined, releaseView(status));
+  for (const id of ['p1', 's1']) { assert.ok(ids(held.running).includes(id), `${id} stays open while its item is at Deploy`); assert.equal(held.running.find(row => row.id === id)!.leftOn, null); }
+  assert.equal(held.finished.find(row => row.id === 'd1')!.leftOn, 'delivered', 'a merge that left the flow still files its session as ended');
+  assert.equal(held.principals.find(entry => entry.principal === 'worker-p1')!.current?.key, pendingItem.key);
+  const heldPage = markup(createElement(WorkersPage, dashboard({ work: deploying, status: status as any })));
+  const heldOpen = heldPage.slice(heldPage.indexOf('aria-label="Agent sessions"'), heldPage.indexOf('<details class="finished-sessions"'));
+  for (const id of ['p1', 's1']) assert.match(heldOpen, new RegExp(`data-session="${id}"`));
+  // Work merged before delivery records existed is Shipped on the board, so an idle session on it is ended too.
+  const legacyItem = { ...real[1], id: 'legacy-item', key: 'GY-9', delivery: undefined, sessions: [running('l1', 'Legacy GY-9', 3 * hour), running('l2', 'Legacy GY-9 fresh', 5 * 60_000)] } as unknown as Work;
+  assert.equal(groupOf(legacyItem, NOW), 'shipped');
+  const legacy = workersView([legacyItem], new Date(NOW));
+  assert.equal(legacy.finished.find(row => row.id === 'l1')!.leftOn, 'delivered', 'a legacy shipped item files its idle session as ended');
+  assert.equal(legacy.running.find(row => row.id === 'l2')!.leftOn, null, 'a session seen within the hour stays open');
+});
+
+test('unit:ui-shipped-strip-latest — the shipped strip names the most recently merged item as latest, and its not-yet-live count comes from the production observation: zero when production serves the newest merge', () => {
+  const real = realDeliveredWork() as unknown as Work[];
+  // Real-shaped deliveries: most carry no delivery.deployment and no verified release.
+  assert.ok(real.filter(item => !item.delivery!.deployment).length > real.length / 2);
+  assert.ok(real.every(item => !item.releaseDeliveries?.length));
+  const work = [...board(), ...real];
+  const merges = work.filter(item => item.stage === 'done' && !item.closure && item.delivery);
+  const newest = merges.reduce((last, item) => mergedAt(item) > mergedAt(last) ? item : last);
+  assert.equal(newest.key, 'GY-163');
+  // The newest merge is not the newest release, so ordering by release would name another item.
+  const released = merges.filter(item => releasedAt(item) !== null).sort((a, b) => releasedAt(b)! - releasedAt(a)!);
+  assert.ok(released.length > 0 && released[0].key !== newest.key);
+  const strip = (production: unknown) => { const page = home(dashboard({ work, status: { ...boardStatus(), production } as any })); return page.slice(page.indexOf('aria-label="Shipped this week"')); };
+  const latestOf = (html: string) => /Latest: <button type="button" class="text-button" data-latest="([^"]+)"><span class="mono">([^<]+)<\/span>/.exec(html)?.slice(1);
+  const unreleased = (html: string) => Number(/data-unreleased="(\d+)"/.exec(html)?.[1] ?? 0);
+  // Production serves the newest merge (and so everything merged before it): latest is the newest merge, and nothing is waiting to go live.
+  const serving = { observedAt: new Date(NOW).toISOString(), serving: newest.delivery!.mergeSha, servingSource: 'provider', error: null, deployed: merges.map(item => item.key), pending: [], incidents: [] };
+  const live = strip(serving);
+  assert.deepEqual(latestOf(live), [newest.key, newest.key]);
+  assert.match(live, new RegExp(`· merged ${formatAge(mergedAt(newest), NOW)} ago`));
+  assert.equal(unreleased(live), 0); assert.doesNotMatch(live, /not yet seen live/);
+  // The count is the observation's: a merge it reports pending or failed, or one merged after its last pass, is not yet live.
+  assert.equal(unreleased(strip({ ...serving, deployed: [], pending: [newest.key] })), 1);
+  assert.match(strip({ ...serving, pending: [newest.key, real[1].key] }), /data-unreleased="2"> 2 merged, not yet seen live\./);
+  assert.equal(unreleased(strip({ ...serving, deployed: [], incidents: [{ key: newest.key }] })), 1);
+  assert.equal(unreleased(strip({ ...serving, observedAt: new Date(NOW - 3 * hour).toISOString() })), 1, 'merged 2h ago, after a pass 3h ago');
+  // With no production observation the page claims no count, and latest is still the newest merge.
+  for (const none of [null, { ...serving, serving: null }, { ...serving, error: 'Railway API answered 500' }]) {
+    const page = strip(none);
+    assert.deepEqual(latestOf(page), [newest.key, newest.key]); assert.equal(unreleased(page), 0);
+  }
+  // A smoke-gated merge with no production observation is not claimed as not yet live either.
+  const smokeGated = { ...newest, policy: { ...newest.policy, deploySmoke: true }, delivery: { ...newest.delivery!, deployment: null } } as unknown as Work;
+  const gated = home(dashboard({ work: [...work.filter(item => item.id !== newest.id), smokeGated] }));
+  assert.equal(unreleased(gated.slice(gated.indexOf('aria-label="Shipped this week"'))), 0);
+  assert.doesNotMatch(gated, /not yet seen live/);
+  // A legacy delivery with no delivery record, dated from its observed merge, can be the latest.
+  const legacy = { ...real[2], id: 'legacy-merge', key: 'GY-9', title: 'A merge from before delivery records', delivery: null,
+    observation: { ...real[2].observation, mergedAt: new Date(NOW - 60_000).toISOString() } } as unknown as Work;
+  assert.ok(mergedAt(legacy) > mergedAt(newest));
+  const withLegacy = home(dashboard({ work: [...work, legacy] }));
+  assert.deepEqual(latestOf(withLegacy.slice(withLegacy.indexOf('aria-label="Shipped this week"'))), ['GY-9', 'GY-9']);
+  // It is Shipped on the board, so a production observation never counts it as not yet live.
+  assert.equal(groupOf(legacy, NOW, undefined, undefined, releaseView({ production: serving } as any)), 'shipped');
+  const legacyStrip = (() => { const page = home(dashboard({ work: [...work, legacy], status: { ...boardStatus(), production: serving } as any })); return page.slice(page.indexOf('aria-label="Shipped this week"')); })();
+  assert.deepEqual(latestOf(legacyStrip), ['GY-9', 'GY-9']);
+  assert.equal(unreleased(legacyStrip), 0); assert.doesNotMatch(legacyStrip, /not yet seen live/);
+  // A closed item never counts as a merge, even the newest.
+  const closed = { ...newest, closure: { kind: 'obsolete', ref: null, reason: 'Reverted', by: 'operator', at: new Date(NOW).toISOString(), from: 'merge' } } as unknown as Work;
+  const withClosed = home(dashboard({ work: [...work.filter(item => item.id !== newest.id), closed] }));
+  assert.notEqual(latestOf(withClosed.slice(withClosed.indexOf('aria-label="Shipped this week"')))?.[0], newest.key);
 });
