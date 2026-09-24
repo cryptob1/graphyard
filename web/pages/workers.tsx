@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type WorkerRow } from '../workers-view';
 import type { Dashboard } from './dashboard';
+import DeliverySlices from '../components/delivery-slices';
 
 /**
  * The Workers tab (GY-116): every agent session across every item in one table — who it is, what
@@ -104,7 +105,7 @@ function Principals({ principals, setSelected }: { principals: PrincipalSummary[
 }
 
 /** Every session handle across every item, running first, for the operator who wants to see who is doing what and watch one. */
-export default function WorkersPage({ work, observedAt, setSelected }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'>) {
+export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
   const view = workersView(work, new Date(now));
   const stale = view.running.filter(row => row.stale).length;
@@ -119,5 +120,6 @@ export default function WorkersPage({ work, observedAt, setSelected }: Pick<Dash
     <details className="finished-sessions"><summary>Finished <span className="count">{view.finished.length}</span></summary>
       {view.finished.length ? <Table rows={view.finished} label="Finished sessions" setSelected={setSelected}/> : <p className="muted">No session has finished yet.</p>}
     </details>
+    <DeliverySlices status={status}/>
   </>;
 }

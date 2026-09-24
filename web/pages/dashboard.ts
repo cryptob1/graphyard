@@ -1,5 +1,6 @@
 import type { RefObject } from 'react';
-import type { Stage, Work } from '../../src/model';
+import type { Work } from '../../src/model';
+import type { OpenGroup } from '../groups';
 import type { IntegrationJob } from '../../src/coordination';
 import type { predictQueue } from '../../src/merge-queue';
 import type { Features } from '../features';
@@ -11,7 +12,8 @@ import type { Features } from '../features';
 export interface Dashboard {
   token: string; work: Work[]; status: any; error: string; connected: boolean; lastUpdated: string | null;
   view: string; setView(view: string): void;
-  filter: Stage | null; setFilter(filter: Stage | null): void;
+  /** The Work page's group filter: the tile last pressed, or null for every group. */
+  filter: OpenGroup | null; setFilter(filter: OpenGroup | null): void;
   selected: string | null; setSelected(id: string | null): void;
   creating: boolean; setCreating(creating: boolean): void;
   busy: boolean; setBusy(busy: boolean): void;

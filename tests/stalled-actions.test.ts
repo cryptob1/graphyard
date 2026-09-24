@@ -215,7 +215,7 @@ test('integration:stalled-action-visible — master status names a stalled row w
   assert.match(status.sentence, /handing it to a builder has failed 3 times for the same reason/);
   assert.equal(status.blocking, stalledStep(stalled, now));
   const card = renderToStaticMarkup(createElement(WorkCard, { item: stalled, now, onOpen: () => {} }));
-  assert.match(card, /handing it to a builder has failed 3 times for the same reason/, 'the item\'s own card says so');
+  assert.match(card, /handing it to a builder has failed 3 times for the same reason/i, 'the item\'s own card says so');
   assert.match(card, /tone-stuck/);
   // Nothing internal leaks into that copy: the reason itself is written for master status.
   assert.ok(!card.includes(busy));

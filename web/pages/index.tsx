@@ -14,16 +14,22 @@ import ReleasesView from '../releases';
 import ProofGrantsView from '../grants';
 import ShippingPulse from '../shipping-pulse';
 import FlowAnalytics from '../flow-analytics';
+import InsightsFlow from './insights-flow';
 
 /**
- * The four primary sidebar entries. Every page belongs to one of them; a section with more
- * than one visible page shows its pages as tabs above the content (web/components/top-bar.tsx).
+ * The one navigation (GY-161): the sidebar and nothing beside it. Every page belongs to one of
+ * these entries; a section with more than one visible page shows its pages as a row of sub-page
+ * links above the content (web/components/top-bar.tsx), never repeating a sidebar entry. Tests is
+ * planned (GY-162): it is listed so the navigation matches the approved design, and opens nothing
+ * until it ships.
  */
 export const sections = [
-  { id: 'work', icon: '▥', label: 'Work' },
-  { id: 'shipped', icon: '✓', label: 'Shipped' },
-  { id: 'insights', icon: '◷', label: 'Insights' },
-  { id: 'settings', icon: '≡', label: 'Settings' },
+  { id: 'work', icon: 'work', label: 'Work' },
+  { id: 'workers', icon: 'workers', label: 'Workers' },
+  { id: 'shipped', icon: 'shipped', label: 'Shipped' },
+  { id: 'tests', icon: 'tests', label: 'Tests', planned: 'GY-162' },
+  { id: 'insights', icon: 'insights', label: 'Insights' },
+  { id: 'settings', icon: 'settings', label: 'Settings' },
 ] as const;
 export type Section = typeof sections[number]['id'];
 
@@ -49,14 +55,16 @@ const configured = (value: boolean | null | undefined) => value !== false;
 
 export const views: readonly View[] = [
   { id: 'work', icon: '▥', label: 'Work', section: 'work', render: dashboard => <OverviewPage {...dashboard}/> },
-  // What waits on the human (GY-89): a tab beside the work list, never a count in the sidebar.
-  { id: 'needs-you', icon: '☝', label: 'Needs you', section: 'work', render: dashboard => <HumanRequestsPage {...dashboard}/> },
-  { id: 'shipped', icon: '✓', label: 'Shipped', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
-  // Every agent session across every item (GY-116): a tab in the Work section, beside the work list
-  // and Needs you, since the sidebar holds exactly the four primary entries.
-  { id: 'workers', icon: '⚙', label: 'Workers', section: 'work', render: dashboard => <WorkersPage {...dashboard}/> },
+  // What waits on the human (GY-89) is the Work page's Needs you group (GY-161): one place, answered on the item page.
+  // This page, the full list with recently answered requests, is opened from that group, not from the navigation.
+  { id: 'needs-you', icon: '☝', label: 'Needs you', render: dashboard => <HumanRequestsPage {...dashboard}/> },
+  { id: 'shipped', icon: '✓', label: 'Delivered', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
+  // Every agent session across every item (GY-116), its own sidebar entry (GY-161).
+  { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
   // What shipping cost people (GY-98): every intervention, and the operator's judgement about what shipped, as a tab beside the delivered list.
   { id: 'interventions', icon: '☝', label: 'Interventions', section: 'shipped', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <InterventionsPage {...dashboard}/> },
+  // The Flow panel (GY-161): where every open item is now, the last day replayed, landed per day and where the time goes.
+  { id: 'insights', icon: '◷', label: 'Flow', section: 'insights', render: dashboard => <InsightsFlow {...dashboard}/> },
   { id: 'pulse', icon: '∿', label: 'Shipping pulse', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <ShippingPulse token={dashboard.token} repository={dashboard.status?.repository}/> },
   { id: 'flow', icon: '◷', label: 'Flow analytics', section: 'insights', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <FlowAnalytics request={dashboard.api} token={dashboard.token} canAudit={['admin', 'coordinator', 'producer'].includes(role(dashboard))}/> },
   { id: 'validation', icon: '↻', label: 'Validation', section: 'insights', visible: dashboard => configured(dashboard.features.validation), render: dashboard => <ValidationView api={dashboard.api} work={dashboard.work}/> },
@@ -64,9 +72,8 @@ export const views: readonly View[] = [
   { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'settings', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
   { id: 'grants', icon: '⚷', label: 'Proof authority', section: 'settings', render: dashboard => <ProofGrantsView api={dashboard.api} work={dashboard.work} canEdit={role(dashboard) === 'admin'}/> },
   { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
-  // Opened from the Work page's fleet line and from Operator automation, like the guide: the
-  // registry names hosts and login homes, so only the identities that may read it see it.
-  { id: 'fleet', icon: '⛭', label: 'Agent fleet', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status}/> },
+  // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
+  { id: 'fleet', icon: '⛭', label: 'Agent fleet', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status}/> },
   { id: 'guide', icon: '?', label: 'How Graphyard works', render: () => <GuidePage/> },
 ];
 
@@ -74,13 +81,14 @@ export const views: readonly View[] = [
 export const visibleViews = (dashboard: Dashboard) => views.filter(view => (!view.adminOnly || role(dashboard) === 'admin') && (!view.visible || view.visible(dashboard)));
 /**
  * The sidebar entry a page stands for: its section, when it is the first page of that section
- * this session may open. Mapping the registry through this yields at most the four sections.
+ * this session may open. Mapping the registry through this yields at most the sections above.
  */
 export function primaryEntry(dashboard: Dashboard, view: View) {
   if (!view.section) return null;
   const first = visibleViews(dashboard).find(page => page.section === view.section);
   return first === view ? { ...sections.find(section => section.id === view.section)!, view } : null;
 }
-export const primaryEntries = (dashboard: Dashboard) => views.map(view => primaryEntry(dashboard, view)).filter(entry => entry !== null);
+/** The sidebar's entries this session may open, in the sidebar's order. */
+export const primaryEntries = (dashboard: Dashboard) => sections.flatMap(section => views.map(view => primaryEntry(dashboard, view)).filter(entry => entry?.id === section.id));
 /** The page for a view id; unknown ids fall back to the work page. */
 export const viewFor = (id: string) => views.find(view => view.id === id) ?? views[0];

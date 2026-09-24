@@ -6,9 +6,10 @@ import { stages } from '../src/model';
 import { flowWindows } from '../src/flow-analytics';
 
 type Report = any;
+// Stage colours are the design tokens (web/style.css), mixed toward the background for the early stages.
 const stageFill: Record<string, string> = {
-  backlog: '#4d5b50', ready: '#6f8f6a', build: '#8fbf76', test: '#c2dd96',
-  review: '#ddc67c', acceptance: '#d9a16d', merge: '#9fc4e2', done: '#7ea7c6',
+  backlog: 'var(--text-3)', ready: 'color-mix(in srgb,var(--up-next) 55%,var(--bg))', build: 'var(--moving)', test: 'color-mix(in srgb,var(--moving) 60%,var(--bg))',
+  review: 'var(--needs-you)', acceptance: 'var(--blocked)', merge: 'var(--up-next)', done: 'var(--shipped)',
 };
 // Durations are shown with their unit; an empty sample is an em dash, never a zero.
 function duration(ms: number | null | undefined) {
@@ -198,7 +199,7 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
               let offset = 0;
               return <g key={bucket}>{report.cumulativeFlow.series.map((series: any) => {
                 const height = series.counts[index] / total * 110; const y = 115 - offset - height; offset += height;
-                return height > 0 ? <rect key={series.stage} x={index * 10 + 1} y={y} width={8} height={height} fill={stageFill[series.stage]}/> : null;
+                return height > 0 ? <rect key={series.stage} x={index * 10 + 1} y={y} width={8} height={height} style={{ fill: stageFill[series.stage] }}/> : null;
               })}</g>;
             })}
           </svg>
@@ -225,8 +226,8 @@ export default function FlowAnalytics({ request, token, canAudit, initial }: { r
               {(() => {
                 const peak = Math.max(1, ...report.leadTime.trend.map((entry: any) => entry.p90Ms ?? 0));
                 return report.leadTime.trend.map((entry: any, index: number) => entry.n ? <g key={entry.bucket}>
-                  <rect x={index * 10 + 1} y={115 - (entry.p90Ms ?? 0) / peak * 110} width={8} height={Math.max(1, ((entry.p90Ms ?? 0) - (entry.medianMs ?? 0)) / peak * 110)} fill="#3f5b46"/>
-                  <rect x={index * 10 + 1} y={115 - (entry.medianMs ?? 0) / peak * 110} width={8} height={Math.max(1, (entry.medianMs ?? 0) / peak * 110)} fill="#8fbf76"/>
+                  <rect x={index * 10 + 1} y={115 - (entry.p90Ms ?? 0) / peak * 110} width={8} height={Math.max(1, ((entry.p90Ms ?? 0) - (entry.medianMs ?? 0)) / peak * 110)} style={{ fill: 'color-mix(in srgb,var(--shipped) 35%,var(--bg))' }}/>
+                  <rect x={index * 10 + 1} y={115 - (entry.medianMs ?? 0) / peak * 110} width={8} height={Math.max(1, (entry.medianMs ?? 0) / peak * 110)} style={{ fill: 'var(--shipped)' }}/>
                 </g> : null);
               })()}
             </svg>

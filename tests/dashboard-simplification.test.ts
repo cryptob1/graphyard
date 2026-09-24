@@ -12,6 +12,8 @@ import { computeAttribution } from '../src/attribution.js';
 import { busyFixtureWork, fixtureApi, fixtureStatus, fixtureWork, flowApi, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { jargon, phaseLabel, phaseOf, phases, plainReason, plainStatus } from '../web/plain-status.js';
 import { homeNumbers } from '../web/home-numbers.js';
+import { classify, groupLabel, groups, summarySentence } from '../web/groups.js';
+import WorkersPage from '../web/pages/workers.js';
 import { glossary } from '../web/glossary.js';
 import { probeFeatures, unknownFeatures, type Features } from '../web/features.js';
 import { primaryEntries, primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
@@ -140,35 +142,37 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
   assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge').text, 'Waiting to merge');
 });
 
-test('integration:dashboard-navigation — four primary entries; everything else under Insights or Settings; admin-only and unconfigured pages hidden', async () => {
+test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, Tests planned, Insights, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {
   const labels = (d: Dashboard) => primaryEntries(d).map(entry => entry!.label);
-  assert.deepEqual(sections.map(section => section.label), ['Work', 'Shipped', 'Insights', 'Settings']);
-  for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 4, role);
-  assert.deepEqual(labels(dashboard()), ['Work', 'Shipped', 'Insights', 'Settings']);
+  // GY-161 replaced GY-67's four entries with the approved design's six; Tests is planned (GY-162) and opens nothing.
+  assert.deepEqual(sections.map(section => section.label), ['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
+  for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
+  assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Insights', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
-  for (const page of ['Shipping pulse', 'Flow analytics', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'insights', page);
-  for (const page of ['Test cases', 'Proof authority', 'Operator automation']) assert.equal(sectionOf[page], 'settings', page);
+  for (const page of ['Flow', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'insights', page);
+  for (const page of ['Test cases', 'Proof authority', 'Operator automation', 'Agent fleet']) assert.equal(sectionOf[page], 'settings', page);
 
-  // The sidebar renders exactly the primary entries; the pages of a section are tabs above the content.
+  // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(dashboard(), view)), dashboard: dashboard() }));
-  assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 4);
+  assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
+  assert.equal(sidebar.match(/class="nav planned"/g)?.length, 1);
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs(dashboard(), 'flow'), ['Shipping pulse', 'Flow analytics', 'Validation', 'Releases']);
-  assert.deepEqual(tabs(dashboard(), 'grants'), ['Test cases', 'Proof authority', 'Operator automation']);
-  assert.match(markup(createElement(TopBar, dashboard())), />How Graphyard works</, 'the guide is linked from the header');
+  assert.deepEqual(tabs(dashboard(), 'flow'), ['Flow', 'Shipping pulse', 'Flow analytics', 'Validation', 'Releases']);
+  assert.deepEqual(tabs(dashboard(), 'grants'), ['Test cases', 'Proof authority', 'Operator automation', 'Agent fleet']);
+  assert.deepEqual(tabs(dashboard(), 'work'), [], 'a section with one page draws no tab row');
+  assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
 
   // Admin-only pages are hidden from reader and worker sessions, even when configured.
   const configured = { validation: true, releases: true, automation: true };
-  for (const role of ['reader', 'worker']) {
-    assert.ok(!visibleViews(dashboard({}, role, configured)).some(view => view.adminOnly), role);
-    assert.deepEqual(tabs(dashboard({}, role, configured), 'grants'), ['Test cases', 'Proof authority'], role);
-  }
+  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'grants'), ['Test cases', 'Proof authority', 'Agent fleet']);
+  assert.deepEqual(tabs(dashboard({}, 'worker', configured), 'grants'), ['Test cases', 'Proof authority']);
+  for (const role of ['reader', 'worker']) assert.ok(!visibleViews(dashboard({}, role, configured)).some(view => view.adminOnly), role);
   // A feature with nothing configured is hidden, not rendered as an empty explainer; an unknown one stays.
   const probed = await probeFeatures(async path => path === 'operator-agents' ? [] : { environments: [], releases: [], requests: [], candidates: [] }, true, false);
   assert.deepEqual(probed.features, { releases: false, validation: false, automation: false });
   const none = dashboard({}, 'admin', probed.features);
-  assert.deepEqual(tabs(none, 'flow'), ['Shipping pulse', 'Flow analytics']);
-  assert.deepEqual(tabs(none, 'grants'), ['Test cases', 'Proof authority']);
+  assert.deepEqual(tabs(none, 'flow'), ['Flow', 'Shipping pulse', 'Flow analytics']);
+  assert.deepEqual(tabs(none, 'grants'), ['Test cases', 'Proof authority', 'Agent fleet']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: null, automation: null }, 'an outage never hides a page');
   // An outage and an empty registry mean opposite things, so the page never reports one as the other.
@@ -180,44 +184,42 @@ test('integration:dashboard-navigation — four primary entries; everything else
   assert.match(unread, /Configured identities <span class="count">—<\/span>/, 'an unknown count is never drawn as zero');
   assert.match(text(markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: null }))), /safe bootstrap default/);
   assert.equal((await probeFeatures(async () => ({ requests: [] }), false, true)).features.validation, true, 'a scenario requirement means validation is in use');
-  // No slice lead: no Delivery slices panel. A lead: the panel appears.
-  assert.doesNotMatch(home(), /Delivery slices/);
+  // Delivery slices are about who works on what: on the Workers page once a slice has a lead, never on Work.
   const led = fixtureStatus('admin'); led.delegation.slices[0].lead = { id: 'lead', displayName: 'Pine', sessionKind: 'ai' } as any;
-  assert.match(home(dashboard({ status: led })), /Delivery slices/);
+  assert.doesNotMatch(home(dashboard({ status: led })), /Delivery slices/);
+  assert.doesNotMatch(markup(createElement(WorkersPage, dashboard())), /Delivery slices/);
+  assert.match(markup(createElement(WorkersPage, dashboard({ status: led }))), /Delivery slices/);
   // Operator agents cannot read the analytics pages, so they are not offered.
   assert.ok(!visibleViews(dashboard({}, 'operator-agent')).some(view => ['pulse', 'flow'].includes(view.id)));
   // web/main.tsx builds the sidebar from the registry through primaryEntry.
   assert.match(await read('web/main.tsx'), /views\.map\(entry => primaryEntry\(dashboard, entry\)\)/);
 });
 
-test('integration:dashboard-word-budget — the home page answers in progress, stuck and shipped on one screen in at most 150 words', () => {
+test('integration:dashboard-word-budget — the home page answers what needs you, what is blocked, what is moving and what shipped on one screen in at most 150 words', () => {
   const page = home();
   const count = words(page).length;
   assert.ok(count <= 150, `home renders ${count} words excluding item titles: ${text(page)}`);
-  for (const gone of ['Delivery slices', 'NO LEAD ASSIGNED', 'ENGINEERING, IN VIEW', 'Every change has an owner', 'Explicit reasons, actionable next steps', 'No delivery requires', 'sessions retain goals', 'leads coordinate only', 'Ownership is explicit'])
+  for (const gone of ['Delivery slices', 'NO LEAD ASSIGNED', 'ENGINEERING, IN VIEW', 'Every change has an owner', 'Explicit reasons, actionable next steps', 'No delivery requires', 'sessions retain goals', 'leads coordinate only', 'Ownership is explicit', 'Agent fleet'])
     assert.ok(!text(page).includes(gone), `no ${gone}`);
   assert.doesNotMatch(text(page), /\bp50\b|\bp95\b/, 'no percentile microtext by default');
-  // The three questions, in order: stuck first, then in progress, then shipped.
-  const order = ['aria-label="Stuck"', 'aria-label="In progress"', 'aria-label="Needs a worker"', 'aria-label="Shipped this week"'].map(label => page.indexOf(label));
+  // The groups, in order: blocked first (nothing needs the human in this fixture), then moving, up next, backlog, shipped.
+  const order = ['aria-label="Blocked"', 'aria-label="Moving"', 'aria-label="Up next"', 'aria-label="Backlog"', 'aria-label="Shipped this week"'].map(label => page.indexOf(label));
   assert.ok(order.every(index => index > 0) && order.every((index, i) => i === 0 || index > order[i - 1]), `sections in order: ${order}`);
-  assert.ok(page.indexOf('Move sessions to Postgres') < page.indexOf('Add dark mode to settings'), 'the stuck item is listed first');
-  assert.match(text(page), /Stuck: needs a second Postgres instance/);
-  // Every open item's status sentence is on the page.
-  for (const item of work.filter(w => w.stage !== 'done' && phaseOf(w, NOW) !== 'not-started')) assert.ok(text(page).includes(text(plainStatus(item, NOW).sentence)), item.key);
+  assert.ok(page.indexOf('Move sessions to Postgres') < page.indexOf('Add dark mode to settings'), 'the blocked item is listed first');
+  assert.match(text(page), /Needs a second Postgres instance/);
 });
 
-test('integration:item-view-structure — status, owner, pull request and the one blocker first; the current step only; each criterion once; edits in an admin menu; at most 250 words', () => {
+test('integration:item-view-structure — state, why, who acts next and the pull request first; the steps; each criterion once; edits in an admin menu; at most 250 words', () => {
   const view = itemView('GY-16');
   const visible = text(view);
   const count = words(view).length;
   assert.ok(count <= 250, `item view renders ${count} words: ${visible}`);
   const at = (needle: string) => { const index = visible.indexOf(words(needle).join(' ')); assert.ok(index >= 0, `shows ${needle}: ${visible}`); return index; };
-  const order = [at('Waiting for proof that it works — 2 of 3 proofs passed'), at('Owner'), at('PR #43'), at('Blocking now: The proof integration:login-latency has not passed yet')];
-  assert.deepEqual([...order].sort((a, b) => a - b), order, 'status sentence, owner, PR link and blocker lead the view');
-  // Only the current step's reasons are visible; later refusing steps are collapsed.
+  const order = [at('Moving'), at('PR #43'), at('Proving 2 of 3 proofs passed'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, pull request, why, who acts next, then what is left');
+  // Only the current step's reasons are listed as what is left; the gates' raw reasons stay under More details.
   const review = itemView('GY-15');
   assert.match(text(review), /Waiting for someone else to approve the latest code/);
-  assert.match(review, /<details class="later-steps"><summary>Later steps \(1\)<\/summary>/);
   assert.doesNotMatch(text(review), /Proven to work:/, 'later steps are collapsed');
   for (const raw of ['needs trusted passing evidence', 'Policy v', 'Revision ', 'assignment 1', 'GitHub observation missing']) assert.ok(!text(review).includes(raw) && !visible.includes(raw), `no ${raw} by default`);
   // Each criterion appears once, with one marker per proof.
@@ -318,13 +320,14 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   // The item view keeps every datum and action, under More details or the Edit menu.
   const item = find('GY-16');
   const view = itemView('GY-16');
-  for (const needle of ['Policy v1', 'Revision 1', 'P2', 'Worker ID: worker-2', 'Coordination', 'Code review', 'Gate decisions', 'Evidence (2)', 'Work history', 'Use Codex cloud review', 'Revise requirements', 'build-1:/work/gy-16-1', 'In this step for'])
+  for (const needle of ['Policy v1', 'Revision 1', 'P2', 'Worker ID: worker-2', 'Owner', 'Blocking now:', 'Coordination', 'Code review', 'Gate decisions', 'Evidence (2)', 'Work history', 'Use Codex cloud review', 'Revise requirements', 'build-1:/work/gy-16-1', 'In this step for'])
     assert.ok(view.includes(needle), needle);
   for (const gate of item.gates) for (const reason of gate.reasons) assert.ok(view.includes(reason.replace(/&/g, '&amp;').replace(/>/g, '&gt;')), `raw reason kept: ${reason}`);
   for (const ac of item.criteria) assert.ok(view.includes(ac.text), `full criterion kept: ${ac.id}`);
-  // The home page keeps the board arrangement, stage timings and search; delivered work has its own page.
+  // The home page keeps search and a way to every shipped item; the board view and the timings toggle
+  // were removed by GY-161 (every moving row carries its time, and the groups replace the columns).
   const page = home();
-  for (const control of ['Board view', 'Show times', 'aria-label="Search work"', 'See everything shipped']) assert.ok(page.includes(control), control);
+  for (const control of ['aria-label="Search work"', 'See what shipped']) assert.ok(page.includes(control), control);
   const shipped = markup(createElement(ShippedPage, dashboard()));
   for (const key of ['GY-18', 'GY-19', 'GY-9']) assert.ok(shipped.includes(key), key);
   // Every page in the registry stays reachable for an admin while its feature is unknown or configured.
@@ -353,108 +356,61 @@ test('integration:dashboard-capability-parity — nothing removed from a default
 });
 
 test('unit:home-numbers-reconcile — every home number counts one named thing and the numbers agree', () => {
+  // GY-161: the numbers are the groups (web/groups.ts). homeNumbers still counts the stages for
+  // the modules that read it; the page draws the groups, and both partition the same open items.
   const numbers = homeNumbers(work, NOW);
   const open = work.filter(w => w.stage !== 'done');
   assert.equal(numbers.open, open.length, 'Open counts open items only');
   assert.equal(numbers.open, 7);
-  assert.equal(numbers.byPhase.shipped, 0, 'delivered items are never in a tile or the open strip');
-  assert.equal(phases.filter(p => p !== 'shipped').reduce((sum, p) => sum + numbers.byPhase[p], 0), numbers.open, 'the stage strip sums to Open');
-  // The row is the only per-stage count: no field aliases a phase under a second name.
-  assert.deepEqual(Object.keys(numbers).sort(), ['byPhase', 'open', 'shippedThisWeek', 'stuck']);
-  // The lapsed claim (GY-12, stored stage "build") and the blocked item are waiting for a worker; only Alex is building.
+  assert.equal(phases.filter(p => p !== 'shipped').reduce((sum, p) => sum + numbers.byPhase[p], 0), numbers.open, 'the stages sum to Open');
+  const { byGroup } = classify(work, NOW);
+  assert.equal(groups.reduce((sum, group) => sum + byGroup[group].length, 0), numbers.open, 'the groups sum to Open');
   assert.equal(find('GY-12').stage, 'build');
   assert.equal(phaseOf(find('GY-12'), NOW), 'needs-worker');
-  assert.equal(numbers.byPhase.building, 1);
-  assert.equal(numbers.byPhase['needs-worker'], 3);
-  // Stuck counts items, not reasons: GY-17 has one blocker but its item refuses several gates.
-  assert.equal(numbers.stuck, 1);
+  assert.deepEqual(byGroup.blocked.map(w => w.key), ['GY-17'], 'Blocked counts items, not reasons');
   assert.ok(find('GY-17').gates.flatMap(g => g.reasons).length > 1);
   assert.equal(numbers.shippedThisWeek, 2, 'GY-18 and GY-19; GY-9 shipped 20 days ago');
-  // The rendered strip shows exactly these numbers, one node per non-empty stage.
+  // The rendered tiles show exactly these numbers, one per group.
   const page = home();
-  for (const p of phases.filter(p => p !== 'shipped' && numbers.byPhase[p] > 0))
-    assert.match(page, new RegExp(`<span>${phaseLabel[p]}</span><strong>${numbers.byPhase[p]}</strong>`), p);
-  assert.match(page, new RegExp(`Shipped this week <span class="count">${numbers.shippedThisWeek}</span>`));
+  for (const group of groups) assert.match(page, new RegExp(`data-tile="${group}"[^>]*>.*?<strong>${byGroup[group].length}</strong>`), group);
+  assert.match(text(page), new RegExp(`${numbers.shippedThisWeek} shipped this week`));
 });
 
-/**
- * Every label the rendered page counts, in every form a count takes: a heading with a `.count`
- * chip, a stage tile (`<span>label</span><strong>n</strong>`), a board column (`<h3>label
- * <span>n</span></h3>`) and a sidebar entry (`<span>label</span><small>n</small>`). The sidebar
- * and the top bar are part of the page: a label counted there and again on the page is the
- * duplicate GY-81 removes.
- */
-const countedLabels = (page: string) => {
-  const labels: string[] = [];
-  for (const [, , inner] of page.matchAll(/<h([123])[^>]*>([\s\S]*?)<\/h\1>/g)) {
-    if (!/<span(?: class="count"[^>]*)?>\d+<\/span>/.test(inner)) continue;
-    labels.push(inner.replace(/<span(?: class="count"[^>]*)?>\d+<\/span>/, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
-  }
-  for (const [, label] of page.matchAll(/<span>([^<]+)<\/span>(?:<strong>|<small>)(\d+)(?:<\/strong>|<\/small>)/g)) labels.push(label);
-  return labels.filter(Boolean);
-};
-/** Every number the page draws as a count, whatever element carries it: chip, tile, column or sidebar badge. */
-const drawnCounts = (page: string) => [...page.matchAll(/<(span|strong|small)(?: class="count"[^>]*)?>(\d+)<\/\1>/g)].map(match => Number(match[2]));
-
-test('unit:work-page-single-count-row — the page shows one row of counts, the stages, plus at most one highlighted stuck count; no count appears twice and no two labels differ only by grammatical form', () => {
-  const numbers = homeNumbers(work, NOW);
+test('unit:work-page-single-count-row — the page shows one row of counts, the groups; no count appears twice and no two labels differ only by grammatical form', () => {
   const page = home();
-  // The old summary tile row is gone; the stage strip is the one count row.
-  assert.ok(!page.includes('class="metrics"'), 'no second count row');
-  assert.ok(page.includes('aria-label="Stages"'), 'the stage strip is the count row');
-  const row = [...page.matchAll(/<span>([^<]+)<\/span><strong>(\d+)<\/strong>/g)].map(match => ({ label: match[1], n: Number(match[2]) }));
-  assert.deepEqual(row, phases.filter(p => p !== 'shipped' && numbers.byPhase[p] > 0).map(p => ({ label: phaseLabel[p], n: numbers.byPhase[p] })), 'the row is exactly the non-empty stages, in work order');
-  // Every counted label on the page is unique: no measure is counted twice.
-  const counted = countedLabels(page);
-  assert.deepEqual(new Set(counted).size, counted.length, `each counted label appears once: ${counted.join(' | ')}`);
-  assert.deepEqual(counted.filter(label => label === 'Work').length, 1, 'the heading counts once; the sidebar entry does not');
+  const row = [...page.matchAll(/data-tile="([\w-]+)"[^>]*>[\s\S]*?<strong>(\d+)<\/strong>/g)].map(match => match[1]);
+  assert.deepEqual(row, [...groups], 'one tile per group, in order');
+  assert.equal((page.match(/role="group" aria-label="Filter by group"/g) ?? []).length, 1, 'one count row');
+  assert.ok(!page.includes('aria-label="Stages"'), 'the old stage strip is gone');
   assert.ok(!/<nav [\s\S]*?<small>\d+<\/small>[\s\S]*?<\/nav>/.test(page), 'no sidebar entry carries a count');
-  // At most one highlighted count for work needing attention, and it is the stuck count. The
-  // heading reads "Stuck 1", with the space, to a screen reader and the clipboard alike.
-  assert.deepEqual([...page.matchAll(/class="work-list attention" aria-label="([^"]+)"/g)].map(match => match[1]), ['Stuck']);
-  assert.match(page, new RegExp(`<h2>Stuck <span class="count">${numbers.stuck}</span></h2>`));
-  // No label differs from another only by grammatical form ("Need a worker" vs "Needs a worker").
+  // Each section heading counts its own group, and it is the tile's number.
+  for (const [, label, n] of page.matchAll(/<h2><span class="group-dot[^"]*"[^>]*><\/span>([^<]+) <span class="count">(\d+)<\/span>/g)) {
+    const group = groups.find(g => groupLabel[g] === label)!;
+    assert.match(page, new RegExp(`data-tile="${group}"[^>]*>[\\s\\S]*?<strong>${n}</strong>`), label);
+  }
+  const labels = groups.map(group => groupLabel[group]);
   const stem = (label: string) => label.toLowerCase().split(/\s+/).map(word => word.replace(/ies$/, 'y').replace(/s$/, '')).join(' ');
-  const stems = counted.map(stem);
-  assert.deepEqual(new Set(stems).size, stems.length, `no grammatical-twin labels: ${counted.join(' | ')}`);
-  assert.ok(!page.includes('Need a worker'), 'the old tile label is gone');
+  assert.equal(new Set(labels.map(stem)).size, labels.length, `no grammatical-twin labels: ${labels.join(' | ')}`);
+  for (const old of ['Need a worker', 'Needs a worker', 'In progress', 'Stuck ']) assert.ok(!text(page).includes(old), `the old label ${old} is gone`);
 });
 
-test('unit:work-page-no-derived-totals — a total that is a sum or subset of the stage row is never a tile; the open count appears once, in the page heading', () => {
-  const numbers = homeNumbers(work, NOW);
+test('unit:work-page-no-derived-totals — a total that is a sum or subset of the group row is never a tile; the open count is said once, in the summary sentence', () => {
   const page = home();
-  // Open is the sum of the stage row: never a tile, counted once, in the heading.
-  assert.ok(!page.includes('aria-label="Open items"'), 'the Open tile row is gone');
+  assert.ok(!page.includes('aria-label="Open items"'), 'no Open tile');
   assert.ok(!/<span>Open<\/span>/.test(page), 'Open is not a tile label');
-  assert.match(page, new RegExp(`<h1>Work <span class="count"[^>]*>${numbers.open}</span></h1>`));
-  // Once anywhere on the page, in any element that carries a count: the sidebar's Work entry
-  // used to badge the same number under the same label.
-  assert.ok(numbers.open !== numbers.stuck && numbers.open !== numbers.shippedThisWeek && !phases.some(p => numbers.byPhase[p] === numbers.open), 'the fixture keeps the open total distinct from every other number');
-  assert.deepEqual(drawnCounts(page).filter(n => n === numbers.open), [numbers.open], 'the open count is drawn once');
-  assert.ok(!page.includes(`<small>${numbers.open}</small>`), 'the sidebar badge is gone');
-  // The other summary tiles repeated the row ("Being built", "Need a worker") or subset it
-  // ("Stuck"): the stage strip and the one stuck highlight are their only homes.
-  for (const label of ['Being built', 'Needs a worker'])
-    assert.equal([...page.matchAll(new RegExp(`<span>${label}</span><strong>`, 'g'))].length, 1, `${label} appears only in the stage row`);
-  assert.ok(!/<span>Stuck<\/span><strong>/.test(page), 'Stuck is not a tile');
-  // A heading over several stages (In progress) carries no derived count of its own.
-  const inProgress = page.match(/<section class="work-list" aria-label="In progress">[\s\S]*?<\/section>/)![0];
-  assert.ok(!inProgress.includes('class="count"'), 'the In progress heading shows no derived total');
+  assert.match(page, /<h1>Work<\/h1>/, 'the heading carries no derived count');
+  const sentence = /<p class="summary">([^<]*)<\/p>/.exec(page)![1];
+  const { byGroup } = classify(work, NOW);
+  assert.equal(sentence, summarySentence(Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as any));
 });
 
-test('integration:work-page-density — a stage with nothing in it takes no labelled tile in the default view, and the page still answers what is in progress, what is stuck and why, and what shipped recently within the 150-word budget', () => {
-  const numbers = homeNumbers(work, NOW);
-  assert.equal(numbers.byPhase.checks, 0);
-  assert.equal(numbers.byPhase.merging, 0);
+test('integration:work-page-density — every group has one tile, an empty group draws no list, and the page answers what needs you, what is blocked and why, what is moving and what shipped within the 150-word budget', () => {
   const page = home();
-  // Empty stages are not drawn: no label, no zero, no empty-stage placeholder.
-  for (const empty of ['Automated checks', 'Merging']) assert.ok(!page.includes(`>${empty}<`), `${empty} takes no tile`);
-  assert.ok(!page.includes('No items in this stage'), 'no placeholder for an empty stage');
-  assert.ok(!/(<strong>|class="count">)0</.test(page), 'no count is drawn as zero');
-  // The three questions are still answered, in order: stuck and why, in progress, shipped.
-  const order = ['aria-label="Stuck"', 'aria-label="In progress"', 'aria-label="Needs a worker"', 'aria-label="Shipped this week"'].map(label => page.indexOf(label));
-  assert.ok(order.every(index => index > 0) && order.every((index, i) => i === 0 || index > order[i - 1]), `sections in order: ${order}`);
-  assert.match(text(page), /Stuck: needs a second Postgres instance/, 'the stuck section says why');
-  for (const item of work.filter(w => w.stage !== 'done' && phaseOf(w, NOW) !== 'not-started')) assert.ok(text(page).includes(text(plainStatus(item, NOW).sentence)), item.key);
+  const { byGroup } = classify(work, NOW);
+  assert.equal(byGroup['needs-you'].length, 0);
+  assert.ok(page.includes('data-tile="needs-you"'), 'the empty group keeps its tile, reading 0');
+  assert.ok(!page.includes('data-group-section="needs-you"'), 'but draws no empty list');
+  assert.match(text(page), /Needs a second Postgres instance/, 'the blocked row says why');
+  for (const item of byGroup.moving) assert.ok(page.includes(`data-row="${item.key}"`), item.key);
   assert.ok(words(page).length <= 150, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
 });

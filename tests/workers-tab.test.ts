@@ -92,13 +92,13 @@ const copies = (html: string, sessionId: string) => {
 const rowOf = (html: string, sessionId: string) => { const start = html.indexOf(`data-session="${sessionId}"`); assert.ok(start >= 0, `row for ${sessionId}`); return html.slice(start, html.indexOf('</tr>', start)); };
 
 test('integration:workers-tab-lists-every-session — a top-level Workers tab lists every handle across every item with its item, role kind and time spent, live for a running handle and fixed for a finished one', async () => {
-  // Registered beside Shipped and Insights, and offered as a tab of the Work section.
+  // Registered beside Shipped and Insights; since GY-161 it is its own sidebar entry, so no tab row repeats it.
   const ids = views.map(view => view.id);
   assert.ok(ids.indexOf('workers') > ids.indexOf('shipped') && ids.indexOf('workers') < ids.indexOf('pulse'), `registered beside Shipped and Insights: ${ids.join(', ')}`);
-  assert.equal(views.find(view => view.id === 'workers')?.section, 'work');
+  assert.equal(views.find(view => view.id === 'workers')?.section, 'workers');
   for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(visibleViews({ ...dashboard([]), status: { actor: { role } } }).some(view => view.id === 'workers'), role);
   const tabs = [...renderToStaticMarkup(createElement(TopBar, { ...dashboard([]), view: 'workers' })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs, ['Work', 'Needs you', 'Workers']);
+  assert.deepEqual(tabs, [], 'a section with one page draws no tab row');
   assert.match(await read('web/pages/index.tsx'), /id: 'workers'.*label: 'Workers'/);
 
   const work = fixture();
@@ -253,7 +253,7 @@ test('manual:workers-tab-docs-review — docs/dashboard.md documents the Workers
   assert.match(section, /interactive attachment is not forwarded/);
   assert.match(section, /GY-113's \[liveness reconciliation\]\(master-agent\.md#session-liveness-is-reconciled-not-trusted\).*is what ends a dead handle/);
   assert.match(section, /registered beside Shipped and Insights in `web\/pages\/index\.tsx`/);
-  assert.match(docs, /\*\*Workers\*\*, every agent session across every item, as tabs/);
+  assert.match(docs, /\*\*Workers\*\* is its own sidebar entry/);
   // The anchor the section links to exists, and the page's own copy states the same threshold.
   assert.match(await read('docs/master-agent.md'), /### Session liveness is reconciled, not trusted/);
   assert.match(renderToStaticMarkup(createElement(WorkersPage, dashboard([]))), /not seen for 15 minutes is marked, never shown as live/);

@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { type Work, type Stage } from '../src/model';
+import { type Work } from '../src/model';
+import type { OpenGroup } from './groups';
 import './style.css';
 import Docs from './docs';
 import type { IntegrationJob } from '../src/coordination';
@@ -16,7 +17,7 @@ import CreateWork from './pages/create-work';
 
 /**
  * The dashboard shell: session state, polling, the sidebar generated from the view
- * registry, and the page it selects. Pages live under web/pages/.
+ * registry, and the page it selects — or the open work item's page. Pages live under web/pages/.
  */
 function App() {
   const [token, setToken] = useState(sessionStorage.getItem('graphyard-token') ?? '');
@@ -28,7 +29,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [view, setView] = useState('work');
-  const [filter, setFilter] = useState<Stage | null>(null);
+  const [filter, setFilter] = useState<OpenGroup | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
@@ -66,7 +67,7 @@ function App() {
     void load(); const timer = setInterval(load, 5000);
     return () => { active = false; controller.abort(); clearInterval(timer); };
   }, [token]);
-  useEffect(() => { setEvents([]); setEditingRequirements(false); }, [selected, token]);
+  useEffect(() => { setEvents([]); setEditingRequirements(false); window.scrollTo?.(0, 0); }, [selected, token]);
   useEffect(() => { let active = true; const epoch = sessionEpoch.current; if (selected) void api(`events?work=${selected}`).then(rows => { if (active && epoch === sessionEpoch.current) setEvents(rows); }).catch(e => { if (active && epoch === sessionEpoch.current) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
   const codexAvailable = status?.reviewProviders?.includes('codex') === true;
   const item = work.find(w => w.id === selected);
@@ -75,9 +76,10 @@ function App() {
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
   const dashboard: Dashboard = { token, work, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, codexAvailable, queue, sessionEpoch, api, refresh, action, setError, signOut };
   if (!token || !status) return <LoginPage token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken}/>;
+  // One page at a time: an open item replaces the page it was opened from, and "← Back" returns to it.
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>
-    <main className="main"><TopBar {...dashboard}/>{error && <div role="alert" className="notice danger">{error}</div>}{viewFor(view).render(dashboard)}</main>
-    {item && <WorkDetails {...dashboard} item={item}/>}
+    <main className="main">{error && <div role="alert" className="notice danger">{error}</div>}
+      {item ? <WorkDetails {...dashboard} item={item}/> : <><TopBar {...dashboard}/>{viewFor(view).render(dashboard)}</>}</main>
     {creating && <CreateWork {...dashboard}/>}
   </div>;
 }

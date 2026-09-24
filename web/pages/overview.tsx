@@ -1,101 +1,67 @@
-import { useState } from 'react';
 import { isClosed, isDelivered, type Work } from '../../src/model';
-import SessionBadge from '../components/session-badge';
-import Term, { Explained } from '../components/term';
-import StatusAge from '../components/status-age';
 import WorkCard from '../components/work-card';
-import { CandidatePr } from '../candidate';
-import { age } from '../format';
-import { formatAge, formatDuration } from '../duration';
-import { homeNumbers } from '../home-numbers';
-import { byAttention, phaseLabel, phaseOf, phases, plainStatus, statusHeld, type Phase } from '../plain-status';
+import { GroupDot } from '../components/status-badge';
+import { formatAge } from '../duration';
+import { classify, groupLabel, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
 import { stalledCards } from './actionless';
 import type { Dashboard } from './dashboard';
 
 const week = 7 * 24 * 60 * 60 * 1000;
-const openPhases = phases.filter(phase => phase !== 'shipped');
 
 /**
- * The home page answers three questions on one screen: what is stuck and why, what is in
- * progress, and what shipped recently. One row of counts — the stages — plus the open total in
- * the page heading and, when there is any, one highlighted stuck count; nothing is counted
- * twice, on this page or beside it: the sidebar's Work entry carries no count, and a board
- * column is headed by its stage name alone. Everything else about an item is one click away in
- * its details; analytics live under Insights.
+ * The Work page (GY-161) answers "what is happening and what do I do next" on one screen, with
+ * one classification: every open item is in exactly one group (web/groups.ts), each summary tile
+ * counts one group and filters the page to exactly that group's rows, and the lists below are
+ * those same groups — so a number on the page is always the number of rows it stands for.
+ * Needs you comes first, with the one action to take; Backlog is folded away and carries no
+ * clock. What shipped is one line at the foot, linking to the Shipped page.
  */
-export default function OverviewPage({ work, status, filter, setFilter, query, setQuery, setSelected, setCreating, setView, observedAt, queue }: Dashboard) {
-  const [phase, setPhase] = useState<Phase | null>(null);
-  const [board, setBoard] = useState(false);
-  const [timings, setTimings] = useState(false);
+export default function OverviewPage({ work, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
-  const numbers = homeNumbers(work, now);
-  const match = (w: Work) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase()) && (!phase || phaseOf(w, now) === phase) && (!filter || w.stage === filter);
-  const openAll = work.filter(w => w.stage !== 'done' && match(w));
-  // Items nobody has worked out a next step for, and nothing else is moving: listed first and on
-  // their own, because every other list on this page is a list of work that is going somewhere.
-  const stalls = stalledCards(openAll, now);
-  const stalled = new Set(stalls.map(card => card.item.id));
-  const open = byAttention(openAll.filter(w => !stalled.has(w.id)), now);
-  const stuck = open.filter(w => plainStatus(w, now).tone === 'stuck');
-  const moving = open.filter(w => plainStatus(w, now).tone !== 'stuck');
-  const inProgress = moving.filter(w => !['needs-worker', 'not-started'].includes(phaseOf(w, now)));
-  const waiting = moving.filter(w => phaseOf(w, now) === 'needs-worker');
-  const notStarted = moving.filter(w => phaseOf(w, now) === 'not-started');
+  const match = (w: Work) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
+  const { byGroup } = classify(work.filter(match), now, status?.humanOnly);
+  const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
+  const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
+  const humanOnly = humanOnlyIds(work, status?.humanOnly);
   const shippedAt = (w: Work) => Date.parse(w.observation?.mergedAt ?? w.stageEnteredAt);
-  const recent = work.filter(w => isDelivered(w) && now - shippedAt(w) <= week && match(w)).sort((a, b) => shippedAt(b) - shippedAt(a));
-  // Closed without delivery (src/model/closure.ts): one small count here, the history on the Shipped page.
-  const closedCount = work.filter(isClosed).length;
-  const card = (w: Work) => <WorkCard key={w.id} item={w} repository={status?.repository} now={now} onOpen={setSelected}/>;
-  const list = (title: string, items: Work[], note?: string, attention = false) => items.length > 0 && <section className={attention ? 'work-list attention' : 'work-list'} aria-label={title}><h2>{attention ? <>{title} <span className="count">{items.length}</span></> : title}{note && <small> {note}</small>}</h2><div className="cards">{items.map(card)}</div></section>;
-  const slices = (status?.delegation?.slices ?? []).filter((slice: any) => slice.lead);
-  // One row of counts: the stages that hold something. A stage with nothing in it takes no tile.
-  const stages = openPhases.filter(p => numbers.byPhase[p] > 0);
-  const dwell = (p: Phase) => {
-    const times = work.filter(w => w.stage !== 'done' && phaseOf(w, now) === p).map(w => now - Date.parse(w.stageEnteredAt)).sort((a, b) => a - b);
-    return times.length ? <span title="Time in this stage for its open items: the oldest, then the 50th and 95th percentile">{`oldest ${age(new Date(now - times.at(-1)!).toISOString())} · p50 ${formatDuration(times[Math.floor(times.length * .5)] / 60000)} · p95 ${formatDuration(times[Math.min(times.length - 1, Math.floor(times.length * .95))] / 60000)}`}</span> : null;
-  };
+  const recent = work.filter(w => isDelivered(w) && now - shippedAt(w) <= week).sort((a, b) => shippedAt(b) - shippedAt(a));
+  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected}/>;
+  const shown = (group: OpenGroup) => !only || only === group;
+  const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
+    <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>
+    {group === 'moving' && <div className="row-head" aria-hidden="true"><span/><span/><span className="step-names">{['Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge', 'Deploy'].map(step => <span key={step}>{step}</span>)}</span><span>Who acts next</span><span>In step</span></div>}
+    <div className="rows">{byGroup[group].map(w => row(w, group))}</div>
+  </section>;
+  const admin = status?.actor?.role === 'admin';
   return <>
-    <div className="page-heading"><h1>Work <span className="count" title="Work items not shipped yet">{numbers.open}</span></h1>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>＋ New work item</button>}</div>
+    <div className="page-heading"><div><h1>Work</h1><p className="summary">{summarySentence(counts)}</p></div>
+      <div className="heading-tools"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
+        {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status && !status.github && <div className="notice">GitHub is not connected, so nothing can merge yet. <a href="/docs/github">Set it up ↗</a></div>}
     {status?.appPermissions?.attention?.length > 0 && <div className="notice danger" role="alert"><strong>GitHub App permissions need attention.</strong>{status.appPermissions.attention.map((line: string) => <p key={line}>{line}</p>)}{status.heldJobs > 0 && <p>{status.heldJobs} integration job{status.heldJobs === 1 ? ' is' : 's are'} held rather than retried until the permission is accepted.</p>}{/^https:\/\/github\.com\//.test(status.appPermissions.installationUrl ?? '') && <a href={status.appPermissions.installationUrl} target="_blank" rel="noreferrer noopener">Review the App installation on GitHub ↗</a>} <a href="/docs/github#app-permissions">Migration guide ↗</a></div>}
-    {status?.fleet && !status.fleet.configured && <p className="muted fleet-line">The agent fleet is not configured yet, so sessions launch from each host's local profiles · <button className="text-button" onClick={() => setView('fleet')}>Set up the fleet ↗</button></p>}
-    {status?.fleet?.configured && <p className="muted fleet-line">Agent fleet: {status.fleet.accounts.length} account{status.fleet.accounts.length === 1 ? '' : 's'} across {status.fleet.runtimes.length} runtime{status.fleet.runtimes.length === 1 ? '' : 's'}{status.fleet.accounts.some((account: any) => !account.eligible) ? <> · <span className="amber">{status.fleet.accounts.filter((account: any) => !account.eligible).length} ineligible</span></> : ' · all eligible'} · <button className="text-button" onClick={() => setView('fleet')}>Open the fleet ↗</button></p>}
-    {/* A rate-limit pause is one incident (GY-117): what stopped, until when, what spent the budget. The jobs it stopped keep their errors in the ledger, behind this one line rather than as twenty identical failures. */}
+    {/* A rate-limit pause is one incident (GY-117): what stopped, until when, what spent the budget. */}
     {status?.githubBudget?.paused && <div className="notice danger" role="alert"><strong>GitHub requests are paused until {status.githubBudget.paused.until}.</strong> {status.githubBudget.paused.reason}. What exhausted the budget: {status.githubBudget.lastHour.requests} requests in the last hour{status.githubBudget.lastHour.byKind.length > 0 && ` (${status.githubBudget.lastHour.byKind.map((entry: any) => `${entry.kind} ${entry.requests}`).join(', ')})`}. Every gate reads stale until the pause lifts{status.jobs?.length > 0 && `; ${status.jobs.length} integration job${status.jobs.length === 1 ? '' : 's'} recorded the refusal`}.</div>}
     {status?.jobs?.length > 0 && !status?.githubBudget?.paused && <div className="notice danger">{status.jobs.length} GitHub update(s) failed: {status.jobs[0].error}</div>}
     {status?.executors?.attention?.length > 0 && <div className="notice danger" role="alert" aria-label="Unserved actions"><strong>{status.executors.live === 0 ? 'No executor is running.' : `No executor serves ${status.executors.attention.map((entry: any) => entry.kind).join(', ')}.`}</strong> {status.executors.attention.map((entry: any) => <p key={entry.kind}>{entry.text}</p>)}<p className="muted">An action nobody can claim is not queued behind other work; nothing moves until an executor of its kind is started. <a href="/docs/master-agent-reference#running-executors-under-supervision">How executors are supervised ↗</a></p></div>}
-    {stages.length > 0 && <section className="stage-strip" aria-label="Stages">
-      <div className="graph">{stages.map(p => <button key={p} className={`node ${phase === p ? 'selected' : ''}`} aria-pressed={phase === p} onClick={() => setPhase(phase === p ? null : p)}><span>{phaseLabel[p]}</span><strong>{numbers.byPhase[p]}</strong>{timings && <small>{dwell(p)}</small>}</button>)}</div>
-    </section>}
-    {slices.length > 0 && <section aria-label="Delivery slices"><h2><Term term="delivery slice">Delivery slices</Term></h2><div className="cards">{status.delegation.slices.map((slice: any) => <div className="slice-card" key={slice.id}>
-      <div className="card-top"><span>{slice.name}</span>{slice.lead ? <SessionBadge kind={slice.lead.sessionKind} suffix="lead"/> : <span className="identity none">No lead assigned</span>}</div>
-      <h3>{slice.lead ? slice.lead.displayName ?? slice.lead.id : 'Unassigned'}</h3>
-      <p>{(slice.engineers ?? slice.workers).length}/{status.delegation.limits.maxEngineersPerLead} active engineers · {slice.workers.length} {slice.workers.length === 1 ? 'claimed item' : 'claimed items'} · {slice.bottlenecks.length} {slice.bottlenecks.length === 1 ? 'bottleneck' : 'bottlenecks'}</p>
-      <p className="muted">Workers: {slice.workers.length ? slice.workers.map((worker: any) => <span className="session" key={worker.key}>{worker.key} · {worker.displayName ?? worker.id} <SessionBadge kind={worker.sessionKind}/></span>) : 'none'}</p>
-      <p className="muted">Bottlenecks: {slice.bottlenecks.length ? slice.bottlenecks.map((bottleneck: any) => `${bottleneck.key} — ${bottleneck.reason}`).join(' · ') : 'none'}</p>
-    </div>)}</div><p className="muted">Independent review/proof sessions ({status.delegation.reviewers.length}): {status.delegation.reviewers.length ? status.delegation.reviewers.map((agent: any) => <span className="session" key={agent.id}>{agent.displayName ?? agent.id} <SessionBadge kind={agent.sessionKind}/></span>) : 'none configured'}</p></section>}
-    <div className="list-tools"><button className="text-button" onClick={() => setTimings(v => !v)} aria-expanded={timings}>{timings ? 'Hide times' : 'Show times'}</button>{(phase || filter) && <button className="text-button" onClick={() => { setPhase(null); setFilter(null); }}>Clear filter ×</button>}<input aria-label="Search work" placeholder="Search work…" value={query} onChange={e => setQuery(e.target.value)}/><button className="text-button" aria-pressed={board} onClick={() => setBoard(v => !v)}>{board ? 'List view' : 'Board view'}</button></div>
-    <div className="home-columns"><div>
-    {stalls.length > 0 && <section className="work-list attention" aria-label="Nothing is happening">
-      <h2>Nothing is happening <span className="count">{stalls.length}</span></h2>
-      <p className="muted">No next step has been worked out for these, and nothing else is waiting to move them. Somebody has to look.</p>
-      <ul className="shipped-list">{stalls.map(card => <li key={card.item.id}>
-        <button className="text-button" onClick={() => setSelected(card.item.id)}>{card.item.key} <span data-title>{card.item.title}</span></button>
-        <span className="danger-text">{card.missing} — stuck at “{phaseLabel[phaseOf(card.item, now)]}” for {formatDuration((now - Date.parse(card.heldSince)) / 60000)} with nothing to do next</span>
-      </li>)}</ul>
-    </section>}
-    {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{status?.actor?.role === 'admin' && <button onClick={() => setCreating(true)}>Create the first work item</button>}</div>
-      : board ? <div className="board">{openPhases.map(p => <div className="column" key={p}><h3>{phaseLabel[p]}</h3>{open.filter(w => phaseOf(w, now) === p).map(card)}</div>)}</div>
-      : <>{list('Stuck', stuck, undefined, true)}{list('In progress', inProgress)}{list('Needs a worker', waiting)}
-        {notStarted.length > 0 && <details className="work-list"><summary>Not started</summary><div className="cards">{notStarted.map(card)}</div></details>}
-        {!open.length && <p className="muted">No open item matches.</p>}</>}
-    </div><aside>
-    {queue.length > 0 && <section className="graph-section" aria-label="Merge queue"><h2><Term term="merge queue">Merge queue</Term> <span className="count">{queue.length}</span></h2>{queue.map(entry => { const item = work.find(w => w.id === entry.id); const held = item && statusHeld(item, now); return <button className={`card${held?.overdue ? ' overdue' : ''}`} key={entry.id} onClick={() => setSelected(entry.id)}><div className="card-top"><span>{entry.position + 1}. {entry.key}</span>{held && <StatusAge held={held}/>}</div><p className="reason">{entry.predecessors.length ? `Behind ${entry.predecessors.join(', ')}` : 'Next to merge'} · {entry.current ? 'tested with the changes ahead of it' : 'being re-tested'} · queued {formatAge(entry.enqueuedAt, now)} ago</p></button>; })}</section>}
-    <section className="work-list shipped-recently" aria-label="Shipped this week"><h2>Shipped this week <span className="count">{numbers.shippedThisWeek}</span></h2>
-      {recent.length ? <ul className="shipped-list">{recent.slice(0, 5).map(w => <li key={w.id}><button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>{w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}{plainStatus(w, now).tone === 'stuck' && <span className="danger-text"><Explained sentence={plainStatus(w, now).blocking!}/></span>}</li>)}</ul> : <p className="muted">Nothing shipped in the last seven days.</p>}
-      {work.some(isDelivered) && <button className="text-button" onClick={() => setView('shipped')}>See everything shipped →</button>}
-      {closedCount > 0 && <p className="muted closed-count">Closed without shipping <span className="count">{closedCount}</span> · <button className="text-button" onClick={() => setView('shipped')}>History →</button></p>}
-    </section>
-    </aside></div>
+    {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
+      <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
+        <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{groupMeaning[group]}</small>
+      </button>)}</div>
+      {only && <p className="filter-note">Showing {groupLabel[only]} only · <button type="button" className="text-button" onClick={() => setOnly(null)}>Show every group</button></p>}
+      {section('needs-you', humanOnly.size ? 'only you can decide these' : undefined)}
+      {section('blocked')}
+      {section('moving')}
+      {section('up-next')}
+      {shown('backlog') && byGroup.backlog.length > 0 && <details className="work-group group-backlog" aria-label="Backlog" data-group-section="backlog" open={only === 'backlog'}>
+        <summary><GroupDot group="backlog"/>Backlog <span className="count">{byGroup.backlog.length}</span><small>no clock runs</small></summary>
+        <div className="rows">{byGroup.backlog.map(w => row(w, 'backlog'))}</div>
+      </details>}
+      {groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Nothing is open.'}</p>}
+      <div className="shipped-line" aria-label="Shipped this week">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
+        <span><strong>{recent.length} shipped this week.</strong>{recent[0] && <> Latest: <button type="button" className="text-button" onClick={() => setSelected(recent[0].id)}><span className="mono">{recent[0].key}</span> <span data-title>{recent[0].title}</span></button> · {formatAge(new Date(shippedAt(recent[0])).toISOString(), now)} ago</>}</span>
+        <button type="button" className="text-button push" onClick={() => setView('shipped')}>See what shipped →</button>
+      </div>
+    </>}
   </>;
 }
