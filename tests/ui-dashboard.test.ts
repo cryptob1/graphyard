@@ -9,7 +9,7 @@ import { predictQueue } from '../src/merge-queue.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
 import { visibleWords } from '../scripts/dashboard-fixture.mjs';
-import { classify, groupLabel, groupOf, groups, humanOnlyIds, timedGroups, type OpenGroup } from '../web/groups.js';
+import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, timedGroups, type OpenGroup } from '../web/groups.js';
 import { prSteps, stepIds } from '../web/pr-steps.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
 import { jargon } from '../web/plain-status.js';
@@ -95,6 +95,28 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
     // The tile row still counts every group, so the numbers never change under the reader.
     for (const other of groups) assert.equal(tileCount(filtered, other), byGroup[other].length);
   }
+  // Merged work is Shipped only once the release serves it: waiting on the deployment or its
+  // post-deployment check it is still Moving (at Deploy), and a failed check is Blocked.
+  const merged = find('GY-18', work);
+  const release = (delivery: Record<string, unknown>) => ({ ...merged, policy: { ...merged.policy, deploySmoke: true }, delivery: { ...merged.delivery!, ...delivery } }) as Work;
+  const deployment = { sha: merged.delivery!.mergeSha, covers: 'exact' };
+  const smoke = (result: string) => ({ sha: merged.delivery!.mergeSha, mergeSha: merged.delivery!.mergeSha, result, producer: 'smoke', executed: 1, skipped: 0, at: new Date(NOW).toISOString() });
+  const awaiting = release({ deployment: null }), checking = release({ deployment, smoke: null }), failed = release({ deployment, smoke: smoke('fail') }), live = release({ deployment, smoke: smoke('pass') });
+  assert.equal(groupOf(merged, NOW), 'shipped');
+  assert.equal(groupOf(live, NOW), 'shipped');
+  assert.equal(groupOf(awaiting, NOW), 'moving'); assert.equal(groupOf(checking, NOW), 'moving'); assert.equal(groupOf(failed, NOW), 'blocked');
+  const releasing = classify(work.map(item => item.key === 'GY-18' ? awaiting : item), NOW);
+  assert.ok(releasing.byGroup.moving.some(item => item.key === 'GY-18'), 'a merge waiting on its release stays on the Work page');
+  assert.equal(releasing.open, open + 1);
+  const releasingPage = home(dashboard({ work: work.map(item => item.key === 'GY-18' ? awaiting : item) }));
+  assert.equal(tileCount(releasingPage, 'moving'), rowsOf(releasingPage, 'moving').length);
+  assert.ok(rowsOf(releasingPage, 'moving').includes('GY-18'));
+  // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
+  const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
+  assert.ok(classify(stalled, NOW).byGroup.blocked.some(item => item.key === 'GY-15'));
+  assert.equal(groupWithin(find('GY-15', stalled), stalled, NOW), 'blocked');
+  assert.match(firstScreen(itemPage('GY-15', dashboard({ work: stalled }))), /data-status-badge="blocked"/);
+  for (const item of work) assert.equal(groupWithin(item, work, NOW), groups.find(group => byGroup[group].includes(item)) ?? groupOf(item, NOW), `${item.key} item page group`);
 });
 
 test('unit:ui-needs-you-and-timers — a human-only decision is listed once, under Needs you, with its one action and never as Blocked; parked, backlog and not-started items carry no overdue timer', () => {
@@ -181,6 +203,16 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
   assert.match(firstScreen(itemPage('GY-20')), /Waiting on your decision about spending money or opening third-party accounts/);
   assert.match(firstScreen(itemPage('GY-17')), /Needs a second Postgres instance/);
   assert.match(firstScreen(itemPage('GY-22')), /Testing · 1 of 2 checks done/);
+  // GY-22 waits on CI and on review; the page shows Test as current, so what is left is the test step's, not the review's.
+  const left = /aria-label="What is left"[\s\S]*?<\/section>/.exec(itemPage('GY-22'))?.[0] ?? '';
+  assert.match(left, /test/i); assert.doesNotMatch(left, /approv|review/i);
+  // Review status is the review gate's verdict, whichever provider gave it.
+  const reviewRow = (item: Work) => /<dt>Review<\/dt><dd>([^<]+)<\/dd>/.exec(markup(createElement(WorkDetails, { ...dashboard({ work: board().map(entry => entry.key === item.key ? item : entry) }), item })))?.[1];
+  const codex = { ...find('GY-16'), policy: { ...find('GY-16').policy, reviewProvider: 'codex' }, observation: { ...find('GY-16').observation!, reviews: [] } } as Work;
+  assert.equal(reviewRow(codex), 'Approved', 'a Codex approval, recorded outside GitHub reviews, reads as approved');
+  assert.equal(reviewRow(find('GY-22')), 'Waiting for approval');
+  const changes = { ...find('GY-21'), gates: find('GY-21').gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] } : gate) } as Work;
+  assert.equal(reviewRow(changes), 'Changes requested', 'an approval beside an open change request is not reported as approved');
   const guide = visibleWords(markup(createElement(GuidePage)));
   assert.ok(guide.length < 300, `the guide is ${guide.length} words`);
 });
@@ -225,6 +257,9 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     ['out of scope', withReasons(handedIn, { build: ['Candidate changes 2 files outside plannedFiles: a, b'] }), 'validate', 'Validating · it changes files outside its plan', 'Builder agent'],
     ['CI running', handedIn, 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
     ['CI failed', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1 }, { name: 'typecheck', result: 'success', appId: 1 }] } } as Work, 'test', 'Testing · the check test failed', 'Builder agent'],
+    ['CI re-run after a failure', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'in_progress', appId: 1, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
+    ['CI re-run after a success', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'success', appId: 1, id: 1 }, { name: 'test', result: 'queued', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, 'test', 'Testing · 0 of 2 checks done', 'Automated checks'],
+    ['CI fixed on a re-run', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
     ['review requested', find('GY-15', work), 'review', 'Reviewing · waiting for the reviewer', 'Reviewer agent'],
     ['proofs pending', find('GY-16', work), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
     ['merging', find('GY-21', work), 'merge', 'Merging · Graphyard is merging it', 'Graphyard (automatic)'],
@@ -259,18 +294,18 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
 });
 
 test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true step and a 24-hour replay built only from recorded step transitions, with rework returning to Build, and every animation off under prefers-reduced-motion', async () => {
-  // The recorded history: the stage-dwell drill-down rows, one per durable stage change.
+  // The recorded history: the steps drill-down rows, one per recorded move between steps.
   const rows = [
-    { workKey: 'GY-15', observedAt: new Date(NOW - 30 * hour).toISOString(), detail: 'ready to build' },
-    { workKey: 'GY-15', observedAt: new Date(NOW - 20 * hour).toISOString(), detail: 'build to review' },
-    { workKey: 'GY-16', observedAt: new Date(NOW - 10 * hour).toISOString(), detail: 'test to acceptance' },
-    { workKey: 'GY-16', observedAt: new Date(NOW - 8 * hour).toISOString(), detail: 'acceptance to build' },
-    { workKey: 'GY-16', observedAt: new Date(NOW - 6 * hour).toISOString(), detail: 'build to review' },
-    { workKey: 'GY-18', observedAt: new Date(NOW - 2 * hour).toISOString(), detail: 'merge to done' },
+    { workKey: 'GY-15', observedAt: new Date(NOW - 30 * hour).toISOString(), detail: 'outside to build' },
+    { workKey: 'GY-15', observedAt: new Date(NOW - 20 * hour).toISOString(), detail: 'build to test' },
+    { workKey: 'GY-16', observedAt: new Date(NOW - 10 * hour).toISOString(), detail: 'test to prove' },
+    { workKey: 'GY-16', observedAt: new Date(NOW - 8 * hour).toISOString(), detail: 'prove to build' },
+    { workKey: 'GY-16', observedAt: new Date(NOW - 6 * hour).toISOString(), detail: 'build to validate' },
+    { workKey: 'GY-18', observedAt: new Date(NOW - 2 * hour).toISOString(), detail: 'merge to deploy' },
     { workKey: 'GY-19', observedAt: new Date(NOW - hour).toISOString(), detail: 'review to review' },
   ];
   const transitions = transitionsFromRows(rows);
-  assert.deepEqual(transitions.map(t => `${t.key}:${t.from}>${t.to}`), ['GY-15:null>build', 'GY-15:build>review', 'GY-16:test>prove', 'GY-16:prove>build', 'GY-16:build>review', 'GY-18:merge>deploy']);
+  assert.deepEqual(transitions.map(t => `${t.key}:${t.from}>${t.to}`), ['GY-15:null>build', 'GY-15:build>test', 'GY-16:test>prove', 'GY-16:prove>build', 'GY-16:build>validate', 'GY-18:merge>deploy']);
   const frames = replayFrames(transitions, NOW);
   // Every frame is one recorded transition inside the last 24 hours, in order; nothing is invented.
   const inWindow = transitions.filter(t => Date.parse(t.at) > NOW - 24 * hour);
@@ -281,14 +316,25 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   assert.deepEqual(frames.filter(frame => frame.rework).map(frame => `${frame.key}:${frame.source.from}>${frame.step}`), ['GY-16:prove>build']);
   // A dot stands where its latest recorded transition put it, and moves only at a transition.
   const at = (t: number) => Object.fromEntries([...positionsAt(frames, t)].map(([key, value]) => [key, `${value.step}${value.rework ? '!' : ''}`]));
-  assert.deepEqual(at(0.2), { 'GY-15': 'review' });
-  assert.deepEqual(at((24 - 7) / 24), { 'GY-15': 'review', 'GY-16': 'build!' });
-  assert.deepEqual(at(1), { 'GY-15': 'review', 'GY-16': 'review', 'GY-18': 'deploy' });
+  assert.deepEqual(at(0.2), { 'GY-15': 'test' });
+  assert.deepEqual(at((24 - 7) / 24), { 'GY-15': 'test', 'GY-16': 'build!' });
+  assert.deepEqual(at(1), { 'GY-15': 'test', 'GY-16': 'validate', 'GY-18': 'deploy' });
+  // The recorded moves are read from the control plane's own gate facts by the same rule the Now
+  // view uses: replaying the board's whole recorded history leaves every item in the flow at
+  // exactly the step prSteps shows — GY-22, refused by both CI and review, at Test, not Review.
+  const recorded = boardApi('analytics/flow/drilldown?window=7&metric=steps') as { rows: { workKey: string; observedAt: string | null; detail: string }[] };
+  const replayed = positionsAt(replayFrames(transitionsFromRows(recorded.rows), NOW, 60 * 24 * hour), 1);
+  const { byGroup: flowGroups } = classify(board(), NOW);
+  for (const item of [...flowGroups.moving, ...flowGroups.blocked]) assert.equal(replayed.get(item.key)?.step, prSteps(item, NOW).current, `${item.key} replays to its true step`);
+  assert.equal(replayed.get('GY-22')?.step, 'test');
+  const since = new Date(NOW - 3 * hour).toISOString();
+  const recent = boardApi(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(since)}`) as typeof recorded;
+  assert.ok(recent.rows.length < recorded.rows.length && recent.rows.every(row => Date.parse(row.observedAt!) >= Date.parse(since)), 'the key leaves out moves before the instant');
   // The page reads exactly that recorded history, and the Now view places each open item at its true step.
   const source = await read('web/pages/insights-flow.tsx');
-  assert.match(source, /analytics\/flow\/drilldown\?days=7&metric=stage-dwell/);
+  assert.match(source, /analytics\/flow\/drilldown\?window=7&metric=steps&key=/);
   assert.match(source, /replayFrames\(transitionsFromRows\(rows\?\.rows \?\? \[\]\), now\)/);
-  assert.match(source, /analytics\/flow\?days=7/); assert.match(source, /report\?\.throughput/); assert.match(source, /report\?\.stageDwell/);
+  assert.match(source, /analytics\/flow\?window=7/); assert.match(source, /report\?\.throughput/); assert.match(source, /report\?\.stageDwell/);
   const page = markup(createElement(InsightsFlow, dashboard()));
   for (const text of ['Now', 'Last 24 hours, replayed', 'Landed on main per day', 'Where the time goes']) assert.ok(page.includes(text), text);
   const now = [...page.matchAll(/class="now-dot[^"]*" data-step="([\w-]+)" data-key="([^"]+)"/g)].map(match => [match[2], match[1]]);

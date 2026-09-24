@@ -14,8 +14,9 @@ import StatusAge from '../components/status-age';
 import Term, { Explained } from '../components/term';
 import { age } from '../format';
 import { plainReason, plainStatus, statusHeld } from '../plain-status';
-import { groupOf, humanOnlyIds, nextActor, timedGroups } from '../groups';
-import { prSteps } from '../pr-steps';
+import { groupWithin, nextActor, timedGroups } from '../groups';
+import { prSteps, stepGate } from '../pr-steps';
+import { latestCheck } from '../../src/merge-queue';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
@@ -72,7 +73,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     document.addEventListener('keydown', keydown);
     return () => document.removeEventListener('keydown', keydown);
   }, [setSelected]);
-  const group = groupOf(item, now, humanOnlyIds(work, status?.humanOnly));
+  // The Work page's own classification of this item, so its badge is the tile that led here.
+  const group = groupWithin(item, work, now, status?.humanOnly);
   const steps = prSteps(item, now);
   const actor = nextActor(item, group, now);
   const showSteps = group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog');
@@ -82,12 +84,17 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       // Waiting work is described by what it waits for, never by who last held it.
       : group === 'up-next' || group === 'backlog' ? (actor.who === 'Nobody yet' ? actor.does : group === 'backlog' ? 'Not released for work yet.' : item.reworkRequested ? 'Sent back for changes; waiting for a builder.' : 'Released for work; waiting for a builder.')
         : withoutPr(plain.sentence).replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
-  const failing = item.gates.find(g => !g.passed);
+  // What is left belongs to the step the bar shows as current: once handed in, that step's own
+  // gate (Test before Review, unlike the evaluation order); before, whatever holds the build.
+  const stepGateName = steps.current && steps.current !== 'build' ? stepGate[steps.current] : undefined;
+  const failing = (stepGateName ? item.gates.find(g => g.name === stepGateName && !g.passed) : undefined) ?? item.gates.find(g => !g.passed);
   // A proof still owed is named by the proof: each criterion is listed once, under Requirements.
   const left = failing ? [...new Set(failing.reasons.map(r => r.match(/^AC-\d+: (\S+) needs trusted/)?.[1]).map((proof, i) => proof ? `The proof ${proof} has not passed yet` : plainReason(failing.reasons[i], failing.name).text))] : [];
   const checks = item.policy.checks ?? [];
-  const check = (name: string) => item.observation?.checks?.find(c => c.name === name)?.result;
-  const approved = (item.observation?.reviews ?? []).some(r => r.state === 'APPROVED' && r.sha === item.candidate?.sha);
+  const check = (name: string) => latestCheck((item.observation?.checks ?? []).filter(c => c.name === name))?.result;
+  // The review gate's own verdict, whichever provider gave it (GitHub, Codex or an agent reviewer).
+  const reviewGate = item.gates.find(g => g.name === 'review');
+  const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
     <div className="item-head">
@@ -129,7 +136,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
             <div><dt><Term term="commit" focusable={false}>Commit</Term></dt><dd className="candidate-details"><CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></dd></div>
             {item.observation?.files && <div><dt>Changes</dt><dd>{item.observation.files.length} {item.observation.files.length === 1 ? 'file' : 'files'}</dd></div>}
             <div><dt>Checks</dt><dd>{checks.length ? checks.map(name => `${name} ${check(name) === 'success' ? 'passed' : check(name) && !['pending', 'queued', 'in_progress'].includes(check(name)!) ? 'failed' : 'running'}`).join(' · ') : 'none required'}</dd></div>
-            <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : approved ? 'Approved' : 'Waiting for approval'}</dd></div>
+            <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
           </dl> : <p className="muted">No pull request yet.</p>}
         </section>
       </div>

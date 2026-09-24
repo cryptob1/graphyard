@@ -1,4 +1,5 @@
 import { deliveryState, type Gate, type Work } from '../src/model';
+import { latestCheck } from '../src/merge-queue';
 import { assignment } from './assignment';
 import { plainReason } from './plain-status';
 
@@ -55,9 +56,10 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number):
     }
     case 'test': {
       const required = work.policy.checks ?? [];
-      const seen = work.observation?.checks ?? [];
-      const finished = (name: string) => seen.some(check => check.name === name && !pendingCheck.has(check.result ?? ''));
-      const failed = required.filter(name => seen.some(check => check.name === name && !pendingCheck.has(check.result ?? '') && check.result !== 'success'));
+      // Only each check's latest run counts, as in the test gate: a re-run replaces an old failure or success.
+      const result = (name: string) => latestCheck((work.observation?.checks ?? []).filter(check => check.name === name))?.result ?? '';
+      const finished = (name: string) => !pendingCheck.has(result(name));
+      const failed = required.filter(name => finished(name) && result(name) !== 'success');
       if (failed.length) return { detail: `the check ${failed.join(', ')} failed`, who: 'Builder agent' };
       return { detail: `${required.filter(finished).length} of ${required.length} checks done`, who: 'Automated checks' };
     }

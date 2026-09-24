@@ -960,7 +960,33 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
 export type FlowReport = ReturnType<typeof computeFlow>;
 
 export interface DrilldownRequest { metric: string; key?: string | null; authorized?: boolean }
-const drilldownMetrics = ['bottleneck', 'wip', 'stage-dwell', 'lead-time', 'throughput', 'phase', 'evidence', 'merge-ready', 'deployments', 'review', 'blockers'] as const;
+const drilldownMetrics = ['bottleneck', 'wip', 'stage-dwell', 'lead-time', 'throughput', 'phase', 'evidence', 'merge-ready', 'deployments', 'review', 'blockers', 'steps'] as const;
+
+/** The seven pull-request steps the dashboard draws (web/pr-steps.ts), in the order a pull request travels. */
+export const flowSteps = ['build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
+export type FlowStep = typeof flowSteps[number];
+const gateStep: [string, FlowStep][] = [['build', 'validate'], ['test', 'test'], ['review', 'review'], ['acceptance', 'prove'], ['merge', 'merge']];
+/**
+ * The step a recorded `gates.changed` fact places its item at, by the dashboard's own rule
+ * (web/pr-steps.ts `prSteps`, which tests/ui-dashboard.test.ts holds this to): outside the flow
+ * (null) while it is in backlog or waiting for a builder, unless a blocker holds it there (the
+ * dashboard shows blocked work at Build); Build until the work is handed in, which is exactly when
+ * the build gate refuses with "Worker has not submitted implementation for this attempt" (read
+ * from the recorded reasons when the build gate refuses first, otherwise from whether a pull
+ * request was seen); then the first step in travel order whose gate refuses — Test before
+ * Review, unlike the evaluation order the stage follows — and Merge when none does; Deploy once
+ * it merged.
+ */
+export function gateFactStep(details: Record<string, any>): FlowStep | null {
+  if (details.stage === 'done') return 'deploy';
+  if (details.stage === 'backlog') return null;
+  if (details.stage === 'ready') return details.blocker ? 'build' : null;
+  const unmet: string[] = details.unmet ?? [];
+  const building = !unmet.includes('build') ? false : details.firstUnmet === 'build'
+    ? (details.reasons ?? []).includes('Worker has not submitted implementation for this attempt') : !details.hasCandidate;
+  if (building) return 'build';
+  return gateStep.find(([gate]) => unmet.includes(gate))?.[1] ?? 'merge';
+}
 export const drilldownCatalog = drilldownMetrics;
 
 // Bounded drill-down to the exact underlying records behind an aggregate.
@@ -1073,6 +1099,21 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
   } else if (metric === 'review') {
     for (const fact of dataset.facts.filter(fact => fact.kind === 'review.submitted' && scopedIds.has(fact.workId) && (!key || fact.details.reviewState === key)))
       row(fact.workKey, String(fact.details.reviewState), fact.observedAt, null, null, fact.details.sha ?? null, `independent=${fact.details.independent}; timestamp=${fact.details.timestampSource}`);
+  } else if (metric === 'steps') {
+    // Each item's moves between the seven pull-request steps, from its recorded gate facts: the
+    // fact carried in from before the window says where it started, and only a fact that puts it
+    // at a different step is a move. `key`, when given, is an instant: moves before it are left out.
+    for (const item of scoped) {
+      const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
+      let at: FlowStep | null = carried ? gateFactStep(carried.details) : null;
+      for (const fact of dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed').sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)) {
+        const step = gateFactStep(fact.details);
+        if (step === at) continue;
+        if (!key || time(fact.observedAt)! >= (time(key) ?? -Infinity))
+          row(item.key, step ?? 'outside', fact.observedAt, null, fact.details.pr ?? null, null, `${at ?? 'outside'} to ${step ?? 'outside'}`);
+        at = step;
+      }
+    }
   } else if (metric === 'blockers') {
     // The aggregate keys on the bounded reason label; the drill-down must match the same label.
     for (const fact of dataset.facts.filter(fact => fact.kind === 'blocker.set' && scopedIds.has(fact.workId) && (!key || blockerReasonKey(fact) === key)))

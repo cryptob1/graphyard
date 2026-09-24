@@ -1,4 +1,4 @@
-import { isClosed, isDelivered, type Work } from '../src/model';
+import { deliveryState, isClosed, type Work } from '../src/model';
 import { parkedOnHuman, type HumanRequestRow } from '../src/model/human-request';
 import { phaseOf, plainReason, plainStatus } from './plain-status';
 import { prSteps } from './pr-steps';
@@ -7,8 +7,9 @@ import { stalledCards } from './pages/actionless';
 /**
  * The one classification the dashboard uses (GY-161). Every open item is in exactly one group,
  * and every count, tile, list, badge and phone chip is drawn from `classify`, so a number on the
- * page is always the number of rows it filters. Delivered work is `shipped`; closed work is in
- * none of them.
+ * page is always the number of rows it filters. Merged work is `shipped` only once the release
+ * serves it (its delivery verified, or no post-deployment check asked for); until then it is
+ * still moving at Deploy, and a failed post-deployment check is blocked. Closed work is in none.
  *
  * - `needs-you`: waits on a decision only the human operator may make (a parked item, or an
  *   approval no agent identity can give). Listed here and nowhere else — never also as Blocked.
@@ -39,7 +40,10 @@ export function humanOnlyIds(work: Work[], rows: HumanRequestRow[] | null | unde
 /** The group of one item. `humanOnly` is the set from `humanOnlyIds`; `stalled` the ids nothing is moving. */
 export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set()): Group | null {
   if (isClosed(work)) return null;
-  if (work.stage === 'done') return isDelivered(work) ? 'shipped' : null;
+  if (work.stage === 'done') {
+    const state = deliveryState(work);
+    return state === 'awaiting-deployment' || state === 'awaiting-smoke' ? 'moving' : state === 'delivered-with-failure' ? 'blocked' : 'shipped';
+  }
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);
   if (phase === 'not-started') return 'backlog';
@@ -60,7 +64,7 @@ export interface Classification {
  */
 export function classify(work: Work[], now: number, humanRows?: HumanRequestRow[] | null): Classification {
   const humanOnly = humanOnlyIds(work, humanRows);
-  const open = work.filter(item => item.stage !== 'done' && !isClosed(item));
+  const open = work.filter(item => !isClosed(item) && (item.stage !== 'done' || groupOf(item, now) !== 'shipped'));
   const stalled = new Set(stalledCards(open, now).map(card => card.item.id));
   const byGroup = Object.fromEntries(groups.map(group => [group, [] as Work[]])) as Record<OpenGroup, Work[]>;
   for (const item of open) {
@@ -70,6 +74,15 @@ export function classify(work: Work[], now: number, humanRows?: HumanRequestRow[
   // The longest wait first within a group; priority breaks ties.
   for (const group of groups) byGroup[group].sort((a, b) => a.stageEnteredAt.localeCompare(b.stageEnteredAt) || a.priority - b.priority);
   return { byGroup, open: open.length };
+}
+
+/**
+ * The group of one item as the Work page classifies it among all of `work`, so the item page
+ * shows the badge of the tile that led to it (the stalled reading needs the whole board).
+ */
+export function groupWithin(item: Work, work: Work[], now: number, humanRows?: HumanRequestRow[] | null): Group | null {
+  const { byGroup } = classify(work.some(entry => entry.id === item.id) ? work : [...work, item], now, humanRows);
+  return groups.find(group => byGroup[group].some(entry => entry.id === item.id)) ?? groupOf(item, now, humanOnlyIds(work, humanRows));
 }
 
 /** "1 item needs you. 2 are moving. Nothing is blocked." — the page's one summary sentence, from the same counts. */

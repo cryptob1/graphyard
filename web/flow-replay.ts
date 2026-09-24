@@ -2,14 +2,19 @@ import { stepIds, type StepId } from './pr-steps';
 
 /**
  * The Insights Flow replay (GY-161), built only from recorded history. The control plane records
- * a durable `stage.changed` fact every time an item's evaluated stage changes (src/flow-analytics.ts
- * `deriveFacts`), and the stage-dwell drill-down returns one row per such change: the item, the
- * instant, and "from to to". Each row becomes one step transition here, each transition one frame
- * of the replay, and nothing is interpolated or invented: a dot only ever stands where a recorded
- * transition put it. A move back to Build from a later step is rework, drawn in the Blocked colour.
+ * a durable `gates.changed` fact every time an item's gates change (src/flow-analytics.ts
+ * `deriveFacts`), and the `steps` drill-down reads those facts through `gateFactStep` — the same
+ * rule `prSteps` draws the Now view and the item page with — returning one row per move between
+ * steps: the item, the instant, and "from to to". Each row becomes one step transition here, each
+ * transition one frame of the replay, and nothing is interpolated or invented: a dot only ever
+ * stands where a recorded transition put it. A move back to Build from a later step is rework,
+ * drawn in the Blocked colour.
  */
 
-/** The step each evaluated stage stands for; backlog and ready are outside the flow. */
+/**
+ * The step each evaluated stage roughly stands for, used only to label the flow report's
+ * per-stage dwell medians ("where the time goes"); positions never come from it.
+ */
 export const stageStep: Record<string, StepId | null> = { backlog: null, ready: null, build: 'build', review: 'review', test: 'test', acceptance: 'prove', merge: 'merge', done: 'deploy' };
 /** The replay's length: the last 24 hours played back in this many seconds. */
 export const replaySeconds = 20;
@@ -26,12 +31,14 @@ export interface ReplayFrame {
 
 const index = (step: StepId | null) => step ? stepIds.indexOf(step) : -1;
 
-/** Step transitions from the stage-dwell drill-down's rows ({ workKey, observedAt, detail: "review to test" }). */
+const asStep = (name: string): StepId | null => (stepIds as readonly string[]).includes(name) ? name as StepId : null;
+
+/** Step transitions from the steps drill-down's rows ({ workKey, observedAt, detail: "review to test" }; "outside" is off the flow). */
 export function transitionsFromRows(rows: readonly { workKey: string; observedAt: string | null; detail: string }[]): StepTransition[] {
   return rows.flatMap(row => {
     const match = /^(\S+) to (\S+)$/.exec(row.detail);
     if (!match || !row.observedAt) return [];
-    const from = stageStep[match[1]] ?? null, to = stageStep[match[2]] ?? null;
+    const from = asStep(match[1]), to = asStep(match[2]);
     return from === to ? [] : [{ key: row.workKey, from, to, at: row.observedAt }];
   });
 }

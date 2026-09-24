@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { classify } from '../groups';
 import { prSteps, stepIds, stepLabel, type StepId } from '../pr-steps';
-import { positionsAt, replayFrames, replaySeconds, stageStep, transitionsFromRows, type ReplayFrame } from '../flow-replay';
+import { positionsAt, replayFrames, replaySeconds, replayWindowMs, stageStep, transitionsFromRows, type ReplayFrame } from '../flow-replay';
 import { formatDuration } from '../duration';
 import type { Dashboard } from './dashboard';
 
@@ -14,7 +14,7 @@ const minutes = (ms: number | null | undefined) => ms === null || ms === undefin
  *
  * - **Now** places every open item at its true step (`prSteps`, the same reading the Work page
  *   draws). A dot is keyed by its item, so it moves only when that item's step changes.
- * - **Last 24 hours, replayed** plays the recorded stage changes (web/flow-replay.ts) in
+ * - **Last 24 hours, replayed** plays the recorded step changes (web/flow-replay.ts) in
  *   twenty seconds; a return to Build is rework and is drawn red.
  * - **Landed on main per day** and **where the time goes** are the flow report's own daily
  *   deliveries and per-stage dwell medians, computed from recorded history.
@@ -32,7 +32,8 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const [playing, setPlaying] = useState(false);
   useEffect(() => {
     let active = true;
-    Promise.all([api('analytics/flow?days=7'), api('analytics/flow/drilldown?days=7&metric=stage-dwell')]).then(([flow, rows]) => {
+    const since = new Date(now - replayWindowMs).toISOString();
+    Promise.all([api('analytics/flow?window=7'), api(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(since)}`)]).then(([flow, rows]) => {
       if (!active) return;
       setReport(flow); setFrames(replayFrames(transitionsFromRows(rows?.rows ?? []), now)); setTruncated(!!rows?.truncated);
       if (!reducedMotion()) { setT(0); setPlaying(true); }
@@ -51,7 +52,8 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   }, [playing]);
 
   const { byGroup } = classify(work, now, status?.humanOnly);
-  const inFlow = [...byGroup.moving, ...byGroup.blocked, ...work.filter(item => item.stage === 'done' && prSteps(item, now).current === 'deploy')];
+  // Merged work still waiting on its release is in Moving (or Blocked) at Deploy, like the Work page.
+  const inFlow = [...byGroup.moving, ...byGroup.blocked];
   const now7 = inFlow.map(item => ({ item, steps: prSteps(item, now) })).filter(entry => entry.steps.current);
   const dwell = new Map<StepId, number | null>();
   for (const entry of report?.stageDwell ?? []) { const step = stageStep[entry.stage]; if (step) dwell.set(step, entry.medianMs ?? null); }
