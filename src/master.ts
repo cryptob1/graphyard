@@ -207,6 +207,15 @@ export const masterRunSchema = z.object({
   dispatchIntervalSeconds: z.number().int().min(5).max(30).default(10),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
+  /**
+   * Automatic bot reviewers whose review of a head the reviewer launch waits for, so their inline
+   * findings are open threads the reviewer judges in the same round rather than arriving after its
+   * approval and costing a rework round each (GY-163). A bot with nothing to say posts no review,
+   * so `awaitReviewersMinutes` bounds the wait from the review request; 0 turns it off.
+   * Unset: the Codex connector, for 8 minutes (`defaultAwaitReviewers`).
+   */
+  awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
+  awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
   // How long a launched reviewer or producer session may show no activity before the loop
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.

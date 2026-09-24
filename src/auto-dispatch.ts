@@ -209,6 +209,9 @@ export function selectReviewerProfile(config: MasterConfig): { profile: Reviewer
   return { profile: null, reason: config.reviewers.length ? 'more than one reviewer profile is configured; set run.reviewerProfile in .graphyard/master.json to the one automatic dispatch launches' : 'no reviewer profile is configured; add one with master reviewer add' };
 }
 
+/** The automatic bot reviewers a reviewer launch waits for when `run.awaitReviewers` is unset, and for how long. */
+export const defaultAwaitReviewers = { logins: ['chatgpt-codex-connector[bot]'], minutes: 8 };
+
 export interface DispatchEffects {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
@@ -218,6 +221,12 @@ export interface DispatchEffects {
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
+  /**
+   * The GitHub logins that have reviewed the request's head, read with the loop's own access outside
+   * every coordination transaction. Used to hold a reviewer launch until the configured automatic
+   * bot reviewers have spoken (`run.awaitReviewers`); a dispatcher wired without it never waits.
+   */
+  headReviewers?: (work: Work, request: DispatchRequest) => Promise<string[]>;
   /**
    * Records a launched reviewer or producer session's durable handle on the item. Without it a
    * launched session is visible only in this host's own ledger, which is the relaying the handle
@@ -586,6 +595,23 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     wait(kind, item, request, retry.exhausted ? `${last}; no further automatic attempt after ${retry.attempts} sessions${kind === 'review' ? ', launch it with master review once the cause is fixed' : ''}` : `${last}; attempt ${retry.attempts + 1} of ${retry.limit} at ${retry.nextAt}`);
     return false;
   };
+  // A reviewer launched before the repository's automatic bot reviewers have spoken approves a head
+  // whose bot findings arrive minutes later as unresolved threads, and each costs a rework round.
+  // The launch waits for them, up to `awaitReviewersMinutes` from the request, then goes ahead: a
+  // bot with nothing to say posts no review at all. A failed read does not hold the launch: the
+  // review goes ahead as it did before the wait existed, rather than stalling on GitHub.
+  const awaitingBotReview = async (item: Work, review: DispatchRequest) => {
+    const awaited = config.run.awaitReviewers ?? defaultAwaitReviewers.logins, minutes = config.run.awaitReviewersMinutes ?? defaultAwaitReviewers.minutes;
+    if (!awaited.length || minutes <= 0 || !effects.headReviewers) return false;
+    const until = Date.parse(review.requestedAt) + minutes * 60_000;
+    if (!Number.isFinite(until) || now() >= until) return false;
+    const seen = await effects.headReviewers(item, review).then(logins => logins.map(login => login.toLowerCase()), () => null);
+    if (!seen) return false;
+    const missing = awaited.filter(login => !seen.includes(login.toLowerCase()));
+    if (!missing.length) return false;
+    wait('review', item, review, `review of ${item.key} at ${review.sha.slice(0, 12)} waits up to ${minutes} min (until ${new Date(until).toISOString()}) for ${missing.join(', ')}'s review of the head, so its findings are judged in the same round`);
+    return true;
+  };
   for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
     const review = item.autoDispatch!.review;
     if (review?.state === 'requested' && review.provider === 'github') {
@@ -601,6 +627,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
         const order = profile ? [profile, ...config.reviewers.filter(other => other.name !== profile.name)].filter(candidate => room(candidate, reviews).free > 0) : [];
         if (!profile) wait('review', item, review, reason!);
         else if (!order.length) wait('review', item, review, `every reviewer profile is busy: ${[profile, ...config.reviewers.filter(other => other.name !== profile.name)].map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
+        else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
         else {
           try {
             const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
@@ -740,6 +767,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
   const current = typeof config === 'function' ? config : () => config;
+  const headReviewerReads = new Map<string, { at: number; logins: string[] }>();
   const log = deps.log ?? (line => console.error(line));
   // A repair is logged once per path: the same over-long string would otherwise be reported on
   // every tick that persists it, when one line naming the path is what a reader needs.
@@ -766,6 +794,17 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     // limit notice is failed over below rather than counted as a refusal.
     launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id }).catch(error => { throw watch.classify(error); }); },
     launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start }).catch(error => { throw watch.classify(error); }); },
+    // Who has reviewed the head: one read per head at most every 30 seconds, however often the
+    // dispatcher ticks, since it is asked on every tick while a launch waits on a bot reviewer.
+    headReviewers: async (_work, request) => {
+      const key = `${request.pr}:${request.sha}`, cached = headReviewerReads.get(key), at = (deps.now ?? Date.now)();
+      if (cached && at - cached.at < 30_000) return cached.logins;
+      const output = String(await run('gh', ['api', '--paginate', `repos/${current().repository}/pulls/${request.pr}/reviews?per_page=100`, '--jq', '.[] | [.user.login, .commit_id] | @tsv']));
+      const logins = [...new Set(output.split('\n').map(line => line.split('\t')).filter(([login, sha]) => login && sha === request.sha).map(([login]) => login))];
+      headReviewerReads.set(key, { at, logins });
+      for (const [entry, value] of headReviewerReads) if (at - value.at > 3_600_000) headReviewerReads.delete(entry);
+      return logins;
+    },
     // The handle goes where every Graphyard reader already looks, so watching a reviewer or
     // producer session the loop launched never means reading this host's own ledger.
     recordSession: (work: Work, handle: SessionHandleInput) => mutate(`work/${work.id}/session`, handle, randomUUID()),
