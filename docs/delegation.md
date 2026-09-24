@@ -22,12 +22,12 @@ Each unresolved trigger drops merge authorization and refuses the merge gate; ra
 
 ### Who may settle what
 
-`graphyard resolve GY-N TRIGGER "reason"` records `escalation.resolved` with the resolver, session kind, reason and any attestation.
+Each resolution records `escalation.resolved`: resolver, session kind, reason, attestation.
 
 | Standing escalation | Settled by |
 | --- | --- |
-| `lease-loss` for a lapse the ledger explains | Reconciliation, any `admin` with `resolve GY-N lease-loss --attestation blocked\|stopped-worker "reason"`, or a declared human session |
-| `lease-loss` nothing explains | A declared human session only |
-| `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised | A declared human session only |
+| `lease-loss` for a lapse the ledger explains | Reconciliation, or any `admin` with `resolve GY-N lease-loss --attestation blocked\|stopped-worker "reason"` |
+| Control-plane `lease-loss` of a superseded or stopped epoch | The loop's two-party decision, stale if the superseding lease lapses |
+| `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised | A two-party decision the master requests, or a declared human session |
 
-A declared human session is an `admin` credential with `sessionKind: "human"`. No lead, worker, producer, coordinator or scoped operator agent may resolve an escalation.
+A declared human session (`admin`, `sessionKind: "human"`) settles any. A two-party `master decide GY-N resolve` applies once an independent approver approves; nobody else resolves alone.

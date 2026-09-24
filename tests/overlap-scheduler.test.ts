@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { broadScope, dispatchOrder, dispatchOverlap, scopeBreadth } from '../src/coordination.js';
+import { broadScope, dispatchOrder, dispatchOverlap, effectiveConcurrency, scopeBreadth } from '../src/coordination.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { candidateConflicts, fetchCandidateHeads, gitConflictProbe } from '../src/conflicts.js';
 import { assertDispatchable, buildMasterStatus, dispatchSchedule, dispatchWork, masterConfigSchema, sequenceAdvice, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -183,4 +183,25 @@ test('integration:overlap-scheduler — the conflict probe is a real in-memory g
     assert.deepEqual(fetched[0].slice(-3), ['+refs/heads/graphyard/gy-one-1:refs/remotes/origin/graphyard/gy-one-1', '+refs/heads/graphyard/gy-two-1:refs/remotes/origin/graphyard/gy-two-1', '+refs/heads/graphyard/gy-three-1:refs/remotes/origin/graphyard/gy-three-1']);
     assert.match(fetchCandidateHeads(root, items, () => { throw new Error('no network'); }).reason!, /could not be fetched: no network/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:overlap-priority-and-open-pr — work never waits behind lower-priority work, and an open pull request is not held by a directory another item merely declared', () => {
+  // 2026-09-24: priority-0 GY-164, PR #155 open on two test files, was held behind priority-1 GY-161, claimed later over the whole tests/ directory.
+  const fix = submitted('GY-164', ['tests/'], 'e'.repeat(40), { priority: 0, reworkRequested: true, observation: { files: ['tests/auto-scope.test.ts'] } as any });
+  const redesign = claimed('GY-161', ['web/', 'tests/'], { priority: 1 });
+  assert.deepEqual(dispatchOverlap(fix, [fix, redesign], clock), [], 'lower priority and only a declared directory: no hold');
+  // Same priority, directory only: the open pull request still goes ahead.
+  assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-170', ['tests/'], { priority: 0 })], clock), []);
+  // Every directory spelling pathScope recognizes is a declared directory, not a named file.
+  for (const spelling of ['tests/*', 'tests/**', './tests/']) assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-174', [spelling], { priority: 0 })], clock), [], spelling);
+  // A claimed item that names the very file the pull request changed still holds it.
+  assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-171', ['tests/auto-scope.test.ts'], { priority: 0 })], clock).map(entry => entry.key), ['GY-171']);
+  // A fresh item with no pull request is still held behind same- or higher-priority work on its directory.
+  assert.deepEqual(dispatchOverlap(work('GY-172', { priority: 1, plannedFiles: ['tests/'] }), [redesign], clock).map(entry => entry.key), ['GY-161']);
+  assert.deepEqual(dispatchOverlap(work('GY-173', { priority: 0, plannedFiles: ['tests/'] }), [redesign], clock), [], 'but never behind lower-priority work');
+  // Effective concurrency reads the same exceptions: each of these pairs may be in flight at once.
+  const pairs: [Work, Work][] = [[fix, redesign], [fix, claimed('GY-170', ['tests/'], { priority: 0 })], [work('GY-173', { priority: 0, plannedFiles: ['tests/'] }), redesign]];
+  for (const pair of pairs) assert.deepEqual(effectiveConcurrency(pair, clock), { effective: 2, items: pair.map(entry => entry.key), nodes: 2, edges: 0, exact: true }, pair.map(entry => entry.key).join(' + '));
+  // A named file, at equal priority, still excludes in both directions.
+  assert.equal(effectiveConcurrency([fix, claimed('GY-171', ['tests/auto-scope.test.ts'], { priority: 0 })], clock).effective, 1);
 });

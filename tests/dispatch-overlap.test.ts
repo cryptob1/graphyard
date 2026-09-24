@@ -152,8 +152,9 @@ test('unit:broad-scope-refused — a tests/ claim is refused where planned files
 test('unit:effective-concurrency-reported — master status reports how many items the overlap graph lets run at once beside the idle worker profiles: a fully overlapping graph reports one', () => {
   const credential = '/credentials/worker.token';
   const profiles = Array.from({ length: 11 }, (_, index) => launchProfile(`worker-${index + 1}`, credential));
-  // Fourteen items that each claimed a root directory: every pair overlaps.
-  const items = [claimed('GY-1', ['src/']), submitted('GY-2', ['tests/'], ['tests/two.test.ts', 'src/master.ts']), ...Array.from({ length: 12 }, (_, index) => work(`GY-${index + 3}`, { plannedFiles: [['src/', 'tests/', 'docs/'][index % 3], 'src/master.ts'] }))];
+  // Fourteen items that each claimed a root directory: every pair overlaps. GY-1 also names the file
+  // GY-2's candidate changed: a declared directory alone would not hold an open candidate.
+  const items = [claimed('GY-1', ['src/', 'src/master.ts']), submitted('GY-2', ['tests/'], ['tests/two.test.ts', 'src/master.ts']), ...Array.from({ length: 12 }, (_, index) => work(`GY-${index + 3}`, { plannedFiles: [['src/', 'tests/', 'docs/'][index % 3], 'src/master.ts'] }))];
   const graph = effectiveConcurrency(items, clock);
   assert.equal(graph.effective, 1); assert.equal(graph.nodes, 14); assert.equal(graph.edges, 91); assert.equal(graph.exact, true);
   const status = buildMasterStatus({ work: items, now: iso(0) }, profiles, [], {}, {}, { pending: [], completed: [] });
@@ -171,7 +172,12 @@ test('unit:effective-concurrency-reported — master status reports how many ite
   assert.equal(busy.effectiveConcurrency.effective, 13);
   // A candidate is a node on its changed files: two directory claims whose candidates changed different files are compatible.
   const candidates = [submitted('GY-x', ['tests/'], ['tests/x.test.ts']), rework('GY-y', ['tests/'], ['tests/y.test.ts']), work('GY-z', { plannedFiles: ['tests/'] })];
-  assert.deepEqual(effectiveConcurrency(candidates, clock), { effective: 2, items: ['GY-x', 'GY-y'], nodes: 3, edges: 2, exact: true });
+  // GY-z's declared tests/ holds neither open candidate either, so all three may be in flight at once;
+  // naming a file one of them changed makes that pair exclusive again.
+  assert.deepEqual(effectiveConcurrency(candidates, clock), { effective: 3, items: ['GY-x', 'GY-y', 'GY-z'], nodes: 3, edges: 0, exact: true });
+  candidates[2] = work('GY-z', { plannedFiles: ['tests/', 'tests/x.test.ts'] });
+  const exclusive = effectiveConcurrency(candidates, clock);
+  assert.equal(exclusive.effective, 2); assert.equal(exclusive.edges, 1); assert.ok(exclusive.items.includes('GY-y') && !(exclusive.items.includes('GY-x') && exclusive.items.includes('GY-z')));
   assert.deepEqual(effectiveConcurrency([], clock), { effective: 0, items: [], nodes: 0, edges: 0, exact: true });
 });
 
