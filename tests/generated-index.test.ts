@@ -78,7 +78,7 @@ async function fixtureRepository() {
   await mkdir(join(main, 'scripts')); await copyFile(checkDocs, join(main, 'scripts/check-docs.mjs'));
   await mkdir(join(main, 'docs/protocol'), { recursive: true }); await mkdir(join(main, 'docs/history'));
   await writeFile(join(main, 'README.md'), '# Fixture\n');
-  const pages: Record<string, [string, number, string]> = { 'docs/start.md': ['Start here', 1, 'start.'], 'docs/operate.md': ['Operate Graphyard', 1, 'operate.'], 'docs/build.md': ['Build integrations', 2, 'build.'], 'docs/contribute.md': ['Understand or contribute', 1, 'contribute.'], 'docs/history/audit.md': ['Maintainer and historical records', 1, 'audit.'], 'docs/protocol/roles.md': ['Agent protocol', 1, 'roles.'] };
+  const pages: Record<string, [string, number, string]> = { 'docs/start.md': ['Start here', 1, 'start.'], 'docs/operate.md': ['Operate Graphyard', 1, 'operate.'], 'docs/build.md': ['Build integrations', 2, 'build.'], 'docs/contribute.md': ['Understand or contribute', 1, 'contribute.'], 'docs/history/audit.md': ['Understand or contribute', 2, 'audit.'], 'docs/protocol/roles.md': ['Agent protocol', 1, 'roles.'] };
   const page = (path: string, section: string, order: number, summary: string, body = 'Body.') => writeFile(join(main, path), `<!-- page: ${section} | ${order} | ${summary} -->\n# ${path}\n\n${body}\n`);
   for (const [path, [section, order, summary]] of Object.entries(pages)) await page(path, section, order, summary);
   execFileSync(process.execPath, ['scripts/check-docs.mjs', '--write'], { cwd: main });
