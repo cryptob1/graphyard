@@ -15,6 +15,7 @@ import { launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermis
 import { applyProtection, protectionPlan, requiredReviewProtection } from '../src/protection.js';
 import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { nativeReviewRequired, type Work } from '../src/model.js';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 const execFile = promisify(execFileCallback);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -440,7 +441,7 @@ console.log(JSON.stringify({ required_pull_request_reviews: JSON.parse(readFileS
 
 test('the reviewer path is documented end to end in the install runbook and guides', async () => {
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
-  const [masterAgent, github, onboarding, help] = await Promise.all([read('docs/master-agent.md'), read('docs/github.md'), read('docs/onboarding.md'), read('src/cli/master.ts')]);
+  const [masterAgent, github, onboarding, help] = await Promise.all([readMasterGuide(), read('docs/github.md'), read('docs/onboarding.md'), read('src/cli/master.ts')]);
   for (const command of ['master reviewer setup', 'master reviewer add', 'master review GY-N', 'master protection', 'master harness']) {
     assert.ok(help.includes(command), `${command} must appear in CLI help`);
     assert.ok(masterAgent.includes(command), `docs/master-agent.md must document ${command}`);

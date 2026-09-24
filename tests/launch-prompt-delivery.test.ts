@@ -14,6 +14,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewI
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 // GY-93: a launched session receives its instruction as its own first request, never as pasted
 // content; the loop tells a session that never started from one that did the work and failed;
@@ -485,7 +486,7 @@ test('manual:launch-authorization-onboarding-review — repository setup writes 
   const onboarding = await readFile(join(repositoryRoot, 'docs/onboarding.md'), 'utf8');
   assert.match(onboarding, /### What the generated instructions authorize/);
   for (const fragment of ['every session Graphyard launches receives its instruction as the session\'s own first request', 'bracketed paste', 'untrusted data', 'prompt injection', 'start without anybody sending `go`', 'the loop\'s single re-prompt', 'the reviewer\'s reminder', '--append-system-prompt', 'role files under `.graphyard/harness/` hold permissions, not instructions']) assert.ok(onboarding.includes(fragment), `docs/onboarding.md states ${fragment}`);
-  const guide = await readFile(join(repositoryRoot, 'docs/master-agent.md'), 'utf8');
+  const guide = await readMasterGuide();
   for (const fragment of ['### The request is the session\'s first message', 'run.acknowledgementSeconds', 'awaiting acknowledgement', 'never started', 'counts.dispatchAwaiting', 'retry.neverStarted', '--append-system-prompt']) assert.ok(guide.includes(fragment), `docs/master-agent.md states ${fragment}`);
 
   // A Claude Code session launched under a role file loads only the user settings, which leaves

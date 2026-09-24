@@ -50,7 +50,7 @@ For several workers, use the [master-agent mode](master-agent.md). It joins Grap
 
 A visible session is health information, not ownership. Graphyard recognizes ownership only after the worker principal's authenticated claim.
 
-Muse is available as `kind: "muse"` in a master launch profile; see [Muse](master-agent.md#muse). Dispatch still follows the normal authenticated claim, assigned-worktree, Herdr pane, and `graphyard watch` path under the profile's own worker credential. Herdr's Muse states make launch, active work, waiting, blocked, exit, and offline sessions observable, but cannot claim, release, renew, or advance Graphyard work. A failed launch is cleaned up before release, and lease loss terminates the supervised process. There is no supported unsupervised Muse dispatch path.
+Muse is available as `kind: "muse"` in a master launch profile; see [Muse](master-agent-sessions.md#muse). Dispatch still follows the normal authenticated claim, assigned-worktree, Herdr pane, and `graphyard watch` path under the profile's own worker credential. Herdr's Muse states make launch, active work, waiting, blocked, exit, and offline sessions observable, but cannot claim, release, renew, or advance Graphyard work. A failed launch is cleaned up before release, and lease loss terminates the supervised process. There is no supported unsupervised Muse dispatch path.
 
 ## Multiple machines
 

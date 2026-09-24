@@ -91,7 +91,7 @@ Every decision names the agent role that makes it and the independent agent role
 | GitHub administration, rotating agent principals in the roster, restarting the loop | Master | API verification and the audit ledger; a rotation preview that refuses to drop a live principal |
 | Goals and priorities; spending money or opening third-party accounts; issuing credentials to people | **Human operator** | — |
 
-An item that reaches one of those three records a typed *human-only request* (`graphyard park`), which ends its attempt's lease and parks it; the human operator answers it (`graphyard answer`, or **Work → Needs you** on the dashboard) and the master loop dispatches the item again. A *capacity escalation* is the other wait that belongs to nobody's judgement: every account of a role is spent, the item names each account and its reset, and the loop resumes the role on its own. See [human-only waits](master-agent.md#human-only-waits) and [when a role has no account left](master-agent.md#when-a-role-has-no-account-left).
+An item that reaches one of those three records a typed *human-only request* (`graphyard park`), which ends its attempt's lease and parks it; the human operator answers it (`graphyard answer`, or **Work → Needs you** on the dashboard) and the master loop dispatches the item again. A *capacity escalation* is the other wait that belongs to nobody's judgement: every account of a role is spent, the item names each account and its reset, and the loop resumes the role on its own. See [human-only waits](master-agent-reference.md#human-only-waits) and [when a role has no account left](master-agent-sessions.md#when-a-role-has-no-account-left).
 
 ## Say this, not that
 

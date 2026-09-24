@@ -13,6 +13,7 @@ import { attributeConflicts, hasConflictMarkers, managedServerUrl, parseGenerate
 import { managedInstructions } from '../src/repository-setup.js';
 import { managedMasterInstructions } from '../src/master.js';
 import type { ScopeFile, Work } from '../src/model.js';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 const exec = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -205,7 +206,7 @@ test('integration:generated-index-no-conflict — AGENTS.md carries exactly the 
 
 test('manual:overlap-docs — the guides describe overlap holds, --allow-overlap, smallest-scope-first dispatch, conflict sets, generated files and sync regeneration', async () => {
   const read = (path: string) => readFile(join(repositoryRoot, path), 'utf8');
-  const coordination = await read('docs/coordination.md'), master = await read('docs/master-agent.md'), development = await read('docs/development.md');
+  const coordination = await read('docs/coordination.md'), master = await readMasterGuide(), development = await read('docs/development.md');
   for (const fragment of ['--allow-overlap', 'smallest', 'highConflict', 'GRAPHYARD_GENERATED_FILES', 'generated', 'merge-tree', 'regenerate']) assert.ok(coordination.includes(fragment), `docs/coordination.md must mention ${fragment}`);
   for (const fragment of ['--allow-overlap', 'smallest', 'merge-tree', 'conflicts', 'overlap']) assert.ok(master.includes(fragment), `docs/master-agent.md must mention ${fragment}`);
   for (const fragment of ['generated in full', 'docs:check', 'GRAPHYARD_GENERATED_FILES', 'AGENTS.md']) assert.ok(development.includes(fragment), `docs/development.md must mention ${fragment}`);

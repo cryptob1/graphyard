@@ -18,6 +18,7 @@ import { emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTi
 import { emptyDaemonState, noteConfigReload, readDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 // @ts-expect-error Dependency-free operator script.
 import { assertRosterSafe, awaitServedTokens, generatedProducer, mergeRoster, parseOptions, pendingSecretSyncs, rosterPreview, secretsDue, secretSyncRecord, secretsToSync } from '../scripts/configure-integrations.mjs';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 // Each test is named for the proof it produces (GY-69): integration:producer-session-retry,
 // integration:master-config-reload, integration:master-profile-management,
@@ -334,7 +335,7 @@ test('integration:master-profile-management — producer profiles can be replace
     // The commands are part of the CLI and the guide.
     const help = await readFile(new URL('../src/cli/master.ts', import.meta.url), 'utf8');
     for (const command of ['master producer add FILE | replace FILE | remove NAME', 'master reviewer add FILE | remove NAME']) assert.ok(help.includes(command), `${command} is in CLI help`);
-    const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
+    const guide = await readMasterGuide();
     for (const fragment of ['master producer replace', 'master producer remove', 'master reviewer remove', 'setup.attention']) assert.ok(guide.includes(fragment), `docs/master-agent.md documents ${fragment}`);
   } finally { await cleanup(); }
 });

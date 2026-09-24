@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 12 | post-merge verification of the pipeline-speed criteria: the commands that read the deployed control plane, and what they found. -->
 # Pipeline-speed verification
 
-Two of [GY-54](master-agent.md#pipeline-speed)'s criteria are measurements of a running deployment, not properties of a diff: CI must publish trusted evidence automatically once the change is live, and routine deliveries merged *after* it is live must land inside the speed target. Neither can be demonstrated by the change that makes it true, so they are verified here, after the merge, against the deployment that serves it.
+Two of [GY-54](master-agent-reference.md#pipeline-speed)'s criteria are measurements of a running deployment, not properties of a diff: CI must publish trusted evidence automatically once the change is live, and routine deliveries merged *after* it is live must land inside the speed target. Neither can be demonstrated by the change that makes it true, so they are verified here, after the merge, against the deployment that serves it.
 
 Everything below reads the deployed control plane or GitHub. Nothing is asserted from the repository. Each record is dated, and a verdict is only as current as the record under it: re-run the procedure before citing one.
 

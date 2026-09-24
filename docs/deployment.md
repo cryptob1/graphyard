@@ -231,7 +231,7 @@ The control plane holds no checkout, but every host that runs `graphyard master 
 - A service unit for the loop must leave the root visible and writable: no `PrivateTmp`-style private mount over it, no `ProtectHome` when it lives under the home directory, and the path in `ReadWritePaths` when the unit is otherwise read-only.
 - Checkouts are removed when their session resolves, and the loop reclaims any a dead session left. `graphyard master status` raises an attention item — with `graphyard master run --once`, the command that reclaims immediately — when the volume falls below the minimum or the root reaches four fifths of `run.worktreeRootBudgetGb` (default 10), which covers a user quota the volume's free space does not show.
 
-See [the managed worktree root](master-agent.md#the-managed-worktree-root) for what is created there and when it is removed.
+See [the managed worktree root](master-agent-reference.md#the-managed-worktree-root) for what is created there and when it is removed.
 
 ## Replicas and availability
 

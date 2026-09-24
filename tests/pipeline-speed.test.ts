@@ -24,6 +24,7 @@ import { acceptedMergeAt, beginAttempt, endAttempt, endLapsedAttempt, nearestRan
 import { planCiProofs } from '../scripts/contracts.mjs';
 // @ts-expect-error Dependency-free measurement script.
 import { measure, parseArguments, render, main as measureMain } from '../scripts/measure-pipeline-speed.mjs';
+import { readMasterGuide } from './helpers/master-guide.js';
 
 // GY-54: pipeline speed. Each test is named for the proof it produces — integration:speed-regression-guard
 // and unit:speed-scope-diff (AC-1), integration:speed-auto-dispatch and integration:speed-reconcile-latency
@@ -425,7 +426,7 @@ test('integration:speed-conflict-avoidance — an item whose plannedFiles overla
   await store.pool.query("UPDATE work_items SET document=document||$2::jsonb WHERE id=$1", [inFlight.id, JSON.stringify({ stage: 'done', delivery: { mergedAt: new Date().toISOString(), mergeSha: sha40('1f'), authorizationRevision: 1 } })]);
   await engine.execute(implementer, 'release', live.id, { epoch: live.epoch }, randomUUID());
   assert.equal(dispatchSchedule(await store.list(), Date.now()).held.length, 0);
-  const guide = await read('docs/master-agent.md');
+  const guide = await readMasterGuide();
   for (const fragment of ['## Conflict avoidance', '--allow-overlap', 'smallest planned scope first']) assert.ok(guide.includes(fragment), `docs/master-agent.md must say: ${fragment}`);
 });
 
@@ -508,7 +509,7 @@ test('integration:speed-metrics — the engine keeps every item\'s timeline thro
   endLapsedAttempt(clamped, { epoch: 1, expiresAt: '2026-09-20T10:05:00Z' }, new Date('2026-09-20T10:06:00Z'));
   assert.equal(clamped.pipeline!.attempts[0].endedAt, '2026-09-20T10:00:30.000Z', 'an ended attempt is not reopened');
   // The guides say where to read it.
-  const guide = await read('docs/master-agent.md');
+  const guide = await readMasterGuide();
   for (const fragment of ['## Pipeline speed', 'speed.submitToMerge', 'executionMs', 'waitMs', 'reworkRounds', 'interventions', 'scripts/measure-pipeline-speed.mjs', '30 minutes', '60 minutes']) assert.ok(guide.includes(fragment), `docs/master-agent.md must document: ${fragment}`);
   assert.ok((await read('docs/coordination.md')).includes('## Ship in under thirty minutes'));
   assert.ok((await read('docs/protocol/pipeline-speed.md')).includes('`pipeline`'));
@@ -597,5 +598,5 @@ test('integration:speed-metrics — the periodic measurement summarizes submit�
     await new Promise<void>(resolve => snapshot.close(() => resolve())); await rm(directory, { recursive: true, force: true });
   }
   // The live measurement for manual:speed-target-met reads the same summary from master status.
-  assert.ok((await read('docs/master-agent.md')).includes('manual:speed-target-met') || (await read('docs/coordination.md')).includes('at least ten'), 'the guides say how the target is judged');
+  assert.ok((await readMasterGuide()).includes('manual:speed-target-met') || (await read('docs/coordination.md')).includes('at least ten'), 'the guides say how the target is judged');
 });

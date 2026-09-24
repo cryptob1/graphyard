@@ -104,7 +104,7 @@ and the [operating guide](master-agent.md#durable-loop).
   and `sudo` when a flow is waiting on GitHub's *Confirm access* prompt — approve it on your device
   and choose the two-digit code shown. A refused flow names its record directory under
   `.graphyard/master-actions/`; `record.json` and the numbered screenshots show exactly what the
-  page offered. See [GitHub administration through the browser](master-agent.md#github-administration-through-the-browser).
+  page offered. See [GitHub administration through the browser](master-agent-reference.md#github-administration-through-the-browser).
 
 ## Lost worker before submission
 
@@ -166,7 +166,7 @@ The control plane reads `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-rate
 
 ### Observation cadence by state
 
-Polling is a backstop to the webhook. A successful observation is repeated after **20 seconds** while its item heads the merge queue (a merge needs an observation under 25 seconds old) and after **five minutes** otherwise; a failed one after 45 seconds. Each observation is also classified into a band from the item's own [next action](master-agent.md#typed-next-actions-and-stateless-executors), which decides what it may spend under the merge-path reserve below and is reported against the job that made it:
+Polling is a backstop to the webhook. A successful observation is repeated after **20 seconds** while its item heads the merge queue (a merge needs an observation under 25 seconds old) and after **five minutes** otherwise; a failed one after 45 seconds. Each observation is also classified into a band from the item's own [next action](master-agent-reference.md#typed-next-actions-and-stateless-executors), which decides what it may spend under the merge-path reserve below and is reported against the job that made it:
 
 | Band | State | Cadence | Why |
 | --- | --- | --- | --- |
@@ -205,7 +205,7 @@ Polling that quietly compensates for a broken webhook hides the fault and spends
 
 Every bounded resource the loop and the plane consume is declared in one registry — its bound, where
 its usage is read, the component that owns it, how it is reclaimed — and the full table is in the
-[master-agent guide](master-agent.md#resource-observation). Read the whole picture with one command:
+[master-agent guide](master-agent-reference.md#resource-observation). Read the whole picture with one command:
 `graphyard master status`, whose `resources.summary` names every reading that is low, exhausted or
 unread, and whose `resources.readings` gives each one as used of bound with its headroom. A reading
 below its warning line is also an attention item with subject `resource:ID` naming the remedy.
@@ -228,7 +228,7 @@ below its warning line is also an attention item with subject `resource:ID` nami
 - **`database-capacity` low.** Grow the database volume, then raise `GRAPHYARD_DATABASE_MAX_BYTES`
   on the plane to the new size. Left unset, the 10 GiB default only warns; once it is set, the plane
   reports itself unhealthy at the bound. The ledger is append-only; nothing reclaims it.
-- **`worktree-disk` low.** See the worktree disk procedure in the [master-agent guide](master-agent.md#worktree-disk).
+- **`worktree-disk` low.** See the worktree disk procedure in the [master-agent guide](master-agent-reference.md#worktree-disk).
 
 **`/healthz` reports `healthy: false`.** The plane cannot serve its purpose, and `causes` says why:
 `Writes are refused: …` (the database is read-only, a standby, or the role lost write privilege —
