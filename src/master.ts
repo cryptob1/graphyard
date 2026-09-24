@@ -21,7 +21,7 @@ import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } f
 import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
-import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
+import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, settingsWarning, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
 import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, unresolvedThreadRefusal, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
@@ -1232,6 +1232,10 @@ export async function observeStart(pane: string, kind: string, command: string, 
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
   const prompt = detectConsentPrompt(screen);
   if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
+  // A runtime stopped on its own settings warning has not started either, whatever Herdr reports,
+  // and is refused at once with the rules it named rather than the dialog's key hint.
+  const warning = settingsWarning(screen);
+  if (warning) return { state: 'blocked', agent, detail: warning, line };
   // An unread pane rules nothing out: an idle runtime may be sitting on a consent prompt, so it is
   // polled again until a read shows its screen, never taken as ready without one.
   if (screen === null && agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'starting', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status} but its pane could not be read, so a consent prompt is not ruled out`, line };
@@ -3466,6 +3470,8 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
  * push itself: to the branch registered for the caller's live lease, conditional on the tip it
  * fetched (`--force-with-lease=refs/heads/BRANCH:TIP`), so it replaces only what it saw.
  */
+/** Every character an empty-source refspec's name can start with as typed: a ref name's first character, a quote, or an expansion. */
+export const emptySourceStarts = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...'_.-/@\'"$`{~'];
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
@@ -3484,8 +3490,11 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
   // `=REF:SHA`) and `--force-if-includes` alike, and the abbreviations git accepts for them. The
   // lease push of the assigned branch is restore-branch's, which checks the ref itself; no rule may
   // end in `:*` or ` *` where the bare prefix would match an allowed push, because Claude Code reads
-  // both as "this prefix, with or without more" (` :**` ends in neither). Each rule also has a twin
-  // for a push behind git's global options (`git -C DIR push`, `git -c KEY=VALUE push`).
+  // both as "this prefix, with or without more". Nor may `:*` stand anywhere but at the end: Claude
+  // Code skips such a rule and stops the session on a settings warning before it starts
+  // (claudeRuleProblem), so the empty-source refspec is spelled once per character its name can
+  // start with (` :g*`, ` :r*`, …), plus the bare ` :` that pushes every matching branch. Each rule
+  // also has a twin for a push behind git's global options (`git -C DIR push`, `git -c KEY=VALUE push`).
   const push: [string, string][] = [
     ['*--force*', 'A raw force push, the lease form included, could rewrite any ref: a glob cannot limit it to the assigned branch. The one restoration push is restore-branch.'],
     ['*--f*', 'Any abbreviation git accepts for --force, --force-with-lease or --force-if-includes.'],
@@ -3505,7 +3514,8 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     ['* -d*', 'Short form of deleting a remote ref, alone or first in a bundle (-du).'],
     ['*-*d *', 'A delete flag bundled with other short flags (-ud).'],
     ['*-*d', 'A delete flag bundled with other short flags, last on the line.'],
-    ['* :**', 'An empty source refspec deletes the ref it names, whatever the name.'],
+    ...emptySourceStarts.map((start): [string, string] => [`* :${start}*`, 'An empty source refspec deletes the ref it names, whatever the name.']),
+    ['* :', 'A bare ":" refspec pushes every matching branch, the base branch included.'],
     [`*:${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
     [`origin ${input.baseBranch}*`, 'The base branch moves only through the guarded merge.'],
     [`* ${input.baseBranch}`, 'The base branch moves only through the guarded merge.'],
