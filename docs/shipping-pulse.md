@@ -10,8 +10,8 @@ A repository view of delivery: no rankings or individual measures. `GET /api/shi
 - **Intent-to-merge** — first `create` event to the merge; median.
 - **PR-to-production** — PR `createdAt` to the first production instant for the merge SHA: a provider observation containing the merge (`POST /api/production-observations`, a `producer` with a `deploymentProviders` scope), else the master's `verify-deployment` record (an upper bound).
 
-Excluded deliveries carry a reason (`missing-pr-created-at`, `no-verifiable-production-deployment`, `superseded-deployment`, `production-observation-cap`, `invalid-clock-order`). With no source at all, `configured: false` explains what to set up.
+Excluded deliveries carry a reason (such as `no-verifiable-production-deployment`). With no source at all, `configured: false` explains what to set up.
 
 ## Bounds and states
 
-At most 1,000 deliveries feed the metrics; beyond that the response is `partial` and counts are lower bounds. States: loading, unavailable, empty, partial, stale, complete; samples under five are sparse; missing values are never zero.
+At most 1,000 deliveries feed the metrics; beyond that the response is `partial`. States: loading, unavailable, empty, partial, stale, complete; samples under five are sparse; missing values are never zero.

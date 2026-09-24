@@ -12,7 +12,7 @@ curl -X POST "$GRAPHYARD_URL/api/interventions" -H "Authorization: Bearer $COORD
   -d '{"kind":"session-nudge","work":"GY-98","blocked":"reviewer session showed no activity for 15 minutes","since":"2026-09-21T10:00:00Z","resolution":"re-prompted once"}'
 ```
 
-The response reports `ratePerDelivery`, `total`, `open`, `waitedMs`, `byKind`, `byStage`, `trend`, `costliest` items and `patterns`. No figure is keyed by a person.
+The response reports rates, totals, wait, breakdowns by kind and stage, trend, costliest items and patterns, never keyed by a person.
 
 ## Patterns become work
 

@@ -1,8 +1,8 @@
 <!-- page: Operate Graphyard | 3 | App permissions, branch protection, CI producers, and Codex review. -->
 # GitHub enforcement
 
-Graphyard uses a dedicated GitHub App that observes the repository and publishes
-**`Graphyard / merge`** on the exact PR head commit. A personal access token is no substitute.
+A dedicated GitHub App observes the repository and publishes **`Graphyard / merge`** on the
+exact PR head commit; a personal access token is no substitute.
 
 ## Create and install the App
 
@@ -171,7 +171,7 @@ lease; worktrees and supervision reduce, not prevent, that.
 | 403 or held job | `appPermissions`; `master browser installation-accept` or `github-setup --update-permissions` |
 | Protection gate refuses | check name, App binding, `strict` off, admin enforcement (`master browser protection`) |
 | Acceptance refuses despite green CI | proof names, grants, candidate SHA, base, policy revision, skipped count |
-| No update after webhook | webhook secret and job errors; polling still runs |
+| No update after webhook | webhook secret, job errors |
 
 ## Agent review approval (Codex cloud adapter)
 

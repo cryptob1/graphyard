@@ -169,9 +169,8 @@ storage; `missing` and `upload-failed` refuse acceptance.
 
 ### Whole-run target attribution
 
-`observations` are independent measurements (provider API or host attestation) of what the
-target ran; an app-served version is `measurement: "unknown"`. They must bracket the run with no
-gap over `maxGapMs`.
+`observations` are independent measurements (provider API or host attestation; an app-served
+version is `measurement: "unknown"`) that must bracket the run with no gap over `maxGapMs`.
 
 | Situation | Attribution | Outcome |
 | --- | --- | --- |
@@ -202,7 +201,6 @@ Artifacts are kept seven days, then swept; see
 
 ## Limits of this path
 
-- The target must be immutable and operator-configured.
-- Traces, screenshots and videos are refused.
-- Attestor, Docker daemon and collector share one host; the three identities stay separate.
+- The target must be immutable and operator-configured; rich captures are refused.
+- Attestor, Docker daemon and collector share one host under three separate identities.
 - Removing a container does not undo side effects in shared systems; use approved test accounts.

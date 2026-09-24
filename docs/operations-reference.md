@@ -25,13 +25,11 @@ the merge yet* (keep cycling), *local checkout* (check out the deployed commit c
 - **Post-deploy proof:** with `deploySmoke`, `delivered` shows `awaiting-deployment`,
   `awaiting-smoke`, `smoke-passed` or `delivered-with-failure`.
 - **Worker profiles:** a failed launch cools a profile for ten minutes (`daemon.profiles`).
-- **GitHub administration:** `administration` shows audit entries and any *Confirm access*
-  code; records are under `.graphyard/master-actions/`.
+- **GitHub administration:** `administration` shows audit entries and any *Confirm access* code.
 
 ## Daily checks
 
-- `/healthz` returns `healthy: true` with the expected `commit` and schema.
-- `master status` → `resources.summary` within warning lines.
+- `/healthz` is `healthy: true` at the expected `commit`; `master status` → `resources.summary` within warning lines.
 - `/api/status`: no persistent job errors, `delegationLimits.attention` or `production.incidents`.
 - Backups verified periodically ([backup, upgrade, rollback](deployment.md#backup-upgrade-rollback)).
 

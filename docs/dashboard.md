@@ -49,7 +49,7 @@ Every card shows **how long the item has held its current status**, not its age.
 ## The home page
 
 - **The heading** carries the open total (*Work 7*), the sum of the count row.
-- **The count row** shows each non-empty stage with its open items; click to filter. A lapsed claim counts under *Needs a worker*. *Show times* adds oldest and p50/p95.
+- **The count row** shows each non-empty stage's open items; click to filter. A lapsed claim counts under *Needs a worker*; *Show times* adds oldest and p50/p95.
 - **Lists** show *Stuck* first (the only counted heading), then *In progress* and *Needs a worker*; *Not started* is collapsed.
 - **Board view** draws every open stage as a column.
 - **Shipped this week** lists merges from the last seven days.
@@ -58,7 +58,7 @@ All numbers come from `homeNumbers` in `web/home-numbers.ts`.
 
 ## The item view
 
-Key and held duration, status sentence, owner, pull request and the one blocker. **Steps** lists the gates in order. **What must be true** lists each criterion with one marker per proof: ✓ passed, ○ pending, × failed or withdrawn. **More details** holds everything else; admins get an **Edit** menu for review provider and requirement revisions.
+Key, held duration, status sentence, owner, pull request and the one blocker. **Steps** lists the gates. **What must be true** lists each criterion with one marker per proof: ✓ passed, ○ pending, × failed or withdrawn. **More details** holds everything else; admins get an **Edit** menu for review provider and requirement revisions.
 
 ## Shipping pulse
 

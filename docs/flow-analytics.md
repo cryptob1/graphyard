@@ -9,7 +9,7 @@ The append-only ledger, Graphyard's own GitHub observations, evidence records, a
 
 ## Metrics
 
-Stage dwell, WIP and aging, cumulative flow, throughput, lead time (p50/p75/p90), queue versus active (lease) time, merge-ready dwell, per-candidate phase durations (PR created → review → evidence → merge authorized → merged → production), CI duration and retries, evidence wait and staleness, and deployment frequency, latency, failure and rollback. `n` is always shown; fewer than five is **sparse**; missing endpoints count as `unknown` with a reason, never estimated.
+Stage dwell, WIP and aging, cumulative flow, throughput, lead time (p50/p75/p90), queue versus active time, per-candidate phase durations (PR created → review → evidence → merge authorized → merged → production), CI, evidence wait, and deployment frequency, latency, failure and rollback. `n` is always shown; fewer than five is **sparse**; missing endpoints count as `unknown` with a reason, never estimated.
 
 ### The production environment
 

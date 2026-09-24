@@ -38,4 +38,4 @@ All machines share one Graphyard URL. Each worker needs its own principal, a sta
 
 ## Automated recovery contract
 
-`integration:herdr-recovery` (`scripts/herdr-recovery-contract.mjs`) proves steps 1–3 over the HTTP API with two workers and two hosts: `exclusive-claim`, `expiry-recovery`, `stale-owner-refused`, `isolated-worktrees` and `supervised-fence-recovery`. It refuses candidates that shorten the two-minute fences and does not prove a real process stopped; see the [two-machine drill](coordination.md#two-machine-operational-drill), [operations](operations.md#lost-worker-before-submission) and [adding a trusted contract](first-pr.md#adding-a-trusted-contract).
+`integration:herdr-recovery` (`scripts/herdr-recovery-contract.mjs`) proves steps 1–3 over the HTTP API with two workers and two hosts. It refuses candidates that shorten the two-minute fences and does not prove a real process stopped; see the [two-machine drill](coordination.md#two-machine-operational-drill), [operations](operations.md#lost-worker-before-submission) and [adding a trusted contract](first-pr.md#adding-a-trusted-contract).

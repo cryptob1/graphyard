@@ -7,7 +7,7 @@ One definition and one canonical usage per term.
 
 ### 1. Human operator (human authority)
 
-The person administering the installation with an `admin` credential declaring `sessionKind: "human"`. They keep three decisions: **goals and priorities**, **spending money or opening third-party accounts**, and **issuing credentials to people**. Every other decision is made by one agent role and approved by an independent one ([Who decides](#who-decides)).
+The person holding an `admin` credential declaring `sessionKind: "human"`. They keep three decisions: **goals and priorities**, **spending money or opening third-party accounts**, and **issuing credentials to people**. Every other decision is made by one agent role and approved by an independent one ([Who decides](#who-decides)).
 
 **Canonical usage:** *human operator*; bare *operator* means this person, never the operator agent.
 
@@ -43,7 +43,7 @@ A *reviewer* is a GitHub identity, not the PR author or the control-plane App, a
 
 ### 7. Graphyard control plane
 
-The server, Postgres, dashboard and CLI that record and gate delivery. It has no lifecycle-state endpoint and no merge bypass, and runs no agents.
+The server, Postgres, dashboard and CLI that record and gate delivery; no lifecycle-state endpoint, no merge bypass, no agents.
 
 **Canonical usage:** Graphyard *records*, *evaluates*, *refuses*, *authorizes*; it never *runs* a session.
 

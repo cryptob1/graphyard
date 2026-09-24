@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 3 | candidates, dispatch, attempts, and trusted results. -->
 # Validation candidates and runner protocol
 
-The human operator pins a candidate, an approved test bundle and separate runner and collector identities. Runners acknowledge and renew an attempt; only the pinned collector publishes its result. The packaged path is in [runner setup](runner-setup.md).
+The operator pins a candidate, an approved test bundle and separate runner and collector identities; only the pinned collector publishes a result. The packaged path is in [runner setup](runner-setup.md).
 
 ## Identities and trust
 
@@ -12,7 +12,7 @@ The human operator pins a candidate, an approved test bundle and separate runner
 | Build producer | `producer` + builder registration | Attest source → artifacts |
 | Collector | `producer` + collector registration | Verify and publish the result |
 
-Registrations name principal IDs and have immutable revisions. A collector that attested the candidate's build is refused. Rotate by disabling the registration, replacing the credential everywhere, then enabling a new revision.
+Registrations name principal IDs and have immutable revisions; a collector that attested the candidate's build is refused. Rotate by disabling, replacing the credential, then enabling a new revision.
 
 ## Commands
 

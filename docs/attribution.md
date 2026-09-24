@@ -13,4 +13,4 @@ When an observation measures another manifest, the request is superseded (never 
 
 ## Metrics
 
-`GET /api/analytics/attribution` and the **Attribution** section of [flow analytics](flow-analytics.md) report target mismatches, paid runs avoided, requests superseded and rescheduled, blocked re-anchors, convergence waits, candidate-to-release drift, signature regeneration, immutable-preview share, unsupported-success claims prevented, and cost in paid runs: **spent**, **attributed**, **wasted**, **saved**. Unknown is never shown as zero.
+`GET /api/analytics/attribution` and the **Attribution** section of [flow analytics](flow-analytics.md) report mismatches, supersessions, re-anchors, drift and paid-run cost (**spent**, **attributed**, **wasted**, **saved**). Unknown is never shown as zero.

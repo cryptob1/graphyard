@@ -27,7 +27,7 @@ graphyard scenario scenario.json
 graphyard scenarios
 ```
 
-The API is `POST /api/scenarios` (`admin`, idempotency key) and `GET /api/scenarios`. Revise with `expectedRevision` equal to the current revision; each revision is immutable and hashed.
+API: `POST /api/scenarios` (`admin`, idempotency key) and `GET /api/scenarios`. Revise with `expectedRevision` equal to the current revision; revisions are immutable and hashed.
 
 ## Link to acceptance
 
@@ -44,4 +44,4 @@ A producer granted that proof submits ordinary [evidence](protocol/evidence.md) 
 }
 ```
 
-It must match the pinned revision and environment as well as the candidate and policy. Defining a case is not running it, and a worker's report of a pass is not trusted.
+It must match the pinned revision, environment, candidate and policy. A worker's report of a pass is not trusted.
