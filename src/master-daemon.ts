@@ -1960,7 +1960,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // A rework request names the observation it was decided from (GY-144), so its approver sees
       // at once whether the item has moved since; the watch keeps the same pair.
       const observed = decision.action === 'rework' && item.observation ? { at: item.observation.at, sha: item.observation.candidate.sha } : null;
-      const reason = decision.action === 'rework' ? `${observedFrom(item)} ${decision.reason}` : decision.reason;
+      // The server refuses a request identical to a refused one unless it cites that refusal. The loop
+      // reaches this point only on grounds no refused request of its own rested on (a rework binding
+      // names its grounds, and a refused binding is never requested again), so it answers each prior
+      // refusal of this action on the item by citing it.
+      const refused = decision.action === 'rework' ? history.filter(entry => entry.action === 'rework' && entry.state === 'refused').map(entry => entry.id) : [];
+      const answers = refused.length ? ` This rests on different grounds from refused rework decision${refused.length === 1 ? '' : 's'} ${refused.join(', ')}, which ${refused.length === 1 ? 'was' : 'were'} judged on earlier grounds.` : '';
+      const reason = decision.action === 'rework' ? `${observedFrom(item)} ${decision.reason}${answers}` : decision.reason;
       const requested = standing ?? await effects.decide!(item, decision.action, reason);
       const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [], observation: observed });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it
