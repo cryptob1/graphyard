@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 10 | operator agents and two-party decisions. -->
 # Scoped operator-agent automation
 
-Enable it after the repository's gates are active. The human operator opts in once; from then on master, approver, workers and reviewers are separate sessions and principals.
+Enable it once the repository's gates are active; master, approver, workers and reviewers then run as separate sessions and principals.
 
 ## Authority model
 

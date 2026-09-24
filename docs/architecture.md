@@ -5,9 +5,9 @@ The technical reference for Graphyard's invariants and storage. For a plain-lang
 
 ## Boundary
 
-Graphyard owns coordination decisions. Git owns source history. GitHub owns PR and merge facts. Herdr and other runtimes host agent sessions. Proof producers produce evidence. A gate is a deterministic evaluation, never an LLM judgment. Terms are in the [glossary](glossary.md).
+Graphyard owns coordination decisions, Git source history, GitHub PR and merge facts; runtimes such as Herdr host sessions, and proof producers produce evidence. A gate is a deterministic evaluation, never an LLM judgment. Terms are in the [glossary](glossary.md).
 
-![Graphyard control-plane components: agent sessions, the dashboard and proof producers call the HTTP API and CLI under their own principals; the coordination engine runs one advisory-locked transaction per mutation against Postgres; a reconciliation worker ticks every two seconds, exchanges facts with GitHub, publishes the required check and runs the guarded merge. Webhooks only wake jobs.](diagrams/control-plane-components.svg)
+![Graphyard control-plane components: callers, the coordination engine, Postgres, the reconciliation worker and GitHub.](diagrams/control-plane-components.svg)
 
 Text equivalent of the diagram: agent sessions (violet), the dashboard (amber) and a proof producer (green) call the **HTTP API and CLI**; commands go to the **coordination engine**, one advisory-locked transaction per mutation with no external I/O; it writes the aggregate and an event to **Postgres**; the **reconciliation worker** leases jobs, exchanges facts with **GitHub** (grey, two-headed arrow), publishes the required check and runs the guarded merge; a dashed arrow marks the signed webhook, which only wakes a job. Legend: [diagram legend](glossary.md#diagram-legend).
 
@@ -30,15 +30,15 @@ Requirements and dependency edges are revised by the operator (or additively by 
 
 A claim succeeds only for released, unblocked work with finished dependencies and no active lease; time comes from Postgres and every claim increments the epoch. Heartbeat, release, blocker, workspace and submission commands require the current owner, epoch and an unexpired lease.
 
-An expired lease makes unsubmitted work recoverable. Old workspaces stay reserved; a new attempt gets a fresh branch and path, and Graphyard never deletes another attempt's files. A workspace is `(host ID, absolute path)` (set `GRAPHYARD_HOST_ID` if hostnames collide).
+An expired lease makes unsubmitted work recoverable. Old workspaces stay reserved; a new attempt gets a fresh branch and path, and nothing deletes another attempt's files. A workspace is `(host ID, absolute path)` (set `GRAPHYARD_HOST_ID` if hostnames collide).
 
 ## Candidates and evidence
 
-A candidate is `(PR, head SHA, base SHA)`, read from GitHub and checked against the assigned branch. Gates evaluate it with the current policy revision; a push or base change invalidates old evidence automatically.
+A candidate is `(PR, head SHA, base SHA)`, read from GitHub and checked against the assigned branch. Gates evaluate it under the current policy revision; a push or base change invalidates old evidence.
 
 Evidence carries the producer principal derived from authentication; a worker cannot self-assign trust. A producer has a live grant of exact proof names or bounded patterns. `admin` may attest `manual:` proofs but cannot mint automated evidence. The latest trusted evidence per proof/candidate/policy wins, including a later failure. E2E reuse across heads requires a recorded decision under an operator policy ([evidence reuse](evidence-reuse.md)).
 
-A CI check proves only that the named check reported success. Acceptance evidence separately requires counts and named behavioral proofs derived by a trusted producer from real reports.
+A CI check proves only that the named check succeeded; acceptance evidence also needs counts and named behavioral proofs a trusted producer derived from real reports.
 
 ## Inverted coordination: typed actions and stateless executors
 
@@ -56,11 +56,11 @@ Kinds: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`
 
 A base that cannot merge cleanly is `request-rework`. A fenced item (unsettled containment quarantine) with no live lease is `escalate`, because only a judgment that the worker stopped can lower the fence.
 
-Each outstanding action is a durable row on the aggregate (`src/model/actions.ts`), with an id hashed from kind, item and situation. An executor claims a row under its own name and credential for a bounded lease, renews while running, and only that pair may settle it; a dead executor's claim expires and its late settlement is refused, so actions retry without double execution.
+Each outstanding action is a durable row on the aggregate (`src/model/actions.ts`), its id hashed from kind, item and situation. An executor claims a row under its own name and credential for a bounded lease and alone may settle it; a dead executor's claim expires and its late settlement is refused, so actions retry without double execution.
 
-**Stalls.** Three consecutive failures with an unchanged reason classify a row as stalled rather than retrying (`src/model/action-progress.ts`). A different reason ends the run. Before this, a row in backoff appeared in no count and no list, so an item owing an impossible action read exactly like an item with nothing to do. The queue snapshot now counts every open row, `master status` raises one attention item per stall, and the dashboard shows it on the item's card. A stalled row rechecks every minute instead of its attempt-count interval, so backoff earned while a blocking condition stood does not outlive it.
+**Stalls.** Three consecutive failures with an unchanged reason classify a row as stalled rather than retrying (`src/model/action-progress.ts`). A different reason ends the run. A row in backoff once appeared in no count and no list; the queue snapshot now counts every open row, `master status` raises one attention item per stall, and the dashboard shows it on the item's card. A stalled row rechecks every minute, so backoff earned while a blocking condition stood does not outlive it.
 
-**Executors are stateless.** Each holds a credential, a host name and a handler per kind; it claims one row, runs it, reports, and keeps nothing. Any number on any hosts share the queue. `scripts/graphyard-executor.mjs` is the shipped one. `actionJudgment` classifies kinds as `none`, `in-session` (launches a session that does the judging) or `in-step`; the `in-step` kinds `escalate` and `request-rework` may never have a handler, so the loop itself makes no judgment.
+**Executors are stateless.** Each holds a credential, a host name and a handler per kind; it claims one row, runs it, reports, and keeps nothing. Any number, on any hosts, share the queue. `scripts/graphyard-executor.mjs` is the shipped one. `actionJudgment` classifies kinds as `none`, `in-session` (launches a session that does the judging) or `in-step`; the `in-step` kinds `escalate` and `request-rework` may never have a handler, so the loop itself makes no judgment.
 
 **Workers pull.** A free session calls `POST /api/assignments/claim` (`scripts/graphyard-pull.mjs`) and claims under its own identity; one idempotency key claims at most one item.
 

@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 8 | scoped evidence reuse, replay, and execution analytics. -->
+<!-- page: Build integrations | 8 | scoped reuse, replay, and execution analytics. -->
 # Evidence replay, scoped reuse and execution analytics
 
 Reuse lets the newest compatible pass stand for a new head under an operator policy; replay re-runs the verifier over retained artifacts. "Newest" means the highest dispatch `sequence`, never arrival order.

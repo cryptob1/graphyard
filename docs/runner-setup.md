@@ -1,11 +1,10 @@
-<!-- page: Build integrations | 4 | the packaged Playwright runner, host attestor, and collector. -->
+<!-- page: Build integrations | 4 | runner, host attestor, and collector. -->
 # The packaged Playwright runner and collector
 
-The supported end-to-end path: discovery, an approved content-addressed oracle bundle, an
-isolated executor supervised by a host attestor, and a separately trusted collector that
-verifies inventory, target attribution and artifacts before publishing. It refuses rich
-captures (traces, screenshots, videos), mutable targets, unapproved bundles and any result a
-candidate could author; those are visible refusals, never passes.
+The supported end-to-end path: an approved content-addressed oracle bundle, an isolated
+executor supervised by a host attestor, and a separately trusted collector that verifies
+inventory, target attribution and artifacts before publishing. Rich captures, mutable targets,
+unapproved bundles and any result a candidate could author are visible refusals, never passes.
 
 ## Inspect, snapshot and approve the bundle
 
@@ -15,8 +14,7 @@ graphyard runner snapshot selected-files.json > oracle-source.json   # reviewabl
 graphyard runner bundle-digest ./oracle                 # the digest the runner will execute
 ```
 
-Found filenames are proposals, not an inventory. A snapshot is not approval. The bundle
-directory holds the reviewed specs plus every helper, config and lockfile; symlinks,
+Found filenames are proposals, and a snapshot is not approval. The bundle directory holds the reviewed specs plus every helper, config and lockfile; symlinks,
 `node_modules` and credential files refuse. Every file and every ancestor directory must be
 owned by the **attestor** (or root) and not group- or world-writable (sticky `/tmp` mode
 excepted). Register it as operator with `validation define`, pinning the bundle `digest` and
@@ -54,9 +52,9 @@ graphyard runner attempt runner.json > execution.json
 }
 ```
 
-`outputPath` is the collection root; the attestor creates `ATTEMPT_ID` beneath it. `runAsUser`
-is a non-root container UID and the boundary-group GID. This file says where an attempt runs,
-never what is approved: target, digests, network, host and key come in the dispatch grant.
+`outputPath` is the collection root (the attestor creates `ATTEMPT_ID` beneath it); `runAsUser`
+is a non-root container UID and the boundary-group GID. Target, digests, network, host and key
+come in the dispatch grant, never from this file.
 
 The runner polls `dispatch`, hands the attempt to the attestor, acknowledges after a clean
 preflight and heartbeats every 20 seconds. The attestor runs two phases in the pinned image:
@@ -65,8 +63,8 @@ network, writes `/output/report.json`), each read-only at `/oracle`, `--cap-drop
 privileges, bounded resources and a constructed environment. Test-account entries are read
 once in preflight and never placed on the command line.
 
-A rejected heartbeat aborts the attempt. After the phases the attestor force-removes both
-containers; the record decides nothing about acceptance.
+A rejected heartbeat aborts the attempt. The attestor then force-removes both containers; the
+record decides nothing about acceptance.
 
 ### The acknowledgement is retried, never repeated
 
@@ -120,10 +118,10 @@ GRAPHYARD_ATTESTOR_TOKEN_FILE=/etc/graphyard/attestor.token \
 ```
 
 Run it as its own OS account through a `sudo` rule restricted to this command, setting all
-three variables there. Key and token file must be mode 0600 and owned by the attestor. Its
-Graphyard credential is a `reader`; it re-reads the attempt before provisioning and after the
-acknowledgement, and executes only if Graphyard dispatched and acknowledged it. It signs what it
-observed, including the outcome, measured digests and the grant digest. It refuses when the
+three variables there; key and token file are mode 0600, owned by the attestor. With a `reader`
+credential it re-reads the attempt before provisioning and after the acknowledgement, executes
+only what Graphyard dispatched and acknowledged, and signs what it observed (outcome, measured
+digests, grant digest). It refuses when the
 container user is the caller or itself. Re-register the runner when rotating the keypair.
 
 ## Collect, verify and publish
@@ -162,7 +160,7 @@ graphyard runner collect collector.json
 }
 ```
 
-Copy `grant` from the runner's output; every field is required. `outputPath` is the attempt
+Copy `grant` from the runner's output (every field is required); `outputPath` is the attempt
 directory. The collector first takes `collection-authority` (ending the runner's authority),
 re-reads the grant, verifies the attestor signature against the bytes it reads, compares the
 offline inventory with execution, and inspects `graphyard-enumerate-ATTEMPT` and
@@ -171,9 +169,8 @@ storage; `missing` and `upload-failed` refuse acceptance.
 
 ### Whole-run target attribution
 
-`observations` are independent measurements (provider API or host attestation) of what the
-target ran; an app-served version is `measurement: "unknown"`. They must bracket the run with no
-gap over `maxGapMs`.
+`observations` are independent measurements (provider API or host attestation; an app-served
+version is `measurement: "unknown"`) that must bracket the run with no gap over `maxGapMs`.
 
 | Situation | Attribution | Outcome |
 | --- | --- | --- |
@@ -204,7 +201,6 @@ Artifacts are kept seven days, then swept; see
 
 ## Limits of this path
 
-- The target must be immutable and operator-configured.
-- Traces, screenshots and videos are refused.
-- Attestor, Docker daemon and collector share one host; the three identities stay separate.
+- The target must be immutable and operator-configured; rich captures are refused.
+- Attestor, Docker daemon and collector share one host under three separate identities.
 - Removing a container does not undo side effects in shared systems; use approved test accounts.

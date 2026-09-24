@@ -5,21 +5,21 @@ Graphyard decides whether work may move forward; runtimes such as Herdr run the 
 
 ## One trip from setup to Done
 
-1. **Setup** — connect the repository, GitHub enforcement, principals and proof producers ([onboarding](onboarding.md)).
-2. **Create** — an item with an outcome, dependencies, planned files and criteria naming proofs.
+1. **Setup** — repository, GitHub enforcement, principals, producers ([onboarding](onboarding.md)).
+2. **Create** — an outcome, dependencies, planned files, criteria naming proofs.
 3. **Ready** — released, unblocked, dependencies Done.
 4. **Claim** — a worker gets a lease, an epoch and an assigned worktree.
-5. **Build** — it renews the lease and stops if ownership is lost.
-6. **Review** — it submits the exact PR commit; an independent reviewer approves.
+5. **Build** — renewing the lease; stop on losing it.
+6. **Review** — an independent reviewer approves the exact PR commit.
 7. **Test** — Graphyard observes CI itself.
 8. **Acceptance** — granted producers report evidence bound to the candidate.
-9. **Merge** — the master asks; Graphyard rechecks every gate first.
+9. **Merge** — Graphyard rechecks every gate first.
 10. **Done** — only after the authorized merge is observed.
 
 ## Two phases, one clear handoff
 
 1. **Bootstrap** — the human operator supervises one worker while the repository's gates are activated.
-2. **Automated operation** — with [operator automation](operator-automation.md) provisioned, master, workers, reviewers and producers run as separate sessions.
+2. **Automated operation** — with [operator automation](operator-automation.md), master, workers, reviewers and producers run as separate sessions.
 
 ![Bootstrap versus normal operation: one supervised worker in phase 1; master, workers, reviewers and producers each with their own credential in phase 2.](diagrams/bootstrap-vs-normal.svg)
 
@@ -47,4 +47,4 @@ Text equivalent: the human operator sends human-only decisions to Graphyard. Her
 | Who owns this work, at which epoch? | Is the session alive? |
 | Which commit is the candidate; have its gates passed? | Which machine hosts it; should it restart? |
 
-Graphyard is right about ownership and delivery, Herdr about session health. No lifecycle-state endpoint and no merge bypass exist, and requirements are never weakened to let a candidate pass.
+Graphyard is right about ownership and delivery, Herdr about session health. There is no lifecycle-state endpoint or merge bypass, and requirements are never weakened to pass a candidate.

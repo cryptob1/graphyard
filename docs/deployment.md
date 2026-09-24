@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 1 | provider reference behind the installer: versioned images, the variables table, a manual fallback for Railway, Docker Compose and the Helm chart, backups, upgrades, and restores. -->
+<!-- page: Operate Graphyard | 1 | images, variables, manual Railway, Compose and Helm, backups and restores. -->
 # Deployment
 
 Graphyard is one stateless application container plus Postgres.
@@ -10,7 +10,7 @@ node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply
 ```
 
-[Install Graphyard](install.md) is the supported path. This page is the reference behind it.
+[Install Graphyard](install.md) is the supported path; this is its reference.
 
 ## Versioned images
 
@@ -75,16 +75,15 @@ branch) with `GRAPHYARD_URL` set; `graphyard init --scan --apply` prints the com
 `ciProofs.next`.
 
 `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the
-live roster by id, previews changes without tokens, and refuses to drop or demote a live principal
-unless named with `--remove ID`. `--rotate ID` rotates one producer; a changed token needs
-`--deploy`, which sets the GitHub secret only after the deployed server accepts the token.
+live roster by id, refusing to drop or demote a live principal not named with `--remove ID`.
+`--rotate ID` rotates one producer; `--deploy` sets the GitHub secret once the server accepts it.
 
 ### Delegation capacity variables
 
-Installers derive the four limits from the deployed principals (default, widened to the role's
-count). An unset limit is derived at start-up and reported as `delegationLimits` drift in
-`doctor` and `master status`, e.g. `Set GRAPHYARD_MAX_REVIEWERS=4 on the deployment`; only a
-principal newly added beyond an explicit limit refuses start-up. `GRAPHYARD_GENERATED_FILES` is
+Installers derive the four limits from the deployed principals. An unset limit is derived at
+start-up and reported as `delegationLimits` drift in `doctor` and `master status`, e.g.
+`Set GRAPHYARD_MAX_REVIEWERS=4 on the deployment`; only a principal added beyond an explicit
+limit refuses start-up. `GRAPHYARD_GENERATED_FILES` is
 drift-checked against the manifest the same way.
 
 ### Production deployment observation
@@ -98,8 +97,7 @@ the server is older than the CLI. Probe it from the master:
 
 ## Manual fallback
 
-Only for an unsupported platform or an existing deployment. Set the variables listed above by
-hand.
+Only for an unsupported platform or an existing deployment; set the variables table above by hand.
 
 ### Railway, by hand
 
@@ -167,8 +165,7 @@ DATABASE_URL=… node bin/graphyard.mjs db backup ./graphyard.json   # any host
 node bin/graphyard.mjs db verify FILE
 ```
 
-Also keep provider backups (Railway backups, volume snapshots). Backups hold secrets' hashes and
-evidence; store them like the database.
+Also keep provider backups. Backups hold secrets' hashes and evidence; store them like the database.
 
 **Upgrade:** back up, deploy the tested image (`GRAPHYARD_IMAGE=...:X.Y.Z docker compose --profile
 full up -d`, `helm upgrade --set image.tag=X.Y.Z`, or a Railway redeploy), confirm `/healthz`
