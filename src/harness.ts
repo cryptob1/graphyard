@@ -62,12 +62,28 @@ export interface HarnessPlan { harness: string; file: string | null; allow: Harn
  */
 export function bashRuleMatches(rule: string, command: string) {
   const body = /^Bash\((.*)\)$/s.exec(rule)?.[1];
-  if (body === undefined) return false;
+  if (body === undefined || claudeRuleProblem(rule)) return false;
   const text = command.trim().replace(/\s+/g, ' ');
   const prefix = body.endsWith(':*') ? body.slice(0, -2) : body.endsWith(' *') ? body.slice(0, -2) : null;
   const glob = (pattern: string) => new RegExp(`^${pattern.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`, 's');
   if (prefix !== null) return glob(prefix).test(text) || glob(`${prefix} *`).test(text);
   return glob(body).test(text);
+}
+/**
+ * Why Claude Code would skip a rule, or null when it takes it. A skipped rule is worse than a
+ * missing one: Claude Code stops the session on a "Settings Warning" dialog before it reads its
+ * request (Herdr reports it blocked), and the dialog's only way on, "Continue", runs the session
+ * without the rule — a deny that silently stops denying. So no generated rule may be one it skips:
+ * `:*` is the legacy prefix marker and must end the rule (`Bash(git push * :**)` is refused as
+ * "The :* pattern must be at the end"), and it needs a prefix before it.
+ */
+export function claudeRuleProblem(rule: string): string | null {
+  const body = /^Bash\((.*)\)$/s.exec(rule)?.[1];
+  if (body === undefined) return null;
+  const marker = body.indexOf(':*');
+  if (marker >= 0 && marker !== body.length - 2) return `${rule}: the :* pattern must be at the end`;
+  if (marker === 0) return `${rule}: prefix cannot be empty before :*`;
+  return null;
 }
 export type HarnessDecision = { decision: 'allow' | 'deny' | 'ask'; rule: HarnessRule | null };
 const commandParts = (command: string) => command.split(/\s*(?:&&|\|\||;|\|)\s*/).map(part => part.trim()).filter(Boolean);

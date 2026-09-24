@@ -101,6 +101,26 @@ export function detectConsentPrompt(screen: string | null | undefined): ConsentP
 }
 
 /**
+ * Claude Code's "Settings Warning" dialog: a settings file the session loads holds rules it skips,
+ * and it stops before reading its request (Herdr reports it blocked) until somebody picks
+ * "Continue", "Fix with Claude" or "Exit". It is not a consent prompt and is never answered:
+ * "Continue" runs the session without the skipped rules, and a skipped deny rule is a guard the
+ * worker silently no longer has. Returns what the launcher reports — the rules Claude Code named —
+ * or null when the screen does not end on that dialog.
+ */
+export function settingsWarning(screen: string | null | undefined): string | null {
+  if (!screen) return null;
+  const lines = screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-consentScreenLines);
+  const heading = lines.findLastIndex(line => /^Settings Warning$/i.test(line));
+  if (heading < 0 || !trailingDialog(lines.slice(heading))) return null;
+  const text = lines.slice(heading + 1).join(' ');
+  const skipped = [...text.matchAll(/Invalid permission rule "([^"]+)" was skipped/g)].map(match => match[1]);
+  const file = lines.slice(heading + 1).find(line => /settings(?:\.local)?\.json$/.test(line));
+  const what = skipped.length ? `it skipped ${skipped.length} invalid permission rule${skipped.length === 1 ? '' : 's'} (${skipped.join(', ')})` : 'it skipped values in its settings';
+  return `Claude Code stopped on a settings warning${file ? ` for ${file}` : ''}: ${what}; the launcher never answers it, since "Continue" would run the session without them`;
+}
+
+/**
  * How long a session held on a prompt nobody answered keeps its slot: long enough for a human who
  * sees the attention item to attach and answer, short against a lease a supervisor would otherwise
  * renew all night. Past it the watch supervisor stops renewing, releases the lease and stops.
