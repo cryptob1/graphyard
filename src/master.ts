@@ -15,7 +15,7 @@ import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, d
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
-import { harnessDecision, launchPlan, masterHarnessPlan, resolveThreadScript, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
@@ -2750,9 +2750,7 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessP
 export type SessionRole = 'worker' | 'reviewer' | 'producer';
 export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number;
   /** The detached checkout Graphyard allocated for a reviewer session under the managed worktree root. */
-  checkout?: string;
-  /** The managed repository root; a reviewer resolves the review threads it judged fixed through its scripts/resolve-thread.mjs. */
-  root?: string }
+  checkout?: string }
 export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
   if (input.kind !== 'claude') return { harness: input.kind ?? 'unknown', file: null, allow: [], deny: [], manual: null, note: `${input.kind ?? 'This runtime'} does not load the repository's Claude Code settings, so it inherits no master rule; its own approval configuration applies.` };
   const cli = `node ${input.cliPath}`;
@@ -2795,9 +2793,6 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
       { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff.' },
       { rule: 'Bash(gh pr view:*)', why: 'Read the pull request and poll its mergeability before posting.' },
       ...(input.pr ? [{ rule: `Bash(gh api --method POST repos/${input.repository}/pulls/${input.pr}/reviews*)`, why: 'Post the one verdict this session was launched for; the master itself is denied every review call.' }] : []),
-      // The reviewer owns thread resolution as part of its verdict: the wrapper sends only
-      // resolveReviewThread under the session's own reviewer token, never another GraphQL call.
-      ...(input.root ? [{ rule: `Bash(node ${resolveThreadScript(input.root)}:*)`, why: 'Resolve a review thread whose finding this reviewer judged fixed on the exact head; the wrapper sends only resolveReviewThread.' }] : []),
       // Surrounding code is read from a detached checkout under the managed worktree root, which
       // Graphyard allocates for the session and removes when it ends.
       ...(input.checkout ? [{ rule: 'Bash(git fetch:*)', why: 'Fetch the exact head under review.' },
@@ -2837,7 +2832,7 @@ async function repositoryCarriesClaudeSettings(root: string) {
  * (repository-setup.ts launchAuthorization) as its role text, loaded from the session's role file.
  */
 export async function prepareSessionHarness(root: string, config: MasterConfig, input: Omit<SessionHarnessInput, 'cliPath' | 'repository' | 'baseBranch' | 'credentialHome' | 'credentialDirectories'> & { profile: string; credentialFiles?: string[] }) {
-  const plan = sessionHarnessPlan({ ...input, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),
+  const plan = sessionHarnessPlan({ ...input, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),
     credentialDirectories: [dirname(config.credentialFile), ...(config.reviewer ? [dirname(config.reviewer.credentialFile)] : []), ...(input.credentialFiles ?? []).map(file => dirname(file))] });
   if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null };
   const file = sessionHarnessFile(root, input.role, input.profile);
@@ -3566,7 +3561,7 @@ export interface UnrunnableRemedy { key: string; epoch: number; command: string;
 export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseBranch: string; repository?: string; workerKinds?: string[] }): UnrunnableRemedy[] {
   const shared = { cliPath: input.cliPath, repository: input.repository ?? 'OWNER/REPOSITORY', baseBranch: input.baseBranch, credentialHome: '/graphyard-credentials', credentialDirectories: [] as string[] };
   const others = [
-    { role: 'reviewer', plan: sessionHarnessPlan({ ...shared, role: 'reviewer', kind: 'claude', root: '/repository' }) },
+    { role: 'reviewer', plan: sessionHarnessPlan({ ...shared, role: 'reviewer', kind: 'claude' }) },
     { role: 'producer', plan: sessionHarnessPlan({ ...shared, role: 'producer', kind: 'claude' }) },
     { role: 'master', plan: masterHarnessPlan({ ...shared, harness: 'claude', root: '/repository' }) },
   ];
