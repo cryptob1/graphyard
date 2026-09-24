@@ -28,7 +28,7 @@ import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
 import WorkersPage, { roleWords, shortShas } from '../web/pages/workers.js';
 import { CandidateSha } from '../web/candidate.js';
-import { computeFlow, deliveredAt, flowDrilldown, gateFactStep, productionHold, releaseObservedAt, servedAt, stepMoves } from '../src/flow-analytics.js';
+import { computeFlow, coveredWindow, deliveredAt, flowDrilldown, gateFactStep, productionHold, releaseObservedAt, servedAt, stepEntries, stepMoves } from '../src/flow-analytics.js';
 
 // GY-161: the dashboard, rendered over the board fixture the browser suite also serves
 // (browser-tests/ui-board.ts): an item parked on a human-only decision, one blocked, items building,
@@ -973,4 +973,40 @@ test('GY-161 review: a refusing ready gate keeps handed-in work at Build, in the
   const cut = await readStepRows(async (path: string) => { const answer = api(path); return /within:/.test(decodeURIComponent(path)) ? { ...answer, next: null } : answer; });
   assert.equal(cut.complete, false);
   assert.ok(!cut.rows.some(row => row.workKey === long.key), 'the partly read item is left out');
+});
+
+test('GY-161 review: a step entered before the drill-down window still starts its clock at its entry; a truncated scan ends every step move where it stopped', () => {
+  // At Test since 12 days ago, with gate facts at that step 10 and 9 days ago (other checks changing),
+  // and nothing recorded in the 7-day window: the carried move starts at the entry, not at the last fact.
+  const testing = board().find(item => prSteps(item, NOW).current === 'test')!;
+  const day = 24 * hour;
+  const fact = (id: number, ago: number, details: Record<string, unknown>) => ({ id, workId: testing.id, workKey: testing.key, kind: 'gates.changed', observedAt: new Date(NOW - ago).toISOString(), details });
+  const atTest = { stage: 'review', unmet: ['test', 'review'], firstUnmet: 'test', hasCandidate: true, reasons: [] };
+  const history = [fact(1, 14 * day, { stage: 'build', unmet: ['build'], firstUnmet: 'build', hasCandidate: false, reasons: ['Worker has not submitted implementation for this attempt'] }),
+    fact(2, 12 * day, atTest), fact(3, 10 * day, atTest), fact(4, 9 * day, atTest)];
+  assert.equal(gateFactStep(atTest), 'test');
+  const carryIn = [history.at(-1)!];
+  const entries = stepEntries(carryIn as any, history as any);
+  assert.equal(entries[testing.id], history[1].observedAt, 'the entry is the oldest fact of the unbroken run at the step');
+  const dataset = { ...flowDataset([testing]), facts: [], carryIn, from: new Date(NOW - 7 * day).toISOString(), days: 7, stepEntries: entries };
+  const report = computeFlow(dataset, { days: 7 });
+  const rows = flowDrilldown(dataset, report, { metric: 'steps', key: null, authorized: true }).rows as { workKey: string; observedAt: string | null; detail: string }[];
+  assert.deepEqual(rows.filter(row => row.workKey === testing.key).map(row => [row.observedAt, row.detail]), [[history[1].observedAt, 'outside to test']], 'the drill-down returns the carried entry');
+  assert.equal(stepSince(testing, NOW, transitionsFromRows(rows)), history[1].observedAt, 'the "In step" clock starts at the entry, 12 days ago');
+  assert.equal(replayFrames(transitionsFromRows(rows), NOW).length, 0, 'an entry before the replay window is not a replay frame');
+  // Without the entry lookup (a hand-built dataset), the carried fact's own instant still stands in.
+  assert.equal(stepMoves({ ...dataset, stepEntries: undefined }, testing)[0].at, history.at(-1)!.observedAt);
+
+  // A delivered item at Deploy whose merge falls past where a truncated scan stopped: no exit move.
+  const [shipped] = realDeliveredWork() as Work[];
+  const mergedAt = Date.parse(shipped.delivery!.mergedAt!);
+  const deploy = { id: 9, workId: shipped.id, workKey: shipped.key, kind: 'gates.changed', observedAt: new Date(mergedAt - hour).toISOString(), details: { stage: 'done', unmet: [], hasCandidate: true, reasons: [] } };
+  const whole = { ...flowDataset([shipped]), facts: [deploy], carryIn: [] };
+  assert.deepEqual(stepMoves(whole, shipped).map(move => move.to), ['deploy', null], 'fully covered, the merge takes it out of the flow');
+  const covered = coveredWindow(whole.from, whole.to, new Date(mergedAt - 30 * 60_000).toISOString(), 5, 20_000);
+  const truncated = { ...whole, covered, truncated: true };
+  assert.deepEqual(stepMoves(truncated, shipped).map(move => move.to), ['deploy'], 'an exit past the covered end is not a move');
+  const cut = computeFlow(truncated, { days: 30 });
+  assert.ok(!(flowDrilldown(truncated, cut, { metric: 'steps', key: null, authorized: true }).rows as { detail: string }[]).some(row => row.detail === 'deploy to outside'), 'nor a drill-down row');
+  assert.equal(cut.stepDwell.find(entry => entry.step === 'deploy')?.n ?? 0, 0, 'nor a completed Deploy stay');
 });

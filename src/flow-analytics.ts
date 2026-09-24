@@ -305,6 +305,12 @@ export interface FlowDataset {
   covered?: CoveredWindow;
   /** What the production watch holds at Deploy (`productionHold`); absent reads as no observation. */
   production?: ProductionHold;
+  /**
+   * When each item still in the flow at the window's start entered the step it was at then
+   * (`stepEntries`), keyed by work id: the carried move starts there, not at the last gate fact
+   * before the window. Absent for an item, the carried fact's instant stands in.
+   */
+  stepEntries?: Record<string, string>;
   projection: { lastEvent: number; updatedAt: string | null; pendingEvents: number; pendingCapped: boolean };
 }
 /**
@@ -343,6 +349,27 @@ export function coveredWindow(from: string, to: string, lastCovered: string, rem
 const fullyCovered = (from: string, to: string): CoveredWindow => ({ from, to, toCovered: to, ms: Math.max(0, (time(to) ?? 0) - (time(from) ?? 0)), windowMs: Math.max(0, (time(to) ?? 0) - (time(from) ?? 0)), fraction: 1, truncated: false, uncovered: null, remainingFacts: null, remainingCapped: false, statement: 'The scan covered the whole requested window.' });
 // Facts whose most recent value before the window end is needed to describe the present
 // state and to carry an item's timeline into the window.
+/** The most pre-window gate facts read per item to find when it entered its carried step. */
+export const stepEntryScan = 200;
+/**
+ * When each item entered the step its carried gate fact puts it at: walking its pre-window gate
+ * facts newest first (`facts`, any order), the oldest of the unbroken run at that step. A run
+ * longer than the facts read starts at the oldest one read, the earliest instant on record.
+ */
+export function stepEntries(carryIn: readonly FlowFact[], facts: readonly FlowFact[]): Record<string, string> {
+  const entries: Record<string, string> = {};
+  for (const carried of carryIn.filter(fact => fact.kind === 'gates.changed')) {
+    const step = gateFactStep(carried.details);
+    if (!step) continue;
+    let entry = carried.observedAt;
+    const history = facts.filter(fact => fact.workId === carried.workId && fact.kind === 'gates.changed' && time(fact.observedAt)! <= time(carried.observedAt)!)
+      .sort((a, b) => time(b.observedAt)! - time(a.observedAt)! || (b.id ?? 0) - (a.id ?? 0));
+    for (const fact of history) { if (gateFactStep(fact.details) !== step) break; entry = fact.observedAt; }
+    entries[carried.workId] = entry;
+  }
+  return entries;
+}
+
 const carryKinds: FlowKind[] = ['stage.changed', 'gates.changed', 'work.created', 'work.released', 'delivered', 'merged', 'candidate.observed', 'lease.claimed', 'lease.released', 'lease.lost', 'dependencies.changed'];
 
 function rowToFact(row: any): FlowFact {
@@ -404,6 +431,13 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     `SELECT fact.* FROM unnest($1::uuid[]) selected_work(work_id) CROSS JOIN unnest($2::text[]) selected_kind(kind)
        CROSS JOIN LATERAL (SELECT * FROM flow_facts WHERE flow_facts.work_id=selected_work.work_id AND flow_facts.kind=selected_kind.kind AND observed_at<$3 ORDER BY observed_at DESC,id DESC LIMIT 1) fact`,
     [ids, carryKinds, from])).rows.map(rowToFact) : [];
+  // Where an item stood when the window opened is a step it may have entered long before: read
+  // back through its earlier gate facts, bounded per item, to the move that put it there.
+  const inFlow = carryIn.filter(fact => fact.kind === 'gates.changed' && gateFactStep(fact.details)).map(fact => fact.workId);
+  const entryFacts = inFlow.length ? (await store.pool.query(
+    `SELECT fact.* FROM unnest($1::uuid[]) selected_work(work_id)
+       CROSS JOIN LATERAL (SELECT * FROM flow_facts WHERE flow_facts.work_id=selected_work.work_id AND flow_facts.kind='gates.changed' AND observed_at<$2 ORDER BY observed_at DESC,id DESC LIMIT $3) fact`,
+    [inFlow, from, stepEntryScan])).rows.map(rowToFact) : [];
   const deploymentRows = (await store.pool.query(
     `SELECT d.*, COALESCE(array_agg(dm.merge_sha ORDER BY dm.merge_sha) FILTER (WHERE dm.merge_sha IS NOT NULL), '{}') AS contained_merge_shas
        FROM deployment_observations d LEFT JOIN deployment_merge_observations dm ON dm.deployment_id=d.id
@@ -416,7 +450,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND details->>'mergeSha'=ANY($1) ORDER BY observed_at,id LIMIT $2`, [mergeShas, flowLimits.deploymentMerges + 1])).rows : [];
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, production, projection };
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned: facts.length, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -1112,17 +1146,20 @@ export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | nu
  * One item's moves between the seven steps, oldest first: the gate fact carried in from before the
  * window says where it started (`carried`, not a move inside the window), each recorded gate fact
  * that puts it at a different step is a move, and its exit (`flowExitAt`) takes it from Deploy
- * out of the flow — never while the production watch (`dataset.production`) holds it at Deploy. Nothing after the report's cutoff (`dataset.to`) is a move, and work that
+ * out of the flow — never while the production watch (`dataset.production`) holds it at Deploy. The carried move starts when the item entered that step (`dataset.stepEntries`). Nothing after the report's cutoff is a move —
+ * `dataset.to`, or where a truncated scan stopped (`covered.toCovered`) — and work that
  * left the flow before the window opened (`dataset.from`) has no moves in it at all: its finished
  * Deploy stay belongs to an earlier window. The replay and the per-step dwell both read these.
  */
-export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { from?: string; to?: string; production?: ProductionHold }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
+export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { from?: string; to?: string; production?: ProductionHold; covered?: CoveredWindow; stepEntries?: Record<string, string> }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
   const moves: StepMove[] = [];
-  const cutoff = dataset.to !== undefined && time(dataset.to) !== null ? time(dataset.to)! : Infinity;
+  const end = dataset.covered?.truncated ? dataset.covered.toCovered : dataset.to;
+  const cutoff = end !== undefined && time(end) !== null ? time(end)! : Infinity;
   const start = dataset.from !== undefined && time(dataset.from) !== null ? time(dataset.from)! : -Infinity;
   const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
   let at: FlowStep | null = carried ? gateFactStep(carried.details) : null;
-  if (carried && at) moves.push({ at: carried.observedAt, from: null, to: at, pr: carried.details.pr ?? null, carried: true });
+  const entered = dataset.stepEntries?.[item.id];
+  if (carried && at) moves.push({ at: entered && time(entered) !== null ? entered : carried.observedAt, from: null, to: at, pr: carried.details.pr ?? null, carried: true });
   for (const fact of dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed' && time(fact.observedAt)! <= cutoff).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)) {
     const step = gateFactStep(fact.details);
     if (step === at) continue;
@@ -1252,7 +1289,9 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     for (const fact of dataset.facts.filter(fact => fact.kind === 'review.submitted' && scopedIds.has(fact.workId) && (!key || fact.details.reviewState === key)))
       row(fact.workKey, String(fact.details.reviewState), fact.observedAt, null, null, fact.details.sha ?? null, `independent=${fact.details.independent}; timestamp=${fact.details.timestampSource}`);
   } else if (metric === 'steps') {
-    // Each item's moves between the seven pull-request steps (`stepMoves`). `key`, when given, is
+    // Each item's moves between the seven pull-request steps (`stepMoves`), led by the carried
+    // entry into the step it held when the window opened ("outside to <step>" at that entry), so a
+    // step entered before the window still says when it began. `key`, when given, is
     // an instant (moves before it are left out) and/or a page cursor (see `next` below):
     // `after:<work key>`, only items ordered after that key, or `within:<work key>:<n>`, that item
     // from its n-th row on and then the items after it.
@@ -1260,7 +1299,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     const from = within?.key ?? after;
     for (const item of scoped.filter(item => from === null || (within ? workKeyOrder(item.key) >= workKeyOrder(from) : workKeyOrder(item.key) > workKeyOrder(from))))
       for (const move of stepMoves(dataset, item, report.productionEnvironment))
-        if (!move.carried && time(move.at)! >= since)
+        if (time(move.at)! >= since)
           row(item.key, move.to ?? 'outside', move.at, null, move.pr, null, `${move.from ?? 'outside'} to ${move.to ?? 'outside'}`);
   } else if (metric === 'blockers') {
     // The aggregate keys on the bounded reason label; the drill-down must match the same label.
