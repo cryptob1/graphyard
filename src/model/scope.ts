@@ -86,7 +86,7 @@ export const documentationScopes = ['docs/', 'AGENTS.md', 'README.md'] as const;
 /**
  * The surfaces that render, test or point users at the documentation: the web app that links to
  * and embeds doc pages, the browser tests that pin their text, and the integrations whose messages
- * name a guide (e.g. integrations/herdr/ledger.mjs names docs/onboarding.md). An item that plans the whole `docs/` tree
+ * name a guide. An item that plans the whole `docs/` tree
  * rewrites or moves pages these files consume, so a single file under them is implied scope.
  * A directory request is not: the implication covers the consumer a rewrite breaks, never a tree.
  */

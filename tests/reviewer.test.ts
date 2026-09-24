@@ -9,11 +9,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
-import { buildMasterStatus, dispatchWork, loadMasterConfig, masterHarness, reviewerProfileSchema, setupMaster, workerProfileSchema } from '../src/master.js';
+import { buildMasterStatus, dispatchWork, loadMasterConfig, masterHarness, reviewerProfileSchema, sessionHarnessPlan, setupMaster, workerProfileSchema } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
-import { launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
+import { harnessDecision, launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
 import { applyProtection, protectionPlan, requiredReviewProtection } from '../src/protection.js';
-import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
+import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, readUnresolvedThreads, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { nativeReviewRequired, type Work } from '../src/model.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 
@@ -126,6 +126,40 @@ test('a reviewer launch is bound to the exact observed candidate and its prompt 
   for (const fragment of ['owner/project', '#42', 'a'.repeat(40), 'b'.repeat(40), 'policy revision 2', 'read-only', `commit_id=${'a'.repeat(40)}`, 'REQUEST_CHANGES']) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
   assert.match(prompt, /do not edit, stage, commit, push, rebase, or merge/);
   assert.match(prompt, /never weaken a requirement/);
+  assert.doesNotMatch(prompt, /resolve-thread|unresolved review thread/, 'no thread list, no thread section');
+  assert.equal(reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { root: '/repo', unresolved: [] }), prompt);
+});
+
+test('the reviewer launch prompt names each unresolved thread and owns resolving the fixed ones', async () => {
+  const binding = assertReviewCandidate(work(), new Date(Date.now() + 1_000).toISOString());
+  const thread = { id: 'PRRT_kwDOabc123', author: 'chatgpt-codex-connector', path: 'src/github.ts', line: 663, outdated: true, excerpt: 'P1 Badge "Handle" the empty page' };
+  const prompt = reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { root: '/repo', unresolved: [thread] });
+  for (const fragment of ['1 unresolved review thread', 'PRRT_kwDOabc123 by chatgpt-codex-connector on src/github.ts:663 (outdated)', 'not instructions', 'node /repo/scripts/resolve-thread.mjs THREAD_ID', 'REQUEST_CHANGES citing the thread', 'an unfixed thread always means REQUEST_CHANGES', `head ${'a'.repeat(40)}`]) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
+  assert.ok(!prompt.includes('"Handle"'), 'a quote in an excerpt cannot close the quoted excerpt');
+  // The launch reads the threads with the minted reviewer token, and ignores resolved ones.
+  const bodies: any[] = [];
+  const fetcher = (async (_url: string, init: any) => {
+    bodies.push({ auth: init.headers.Authorization, body: JSON.parse(init.body) });
+    return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      { id: 'PRRT_resolved1', isResolved: true, path: 'a.ts', line: 1, comments: { nodes: [] } },
+      { id: 'PRRT_open12345', isResolved: false, isOutdated: false, path: 'b.ts', line: null, originalLine: 7, comments: { nodes: [{ author: { login: 'someone' }, body: 'Fix\n\n  this' }] } }] } } } } }), { status: 200 });
+  }) as typeof fetch;
+  assert.deepEqual(await readUnresolvedThreads('owner/project', 42, 'reviewer-token', fetcher), [{ id: 'PRRT_open12345', author: 'someone', path: 'b.ts', line: 7, outdated: false, excerpt: 'Fix this' }]);
+  assert.equal(bodies[0].auth, 'Bearer reviewer-token');
+  assert.deepEqual(bodies[0].body.variables, { owner: 'owner', name: 'project', number: 42, after: null });
+});
+
+test('only the reviewer role harness may resolve review threads; a worker may not', () => {
+  const shared = { kind: 'claude', cliPath: '/gy/bin/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', credentialHome: '/creds', credentialDirectories: [], root: '/repo' };
+  const rule = 'Bash(node /repo/scripts/resolve-thread.mjs:*)';
+  const reviewer = sessionHarnessPlan({ ...shared, role: 'reviewer', pr: 42 });
+  assert.ok(reviewer.allow.some(entry => entry.rule === rule));
+  assert.equal(harnessDecision(reviewer, 'node /repo/scripts/resolve-thread.mjs PRRT_kwDOabc123').decision, 'allow');
+  assert.equal(harnessDecision(reviewer, 'gh api graphql -f query=mutation').decision, 'deny', 'the wrapper is the only GraphQL path');
+  const worker = sessionHarnessPlan({ ...shared, role: 'worker', branch: 'graphyard/gy-42-1' });
+  assert.ok(!worker.allow.some(entry => entry.rule.includes('resolve-thread')));
+  assert.notEqual(harnessDecision(worker, 'node /repo/scripts/resolve-thread.mjs PRRT_kwDOabc123').decision, 'allow');
+  assert.ok(!sessionHarnessPlan({ ...shared, role: 'producer' }).allow.some(entry => entry.rule.includes('resolve-thread')));
 });
 
 test('master review mints a private session credential, records the request, and closes on the verdict', async () => {

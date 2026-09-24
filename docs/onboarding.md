@@ -90,8 +90,11 @@ For worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots a
 ```sh
 node "$GRAPHYARD_CLI" master init --url https://YOUR-GRAPHYARD-HOST --herdr-workspace HERDR_WORKSPACE_ID \
   --browser-profile Default --token-stdin < ~/.config/graphyard/INSTALL/tokens/INSTALL-master.token
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # installs the executors now that .graphyard/master.json exists
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
+
+The second `init` writes `.graphyard/executors.json` and installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances that claim each item's next action; skipping it leaves typed actions (resync, reclaim) unserved.
 
 Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. `master start claude` also writes the harness rules. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation, and `master review GY-1` is the recovery path.
 
