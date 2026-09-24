@@ -204,12 +204,9 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
           'workspaces', COALESCE(a.work->'workspaces','[]'::jsonb),
           'lastAssignment', a.work->'lastAssignment',
           'lease', a.work->'lease')
-        FROM (
-          SELECT e.payload->'work' AS work FROM events e
-          WHERE e.work_id=d.work_id AND e.payload ? 'work'
-            AND e.payload->'work'->>'revision' = d.work->'delivery'->>'authorizationRevision'
-          ORDER BY e.seq DESC LIMIT 1
-        ) a) END AS authorized_work,
+        -- An exact index probe for the full snapshot, else the delta row near its base
+        -- (store/snapshot-delta.ts: graphyard_work_at_revision).
+        FROM (SELECT graphyard_work_at_revision(d.work_id, d.work->'delivery'->>'authorizationRevision') AS work) a WHERE a.work IS NOT NULL) END AS authorized_work,
       production.production_at, production.production_matches::int, production.superseded_matches::int,
       verification.verified_at, verification.verified_sha
     FROM ranked d
@@ -253,11 +250,10 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
     -- the ledger walk runs solely for the few items that carry one instead of reading the
     -- whole history of every unverified delivery in the window.
     LEFT JOIN LATERAL (
-      SELECT graphyard_instant(e.payload->'work'->'delivery'->'deployment'->>'at') AS verified_at,
-        e.payload->'work'->'delivery'->'deployment'->>'sha' AS verified_sha
-      FROM events e
-      WHERE e.work_id=d.work_id AND e.kind='deployment'
-        AND lower(e.payload->'work'->'delivery'->'deployment'->>'mergeSha')=lower(d.work->'delivery'->>'mergeSha')
+      SELECT graphyard_instant(e.work->'delivery'->'deployment'->>'at') AS verified_at,
+        e.work->'delivery'->'deployment'->>'sha' AS verified_sha
+      FROM (SELECT seq, graphyard_event_work(work_id, payload) AS work FROM events WHERE work_id=d.work_id AND kind='deployment') e
+      WHERE lower(e.work->'delivery'->'deployment'->>'mergeSha')=lower(d.work->'delivery'->>'mergeSha')
         AND (SELECT wi.document->'delivery'->'deployment' IS NOT NULL FROM work_items wi WHERE wi.id=d.work_id)
       ORDER BY e.seq DESC LIMIT 1
     ) verification ON true

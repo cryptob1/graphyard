@@ -32,7 +32,7 @@ async function readRules(services: Services, work: Work): Promise<RulesSource> {
   }
 }
 
-const detailsColumn = "CASE WHEN payload ? 'details' THEN payload->'details' ELSE payload - 'work' END AS details";
+const detailsColumn = "CASE WHEN payload ? 'details' THEN payload->'details' ELSE payload - 'work' - 'delta' END AS details";
 const row = (entry: any): LedgerRow => ({ seq: String(entry.seq), at: new Date(entry.created_at).toISOString(), actor: entry.actor, kind: entry.kind, details: entry.details ?? null });
 
 export async function readEscalationContext(services: Services, actor: Principal, id: string, params: URLSearchParams, env: NodeJS.ProcessEnv = process.env) {

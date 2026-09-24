@@ -43,15 +43,16 @@ export interface InterventionLedgerRow {
 type Db = { query: pg.Pool['query'] };
 /** A provider or ledger instant in the one form the report compares: ISO with milliseconds. */
 const instant = (value: unknown, fallback: string) => { const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback; };
-const ledgerColumns = `seq, work_id, actor, kind, created_at, payload->'work'->>'updatedAt' AS updated_at, payload->'details' AS details,
+// A row stored as a delta (store/snapshot-delta.ts) is read as the document it stands for: `doc`.
+const ledgerColumns = `seq, work_id, actor, kind, created_at, doc->>'updatedAt' AS updated_at, payload->'details' AS details,
   CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
-  CASE WHEN payload ? 'work' THEN jsonb_build_object('key', payload->'work'->'key', 'stage', payload->'work'->'stage', 'title', payload->'work'->'title', 'epoch', payload->'work'->'epoch', 'blocker', payload->'work'->'blocker',
-    'plannedFiles', payload->'work'->'plannedFiles', 'quarantine', payload->'work'->'containmentQuarantine', 'escalations', payload->'work'->'escalations', 'candidate', payload->'work'->'candidate', 'submission', payload->'work'->'submission') ELSE NULL END AS work,
-  CASE WHEN work_id IS NULL THEN NULL ELSE (SELECT earlier.payload->'work'->>'stage' FROM events earlier WHERE earlier.work_id=events.work_id AND earlier.seq<events.seq AND earlier.payload ? 'work' ORDER BY earlier.seq DESC LIMIT 1) END AS stage_before`;
+  CASE WHEN doc IS NOT NULL THEN jsonb_build_object('key', doc->'key', 'stage', doc->'stage', 'title', doc->'title', 'epoch', doc->'epoch', 'blocker', doc->'blocker',
+    'plannedFiles', doc->'plannedFiles', 'quarantine', doc->'containmentQuarantine', 'escalations', doc->'escalations', 'candidate', doc->'candidate', 'submission', doc->'submission') ELSE NULL END AS work,
+  CASE WHEN work_id IS NULL THEN NULL ELSE (SELECT graphyard_event_work(earlier.work_id, earlier.payload)->>'stage' FROM events earlier WHERE earlier.work_id=ledger.work_id AND earlier.seq<ledger.seq AND (earlier.payload ? 'work' OR earlier.payload ? 'delta') ORDER BY earlier.seq DESC LIMIT 1) END AS stage_before`;
 /** The newest `limit` rows of the kinds the fold reads, in ledger order. */
 export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
   const limit = options.limit ?? interventionLedgerLimit;
-  const result = await db.query(`SELECT ${ledgerColumns} FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
+  const result = await db.query(`SELECT ${ledgerColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM (SELECT * FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2) newest) ledger ORDER BY seq DESC`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
   const truncated = result.rows.length > limit;
   // A row written with the document carries the transaction instant the document's own
   // timestamps use (`updatedAt`); a raw row has only its insertion instant.

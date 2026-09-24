@@ -18,7 +18,7 @@ Text equivalent of the diagram: agent sessions (violet), the dashboard (amber) a
 - `jobs` is the durable integration queue, created with PR submission and processed with `FOR UPDATE SKIP LOCKED`; GitHub calls happen outside coordination transactions.
 - Release, delivery and validation tables support [delivery](delivery.md) and [recovery](recovery.md); `flow_facts`, `deployment_observations` and the [attribution](attribution.md) tables feed analytics only and never gates.
 
-Triggers reject updates and deletes to the event ledger — an application audit guarantee, not tamper-proofing against a database administrator. A `github.observed` or `heartbeat` row that changes only a clock stores `payload.delta` — the `base` full snapshot's seq and those clocks — instead of the whole document; every other kind keeps `payload.work`.
+Triggers reject updates and deletes to the event ledger — an application audit guarantee, not tamper-proofing against a database administrator. A save whose change from the item's last full snapshot is small stores `payload.delta` (`base` seq and edits) instead of the document; full snapshots recur every 50 rows and at stage changes.
 
 ## Coordination transactions
 

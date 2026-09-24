@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
+import { Store, snapshotBaseSql } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
@@ -144,7 +144,8 @@ test('integration:timeline-backfill — items delivered before the timeline exis
   }
   const embedded = (await store.pool.query('SELECT avg(pg_column_size(payload))::int AS bytes FROM events WHERE work_id=$1', [legacy.id])).rows[0].bytes;
   assert.ok(embedded > 1000, 'whereas the payload each of those rows carries is a whole document');
-  assert.equal(locked.filter(text => /FROM events\b/.test(text)).length, 0, 'the coordination lock is never held while the ledger is read');
+  // Beyond the save's own probe for the snapshot its delta extends (store/snapshot-delta.ts).
+  assert.equal(locked.filter(text => /FROM events\b/.test(text) && text !== snapshotBaseSql).length, 0, 'the coordination lock is never held while the ledger is read');
   assert.ok(locked.some(text => /INSERT INTO events/.test(text)), 'only the short write runs under it');
   const state = pipelineBackfillState();
   assert.equal(state.lastError, null);

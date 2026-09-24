@@ -4,7 +4,7 @@ import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { migration } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
-import { appendSave } from './snapshot-delta.js';
+import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 
 export * from './snapshot-delta.js';
 
@@ -48,7 +48,8 @@ export class Store {
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
   }
   async events(id?: string) {
-    return (await this.pool.query('SELECT * FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300', [id ?? null])).rows;
+    // A delta row reads as the full row it stands for (snapshot-delta.ts).
+    return (await this.pool.query(`SELECT seq, work_id, actor, kind, ${resolvedPayloadSql()} AS payload, created_at FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300`, [id ?? null])).rows;
   }
   /**
    * Claim the next due job. `woken` says the claim follows a webhook delivery (the generation
@@ -135,6 +136,6 @@ export async function save(db: pg.PoolClient, work: Work, actor: string, kind: s
   work.revision++;
   work.updatedAt = now.toISOString();
   await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
-  // Routine rows that change only a clock are stored as a delta on the last full snapshot.
+  // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
   await appendSave(db, work, actor, kind, details);
 }

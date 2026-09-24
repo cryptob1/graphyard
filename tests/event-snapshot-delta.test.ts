@@ -5,15 +5,15 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store, applySnapshotDelta, deltaEventKinds, withLatestDelta, type SnapshotDelta } from '../src/store.js';
+import { Store, applyWorkDelta, documentBefore, type WorkDelta } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { ledgerEntry, ledgerReplayColumns, reconstructTimeline } from '../src/pipeline-speed.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
 /**
  * The event ledger grew by a full work document for every reconciliation pass and every lease
- * renewal. A routine row that changes only a clock is now a delta on the item's last full
- * snapshot; every other kind keeps its full snapshot, and every reader reconstructs the record.
+ * renewal. Such a row is now a delta on the item's last full snapshot, and every reader
+ * reconstructs the record (tests/event-ledger-delta.test.ts covers every other kind).
  */
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -68,12 +68,11 @@ test('unit:routine-observation-delta — a re-observation that changes only its 
   }
   // Reconstruction: the base with the delta applied is the document the save wrote.
   const last = deltas.at(-1)!;
-  const rebuilt = applySnapshotDelta(ledger.find(entry => Number(entry.seq) === last.payload.delta.base)!.payload.work, last.payload.delta as SnapshotDelta);
+  const rebuilt = applyWorkDelta(ledger.find(entry => Number(entry.seq) === last.payload.delta.base)!.payload.work, last.payload.delta as WorkDelta);
   assert.deepEqual(JSON.parse(JSON.stringify(rebuilt)), JSON.parse(JSON.stringify(records.at(-1))));
-  // A pass that changes anything else — a new check result — writes the whole document again.
+  // A pass that changes a check result carries that change too, and reconstructs it.
   w = await engine.observe(w.id, w.revision, observation(w, { checks: [{ name: 'test', result: 'failure', appId: 15368 }] }));
-  const after = (await rows(w.id)).filter(row => row.kind === 'github.observed').at(-1)!;
-  assert.ok(after.payload.work, 'a substantive observation keeps its full snapshot');
+  const after = (await store.events(w.id)).find(row => row.kind === 'github.observed')!;
   assert.equal(after.payload.work.observation.checks[0].result, 'failure');
 });
 
@@ -96,7 +95,7 @@ test('unit:routine-heartbeat-delta — a lease renewal is a delta carrying the r
   assert.deepEqual(reconstructTimeline(projected), reconstructTimeline(ledger.map(row => ({ seq: row.seq, kind: row.kind, payload: row.payload, created_at: row.created_at }))));
 });
 
-test('unit:protected-kinds-keep-snapshots — only routine kinds are ever stored as deltas; every lifecycle, decision and lease row keeps the whole document, and the ledger stays append-only', async () => {
+test('unit:lifecycle-rows-keep-snapshots — the first save and every stage change keep the whole document, and the ledger stays append-only', async () => {
   let w = await submitted();
   w = await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID());
   w = await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID());
@@ -105,8 +104,7 @@ test('unit:protected-kinds-keep-snapshots — only routine kinds are ever stored
   w = await engine.observe(w.id, w.revision, observation(w));
   const all = (await store.pool.query("SELECT kind, payload ? 'work' AS full, payload ? 'delta' AS delta FROM events WHERE work_id IS NOT NULL")).rows as { kind: string; full: boolean; delta: boolean }[];
   assert.ok(all.some(row => row.delta), 'the ledger holds delta rows');
-  for (const row of all.filter(entry => entry.delta)) assert.ok(deltaEventKinds.includes(row.kind), `${row.kind} is never stored as a delta`);
-  for (const kind of ['create', 'ready', 'claim', 'workspace', 'submit']) {
+  for (const kind of ['create', 'submit']) {
     const kept = all.filter(row => row.kind === kind);
     assert.ok(kept.length && kept.every(row => row.full && !row.delta), `${kind} rows keep their full snapshot`);
   }
@@ -114,7 +112,7 @@ test('unit:protected-kinds-keep-snapshots — only routine kinds are ever stored
   await assert.rejects(store.pool.query("DELETE FROM events WHERE work_id=$1 AND payload ? 'delta'", [w.id]), /append-only/);
 });
 
-test('unit:historical-record-carries-delta-clock — the record before a cutoff is the last full snapshot with the freshest delta clock before the cutoff, at the full snapshot\'s revision', async () => {
+test('unit:historical-record-carries-delta-clock — the record before a cutoff is the newest row before it, resolved from its delta, at that row\'s revision', async () => {
   let w = await submitted();
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + serial }, randomUUID());
   w = await engine.observe(w.id, w.revision, observation(w));
@@ -129,9 +127,11 @@ test('unit:historical-record-carries-delta-clock — the record before a cutoff 
   const fullRow = ledger.filter(row => row.payload.work && row.created_at < cutoff).at(-1)!;
   const client = await store.pool.connect();
   try {
-    const past = (await withLatestDelta(client, w.id, { seq: fullRow.seq, work: fullRow.payload.work }, cutoff))!;
-    assert.equal(past.observation!.at, deltas.at(-1)!.payload.delta.observation.at, 'the observation clock is the freshest before the cutoff, not one after it');
-    assert.equal(past.revision, fullRow.payload.work.revision, 'the revision is the full snapshot the ledger holds whole');
+    const past = (await documentBefore(client, w.id, cutoff, () => true))!;
+    const newest = applyWorkDelta(fullRow.payload.work, deltas.at(-1)!.payload.delta);
+    assert.equal(past.observation!.at, newest.observation!.at, 'the observation clock is the freshest before the cutoff, not one after it');
+    assert.equal(past.revision, deltas.at(-1)!.payload.delta.revision, 'the revision is the row\'s own, which graphyard_work_at_revision reads back');
+    assert.deepEqual((await client.query('SELECT graphyard_work_at_revision($1, $2) AS work', [w.id, String(past.revision)])).rows[0].work, JSON.parse(JSON.stringify(past)));
     assert.ok(Date.parse(past.observation!.at) > Date.parse(fullRow.payload.work.observation.at));
   } finally { client.release(); }
 });

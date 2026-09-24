@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { z } from 'zod';
 import { demand } from './model.js';
+import { resolvedPayloadSql } from './store/snapshot-delta.js';
 
 /**
  * Reading an item's history.
@@ -96,7 +97,7 @@ export function eventHistorySql(query: EventHistoryQuery): Sql {
   if (query.since) where.push(`created_at>=${param(query.since)}::timestamptz`);
   if (query.until) where.push(`created_at<${param(query.until)}::timestamptz`);
   if (query.cursor) where.push(`seq${query.order === 'asc' ? '>' : '<'}${param(query.cursor)}::bigint`);
-  const columns = query.payload === 'none' ? '' : query.payload === 'details' ? ", payload->'details' AS details" : ', payload';
+  const columns = query.payload === 'none' ? '' : query.payload === 'details' ? ", payload->'details' AS details" : `, ${resolvedPayloadSql()} AS payload`;
   // One row beyond the page proves whether another page exists without a second count.
   return { text: `SELECT seq,work_id,actor,kind,created_at${columns} FROM events${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY seq ${query.order === 'asc' ? 'ASC' : 'DESC'} LIMIT ${param(query.limit + 1)}`, values };
 }

@@ -254,7 +254,9 @@ export async function projectFlow(store: Store, options: { batch?: number; batch
       await db.query('BEGIN');
       if (!(await db.query('SELECT pg_try_advisory_xact_lock(71490322) AS ok')).rows[0].ok) { await db.query('ROLLBACK'); break; }
       checkpoint = Number((await db.query('SELECT last_event FROM flow_projection WHERE id=1 FOR UPDATE')).rows[0]?.last_event ?? 0);
-      const events: LedgerEvent[] = (await db.query('SELECT seq,work_id,actor,kind,payload,created_at FROM events WHERE seq>$1 AND work_id IS NOT NULL ORDER BY seq LIMIT $2', [checkpoint, batch])).rows;
+      const events: LedgerEvent[] = (await db.query(`SELECT seq,work_id,actor,kind,created_at,
+        CASE WHEN payload ? 'delta' THEN (payload - 'delta') || jsonb_build_object('work', graphyard_event_work(work_id, payload)) ELSE payload END AS payload
+        FROM events WHERE seq>$1 AND work_id IS NOT NULL ORDER BY seq LIMIT $2`, [checkpoint, batch])).rows;
       if (!events.length) { await db.query('COMMIT'); break; }
       const ids = [...new Set(events.map(e => e.work_id))];
       const states = new Map<string, ProjectionState>((await db.query('SELECT work_id,state FROM flow_projection_state WHERE work_id=ANY($1) FOR UPDATE', [ids])).rows.map(r => [r.work_id, r.state]));

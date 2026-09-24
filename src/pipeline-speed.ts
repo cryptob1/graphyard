@@ -117,7 +117,7 @@ const instant = (value: Date | string) => value instanceof Date ? value : new Da
  * whole is a document; read this way it is a few hundred bytes whatever the item has grown to.
  */
 export const ledgerReplayColumns = `seq, kind, created_at, (payload->'work') IS NOT NULL OR (payload->'delta') IS NOT NULL AS has_work,
-  COALESCE(payload->'work'->>'updatedAt', payload->'delta'->>'updatedAt') AS updated_at, COALESCE(payload->'work'->'lease', payload->'delta'->'lease') AS lease, payload->'work'->'submission' AS submission,
+  COALESCE(payload->'work'->>'updatedAt', payload->'delta'->>'updatedAt') AS updated_at, COALESCE(payload->'work'->'lease', payload->'delta'->'lease') AS lease, COALESCE(payload->'work'->'submission', payload->'delta'->'submission') AS submission,
   payload->'details'->>'at' AS detail_at, payload->'details'->'epoch' AS detail_epoch, payload->'details'->'pr' AS detail_pr,
   COALESCE(payload->'details'->>'reason','') <> '' AS detail_reason`;
 /** A projected row (`ledgerReplayColumns`) in the shape the replay reads. */
@@ -157,10 +157,10 @@ export function timelineReplay(resume?: ReplayState | null) {
   const from = resume ? structuredClone(resume) : null;
   const shadow = { pipeline: from?.timeline ?? emptyTimeline(), lease: from?.lease ?? null, submission: from?.submission ?? null } as unknown as Work;
   const apply = (event: LedgerEntry) => {
-    // A routine delta row (store/snapshot-delta.ts) changed nothing but clocks: its lease deadline
-    // and `updatedAt` are what the replay reads from it, and the submission is the base's.
+    // A delta row (store/snapshot-delta.ts) carries the three fields the replay reads; one written
+    // before deltas carried `submission` changed nothing but clocks.
     const delta = event.payload?.delta;
-    const snapshot: Work | undefined = event.payload?.work ?? (delta ? { updatedAt: delta.updatedAt, lease: delta.lease ?? null, submission: null } as unknown as Work : undefined);
+    const snapshot: Work | undefined = event.payload?.work ?? (delta ? { updatedAt: delta.updatedAt, lease: delta.lease ?? null, submission: delta.submission ?? null } as unknown as Work : undefined);
     const details = event.payload?.details ?? {};
     // The instant the command decided, not the instant its row reached the table: a saved
     // document stamps `updatedAt` from the transaction clock, and a raw ledger entry carries its

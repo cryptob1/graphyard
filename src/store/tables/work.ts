@@ -1,4 +1,5 @@
 import { appendOnly, defineTable } from '../tables.js';
+import { eventWorkFunctions } from '../snapshot-delta.js';
 
 /** Work aggregates, their immutable history, and the durable integration jobs behind them. */
 export const workItems = defineTable({
@@ -15,6 +16,9 @@ export const events = defineTable({
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX IF NOT EXISTS events_work ON events(work_id,seq);
+-- The ledger's recent growth by kind (eventStats) is a range read on insertion time.
+CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
+${eventWorkFunctions}
 ${appendOnly('events')}`,
 });
 export const receipts = defineTable({

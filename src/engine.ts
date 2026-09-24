@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { Store, save, wakeJob, withLatestDelta } from './store.js';
+import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
@@ -179,8 +179,8 @@ function retainQuarantineFence(work: Work) {
 // `--previous-worker-stopped` rework or recovery. They are read back from there, never from a
 // client, so the classification rests on what was recorded when it happened.
 export async function readAttestations(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, workId: string): Promise<Attestation[]> {
-  const rows = (await db.query("SELECT seq, actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind IN ('blocked','rework','recover') ORDER BY seq", [workId])).rows;
-  return attestationsFromLedger(rows.map(row => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), details: row.payload?.details, workEpoch: row.payload?.work?.epoch })));
+  const rows = (await db.query(`SELECT seq, actor, kind, payload->'details' AS details, ${eventWorkSql()}->'epoch' AS work_epoch, created_at FROM events WHERE work_id=$1 AND kind IN ('blocked','rework','recover') ORDER BY seq`, [workId])).rows;
+  return attestationsFromLedger(rows.map(row => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), details: row.details ?? undefined, workEpoch: row.work_epoch ?? undefined })));
 }
 /**
  * Apply this repository's scope rule to an open request and record what it decided (GY-85).
@@ -1669,7 +1669,7 @@ export class Engine {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
-        const acquired = (await db.query("SELECT payload->'work'->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        const acquired = (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1`, [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
         const boundedExecution = activeExecution ?? acquired ?? null;
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
@@ -1707,10 +1707,9 @@ export class Engine {
         // repository clock still counts, but that allowance admits no post-merge record (GY-94):
         // a snapshot whose own observation already reports this pull request merged was written
         // after the merge, whatever its timestamp, and carries the merge's consequences.
-        // A routine row written on that snapshot carries only its clocks (store/snapshot-delta.ts);
-        // the freshest of them before the cutoff is the observation the record then held.
-        const past = authorizedSnapshot ? undefined : await withLatestDelta(db, id, (await db.query(`SELECT seq, payload->'work' AS work FROM events WHERE work_id=$1 AND created_at<$2 AND payload ? 'work'
-          AND NOT COALESCE((payload->'work'->'observation'->>'merged')::boolean AND (payload->'work'->'observation'->'candidate'->>'pr')::int=$3, false) ORDER BY seq DESC LIMIT 1`, [id, new Date(cutoff), observation.candidate.pr])).rows[0], new Date(cutoff));
+        // A row stored as a delta (store/snapshot-delta.ts) is read as the document it stands for.
+        const past = authorizedSnapshot ? undefined : await documentBefore(db, id, new Date(cutoff),
+          record => !(record.observation?.merged && record.observation.candidate?.pr === observation.candidate.pr));
         const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
         if (!authorizedSnapshot && past && executionValid && !historical.length) {
           authorizedSnapshot = past; authorizationRevision = boundedExecution?.authorizationRevision ?? past.revision;
