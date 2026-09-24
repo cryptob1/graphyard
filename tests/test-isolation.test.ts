@@ -73,7 +73,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 test('holds its database port', async () => {
   assert.deepEqual(Object.keys(process.env).filter(name => /^(GRAPHYARD|HERDR)_/.test(name)).sort(), ['GRAPHYARD_EVENTS_TEST_PORT', 'GRAPHYARD_TEST_PORT']);
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 7;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT) + 7;
   const server = createServer();
   await new Promise<void>((ok, fail) => { server.once('error', fail); server.listen({ port, host: '127.0.0.1', exclusive: true }, () => ok()); });
   await new Promise(done => setTimeout(done, 1500));
