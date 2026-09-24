@@ -460,6 +460,15 @@ export const closeKey = (profile: WorkerProfile, pane: string) => `close:${profi
 export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>) => `decision:${decision.action}:${work.id}:${decision.binding}:${work.policyRevision}`;
 /** One decision per request: the instant the worker recorded it identifies the ask. */
 export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${request.epoch}:${request.at}`;
+/**
+ * The requirements revision that widens `work` by `paths` in answer to `request`. It names the
+ * request it answers, so the control plane refuses it once a claim or a lease end has cleared that
+ * request while the loop was still reading the findings it is grounded on.
+ */
+export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => ({
+  expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
+  plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
+  reason, answers: { epoch: request.epoch, at: request.at } });
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -1271,8 +1280,11 @@ export interface DaemonEffects {
   reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
   /** Whether a file exists on the base branch in this checkout. */
   baseHasPath?: (path: string) => Promise<boolean>;
-  /** The master's own additive scope widening — the revision `master scope` applies — with its audited reason. */
-  widenScope?: (work: Work, paths: string[], reason: string) => Promise<unknown>;
+  /**
+   * The master's own additive scope widening — the revision `master scope` applies — with its
+   * audited reason, bound to the scope request it answers (`answeringWidening`).
+   */
+  widenScope?: (work: Work, request: ScopeRequestState, paths: string[], reason: string) => Promise<unknown>;
   merge: (work: Work) => Promise<unknown>;
   /**
    * The deployed release and which deliveries it serves. The containment the previous observation
@@ -1662,6 +1674,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //     policy revision; anything the findings do not name stays refused and escalated. Findings
   //     change while the request and revision stand — a bot's thread lands after the refusal — so
   //     a refusal on the findings is judged again every findingRecheckMs, never cached for good.
+  //     The reads take seconds; the widening names the request it answers, so a claim or lease
+  //     end that clears that request meanwhile makes the control plane refuse it, never apply it.
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<boolean> => {
     if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return false;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return false;
@@ -1688,7 +1702,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
         `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
-      await effects.widenScope(item, paths, reason);
+      await effects.widenScope(item, request, paths, reason);
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: `Widened ${item.key} with ${paths.join(', ')} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`, attempts, cycle: state.cycle }, now(), effects.persist));
       return true;
     } catch (error) {
@@ -2882,8 +2896,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     baseHasPath: path => baseHasPath(root, current().baseBranch, path, run),
     get widenScope() {
-      return current().operatorAgent ? async (work: Work, paths: string[], reason: string) => asOperatorAgent('POST', `work/${work.id}/requirements`, { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
-        plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason }) : undefined;
+      return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
+        asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;
     },
     requestProof: async work => {
       const config = current();

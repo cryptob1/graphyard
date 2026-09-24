@@ -10,9 +10,9 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
-import { emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
+import { emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, answeringWidening, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker } from '../src/model/scope.js';
+import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { baseHasPath, findingScope, namesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
@@ -375,10 +375,9 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   const state = emptyDaemonState(loopConfig());
   const widened: { paths: string[]; reason: string }[] = [];
   const findings = [{ ground: 'review thread PRRT_finding01', text: 'Not fixed: `src/merge-queue.ts:85-97` still marks every item with blocking threads; see also src/cli/master-status.ts:128.' }];
-  const widen = async (item: Work, paths: string[], reason: string) => {
+  const widen = async (item: Work, asked: ScopeRequestState, paths: string[], reason: string) => {
     widened.push({ paths, reason });
-    return ok(master.token, 'POST', `work/${item.id}/requirements`, { expectedPolicyRevision: item.policyRevision, criteria: item.criteria, dependencies: item.dependencies,
-      plannedFiles: [...new Set([...item.plannedFiles, ...paths])], exclusiveResources: item.exclusiveResources ?? [], producerProofs: item.producerProofs ?? [], reason });
+    return ok(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
   };
   const overrides: Partial<DaemonEffects> = { reviewFindings: async () => findings, baseHasPath: async path => path !== 'src/new-helper.ts', widenScope: widen };
 
@@ -418,6 +417,48 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.equal(widened.length, 2, 'a finding posted after the refusal widens the request');
   assert.ok(work.plannedFiles.includes('src/server/routes/work.ts'));
   assert.match(widened[1].reason, /PRRT_later02/);
+
+  // The reads take seconds. The asking attempt can lose its lease while they run — released, lapsed
+  // or overtaken by a new claim — without a new policy revision, so the widening decided on them
+  // answers an attempt that no longer stands: it is refused in its own transaction, nothing widens.
+  let raced = await claimed('lease ends during the finding reads');
+  await request(raced, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const stale = (await reload(raced.id)).scopeRequest!;
+  const attempted: string[] = [];
+  const racing: Partial<DaemonEffects> = {
+    reviewFindings: async item => {
+      if (item.id === raced.id && item.lease) await engine.execute(implementer, 'release', raced.id, { epoch: raced.epoch }, randomUUID());
+      return findings;
+    },
+    baseHasPath: async () => true,
+    widenScope: async (item, asked, paths, reason) => {
+      attempted.push(item.id);
+      const answer = await call(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
+      if (answer.status !== 200) throw new Error(answer.body.error ?? JSON.stringify(answer.body));
+      return answer.body;
+    },
+  };
+  await cycle(state, racing);
+  raced = await reload(raced.id);
+  assert.deepEqual(attempted, [raced.id], `the loop tried to widen on the stale reads: ${JSON.stringify(Object.entries(state.actions).filter(([key]) => key.includes(raced.id)))}`);
+  assert.ok(!raced.plannedFiles.includes('src/merge-queue.ts'), `not widened: ${raced.plannedFiles}`);
+  assert.equal(raced.lease, null);
+  const refused = state.actions[`${scopeKey(raced, stale)}:finding:${raced.policyRevision}`];
+  assert.equal(refused.state, 'failed');
+  assert.match(refused.detail, /no longer open|no longer holds the lease/);
+  // A request that no longer stands — withdrawn, or asked afresh — is refused the same way, however live the lease.
+  let asked = await claimed('request asked afresh during the finding reads');
+  await request(asked, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const first = (await reload(asked.id)).scopeRequest!;
+  await request(asked, { paths: ['src/merge-queue.ts', 'src/cli/master-status.ts'], reason: 'Both files the finding names' });
+  asked = await reload(asked.id);
+  assert.notEqual(asked.scopeRequest!.at, first.at);
+  const superseded = await call(master.token, 'POST', `work/${asked.id}/requirements`, answeringWidening(asked, first, ['src/merge-queue.ts'], 'stale request'));
+  assert.notEqual(superseded.status, 200);
+  assert.match(JSON.stringify(superseded.body), /scope request this widening answers is no longer open/);
+  const answered = await call(master.token, 'POST', `work/${asked.id}/requirements`, answeringWidening(asked, asked.scopeRequest!, ['src/merge-queue.ts', 'src/cli/master-status.ts'], 'the open request'));
+  assert.equal(answered.status, 200, JSON.stringify(answered.body));
+  assert.ok(answered.body.lease, 'the attempt keeps its lease');
 });
 
 test('unit:review-finding-scope — only a file a finding names literally is granted; a directory, a longer path, or a missing file the finding does not ask to create is not', async () => {
