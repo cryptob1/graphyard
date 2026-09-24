@@ -135,7 +135,9 @@ export class ProductionWatch {
       if (row.kind === INCIDENT_EVENT && row.payload?.incident) this.incidents.set(row.work_id, row.payload.incident as ProductionIncident);
     }
     const since = new Date(this.now - (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS) - 86_400_000).toISOString();
-    const contained = (await this.store.pool.query('SELECT work_id, payload FROM events WHERE kind=$1 AND created_at >= $2 ORDER BY seq DESC LIMIT 5000', [CONTAINED_EVENT, since])).rows;
+    // Every containment record in the window, newest per item and with no cap: a record left out
+    // would be compared and recorded again, and the duplicate could crowd out another on a later restart.
+    const contained = (await this.store.pool.query('SELECT DISTINCT ON (work_id) work_id, payload FROM events WHERE kind=$1 AND created_at >= $2 AND work_id IS NOT NULL ORDER BY work_id, seq DESC', [CONTAINED_EVENT, since])).rows;
     for (const row of contained) if (row.work_id && typeof row.payload?.serving === 'string' && !this.deployedIn.has(row.work_id)) this.deployedIn.set(row.work_id, row.payload.serving);
     this.loaded = true;
     this.report.incidents = this.openIncidents();
@@ -156,7 +158,7 @@ export class ProductionWatch {
         : await github.request(`/compare/${mergeSha}...${serving}`).then(comparison => comparison?.status === 'ahead' || comparison?.status === 'identical');
     } catch { return null; }
   }
-  /** How far the base branch is ahead of `serving`: only the count is read, never the commit or file lists. */
+  /** How far the base branch is ahead of `serving`: only the count is read, never the commit or file lists (the adapter's `aheadBy` skips the file-bearing first page). */
   private async aheadBy(serving: string): Promise<number> {
     const github = this.options.github!, base = this.options.baseBranch;
     if (github.aheadBy) return github.aheadBy(serving, base);

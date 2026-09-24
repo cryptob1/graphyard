@@ -709,9 +709,13 @@ export class GitHub {
     }
     return contained;
   }
-  /** How many commits `head` holds that `base` does not: one compare page of one commit, and only the count is read. */
+  /**
+   * How many commits `head` holds that `base` does not. GitHub puts the changed-file list on the
+   * first compare page whatever `per_page` says, so the second one-commit page is asked for: it
+   * carries `ahead_by` and neither the file list nor more than one commit.
+   */
   async aheadBy(base: string, head: string): Promise<number> {
-    const comparison = await this.request(`/compare/${base}...${encodeURIComponent(head)}?per_page=1`);
+    const comparison = await this.request(`/compare/${base}...${encodeURIComponent(head)}?per_page=1&page=2`);
     demand(typeof comparison?.ahead_by === 'number', `GitHub did not report how far ${head} is ahead of ${base.slice(0, 12)}`, 502);
     return comparison.ahead_by;
   }

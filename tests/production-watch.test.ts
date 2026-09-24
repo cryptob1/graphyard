@@ -20,8 +20,9 @@ function memoryStore(work: Work[]) {
   const events: { seq: number; work_id: string; kind: string; payload: any }[] = [];
   const pool = { async query(sql: string, params: any[] = []) {
     if (sql.startsWith('INSERT INTO events')) { events.push({ seq: events.length + 1, work_id: params[0], kind: params[2], payload: JSON.parse(params[3]) }); return { rows: [] }; }
-    if (sql.includes('kind IN ($1,$2)')) return { rows: events.filter(row => row.kind === params[0] || row.kind === params[1]).reverse() };
-    if (sql.includes('kind=$1')) return { rows: events.filter(row => row.kind === params[0]).reverse() };
+    const limit = Number(sql.match(/LIMIT (\d+)/)?.[1] ?? Infinity);
+    if (sql.includes('kind IN ($1,$2)')) return { rows: events.filter(row => row.kind === params[0] || row.kind === params[1]).reverse().slice(0, limit) };
+    if (sql.includes('kind=$1')) return { rows: events.filter(row => row.kind === params[0]).reverse().slice(0, limit) };
     throw new Error(`unexpected query ${sql}`);
   } };
   return { store: { pool, list: async () => work } as unknown as Store, events };
@@ -88,14 +89,25 @@ test('unit:containment-monotonic — over 150 delivered items a new serving SHA 
   github.compares.length = 0; clock += 61_000;
   await restarted.tick();
   assert.deepEqual(github.compares.filter(path => !isAheadBy(path)), []);
+
+  // A restart restores every containment record in the window, however many there are: with more
+  // than 5,000 contained deliveries none is compared or recorded again.
+  const many = delivered(6_000), ledger = memoryStore(many), wide = linearGitHub(6_000);
+  for (const item of many) ledger.events.push({ seq: ledger.events.length + 1, work_id: item.id, kind: CONTAINED_EVENT, payload: { key: item.key, mergeSha: item.delivery!.mergeSha, serving: sha(6_000) } });
+  const large = await new ProductionWatch(ledger.store, { provider: serving(sha(6_000)), github: wide, build: buildIdentity({}), baseBranch: 'main', windowMs: 60 * 86_400_000, now: () => T0 }).tick();
+  assert.equal(large.deployed.length, 6_000);
+  assert.deepEqual(wide.compares.filter(path => !isAheadBy(path)), [], 'no restored delivery is compared again');
+  assert.equal(ledger.events.length, 6_000, 'no containment is recorded twice');
 });
 
 test('unit:ahead-by-minimal — the ahead-by read asks GitHub for the count only: one commit per page, no commit or file lists read', async () => {
   const adapter = new GitHub({ repository: 'owner/project', base: 'main', appId: 1, installationId: 2, privateKey: 'not-used' });
   const requests: string[] = [];
+  // As GitHub answers: the counts on every page, the changed-file list only on the first.
   adapter.request = async (path: string) => {
     requests.push(path);
-    return { status: 'ahead', ahead_by: 7, total_commits: 7, commits: [{ sha: sha(99), commit: { message: 'x' } }], files: [{ filename: 'src/a.ts' }] };
+    const page = Number(new URL(path, 'https://api.github.com').searchParams.get('page') ?? 1);
+    return { status: 'ahead', ahead_by: 7, total_commits: 7, commits: page <= 7 ? [{ sha: sha(99), commit: { message: 'x' } }] : [], ...(page === 1 ? { files: [{ filename: 'src/a.ts' }] } : {}) };
   };
   const work = delivered(1);
   const { store } = memoryStore(work);
@@ -104,10 +116,11 @@ test('unit:ahead-by-minimal — the ahead-by read asks GitHub for the count only
   const ahead = requests.filter(path => path.startsWith(`/compare/${sha(40)}...main`));
   assert.equal(ahead.length, 1, 'one ahead-by read per pass');
   const parameters = new URL(ahead[0], 'https://api.github.com').searchParams;
-  assert.deepEqual([...parameters.entries()], [['per_page', '1']], 'per_page=1 and nothing else is asked for');
+  assert.deepEqual([...parameters.entries()], [['per_page', '1'], ['page', '2']], 'one commit per page, and never the first page, which carries the file list');
+  assert.equal(ahead[0], `/compare/${sha(40)}...main?per_page=1&page=2`);
   assert.deepEqual(report.ahead, { by: 7, head: null, commits: [] }, 'only the count is read from the answer');
   // The containment compare the adapter makes is the one-commit form too.
-  assert.ok(requests.filter(path => path.startsWith('/compare/')).every(path => path.endsWith('?per_page=1')), requests.join(', '));
+  assert.ok(requests.filter(path => path.startsWith('/compare/')).every(path => new URL(path, 'https://api.github.com').searchParams.get('per_page') === '1'), requests.join(', '));
 });
 
 test('unit:production-watch-off-tick — a GitHub fake that never answers holds only the production watch; engine.reconcile keeps running every tick', async () => {
