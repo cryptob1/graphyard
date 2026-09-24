@@ -1114,6 +1114,16 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   const asked = { id: requested.id, request: { at: new Date(NOW - 30 * 60_000).toISOString() } } as any;
   const headline = markup(createElement(Headline, { shipped: 0, moving: 0, waiting: [requested], now: NOW, pulse: { pulse: null, unavailable: true, elapsed: 0, stale: true, refresh: noop } as any, requests: [asked] }));
   assert.match(headline, new RegExp(`<strong>${formatDuration(30)}</strong><small>1 item waits on you now</small>`));
+  // A cached start-to-live median after a failed poll is marked stale on the headline itself, never shown as current.
+  const measured = { prToProduction: { configured: true, medianHours: 5, sampleSize: 3, eligible: 4 } };
+  const kpi = (read: object) => /<div class="[^"]*" data-kpi="start-to-live"[\s\S]*?<\/div>/.exec(markup(createElement(Headline, { shipped: 0, moving: 0, waiting: [], now: NOW, pulse: { refresh: noop, ...read } as any })))![0];
+  const fresh = kpi({ pulse: measured, unavailable: false, elapsed: 5_000, stale: false });
+  assert.match(fresh, /<strong>5h<\/strong><small>pull request to production · 3 of 4 measured<\/small>/);
+  assert.doesNotMatch(fresh, /stale/);
+  const failed = kpi({ pulse: measured, unavailable: true, elapsed: 3 * 60_000, stale: true });
+  assert.match(failed, /class="kpi stale" data-kpi="start-to-live" data-stale="true"/);
+  assert.match(failed, /<small>pull request to production · 3 of 4 measured · stale: last read 3m ago, the latest read failed<\/small>/);
+  assert.match(kpi({ pulse: measured, unavailable: false, elapsed: 4 * 60_000, stale: true }), /· stale: last read 4m ago<\/small>/);
   // Show details: exactly one toggle on the page, collapsed, and nothing of the detail read or drawn until it opens.
   assert.equal(page.match(/Show details/g)?.length, 1, 'one Show details toggle');
   assert.match(page, /<details class="insight-details"><summary>Show details<\/summary><\/details>/, 'collapsed and empty until opened');
@@ -1233,6 +1243,11 @@ test('unit:ui-shipped-strip-latest — the shipped strip names the most recently
   assert.ok(mergedAt(legacy) > mergedAt(newest));
   const withLegacy = home(dashboard({ work: [...work, legacy] }));
   assert.deepEqual(latestOf(withLegacy.slice(withLegacy.indexOf('aria-label="Shipped this week"'))), ['GY-9', 'GY-9']);
+  // It is Shipped on the board, so a production observation never counts it as not yet live.
+  assert.equal(groupOf(legacy, NOW, undefined, undefined, releaseView({ production: serving } as any)), 'shipped');
+  const legacyStrip = (() => { const page = home(dashboard({ work: [...work, legacy], status: { ...boardStatus(), production: serving } as any })); return page.slice(page.indexOf('aria-label="Shipped this week"')); })();
+  assert.deepEqual(latestOf(legacyStrip), ['GY-9', 'GY-9']);
+  assert.equal(unreleased(legacyStrip), 0); assert.doesNotMatch(legacyStrip, /not yet seen live/);
   // A closed item never counts as a merge, even the newest.
   const closed = { ...newest, closure: { kind: 'obsolete', ref: null, reason: 'Reverted', by: 'operator', at: new Date(NOW).toISOString(), from: 'merge' } } as unknown as Work;
   const withClosed = home(dashboard({ work: [...work.filter(item => item.id !== newest.id), closed] }));

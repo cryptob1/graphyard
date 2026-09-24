@@ -222,7 +222,7 @@ img.mark{width:26px;height:26px}
 
 /* Insights: headline numbers, the Flow panel, the charts, one Show details toggle (GY-168). */
 .insight-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-4)}
-.kpi{display:flex;flex-direction:column;gap:6px;padding:var(--space-4) 18px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);font-size:var(--type-small);color:var(--text-2)}.kpi strong{font-size:var(--type-title);font-weight:600;color:var(--text)}.kpi small{font-size:var(--type-tiny);color:var(--text-3)}
+.kpi{display:flex;flex-direction:column;gap:6px;padding:var(--space-4) 18px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);font-size:var(--type-small);color:var(--text-2)}.kpi strong{font-size:var(--type-title);font-weight:600;color:var(--text)}.kpi small{font-size:var(--type-tiny);color:var(--text-3)}.kpi.stale strong{color:var(--text-3)}
 .flow-analytics{display:flex;flex-direction:column;gap:var(--space-5);min-width:0}
 .insight-details-body{display:flex;flex-direction:column;gap:var(--space-5)}.insight-details>summary{cursor:pointer;color:var(--up-next);font-weight:600;padding:6px 0;font-size:var(--type-small)}.insight-details[open]>summary{margin-bottom:var(--space-4)}
 @media(max-width:1100px){.insight-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}

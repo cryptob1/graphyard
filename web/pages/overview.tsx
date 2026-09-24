@@ -40,7 +40,8 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   // Merged this week but not yet seen live, as the production observation says, whatever its group:
   // a merge the production watch reports pending or failed, or merged after its last pass. With no
   // production observation nothing is claimed: a smoke-gated merge is not "not live" by default.
-  const unreleased = release.observedAt === null ? 0 : merged.filter(w => now - mergedAt(w) <= week && leftFlowAt(w, release) === null).length;
+  // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
+  const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && leftFlowAt(w, release) === null).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>

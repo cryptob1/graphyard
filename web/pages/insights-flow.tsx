@@ -51,8 +51,10 @@ export function Headline({ shipped, moving, waiting, now, pulse, requests }: { s
   const production = pulse.pulse?.prToProduction;
   const live = !pulse.pulse ? (pulse.unavailable ? 'Unavailable' : '…')
     : production!.configured === false || production!.medianHours === null ? 'Unavailable' : formatDuration(production!.medianHours * 60);
+  // A cached median after a failed or late read is marked stale, never shown as current.
+  const stale = !!pulse.pulse && pulse.stale ? ` · stale: last read ${formatDuration(pulse.elapsed / 60000)} ago${pulse.unavailable ? ', the latest read failed' : ''}` : '';
   const liveNote = !pulse.pulse ? (pulse.unavailable ? 'the shipping pulse could not be read' : 'reading the shipping pulse')
-    : production!.configured === false ? 'no production observation is recorded' : `pull request to production · ${production!.sampleSize} of ${production!.eligible} measured`;
+    : (production!.configured === false ? 'no production observation is recorded' : `pull request to production · ${production!.sampleSize} of ${production!.eligible} measured`) + stale;
   // An item waits from when it was asked: its oldest open human-only row (status `humanOnly`),
   // else its own parked request; its stage clock only when neither says.
   const asked = (item: Work) => {
@@ -62,7 +64,7 @@ export function Headline({ shipped, moving, waiting, now, pulse, requests }: { s
   const waited = waiting.reduce((total, item) => total + Math.max(0, now - asked(item)), 0);
   return <section className="insight-kpis" aria-label="Headline numbers">
     <div className="kpi" data-kpi="shipped"><span>Shipped</span><strong>{shipped}</strong><small>seen live this week</small></div>
-    <div className="kpi" data-kpi="start-to-live"><span>Start to live, median</span><strong>{live}</strong><small>{liveNote}</small></div>
+    <div className={`kpi${stale ? ' stale' : ''}`} data-kpi="start-to-live" data-stale={stale ? 'true' : undefined}><span>Start to live, median</span><strong>{live}</strong><small>{liveNote}</small></div>
     <div className="kpi" data-kpi="moving"><span>Moving now</span><strong>{moving}</strong><small>build to live</small></div>
     <div className="kpi" data-kpi="waiting-on-people"><span>Time waiting on people</span><strong>{waiting.length ? formatDuration(waited / 60000) : 'None'}</strong><small>{waiting.length} {waiting.length === 1 ? 'item waits' : 'items wait'} on you now</small></div>
   </section>;
