@@ -83,6 +83,13 @@ export interface ScopeDecision {
  * scopes are not: the implication covers the guide a change touches, never the whole tree.
  */
 export const documentationScopes = ['docs/', 'AGENTS.md', 'README.md'] as const;
+/**
+ * The surfaces that render or test the documentation: the web app that links to and embeds doc
+ * pages, and the browser tests that pin their text. An item that plans the whole `docs/` tree
+ * rewrites or moves pages these files consume, so a single file under them is implied scope.
+ * A directory request is not: the implication covers the consumer a rewrite breaks, never a tree.
+ */
+export const documentationConsumerScopes = ['web/', 'browser-tests/'] as const;
 
 const pathToken = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.*-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}/g;
 const wellFormed = (path: string) => {
@@ -98,7 +105,7 @@ export function namedPaths(text: string) {
   return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
 }
 
-export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation'; why: string }
+export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer'; why: string }
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
  * documentation the repository requires updating for the behaviour those criteria change.
@@ -117,8 +124,12 @@ export function impliedScopes(criteria: readonly ScopeCriterion[], documentation
  */
 export function scopeImplication(path: string, implied: readonly ScopeImplication[]) {
   const breadth = pathScope(path).prefix;
-  return implied.find(entry => pathScopeContains(entry.scope, path) && !(breadth && entry.kind === 'documentation')) ?? null;
+  const found = implied.find(entry => pathScopeContains(entry.scope, path) && !(breadth && entry.kind !== 'criteria')) ?? null;
+  return found?.kind === 'documentation-consumer' ? { ...found, why: `${path} renders or tests the documentation this item rewrites` } : found;
 }
+
+/** True when the item's planned scope covers the entire `docs/` tree, not one guide in it. */
+export const plansDocumentationTree = (plannedFiles: readonly string[] = []) => plannedFiles.some(planned => pathScopeContains(planned, 'docs/'));
 
 /** The blocker a refused scope request writes, and the prefix a later decision clears it by. */
 export const scopeRefusalBlocker = 'Scope request refused';
@@ -137,7 +148,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
 export function decideScopeRequest(
   item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[] },
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
-  options: { documentation?: readonly string[] } = {},
+  options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {
   // Paths the current planned scope already covers are no widening at all, so the decision is
   // about the rest: a master revision between the request and this decision narrows the ask
@@ -147,9 +158,22 @@ export function decideScopeRequest(
   if (request.remove?.length) return refused(`the request drops planned paths (${request.remove.join(', ')}); only additive scope is decided automatically, and narrowing containment is an operator requirements revision`);
   if (request.criteria?.length) return refused('the request rewrites criteria or proofs; requirements are decided by an operator and approved by an independent agent, never by the loop');
   if (!paths.length) return refused('the request names no path outside the planned scope; nothing is left to widen');
-  const implied = impliedScopes(item.criteria, options.documentation);
+  const implied = [...impliedScopes(item.criteria, options.documentation),
+    ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : [])];
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) }));
   const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
   if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
   return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
+}
+
+/**
+ * True when a request the loop refused would be approved by the rules as they stand now — a rule
+ * change, or a widening that made its implication hold — so the loop asks the control plane to
+ * decide it again rather than leave the item blocked on a verdict the rules no longer give.
+ * Only a refusal that is still the item's blocker qualifies; an approval is never re-decided.
+ */
+export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; blocker?: string | null; scopeRequest?: ScopeRequestState | null }) {
+  const request = item.scopeRequest;
+  return !!request && request.decision?.state === 'refused' && !!item.blocker?.startsWith(scopeRefusalBlocker)
+    && decideScopeRequest(item, request).state === 'approved';
 }

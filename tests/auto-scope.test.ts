@@ -11,7 +11,7 @@ import { Store } from '../src/store.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import { emptyDaemonState, runCycle, scopeBudget, scopeKey, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { decideScopeRequest, impliedScopes, namedPaths, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker } from '../src/model/scope.js';
+import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 
@@ -308,4 +308,62 @@ test('unit:scope-implication — an item implies the files its criteria name and
   assert.deepEqual(namedPaths('p90 of scope-request→decision is at most 5 minutes over ten requests'), [], 'prose with no path implies nothing');
   assert.deepEqual(namedPaths('Update src/engine.ts, tests/auto-scope.test.ts and docs/master-agent.md.'), ['src/engine.ts', 'tests/auto-scope.test.ts', 'docs/master-agent.md']);
   assert.deepEqual(impliedScopes([{ id: 'AC-1', text: 'No files here' }], []), []);
+});
+
+test('unit:documentation-consumer-scope — an item planning the whole docs/ tree implies single files that render or test those pages', () => {
+  const docsTree = { plannedFiles: ['docs/', 'README.md'], criteria: [{ id: 'AC-1', text: 'The guides are rewritten', proofs: ['unit:docs'] }] };
+  const approved = decideScopeRequest(docsTree, { paths: ['web/x.tsx', 'browser-tests/y.spec.ts'] });
+  assert.equal(approved.state, 'approved', approved.reason);
+  assert.match(approved.reason, /web\/x\.tsx \(web\/x\.tsx renders or tests the documentation this item rewrites\)/);
+  assert.match(approved.reason, /browser-tests\/y\.spec\.ts \(browser-tests\/y\.spec\.ts renders or tests/);
+  assert.deepEqual([...documentationConsumerScopes], ['web/', 'browser-tests/']);
+  const other = { plannedFiles: ['docs/one.md', 'src/a.ts'], criteria: docsTree.criteria };
+  assert.equal(decideScopeRequest(other, { paths: ['web/x.tsx', 'browser-tests/y.spec.ts'] }).state, 'refused', 'one guide is not the whole tree');
+  assert.equal(decideScopeRequest(docsTree, { paths: ['web/'] }).state, 'refused', 'a consumer directory is never implied');
+  assert.equal(decideScopeRequest(docsTree, { paths: ['browser-tests/**'] }).state, 'refused');
+  assert.equal(decideScopeRequest(docsTree, { paths: ['src/engine.ts'] }).state, 'refused', 'only the consumer surfaces');
+  assert.equal(decideScopeRequest(docsTree, { paths: ['web/x.tsx'], remove: ['README.md'] }).state, 'refused', 'a removal is still never decided here');
+  assert.equal(decideScopeRequest(docsTree, { paths: ['web/x.tsx'], criteria: [{ id: 'AC-1', text: 'Less', proofs: [] }] }).state, 'refused');
+  assert.equal(decideScopeRequest(docsTree, { paths: ['web/x.tsx'] }, { documentationConsumers: ['site/'] }).state, 'refused', 'the consumer surfaces are overridable');
+  assert.equal(decideScopeRequest(docsTree, { paths: ['site/x.tsx'] }, { documentationConsumers: ['site/'] }).state, 'approved');
+});
+
+test('integration:scope-redecision — a refusal the current rules would approve is decided again and applied; an approval never is', async () => {
+  let work = await claimed('docs consumer redecision');
+  const state = emptyDaemonState(loopConfig());
+  const asked = await request(work, { paths: ['web/pages/overview.tsx', 'browser-tests/dashboard.spec.ts'], reason: 'They link to the guides this item moves' });
+  await cycle(state);
+  work = await reload(work.id);
+  assert.equal(work.scopeRequest!.decision!.state, 'refused', 'nothing plans the docs tree yet');
+  assert.ok(work.blocker?.startsWith(scopeRefusalBlocker));
+  assert.equal(redecidableScopeRefusal(work), false);
+  // A standing refusal the rules still give is not rewritten, by the loop or by a direct call.
+  await cycle(state);
+  assert.equal(scopeAction(state, work, asked.scopeRequest!.at).attempts, 1);
+  const still = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  assert.notEqual(still.status, 200, JSON.stringify(still.body));
+  assert.match(still.body.error, /current rules still refuse/);
+
+  // The item now plans the whole docs/ tree, so the rule implies the consumers it asked for.
+  await ok(master.token, 'POST', `work/${work.id}/requirements`, { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
+    plannedFiles: [...work.plannedFiles, 'docs/'], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason: 'The item rewrites the whole documentation tree' });
+  work = await reload(work.id);
+  assert.equal(work.scopeRequest!.decision!.state, 'refused', 'the widening did not cover the request itself');
+  assert.equal(redecidableScopeRefusal(work), true);
+  const before = work.policyRevision;
+  await cycle(state);
+  work = await reload(work.id);
+  assert.equal(work.scopeRequest, null, 'the re-decided request is answered and cleared');
+  assert.equal(work.scopeDecision!.state, 'approved');
+  assert.match(work.scopeDecision!.reason, /renders or tests the documentation this item rewrites/);
+  assert.equal(work.blocker, null, 'the refusal blocker is lifted');
+  assert.deepEqual(work.plannedFiles, [layout, 'docs/', 'web/pages/overview.tsx', 'browser-tests/dashboard.spec.ts']);
+  assert.equal(work.policyRevision, before + 1);
+  assert.ok(work.lease && work.lease.epoch === asked.epoch, 'the attempt keeps its lease');
+
+  // An approval is never re-decided.
+  await cycle(state);
+  assert.equal((await reload(work.id)).policyRevision, work.policyRevision);
+  const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  assert.equal(again.status, 404, JSON.stringify(again.body));
 });

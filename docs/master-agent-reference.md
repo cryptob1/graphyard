@@ -13,7 +13,7 @@
 
 ## Items, scope and human waits
 
-A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`; one needing a human-only decision runs `park GY-N EPOCH KIND NEEDED -- REASON`, and the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`: documentation, files the criteria name and, for an item planning all of `docs/`, single files under `web/` and `browser-tests/` widen automatically; the loop re-decides a refused request once per policy revision. One needing a human-only decision runs `park GY-N EPOCH KIND NEEDED -- REASON`, and the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
