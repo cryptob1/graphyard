@@ -75,9 +75,18 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
 function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, release: ReleaseView): { detail: string; who: string } {
   const reasons = gate?.reasons ?? [];
   switch (step) {
-    case 'build':
+    case 'build': {
+      // Handed in, but the ready gate refuses (a recorded blocker, or a dependency a requirements
+      // revision added): the control plane holds it at build, so it waits there on that, not on a builder.
+      const ready = work.submission ? work.gates.find(gate => gate.name === 'ready' && !gate.passed)?.reasons[0] : undefined;
+      if (ready !== undefined) {
+        // A dependency waits for the other item to ship; a blocker is shown as written, for the Master agent to clear.
+        if (/^Dependency /.test(ready)) return { detail: plainReason(ready, 'ready').text.replace(/^./, c => c.toLowerCase()), who: 'Graphyard (automatic)' };
+        return { detail: `blocked: ${ready}`, who: 'Master agent' };
+      }
       if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
       return assignment(work, now).active ? { detail: 'the builder is writing the code', who: 'Builder agent' } : { detail: 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
+    }
     case 'validate': {
       const first = reasons[0] ?? '';
       if (/^(Candidate changes \d+ files? outside|Out-of-scope regression)/.test(first)) return { detail: 'it changes files outside its plan', who: 'Builder agent' };
@@ -144,8 +153,10 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
     const { detail, who } = waitsOn('deploy', undefined, work, now, release);
     return make(id => id === 'deploy' ? 'current' : 'done', 'deploy', detail, who);
   }
-  // A change request sends the work back to its builder, so it waits at Build, not at Review.
-  const handedIn = !!work.submission && !work.reworkRequested && !changesRequested(work);
+  // A change request sends the work back to its builder, so it waits at Build, not at Review; and
+  // a refusing ready gate keeps handed-in work at build, as the control plane's stage does (src/model/gates.ts).
+  const readyRefused = work.gates.some(gate => gate.name === 'ready' && !gate.passed);
+  const handedIn = !!work.submission && !work.reworkRequested && !changesRequested(work) && !readyRefused;
   if (!handedIn) {
     const { detail, who } = waitsOn('build', undefined, work, now, release);
     return make(id => id === 'build' ? 'current' : 'pending', 'build', detail, who);

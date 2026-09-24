@@ -7,8 +7,11 @@ import { defaultProductionEnvironment, deliveredAt, servedAt } from '../src/flow
  * status as `productionEnvironment`), and — only where the production watch has observed what
  * production serves (status `production`) — the merged items it does not serve yet and those
  * whose deployment failed, and when it last looked. With no production observation both sets are
- * empty: a merged item is then Shipped ("Merged, not yet seen live"), never held at Deploy for a
- * record nobody writes.
+ * empty: a merged item is then Shipped, reading "Merged, not yet seen live" (GY-161 AC-11: never in
+ * Moving or at Deploy because `delivery.deployment` is absent). That is the board's grouping only:
+ * the delivery still counts as not live — "shipped this week" counts only observed releases — and
+ * the master loop still owes `master verify-deployment` for it, which `master status` keeps under
+ * `pending` until the release serves it (AGENTS.md).
  */
 export interface ReleaseView {
   environment: string;

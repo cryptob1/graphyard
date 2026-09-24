@@ -7,21 +7,27 @@ type StepRow = { workKey: string; observedAt: string | null; detail: string };
 
 /**
  * Every recorded step move of the last week (since `since`, when given): the steps drill-down,
- * followed page by page. Each page holds whole items and names the next (`next`), so no item's
- * history is cut at the page bound. `complete` is false when the pages ran out before the answer
- * did, and the rows then cover only the items read in full.
+ * followed page by page. Each page holds whole items and names the next (`next`); an item whose
+ * history alone is longer than a page is continued within it (`within:<key>:<rows read>`), so no
+ * item's history is cut at the page bound. `complete` is false when the pages ran out before the
+ * answer did, and the rows then cover only the items read in full: an item the read stopped inside
+ * is left out whole, never taken as its whole history.
  */
 export async function readStepRows(api: (path: string) => Promise<any>, since?: string | null): Promise<{ rows: StepRow[]; complete: boolean }> {
   const rows: StepRow[] = [];
   let key: string | null = since ?? null;
+  const partial = () => {
+    const inside = /(?:^|\s)within:(.+):\d+$/.exec(key ?? '')?.[1];
+    return { rows: inside ? rows.filter(row => row.workKey !== inside) : rows, complete: false };
+  };
   for (let page = 0; page < stepPagesLimit; page++) {
     const answer = await api(`analytics/flow/drilldown?window=7&metric=steps${key ? `&key=${encodeURIComponent(key)}` : ''}`);
     rows.push(...(Array.isArray(answer?.rows) ? answer.rows : []));
     if (!answer?.truncated) return { rows, complete: true };
-    if (typeof answer.next !== 'string' || answer.next === key) return { rows, complete: false };
+    if (typeof answer.next !== 'string' || answer.next === key) return partial();
     key = answer.next;
   }
-  return { rows, complete: false };
+  return partial();
 }
 
 /**

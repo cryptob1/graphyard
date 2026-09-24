@@ -122,7 +122,7 @@ function ledger(work) {
   }
   return events;
 }
-function flowDataset(work) {
+export function flowDataset(work) {
   const states = new Map(), facts = [];
   for (const event of ledger(work)) { const state = states.get(event.work_id) ?? {}; states.set(event.work_id, state); facts.push(...deriveFacts(event, state)); }
   const latest = [];

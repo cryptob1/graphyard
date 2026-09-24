@@ -991,6 +991,7 @@ const gateStep: [string, FlowStep][] = [['build', 'validate'], ['test', 'test'],
  * the build gate refuses with "Worker has not submitted implementation for this attempt" (read
  * from the recorded reasons when the build gate refuses first, otherwise from whether a pull
  * request was seen) and while a rework or a change request is pending (`reworkRequested`); then
+ * or the ready gate refuses (a blocker, or a dependency a requirements revision added); then
  * the first step in travel order whose gate refuses — Test before Review, unlike the evaluation
  * order the stage follows — and Merge when none does; Deploy once it merged.
  */
@@ -1002,6 +1003,9 @@ export function gateFactStep(details: Record<string, any>): FlowStep | null {
   const building = !unmet.includes('build') ? false : details.firstUnmet === 'build'
     ? (details.reasons ?? []).includes('Worker has not submitted implementation for this attempt') : !details.hasCandidate;
   if (building) return 'build';
+  // A refusing ready gate (a blocker, or a dependency added after hand-in) keeps handed-in work at
+  // build, the stage the control plane gives it, whichever later gate also refuses.
+  if (unmet.includes('ready')) return 'build';
   // A requested rework or a change request sends the work back to its builder: it waits at Build,
   // not at the step whose gate refuses first (`prSteps` reads `reworkRequested` the same way).
   if (details.reworkRequested) return 'build';
@@ -1197,10 +1201,12 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
       row(fact.workKey, String(fact.details.reviewState), fact.observedAt, null, null, fact.details.sha ?? null, `independent=${fact.details.independent}; timestamp=${fact.details.timestampSource}`);
   } else if (metric === 'steps') {
     // Each item's moves between the seven pull-request steps (`stepMoves`). `key`, when given, is
-    // an instant (moves before it are left out) and/or `after:<work key>`, the page cursor: only
-    // items ordered after that key (see `next` below).
-    const { since, after } = stepsKey(key);
-    for (const item of scoped.filter(item => after === null || workKeyOrder(item.key) > workKeyOrder(after)))
+    // an instant (moves before it are left out) and/or a page cursor (see `next` below):
+    // `after:<work key>`, only items ordered after that key, or `within:<work key>:<n>`, that item
+    // from its n-th row on and then the items after it.
+    const { since, after, within } = stepsKey(key);
+    const from = within?.key ?? after;
+    for (const item of scoped.filter(item => from === null || (within ? workKeyOrder(item.key) >= workKeyOrder(from) : workKeyOrder(item.key) > workKeyOrder(from))))
       for (const move of stepMoves(dataset, item, report.productionEnvironment))
         if (!move.carried && time(move.at)! >= since)
           row(item.key, move.to ?? 'outside', move.at, null, move.pr, null, `${move.from ?? 'outside'} to ${move.to ?? 'outside'}`);
@@ -1213,27 +1219,42 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
   }
   const order = (value: Record<string, any>) => `${workKeyOrder(String(value.workKey))}|${value.bucket ?? ''}|${value.observedAt ?? ''}|${value.commit ?? ''}|${value.detail}`;
   rows.sort((left, right) => order(left).localeCompare(order(right)));
-  let page = rows.slice(0, flowLimits.drilldown);
-  const truncated = rows.length > flowLimits.drilldown;
-  // A steps page holds whole items: an item cut at the bound moves to the next page (unless it is
-  // the page's only item), so no reader takes an item's partial history for all of it. `next` is
-  // the cursor for that page, `after:<the last item on this one>`.
+  // A `within:` cursor resumes one item's history where the last page stopped: its rows sort first.
+  const cursor = metric === 'steps' ? stepsKey(key) : null;
+  const skipped = cursor?.within ? Math.min(cursor.within.skip, rows.filter(entry => entry.workKey === cursor.within!.key).length) : 0;
+  const remaining = skipped ? rows.slice(skipped) : rows;
+  let page = remaining.slice(0, flowLimits.drilldown);
+  const truncated = remaining.length > flowLimits.drilldown;
+  // A steps page holds whole items: an item cut at the bound moves to the next page, so no reader
+  // takes an item's partial history for all of it. An item whose history alone fills the page is
+  // continued within it: `next` is then `within:<that item>:<rows read so far>`, and a reader stops
+  // with that item unread rather than whole. Otherwise `next` is `after:<the last item on this page>`.
+  let next: string | null = null;
   if (metric === 'steps' && truncated) {
     const cut = page.at(-1)!.workKey;
-    if (rows[flowLimits.drilldown].workKey === cut && page.some(entry => entry.workKey !== cut)) page = page.filter(entry => entry.workKey !== cut);
+    const split = remaining[flowLimits.drilldown].workKey === cut;
+    if (split && page.some(entry => entry.workKey !== cut)) page = page.filter(entry => entry.workKey !== cut);
+    const alone = split && page.every(entry => entry.workKey === cut);
+    const read = (cursor?.within?.key === cut ? skipped : 0) + page.length;
+    next = `${cursor!.instant ?? ''} ${alone ? `within:${cut}:${read}` : `after:${page.at(-1)!.workKey}`}`.trim();
   }
-  const next = metric === 'steps' && truncated ? `${stepsKey(key).instant ?? ''} after:${page.at(-1)!.workKey}`.trim() : null;
-  return { metric, key, supported: drilldownMetrics, columns, total: rows.length, truncated, next, rows: page, authorized };
+  return { metric, key, supported: drilldownMetrics, columns, total: rows.length - skipped, truncated, next, rows: page, authorized };
 }
 
 /** A work key in the drill-down's row order: its number padded, so GY-9 sorts before GY-10. */
 const workKeyOrder = (key: string) => key.replace(/\d+/, match => match.padStart(8, '0'));
-/** The steps drill-down's `key`: an optional instant and an optional `after:<work key>` page cursor. */
+/**
+ * The steps drill-down's `key`: an optional instant and an optional page cursor, `after:<work key>`
+ * or `within:<work key>:<rows of it already read>`.
+ */
 function stepsKey(key: string | null) {
   const tokens = (key ?? '').trim().split(/\s+/).filter(Boolean);
+  const cursor = (token: string) => token.startsWith('after:') || token.startsWith('within:');
   const after = tokens.find(token => token.startsWith('after:'))?.slice('after:'.length) || null;
-  const instant = tokens.find(token => !token.startsWith('after:')) ?? null;
-  return { instant, after, since: instant === null ? -Infinity : time(instant) ?? -Infinity };
+  const inside = /^within:(.+):(\d+)$/.exec(tokens.find(token => token.startsWith('within:')) ?? '');
+  const within = inside ? { key: inside[1], skip: Number(inside[2]) } : null;
+  const instant = tokens.find(token => !cursor(token)) ?? null;
+  return { instant, after, within, since: instant === null ? -Infinity : time(instant) ?? -Infinity };
 }
 
 function csvCell(value: unknown) {

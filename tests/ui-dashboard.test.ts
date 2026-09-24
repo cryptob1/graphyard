@@ -8,7 +8,7 @@ import type { Work } from '../src/model.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
-import { flowApi, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
 import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../web/pr-steps.js';
 import { noRelease, releaseView } from '../web/release.js';
@@ -854,7 +854,7 @@ test('GY-161 review: a check fails on the latest trusted run across Apps; closed
   assert.doesNotMatch(closedPage, /class="steps-detail"/); assert.doesNotMatch(closedPage, /Merged/); assert.match(closedPage, /Closed as obsolete/);
 
   // A pending rework puts the recorded gate fact at Build whichever gate refuses first, as prSteps does.
-  const rework = { stage: 'build', unmet: ['ready', 'build', 'review'], firstUnmet: 'ready', reasons: ['Lease expired'], hasCandidate: true };
+  const rework = { stage: 'build', unmet: ['build', 'review'], firstUnmet: 'build', reasons: ['Pull request is not mergeable against the current base'], hasCandidate: true };
   assert.equal(gateFactStep(rework), 'validate', 'without the rework the build gate reads as Validate');
   assert.equal(gateFactStep({ ...rework, reworkRequested: true }), 'build');
   const sentBack = { ...handedIn, reworkRequested: true, gates: handedIn.gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons: ['Lease expired'] } : gate) } as Work;
@@ -899,4 +899,52 @@ test('GY-161 review: a check fails on the latest trusted run across Apps; closed
   const older = { ...merged, delivery: { ...merged.delivery!, mergedAt: new Date(NOW - 48 * hour).toISOString() } } as Work;
   assert.equal(groupOf(older, NOW, undefined, undefined, watch), 'shipped');
   assert.equal(groupOf(fresh, NOW), 'shipped', 'with no production observation a merge alone is Shipped');
+});
+
+test('GY-161 review: a refusing ready gate keeps handed-in work at Build, in the steps and the recorded moves; one item\'s history longer than a drill-down page is read in full, or not at all', async () => {
+  // Handed in, then a blocker is recorded or a requirements revision adds a dependency: the ready
+  // gate refuses, the control plane's stage is build (src/model/gates.ts), and so is the step.
+  const handedIn = find('GY-22');
+  assert.notEqual(prSteps(handedIn, NOW).current, 'build', 'handed in, it has moved past Build');
+  const refuse = (reasons: string[]) => ({ ...handedIn, stage: 'build', gates: handedIn.gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons } : gate) }) as Work;
+  const blocked = prSteps(refuse(['Staging credentials expired']), NOW);
+  assert.equal(blocked.current, 'build'); assert.ok(blocked.steps.slice(1).every(step => step.state === 'pending'));
+  assert.equal(blocked.label, 'Building · blocked: Staging credentials expired'); assert.equal(blocked.who, 'Master agent');
+  const waiting = prSteps(refuse(['Dependency GY-7 is unfinished']), NOW);
+  assert.equal(waiting.current, 'build'); assert.equal(waiting.label, 'Building · waiting for GY-7 to ship first'); assert.equal(waiting.who, 'Graphyard (automatic)');
+  assert.equal(stepSince(refuse(['Staging credentials expired']), NOW, [{ key: handedIn.key, at: new Date(NOW - hour).toISOString(), from: 'build', to: 'review' }]), stepSince(refuse(['Staging credentials expired']), NOW), 'Build keeps the builder\'s clock');
+  // The recorded gate fact places it the same way, whichever later gate also refuses.
+  const fact = { stage: 'build', unmet: ['ready', 'review', 'acceptance'], firstUnmet: 'ready', reasons: ['Dependency GY-7 is unfinished'], hasCandidate: true, dependencyWaiting: ['GY-7'] };
+  assert.equal(gateFactStep(fact), 'build');
+  assert.equal(gateFactStep({ ...fact, unmet: ['review', 'acceptance'], firstUnmet: 'review' }), 'review', 'once the ready gate passes it is back at its step');
+  assert.equal(gateFactStep({ stage: 'ready', unmet: ['ready'], blocker: null }), null, 'not handed in and waiting on a dependency, it is not in the flow');
+
+  // One item with more recorded moves than a drill-down page (flowLimits.drilldown = 200 rows).
+  const [long, ...rest] = board().filter(item => item.stage !== 'backlog' && item.stage !== 'done');
+  const dataset = flowDataset([long, ...rest]);
+  const start = NOW - 5 * 24 * hour;
+  for (let index = 0; index < 450; index++)
+    dataset.facts.push({ workId: long.id, workKey: long.key, kind: 'gates.changed', observedAt: new Date(start + index * 60_000).toISOString(), details: { stage: index % 2 ? 'review' : 'test', unmet: [index % 2 ? 'review' : 'test'], firstUnmet: index % 2 ? 'review' : 'test', hasCandidate: true, reasons: [] } });
+  const report = computeFlow(dataset, { days: 30 });
+  const api = (path: string) => { const url = new URL(`http://fixture/${path}`); return flowDrilldown(dataset, report, { metric: 'steps', key: url.searchParams.get('key'), authorized: true }); };
+  const own = stepMoves(dataset, long).filter(move => !move.carried);
+  assert.ok(own.length > 400, `${own.length} moves for ${long.key}`);
+  const first = api('analytics/flow/drilldown?window=7&metric=steps');
+  assert.ok(first.truncated);
+  const pages = [first];
+  while (pages.at(-1)!.truncated) pages.push(api(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(pages.at(-1)!.next!)}`));
+  const longRows = pages.flatMap(page => page.rows).filter(row => row.workKey === long.key);
+  assert.equal(longRows.length, own.length, 'every move of the long item is on some page');
+  assert.ok(pages.some(page => /within:/.test(page.next ?? '')), 'the long item is continued within it');
+  assert.equal(new Set(longRows.map(row => `${row.observedAt}|${row.detail}`)).size, longRows.length, 'no move is read twice');
+  const latest = own.at(-1)!;
+  assert.ok(longRows.some(row => row.observedAt === latest.at && row.detail === `${latest.from ?? 'outside'} to ${latest.to ?? 'outside'}`), 'its latest move is read');
+  const whole = await readStepRows(async (path: string) => api(path));
+  assert.equal(whole.complete, true);
+  assert.equal(whole.rows.length, pages.reduce((sum, page) => sum + page.rows.length, 0));
+  assert.equal(whole.rows.filter(row => row.workKey === long.key).length, own.length);
+  // A read that stops inside the long item leaves that item out, never takes its first page for all of it.
+  const cut = await readStepRows(async (path: string) => { const answer = api(path); return /within:/.test(decodeURIComponent(path)) ? { ...answer, next: null } : answer; });
+  assert.equal(cut.complete, false);
+  assert.ok(!cut.rows.some(row => row.workKey === long.key), 'the partly read item is left out');
 });
