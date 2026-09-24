@@ -5,6 +5,7 @@ import { liveReviewRequest } from '../model/dispatch.js';
 import type { Work } from '../model/work.js';
 import { sessionRetry } from '../producer.js';
 import { dispatchFailureLimit } from '../auto-dispatch.js';
+import { mergedWithoutAuthorization } from '../master.js';
 
 /**
  * The master-side rules the loop depends on, enforced where the master acts rather than
@@ -17,9 +18,10 @@ import { dispatchFailureLimit } from '../auto-dispatch.js';
  * (`systemDriven`, on by default for new items) is never pushed through its gates by hand: the
  * master CLI refuses the actions the loop owns for it, naming the loop step that performs each.
  * Monitoring commands and `master run` itself are not hand actions and are never refused here.
- * Two hand actions stay open on a system-driven item because the loop itself sends the master to
+ * Three hand actions stay open on a system-driven item because the loop itself sends the master to
  * them: `master review` for a review request the loop has stopped relaunching (its session settled
- * unanswered, its sessions or launch refusals are exhausted), and `master decide attest` for a
+ * unanswered, its sessions or launch refusals are exhausted), `master decide merge` for a merge
+ * the loop cannot request (`mergeDecisionRecovery`), and `master decide attest` for a
  * `manual:` proof no producer session runs, or whose producer request the loop has likewise stopped
  * relaunching, which then only an attestation can satisfy.
  * The executor's own dispatch goes through its handler (src/executor.ts), never this path.
@@ -49,6 +51,7 @@ export const loopOwnedDecisions: Partial<Record<string, HandAction>> = { attest:
  */
 export function handDecision(work: Work, action: string | undefined, input: unknown, loop: LoopSessions = { sessions: [], failures: {}, now: Date.now() }): HandAction | null {
   const owned = action ? loopOwnedDecisions[action] ?? null : null;
+  if (owned === 'merge-decision') return mergeDecisionRecovery(work, loop) ? null : owned;
   if (owned !== 'evidence') return owned;
   const proof = (input as { proof?: unknown } | null)?.proof;
   if (typeof proof !== 'string' || !proof.startsWith('manual:')) return owned;
@@ -60,10 +63,27 @@ export async function decisionPayload(argument: string | undefined): Promise<unk
   try { return JSON.parse(argument.startsWith('@') ? await readFile(argument.slice(1), 'utf8') : argument); } catch { return null; }
 }
 
+/**
+ * Why a hand merge decision is the one the loop sends the master to, or null while the loop
+ * requests it itself. Two cases: a merge GitHub already made without a valid execution, which
+ * only a two-party decision reconciles and the loop names rather than requests; and a loop with
+ * no operator-agent identity (`requestsDecisions: false`), whose merge step says the master puts
+ * the decision to the approver by hand.
+ */
+export function mergeDecisionRecovery(work: Work, loop: Pick<LoopSessions, 'requestsDecisions'>): string | null {
+  if (mergedWithoutAuthorization(work)) return `${work.key} was merged on GitHub without a valid merge execution; only a two-party merge decision reconciles it`;
+  if (loop.requestsDecisions === false) return 'no master operator-agent identity is provisioned, so the loop cannot request the merge decision itself';
+  return null;
+}
+
 /** One session as the loop's reviewer or producer ledger records it, and the launches of each request the loop's cursor saw refused. */
 type LoopSession = Parameters<typeof sessionRetry>[0][number];
 type ReviewSession = LoopSession;
-export interface LoopSessions { sessions: LoopSession[]; failures: Record<string, { attempts: number }>; now: number }
+export interface LoopSessions {
+  sessions: LoopSession[]; failures: Record<string, { attempts: number }>; now: number;
+  /** False when the loop has no operator-agent identity and so cannot request decisions itself. */
+  requestsDecisions?: boolean;
+}
 
 /**
  * Why the loop has stopped relaunching a live request, or null while it still launches it: its

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -12,8 +12,8 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { actionClaimMs, actionId, type ActionRow } from '../src/model/actions.js';
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
-import { dispatchWork, masterConfigSchema, type WorkerProfile } from '../src/master.js';
-import { assertHandDispatch, dispatchRaceRefusal, handDecision, handDispatchClaimMarginMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
+import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
+import { assertHandDispatch, dispatchRaceRefusal, handDecision, mergeDecisionRecovery, handDispatchClaimMarginMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
 
 // GY-175: the master-side rules the loop depends on are enforced by the master CLI itself, not
@@ -49,7 +49,7 @@ function dispatchRow(overrides: Partial<ActionRow> = {}): ActionRow {
 const claimed = (): Partial<ActionRow> => ({ state: 'claimed', attempts: 1, claim: { executor: 'executor-host-1', host: 'host-1', principal: 'master', claimedAt: iso(-5_000), expiresAt: iso(actionClaimMs - 5_000), attempt: 1 } });
 
 /** A master checkout bound to a stub control plane; `run` executes one master command through the launcher. */
-async function masterHarness(state: { work: Work[]; releasedAt?: string | null }) {
+async function masterHarness(state: { work: Work[]; releasedAt?: string | null }, options: { operatorAgent?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'gy-hand-'));
   const credentials = await mkdtemp(join(tmpdir(), 'gy-hand-cred-'));
   const credentialFile = join(credentials, 'coordinator.token');
@@ -68,7 +68,8 @@ async function masterHarness(state: { work: Work[]; releasedAt?: string | null }
   await exec('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await mkdir(join(root, '.graphyard'));
-  await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ version: 1, url, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { intervalSeconds: 5, dispatchIntervalSeconds: 10, deploymentShaField: 'commit' } }), { mode: 0o600 });
+  await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ version: 1, url, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [],
+    ...(options.operatorAgent ? { operatorAgent: { id: 'master-operator', credentialFile: join(credentials, 'operator.token') } } : {}), run: { intervalSeconds: 5, dispatchIntervalSeconds: 10, deploymentShaField: 'commit' } }), { mode: 0o600 });
   const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: url };
   for (const name of Object.keys(env)) if (name.startsWith('GRAPHYARD_') && name !== 'GRAPHYARD_URL') delete env[name];
   const run = (args: string[]) => exec(process.execPath, [launcher, 'master', ...args], { cwd: root, env, timeout: 120_000 });
@@ -187,7 +188,8 @@ test('unit:system-driven-items new items are system-driven by the shipped defaul
 
 test('unit:system-driven-items the master CLI refuses dispatch, merge, review launch and evidence on a system-driven item, naming the loop step', async () => {
   const state = { work: [item({ systemDriven: true })] };
-  const master = await masterHarness(state);
+  // With an operator-agent identity the loop requests merge decisions itself, so a hand one is refused too.
+  const master = await masterHarness(state, { operatorAgent: true });
   try {
     const refused: [string[], keyof typeof loopOwned, RegExp][] = [
       [['dispatch', 'GY-7', 'claude-worker'], 'dispatch', /the loop's dispatch step: master run's dispatcher claims the item's dispatch action/],
@@ -299,4 +301,68 @@ test('unit:dispatch-race-guard a hand launch through a long backoff claims nothi
       /GY-7: the hand launch did not reach its lease claim before the item's backed-off dispatch action is offered to the executor again, so it claims nothing/);
     assert.deepEqual(prepared, [], 'nothing was claimed');
   } finally { await master.close(); }
+});
+
+test('unit:dispatch-race-guard the hand launch checks its deadline again immediately before the lease claim, after the slow steps that precede it', async () => {
+  const master = await masterHarness({ work: [item({ systemDriven: false })] });
+  try {
+    const credential = join(master.credentials, 'worker.token'); await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const configFile = join(master.root, '.graphyard/master.json');
+    const config = JSON.parse(await readFile(configFile, 'utf8'));
+    await writeFile(configFile, JSON.stringify({ ...config, workers: [{ name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, approvals: 'auto' }] }), { mode: 0o600 });
+    const commands: string[] = [];
+    // The base fetch is the slow step between the dispatch-time check and the claim.
+    const run = async (command: string, args: string[]) => {
+      commands.push(command === 'git' ? `git ${args[0]}` : args[1]);
+      if (command === 'git' && args[0] === 'fetch') await new Promise(resolve => setTimeout(resolve, 200));
+      if (command === 'git') return args[0] === 'rev-parse' ? `${'c'.repeat(40)}\n` : '';
+      return args[1] === 'claim' ? JSON.stringify({ epoch: 3, lease: { owner: 'worker-a' } }) : JSON.stringify({ path: join(master.root, 'assigned') });
+    };
+    // Inside its deadline when the launch began, past it once the fetch returned: the claim is never made.
+    await assert.rejects(prepareWorkerLaunch(master.root, 'GY-7', 'launch', run, Date.now() + 100), /GY-7: the hand launch did not reach its lease claim before the item's backed-off dispatch action is offered to the executor again, so it claims nothing/);
+    assert.deepEqual(commands, ['git fetch', 'git rev-parse'], 'nothing was claimed, so nothing is released either');
+    commands.length = 0;
+    const prepared = await prepareWorkerLaunch(master.root, 'GY-7', 'launch', run, Date.now() + 60_000);
+    assert.equal(prepared.epoch, 3); assert.deepEqual(commands.slice(0, 4), ['git fetch', 'git rev-parse', 'claim', 'worktree'], 'inside the deadline the claim proceeds');
+    // dispatchWork hands its deadline to the preparer, which is where the claim happens.
+    const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
+    const deadlines: (number | undefined)[] = [], claimBy = Date.now() + 60_000;
+    const prepare = async (_root: string, _key: string, _profile: string, _run?: unknown, deadline?: number): Promise<never> => { deadlines.push(deadline); throw new Error('stop at the claim'); };
+    await assert.rejects(dispatchWork(master.root, item({ systemDriven: false }), profile, [], undefined, [item({ systemDriven: false })], prepare, async () => {}, 1, iso(), { claimBy }), /stop at the claim/);
+    assert.deepEqual(deadlines, [claimBy]);
+  } finally { await master.close(); }
+});
+
+test('unit:system-driven-items master decide merge stays open where the loop sends the master to it: an unauthorized merge, or a loop that cannot request decisions', async () => {
+  const merged = item({ systemDriven: true, stage: 'merge', violations: [unauthorizedMergeViolation], observation: { merged: true, mergeSha: 'e'.repeat(40), mergedAt: iso(-60_000) } as any });
+  const loop = (requestsDecisions?: boolean) => ({ sessions: [], failures: {}, now: Date.now(), requestsDecisions });
+  assert.equal(handDecision(item({ systemDriven: true }), 'merge', null, loop(true)), 'merge-decision');
+  assert.equal(handDecision(merged, 'merge', null, loop(true)), null);
+  assert.match(mergeDecisionRecovery(merged, loop(true))!, /merged on GitHub without a valid merge execution/);
+  assert.equal(handDecision(item({ systemDriven: true }), 'merge', null, loop(false)), null);
+  assert.match(mergeDecisionRecovery(item({ systemDriven: true }), loop(false))!, /no master operator-agent identity/);
+  const master = await masterHarness({ work: [merged] }, { operatorAgent: true });
+  try {
+    assert.doesNotMatch(await master.refusal(['decide', 'GY-7', 'merge', 'reconcile', 'the', 'merge']), /is system-driven/, 'the reconciliation reaches the decision request');
+  } finally { await master.close(); }
+  const unprovisioned = await masterHarness({ work: [item({ systemDriven: true })] });
+  try {
+    assert.match(await unprovisioned.refusal(['decide', 'GY-7', 'merge', 'hand', 'merge']), /No master operator-agent identity is provisioned/, 'without an operator-agent identity the hand decision is the only one');
+  } finally { await unprovisioned.close(); }
+});
+
+test('unit:system-driven-items the master\'s own next steps name the loop step for a system-driven item, never a hand command it refuses', () => {
+  const atMerge = (systemDriven: boolean) => item({ systemDriven, stage: 'merge', gates: [{ name: 'merge', passed: false, reasons: ['Merge authorization is not current'] }] as any });
+  assert.match(workAttentionOwner(atMerge(true), 'gate').next, /the loop's merge step performs the guarded merge of GY-7/);
+  assert.doesNotMatch(workAttentionOwner(atMerge(true), 'gate').next, /master merge/);
+  assert.equal(workAttentionOwner(atMerge(false), 'gate').next, 'graphyard master merge GY-7');
+  assert.doesNotMatch(workAttentionOwner(item({ systemDriven: true }), 'hold-overdue').next, /master dispatch/);
+  assert.match(workAttentionOwner(item({ systemDriven: false }), 'hold-overdue').next, /graphyard master dispatch GY-7 PROFILE does it now/);
+  assert.match(workAttentionOwner(item({ systemDriven: true }), 'session').next, /the loop's dispatcher launches GY-7 again/);
+  const produced = item({ systemDriven: true, producerProofs: ['manual:produced-review'], gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1: manual:produced-review needs trusted passing evidence'] }] as any });
+  assert.match(workAttentionOwner(produced, 'gate').next, /The loop's producer session produces manual:produced-review/);
+  // The AGENTS.md master block routes merges of system-driven items to the loop and keeps the hand commands for the opt-out.
+  const block = managedMasterInstructions('').replace(/\s+/g, ' ');
+  assert.match(block, /Items are system-driven unless created with `"systemDriven": false`: for them `graphyard master run` dispatches, launches review and proof producers, requests merge decisions and performs the guarded merge/);
+  assert.match(block, /which the loop requests for a system-driven item; for an item with `"systemDriven": false` request it with `graphyard master decide GY-N merge`/);
 });

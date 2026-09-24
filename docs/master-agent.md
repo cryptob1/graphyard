@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | the loop, dispatch and merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes work, merges, verifies deployments and administers GitHub; it never implements, reviews or produces evidence.
+The master (`coordinator`) routes work, merges, verifies deployments and administers GitHub; it never implements, reviews or proves.
 
 ## Autonomy: agents approve agents
 
@@ -24,7 +24,7 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 ### System-driven items
 
-Unless created with `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step; `review`/`attest` for a request the loop stopped relaunching and `attest` of an unproduced `manual:` proof stay open. Hand `dispatch` also waits out a live or just-released dispatch.
+Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except recovery the loop stopped relaunching, unproduced `manual:` attestations, and `decide merge` of an unauthorized merge or without an operator agent. Hand `dispatch` waits out a live or just-released one.
 
 ### Session liveness is reconciled, not trusted
 
@@ -55,7 +55,7 @@ When a candidate passes the build gate, `autoDispatch` records one producer requ
 
 **Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles as `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`; close its pane.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after fixing a refused launch.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after a refused launch.
 
 ### Proofs must exercise their criterion
 
@@ -69,6 +69,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` merges only under a current authorization for the exact head, base and policy, rechecking every gate under a single-use execution, never with an administrative bypass. A server on another merge protocol refuses with `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
+`master merge GY-N|--all` (skipping system-driven items) merges only under a current authorization for the exact head, base and policy, rechecking every gate under a single-use execution, never with an administrative bypass. A server on another merge protocol refuses with `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
 
 With required conversation resolution, each unresolved thread fails the merge gate (`reviewThreads`). An unresolved review thread is a finding to fix: the loop resolves those its reviewer verified; route others to `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.

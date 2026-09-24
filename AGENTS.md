@@ -147,12 +147,16 @@ An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
 
-Check the automatic-merge preference in master status. When disabled, each merge
-needs an approved merge decision: request it with `graphyard master decide GY-N
-merge`, and `graphyard master merge` refuses a candidate the approver agent has not
-approved. Otherwise routine merges may use `graphyard master merge --all`. The command
-rechecks the exact current candidate, every configured gate, and GitHub state
-immediately before merging. Unapproved decisions, stale observations, failures, and
+Items are system-driven unless created with `"systemDriven": false`: for them
+`graphyard master run` dispatches, launches review and proof producers, requests
+merge decisions and performs the guarded merge, and the master CLI refuses those hand
+actions, naming the loop step. Check the automatic-merge preference in master status.
+When disabled, each merge needs an approved merge decision, which the loop requests
+for a system-driven item; for an item with `"systemDriven": false` request it with
+`graphyard master decide GY-N merge`, and `graphyard master merge` refuses a
+candidate the approver agent has not approved. Otherwise such items may use
+`graphyard master merge --all`. The guarded merge rechecks the exact current
+candidate, every configured gate, and GitHub state immediately before merging. Unapproved decisions, stale observations, failures, and
 changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.

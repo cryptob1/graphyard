@@ -25,7 +25,7 @@ import { reviewerCommand } from './master-reviewer.js';
 import { registryCommand, registryHelp } from './master-registry.js';
 import { executorsCommand, executorsHelp } from './master-executors.js';
 import { closeHelp, closeRequest } from './master-close.js';
-import { assertHandAction, assertHandDispatch, assertHandReview, decisionPayload, handDecision } from './hand-actions.js';
+import { assertHandAction, assertHandDispatch, assertHandReview, decisionPayload, handDecision, systemDriven } from './hand-actions.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -118,7 +118,7 @@ export const masterCommands = defineCommands([
       // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175).
       if (id === 'decide' && ['attest', 'merge'].includes(args[1])) {
         const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-        const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now: Date.parse(snapshot.now) };
+        const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now: Date.parse(snapshot.now), requestsDecisions: !!master.operatorAgent };
         const owned = work ? handDecision(work, args[1], await decisionPayload(args[2]), loop) : null; if (owned) assertHandAction(work, owned);
       }
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
@@ -211,7 +211,9 @@ export const masterCommands = defineCommands([
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
-        for (const item of selected) assertHandAction(item, 'merge');
+        // `--all` merges the candidates that are not system-driven and leaves the rest to the loop; a named item is refused (GY-175).
+        if (args[0] === '--all') { const hand = selected.filter((item: any) => !systemDriven(item)); if (!hand.length) assertHandAction(selected[0], 'merge'); selected.splice(0, selected.length, ...hand); }
+        else for (const item of selected) assertHandAction(item, 'merge');
         if (!master.autoMerge) selected.splice(0, selected.length, ...await approvedMerges(selected, item => masterApi(`work/${item.id}/decisions`), args[0] !== '--all'));
         // One executor instance per request id (see MergeExecutor in master.ts).
         const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();

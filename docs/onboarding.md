@@ -102,7 +102,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it, the worker runs `complete GY-1 EPOCH PR_NUMBER`, review and proofs start, and the loop merges it once `Graphyard / merge` is required in branch protection. `"systemDriven": false` allows [hand dispatch and merge](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it, the worker runs `complete GY-1 EPOCH PR_NUMBER`, review and proofs start, and the loop merges it once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 Before adding workers, let one lease expire and confirm a reclaim fences the old epoch.
 
