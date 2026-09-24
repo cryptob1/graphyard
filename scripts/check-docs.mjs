@@ -94,7 +94,8 @@ function pageEntry(file, content = readFileSync(file, 'utf8')) {
 }
 
 function renderIndex({ file: indexFile, directories, sections, head, tail }) {
-  const pages = directories.flatMap(directory => readdirSync(directory, { withFileTypes: true })
+  const present = directories.filter(directory => existsSync(directory));
+  const pages = present.flatMap(directory => readdirSync(directory, { withFileTypes: true })
     .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
     .map(entry => join(directory, entry.name)))
     .filter(file => file !== indexFile)
@@ -103,7 +104,7 @@ function renderIndex({ file: indexFile, directories, sections, head, tail }) {
     .map(file => generatedFiles.has(file) ? pageEntry(file, render(generatedIndexes.find(index => index.file === file))) : pageEntry(file)).filter(Boolean);
   for (const page of pages) if (!sections.includes(page.section)) failures.push(`${page.file}: section "${page.section}" is not listed by the index in ${indexFile}`);
   const listed = new Set(pages.map(page => page.file));
-  for (const directory of directories) for (const entry of readdirSync(directory, { withFileTypes: true })) {
+  for (const directory of present) for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const file = join(directory, entry.name);
     if (!entry.isFile() || !entry.name.endsWith('.md') || file === indexFile || listed.has(file) || generatedFiles.has(file)) continue;
     failures.push(`${file}: add a <!-- page: Section | order | summary --> line so ${indexFile} lists it`);
