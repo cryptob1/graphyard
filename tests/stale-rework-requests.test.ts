@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { GitHub } from '../src/github.js';
-import { decisionKey, emptyDaemonState, githubPause, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, githubPause, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -116,7 +116,19 @@ test('unit:rework-records-its-observation — a rework request carries the time 
   assert.ok(decided[0].reason.includes(observedAt), `the decision carries the observation time: ${decided[0].reason}`);
   assert.ok(decided[0].reason.includes(reviewed), `the decision carries the observed candidate SHA: ${decided[0].reason}`);
   assert.match(decided[0].reason, /Decided from the GitHub observation taken at/);
-  const watch = state.approvals[decisionKey(item, { action: 'rework', binding: reviewed })];
+  // The watch is keyed by the head and the verdict it answers.
+  const watch = Object.entries(state.approvals).find(([key]) => key.includes(`:${reviewed}:verdict:`))![1];
   assert.deepEqual(watch.observation, { at: observedAt, sha: reviewed }, 'the loop keeps the same pair with the request');
   assert.ok(result.actions.some(action => action.kind === 'decision' && action.detail.includes(observedAt) && action.detail.includes(reviewed)));
+});
+
+test('unit:rework-answers-earlier-refusal — a rework on new grounds cites each refused rework of the item, which the server otherwise refuses as a repeat', async () => {
+  const observedAt = iso(-30_000), item = verdictItem(observedAt), decided: { action: string; reason: string }[] = [];
+  const refused = '6ee09885-03ee-419b-9e67-a05e42e03afb';
+  const withHistory: DaemonEffects = { ...effects({ work: [item], now: iso(0), jobs: [] }, decided),
+    decisions: async () => ({ decisions: [{ id: refused, action: 'rework', state: 'refused', input: { previousWorkerStopped: true }, approvedBy: null, refusal: { approver: 'graphyard-approver-graphyard', reason: 'Premature' } }] }) };
+  await runCycle(config(), emptyDaemonState(config()), withHistory, () => clock);
+  assert.equal(decided.length, 1, 'the verdict is decided on despite the earlier refusal');
+  assert.ok(decided[0].reason.includes(refused), `the request cites the refused decision: ${decided[0].reason}`);
+  assert.match(decided[0].reason, /different grounds/);
 });
