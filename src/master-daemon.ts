@@ -1376,6 +1376,12 @@ export interface DaemonEffects {
   observeDeployment: (delivered: Work[], retained?: ContainmentRetention | null) => Promise<DeploymentObservation>;
   /** Records the coordinator's own deployment observation on the delivered item. */
   recordDeployment: (work: Work, observation: { sha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }) => Promise<unknown>;
+  /**
+   * Publishes the production environment this loop verifies deployments under
+   * (`config.run.productionEnvironment`, else GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`)
+   * so the dashboard and flow report read releases under that same name; sent only on a change.
+   */
+  publishProductionEnvironment?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
   /**
@@ -2429,6 +2435,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: 'failed', detail: `Deployment SHA could not be verified: ${message(error)}`, attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
+  // 7a'. The control plane reads a release as live under the environment named here; a failed
+  //      publication is retried next cycle and holds nothing else back.
+  if (effects.publishProductionEnvironment) await effects.publishProductionEnvironment().catch(() => undefined);
+
   // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
   //     the observation on Graphyard once the release serves its merge, ask the provider to run the
   //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
@@ -2939,6 +2949,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
+  let publishedEnvironment: string | null = null;
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     childWaits: () => ledger.drain(),
@@ -3018,6 +3029,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     merge: work => mergeExecutor(current(), deps.snapshot, deps.mutate, deps.executor, randomUUID(), run)(work),
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
+    publishProductionEnvironment: async () => {
+      const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
+      if (environment === publishedEnvironment) return;
+      await deps.mutate('production-environment', { environment });
+      publishedEnvironment = environment;
+    },
     recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {
       const config = current();

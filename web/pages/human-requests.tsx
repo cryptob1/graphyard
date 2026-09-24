@@ -47,7 +47,7 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
  * One waiting action. The form is the row's own: the rule says what the operator's words are
  * called, what the button reads, and whether there is a refusing answer beside it.
  */
-function RequestCard({ row, refusal, busy, open, answer }: { row: HumanRequestRow; refusal: string | null; busy: boolean; open(): void; answer(text: string, body: Record<string, unknown>): Promise<void> }) {
+export function RequestCard({ row, refusal, busy, open, answer }: { row: HumanRequestRow; refusal: string | null; busy: boolean; open(): void; answer(text: string, body: Record<string, unknown>): Promise<void> }) {
   const [text, setText] = useState('');
   const post: HumanOnlyPost = row.answer.post;
   const send = (body: Record<string, unknown>) => { if (text.trim()) void answer(text.trim(), body).then(() => setText('')); };

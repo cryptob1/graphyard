@@ -115,8 +115,10 @@ async function fixture(page: Page, role = 'admin', mutate: (report: any) => any 
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   // Flow analytics is a tab under Insights.
-  await page.getByRole('button', { name: /Insights/ }).click();
-  await page.getByRole('button', { name: 'Flow analytics' }).click();
+  // On a phone the one navigation folds into the Menu button (GY-161).
+  if (page.viewportSize()!.width <= 650) await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Insights', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: 'Flow analytics', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Flow analytics', level: 1 })).toBeVisible();
   return state;
 }

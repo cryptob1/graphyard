@@ -9,11 +9,12 @@ import { controlPlanePermissions, requiredPermissions } from '../../github-permi
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { openHumanOnly } from '../../model/human-request.js';
 import { humanOnlySubjects } from '../waits.js';
-import { defineRoutes } from '../routes.js';
+import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
 import { eventStats } from '../../store/snapshot-delta.js';
+import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -35,6 +36,10 @@ export const statusRoutes = defineRoutes('status', [
       // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
       // and carried on the read every client already polls, so the dashboard's Needs you page is
       // a renderer of that table rather than a second opinion about it (GY-102).
+      // The production environment the master verifies deployments under, as it last published it
+      // (else this process's own setting), so the dashboard reads a release as live under the same
+      // name `master verify-deployment` and the flow report's production phase use.
+      const productionEnvironment = await resolvedProductionEnvironment(engine.store.pool);
       const humanOnly = openHumanOnly(await humanOnlySubjects(services, visibleWork), observedAt.getTime());
       // The GitHub request budget and the observation schedule spending it (GY-117): what is
       // left, how fast it goes, the pause in force, what each observation cost; and whether the
@@ -51,7 +56,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null,
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds,
         // What the timeline reconstruction has done in this process, and any failure it hit.
         pipelineBackfill: pipelineBackfillState(observedAt.getTime()),
         // The fleet as the registry holds it: each account's runtime, model, role eligibility, live
@@ -62,6 +67,22 @@ export const statusRoutes = defineRoutes('status', [
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
+    },
+  },
+  {
+    // The master loop publishes the production environment it resolves from its own configuration
+    // (`graphyard master config productionEnvironment=…`), which lives only on the master's host.
+    // Recorded once per change in the installation ledger; every status and flow read uses it.
+    method: 'POST', path: '/api/production-environment',
+    async handle(context) {
+      const { actor, services: { engine } } = context;
+      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+      const environment = productionEnvironmentName((await parseJson(context, 4096, '{}'))?.environment);
+      demand(environment, 'environment must name a deployment-provider environment (1-100 characters)', 400);
+      const latest = (await engine.store.pool.query('SELECT payload->>\'environment\' AS environment FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [productionEnvironmentEvent])).rows[0];
+      if (latest?.environment === environment) return { productionEnvironment: environment, recorded: false };
+      await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, productionEnvironmentEvent, JSON.stringify({ environment, previous: latest?.environment ?? null })]);
+      return { productionEnvironment: environment, recorded: true };
     },
   },
   {
