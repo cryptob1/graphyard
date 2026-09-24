@@ -131,8 +131,7 @@ export function plainStatus(work: Work, now: number): PlainStatus {
     const state = deliveryState(work);
     const merged = link ? `Shipped in ${link}` : 'Shipped';
     if (state === 'delivered-with-failure') return make(`${merged} — the check after deploying failed`, 'stuck', 'The check after deploying failed');
-    // Until the release is recorded serving the merge it is still being deployed (web/groups.ts reads the same record).
-    if (state === 'awaiting-deployment' || (state === 'delivered' && !work.delivery?.deployment)) return make(`${merged} — waiting to be deployed`, 'waiting', 'Waiting to be deployed');
+    if (state === 'awaiting-deployment') return make(`${merged} — waiting to be deployed`, 'waiting', 'Waiting to be deployed');
     if (state === 'awaiting-smoke') return make(`${merged} — deployed, waiting for the check after deploying`, 'waiting', 'Waiting for the check after deploying');
     return make(merged, 'shipped');
   }

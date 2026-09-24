@@ -10,6 +10,18 @@ const reducedMotion = () => typeof window !== 'undefined' && !!window.matchMedia
 const minutes = (ms: number | null | undefined) => ms === null || ms === undefined ? '—' : formatDuration(ms / 60000);
 
 /**
+ * What the Flow panel reads from the control plane: the flow report and the replay frames of the
+ * last day's recorded step moves. Tolerant of what a real board returns — a report without step
+ * or throughput figures, a drill-down without rows — so an item with no observation, reviews or
+ * candidate never stops the panel (GY-161, AC-12).
+ */
+export async function readFlow(api: Dashboard['api'], now: number) {
+  const since = new Date(now - replayWindowMs).toISOString();
+  const [flow, rows] = await Promise.all([api('analytics/flow?window=7'), api(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(since)}`)]);
+  return { report: flow ?? null, frames: replayFrames(transitionsFromRows(Array.isArray(rows?.rows) ? rows.rows : []), now), truncated: !!rows?.truncated };
+}
+
+/**
  * Insights → Flow (GY-161): build to live, one column per pull-request step.
  *
  * - **Now** places every open item at its true step (`prSteps`, the same reading the Work page
@@ -32,10 +44,9 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const [playing, setPlaying] = useState(false);
   useEffect(() => {
     let active = true;
-    const since = new Date(now - replayWindowMs).toISOString();
-    Promise.all([api('analytics/flow?window=7'), api(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(since)}`)]).then(([flow, rows]) => {
+    readFlow(api, now).then(flow => {
       if (!active) return;
-      setReport(flow); setFrames(replayFrames(transitionsFromRows(rows?.rows ?? []), now)); setTruncated(!!rows?.truncated);
+      setReport(flow.report); setFrames(flow.frames); setTruncated(flow.truncated);
       if (!reducedMotion()) { setT(0); setPlaying(true); }
     }).catch((e: Error) => { if (active) setError(e.message); });
     return () => { active = false; };
@@ -57,11 +68,11 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
   const now7 = inFlow.map(item => ({ item, steps: prSteps(item, now) })).filter(entry => entry.steps.current);
   const dwell = new Map<StepId, number | null>();
   // Per-step medians come from the same recorded step moves the replay plays (the report's stepDwell).
-  for (const entry of report?.stepDwell ?? []) if ((stepIds as readonly string[]).includes(entry.step)) dwell.set(entry.step, entry.medianMs ?? null);
+  for (const entry of Array.isArray(report?.stepDwell) ? report.stepDwell : []) if ((stepIds as readonly string[]).includes(entry.step)) dwell.set(entry.step, entry.medianMs ?? null);
   const shares = stepIds.map(step => ({ step, ms: dwell.get(step) ?? 0 })).filter(entry => entry.ms > 0);
   const total = shares.reduce((sum, entry) => sum + entry.ms, 0);
   const slowest = shares.length ? shares.reduce((a, b) => b.ms > a.ms ? b : a).step : null;
-  const landed: { bucket: string; delivered: number }[] = (report?.throughput ?? []).slice(-7);
+  const landed: { bucket: string; delivered: number }[] = (Array.isArray(report?.throughput) ? report.throughput : []).slice(-7);
   const peak = Math.max(1, ...landed.map(day => day.delivered));
   const positions = frames ? positionsAt(frames, t) : new Map();
   const lanes = [...new Set((frames ?? []).map(frame => frame.key))];

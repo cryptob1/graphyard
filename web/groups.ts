@@ -8,9 +8,10 @@ import { stalledCards } from './pages/actionless';
 /**
  * The one classification the dashboard uses (GY-161). Every open item is in exactly one group,
  * and every count, tile, list, badge and phone chip is drawn from `classify`, so a number on the
- * page is always the number of rows it filters. Merged work is `shipped` only once the release
- * is recorded serving it (`servedAt`: the verified deployment, and the passing post-deployment
- * check when one is asked for); until then it is still moving at Deploy, and a failed post-deployment check is blocked. Closed work is in none.
+ * page is always the number of rows it filters. Merged work is `shipped` (`servedAt`): a per-item
+ * deployment record is written only for policies that ask for a post-deployment check, so its
+ * absence never holds work back; only work whose check is still outstanding is moving at Deploy,
+ * and a failed check is blocked. Closed work is in none.
  *
  * - `needs-you`: waits on a decision only the human operator may make (a parked item, or an
  *   approval no agent identity can give). Listed here and nowhere else — never also as Blocked.
@@ -30,7 +31,7 @@ export const groupLabel: Record<Group, string> = {
 /** What each group means, in the words a tile carries under its count. */
 export const groupMeaning: Record<Group, string> = {
   'needs-you': 'Only you can decide', blocked: 'Agents fixing a fault', moving: 'Build to live',
-  'up-next': 'Waiting for a worker', backlog: 'Not released yet', shipped: 'Merged and live',
+  'up-next': 'Waiting for a worker', backlog: 'Not released yet', shipped: 'Merged to main',
 };
 
 /** The work ids waiting on the human, from the server's human-only rows or, before they load, the items' own parked requests. */
@@ -38,7 +39,7 @@ export function humanOnlyIds(work: Work[], rows: HumanRequestRow[] | null | unde
   return new Set([...(rows ?? []).map(row => row.id), ...work.filter(item => item.stage !== 'done' && parkedOnHuman(item)).map(item => item.id)]);
 }
 
-/** When a shipped item shipped: the recorded release serving it, or its merge for work that predates delivery records. */
+/** When a shipped item shipped: the production release observed serving it, else its merge. */
 export function shippedAt(work: Work): number {
   return Date.parse(servedAt(work) ?? work.observation?.mergedAt ?? work.stageEnteredAt);
 }
@@ -47,8 +48,8 @@ export function shippedAt(work: Work): number {
 export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set()): Group | null {
   if (isClosed(work)) return null;
   if (work.stage === 'done') {
-    // Shipped only once the recorded release serves it; a merge alone is still moving at Deploy.
-    // Work merged before delivery records existed has nothing left to wait on.
+    // Shipped whether or not a per-item deployment record exists; only an outstanding
+    // post-deployment check keeps it at Deploy. Work merged before delivery records existed has nothing left to wait on.
     if (!work.delivery || servedAt(work)) return 'shipped';
     return deliveryState(work) === 'delivered-with-failure' ? 'blocked' : 'moving';
   }

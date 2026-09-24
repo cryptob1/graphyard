@@ -44,6 +44,12 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
       return box.width > 0 && (element.scrollWidth > element.clientWidth + 1 || box.right > document.documentElement.clientWidth + 1 || box.left < -1);
     }).map(element => element.textContent?.trim().slice(0, 40)));
     expect(cut, `${name}: nothing cut off at ${viewport.name} width`).toEqual([]);
+    // Agent names and roles never break mid-word: each renders on one line (GY-161, AC-13).
+    const broken = await page.evaluate(() => [...document.querySelectorAll('.sessions-table .agent-name, .sessions-table td[data-label=Role]')].filter(element => {
+      const range = document.createRange(); range.selectNodeContents(element);
+      return new Set([...range.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size > 1;
+    }).map(element => element.textContent?.trim()));
+    expect(broken, `${name}: agent names and roles on one line at ${viewport.name} width`).toEqual([]);
     await page.screenshot({ path: `${out}/${name}-${viewport.name}.png`, fullPage: true });
   };
   // Every sidebar entry this session may open, and every page under it, as the dashboard lists them.

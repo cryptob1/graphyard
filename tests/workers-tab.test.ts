@@ -188,7 +188,7 @@ test('integration:workers-tab-per-principal-summary — running rows first by ti
   // Drawn in that order: open rows in the one sessions table, ended rows inside a collapsed <details> with the count.
   const order = [...view.running, ...view.finished].map(row => html.indexOf(`data-session="${row.id}"`));
   assert.ok(order.every((index, i) => index > 0 && (i === 0 || index > order[i - 1])), `rows in order: ${order}`);
-  assert.match(html, /4 agent sessions open: 3 working, 1 not seen recently\. 5 ended\./);
+  assert.match(html, /3 agent sessions open\. 1 not seen recently\. 5 ended\./);
   assert.match(html, /<details class="finished-sessions"><summary>Ended <span class="count">5<\/span><\/summary>/);
   assert.ok(html.indexOf('<details') < html.indexOf('data-session="proof-gy-15"'), 'ended rows are inside the collapsed section');
   // The per-account summary is folded below the sessions table, never a second table on the first screen (GY-161, AC-9).
@@ -226,12 +226,12 @@ test('unit:stale-session-marked — a running handle not seen inside the thresho
   const html = render(fixture());
   const stale = rowOf(html, 'worker-b:2');
   // Stale in plain words, never "running" (GY-161, AC-9).
-  assert.match(stale, new RegExp(`<span class="health stale" data-health="stale" data-stale="worker-b:2"><span class="health-dot" aria-hidden="true"></span>Not seen since ${new Date(at(-40 * minute)).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</span>`));
+  assert.match(stale, new RegExp(`<span class="health stale" data-health="stale" data-stale="worker-b:2"><span class="health-dot" aria-hidden="true"></span>Not seen for 40m 00s</span>`));
   assert.doesNotMatch(stale, /running|Active/i);
   assert.ok(stale.startsWith('data-session="worker-b:2" data-work="GY-13" data-role="worker" class="stale"'), 'the row itself is marked');
   const fresh = rowOf(html, 'graphyard-codex-1:1');
   assert.doesNotMatch(fresh, /data-stale|not seen since/i);
-  assert.match(fresh, /<span class="health live" data-health="live"><span class="health-dot" aria-hidden="true"><\/span>Active 2m ago<\/span>/);
+  assert.match(fresh, /<span class="health live" data-health="live"><span class="health-dot" aria-hidden="true"><\/span>Seen 2m 00s ago<\/span>/);
   assert.match(html, /1 not seen recently/);
   // Ended by liveness reconciliation: said in plain words, the rule that closed it on the element and the recorded outcome in its title.
   const reconciled = rowOf(html, 'review-gy-13');
@@ -250,7 +250,7 @@ test('manual:workers-tab-docs-review — docs/dashboard.md documents the Workers
   assert.match(section, /A row is one \[session handle\]/);
   assert.match(section, /not from Herdr/);
   assert.match(section, /\*\*15 minutes\*\* by default, `sessionStaleThresholdMs`/);
-  assert.match(section, /reads \*not seen since <updatedAt>\*, never as running/);
+  assert.match(section, /reads \*not seen for <time since updatedAt>\*, never as running, and is not counted among the open sessions/);
   assert.match(section, /\*\*Copy local\*\*/); assert.match(section, /\*\*Copy remote\*\*/);
   assert.match(section, /`herdr --help` documents `herdr --machine <label-or-id> <command>`/);
   assert.ok(section.includes('`herdr agent attach w1V:pJD`'), 'the local form');

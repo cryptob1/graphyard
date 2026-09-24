@@ -1,6 +1,6 @@
 import { deliveryState, type Gate, type Work } from '../src/model';
 import { latestCheck } from '../src/merge-queue';
-import { servedAt } from '../src/flow-analytics';
+import { releaseObservedAt, servedAt } from '../src/flow-analytics';
 import { assignment } from './assignment';
 import { plainReason } from './plain-status';
 
@@ -92,8 +92,9 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number):
 /**
  * The seven steps for one item. Before the work is handed in only Build can be current. After
  * it, each step's own gate decides done, and the first step whose gate refuses is current; when
- * every gate passes the item is merging. A merged item is at Deploy until the release serves it,
- * and every step is done after.
+ * every gate passes the item is merging. A merged item has every step done — reading "Live" where
+ * production was observed serving it — unless its policy asks for a post-deployment check that has
+ * not passed, which keeps it at Deploy.
  */
 export function prSteps(work: Work, now: number): PrSteps {
   const make = (state: (id: StepId) => StepState, current: StepId | null, detail: string, who: string): PrSteps => ({
@@ -101,8 +102,9 @@ export function prSteps(work: Work, now: number): PrSteps {
     label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who,
   });
   if (work.stage === 'done') {
-    // Live once the recorded release serves it (web/groups.ts reads the same `servedAt`).
-    if (!work.delivery || servedAt(work)) return make(() => 'done', null, 'Live', 'Nobody — it has shipped');
+    // Shipped once merged, unless its policy asks for a post-deployment check that has not passed
+    // (web/groups.ts reads the same `servedAt`). "Live" only where production was observed serving it.
+    if (!work.delivery || servedAt(work)) return make(() => 'done', null, releaseObservedAt(work) ? 'Live' : 'Merged', 'Nobody — it has shipped');
     const { detail, who } = waitsOn('deploy', undefined, work, now);
     return make(id => id === 'deploy' ? 'current' : 'done', 'deploy', detail, who);
   }

@@ -21,7 +21,7 @@ const base = sha('b');
 const blocked = (reason, n = 1) => ({ ready: [], build: ['Worker has not submitted implementation for this attempt', 'Pull request has not been independently observed', 'No workspace registered'], review: ['Independent approval of the current commit is required'], test: ['Required CI check test has not passed on the current candidate', 'Required CI check typecheck has not passed on the current candidate'], merge: ['GitHub observation missing or older than two minutes', 'Required Graphyard check and merge-queue branch protection have not been verified', 'Pull request is not mergeable against the current base'], ...reason, _n: n });
 const proofReason = (ac, proof) => `${ac}: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`;
 function gates(reasons, criteria) {
-  const acceptance = reasons.acceptance ?? criteria.flatMap(c => c.proofs.map(p => proofReason(c.id, p)));
+  const acceptance = reasons.acceptance ?? (criteria ?? []).flatMap(c => c.proofs.map(p => proofReason(c.id, p)));
   return ['ready', 'build', 'review', 'test', 'acceptance', 'merge'].map(name => {
     const list = name === 'acceptance' ? acceptance : reasons[name] ?? [];
     return { name, passed: list.length === 0, reasons: list };
@@ -106,14 +106,18 @@ function ledger(work) {
     const initial = { ...final, ready: false, stage: 'backlog', stageEnteredAt: final.createdAt, lease: null, submission: null, candidate: null, observation: null, evidence: [], blocker: null, delivery: undefined, mergeAuthorization: undefined, gates: gates(blocked({ ready: ['Not released from backlog'] }), final.criteria) };
     push(initial, created, 'create');
     if (final.stage !== 'done') { push(final, Date.parse(final.stageEnteredAt) - NOW, final.lease ? 'claim' : final.candidate ? 'github.observed' : 'ready'); continue; }
+    // Real delivered items may carry no observation (nor reviews, nor a candidate): the history
+    // is then replayed without one, never read through a null (GY-161, AC-12).
     const merged = Date.parse(final.stageEnteredAt) - NOW, opened = merged - 20 * hour;
-    const open = { ...final, stage: 'review', delivery: undefined, mergeAuthorization: undefined, evidence: [], observation: { ...final.observation, merged: false, mergeSha: null, mergedAt: null, reviews: [] }, gates: gates(blocked({ build: [], test: [], merge: [] }), final.criteria) };
+    const observed = changes => final.observation ? { ...final.observation, merged: false, mergeSha: null, mergedAt: null, ...changes } : null;
+    const reviews = final.observation?.reviews ?? [];
+    const open = { ...final, stage: 'review', delivery: undefined, mergeAuthorization: undefined, evidence: [], observation: observed({ reviews: [] }), gates: gates(blocked({ build: [], test: [], merge: [] }), final.criteria) };
     push({ ...open, stage: 'build', candidate: null, observation: null, lease: { owner: 'worker-2', epoch: 1, expiresAt: at(opened) } }, opened - 6 * hour, 'claim');
     push({ ...open, candidate: null, observation: null }, opened, 'submit');
     push({ ...open, stageEnteredAt: at(opened + hour) }, opened + hour, 'github.observed');
-    push({ ...open, stage: 'acceptance', observation: { ...open.observation, reviews: final.observation.reviews }, gates: gates(blocked({ build: [], review: [], test: [], merge: [] }), final.criteria) }, merged - 5 * hour, 'github.observed');
-    push({ ...open, stage: 'merge', evidence: final.evidence, observation: { ...open.observation, reviews: final.observation.reviews }, gates: gates({ merge: ['Merge queue position 1 of 1: GY-0 is ahead'], acceptance: [] }, final.criteria) }, merged - 3 * hour, 'evidence');
-    push({ ...final, observation: { ...final.observation, merged: false, mergeSha: null, mergedAt: null }, stage: 'merge', delivery: undefined }, merged - hour, 'merge.authorize');
+    push({ ...open, stage: 'acceptance', observation: observed({ reviews }), gates: gates(blocked({ build: [], review: [], test: [], merge: [] }), final.criteria) }, merged - 5 * hour, 'github.observed');
+    push({ ...open, stage: 'merge', evidence: final.evidence ?? [], observation: observed({ reviews }), gates: gates({ merge: ['Merge queue position 1 of 1: GY-0 is ahead'], acceptance: [] }, final.criteria) }, merged - 3 * hour, 'evidence');
+    push({ ...final, observation: observed({}), stage: 'merge', delivery: undefined }, merged - hour, 'merge.authorize');
     push(final, merged, 'github.observed');
   }
   return events;
@@ -164,7 +168,7 @@ export function fixtureApi(path, role = 'admin') {
       counts: { days7: done.filter(w => Date.parse(w.delivery.mergedAt) > NOW - 7 * day).length, days30: done.length }, intentToMerge: { medianHours: 240, sampleSize: done.length, excluded: 0 },
       prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: done.length, excluded: done.length, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': done.length }, split: { prToMergeAverageHours: 20, mergeToProductionAverageHours: null } },
       weeks: Array.from({ length: 12 }, (_, index) => week(index + 1)),
-      recent: done.map(w => ({ key: w.key, title: w.title, pullRequest: w.candidate.pr, mergeSha: w.delivery.mergeSha, mergedAt: w.delivery.mergedAt, quality: { passingProofs: 1, requiredProofs: 1, violations: [] } })) };
+      recent: done.map(w => ({ key: w.key, title: w.title, pullRequest: w.candidate?.pr ?? null, mergeSha: w.delivery.mergeSha, mergedAt: w.delivery.mergedAt, quality: { passingProofs: 1, requiredProofs: 1, violations: [] } })) };
   }
   if (route === 'delivery') return { environments: [], releases: [], rollbacks: [], now: at(0) };
   if (route.startsWith('validation')) return { requests: [], candidates: [], nextCursor: null };

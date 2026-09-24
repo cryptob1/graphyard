@@ -98,7 +98,8 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['merge (ready)', { ...withGates(handedIn, 'merge', []), stage: 'merge', gates: find('GY-18').gates }, 'Ready to merge PR #42', 'waiting'],
     ['done', { ...find('GY-18') }, 'Shipped in PR #40', 'shipped'],
     ['done (awaiting deploy)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined }, policy: { ...find('GY-18').policy, deploySmoke: true } as any }, 'Shipped in PR #40 — waiting to be deployed', 'waiting'],
-    ['done (merged, release not yet seen)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined } }, 'Shipped in PR #40 — waiting to be deployed', 'waiting'],
+    // No per-item deployment record is written unless the policy asks for the check after deploying (GY-161 AC-11).
+    ['done (no deployment record)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined } }, 'Shipped in PR #40', 'shipped'],
     ['blocked', { ...find('GY-17') }, 'Stuck: needs a second Postgres instance', 'stuck'],
   ];
   const seen = new Set<string>();

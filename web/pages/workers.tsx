@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Work } from '../../src/model';
 import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type SessionRoleKind, type WorkerRow } from '../workers-view';
-import { formatAge } from '../duration';
 import { prSteps } from '../pr-steps';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
@@ -24,7 +23,13 @@ export function spent(ms: number) {
   const two = (n: number) => String(n).padStart(2, '0');
   return hours ? `${hours}h ${two(minutes)}m ${two(seconds)}s` : minutes ? `${minutes}m ${two(seconds)}s` : `${seconds}s`;
 }
-const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '—';
+/** How long ago an instant was, in the same units: `12s ago`, `4m 30s ago`. Never an absolute timestamp. */
+export function ago(iso: string | null, now: number) {
+  const at = Date.parse(iso ?? '');
+  return Number.isFinite(at) ? `${spent(now - at)} ago` : 'at an unrecorded time';
+}
+/** Commit SHAs (and other long hex ids) in recorded text, shown as their first 8 characters. */
+export const shortShas = (text: string) => text.replace(/\b[0-9a-f]{9,64}\b/g, hex => hex.slice(0, 8));
 
 /**
  * One-click copy of exactly the text given: no prose, no trailing newline. The text is also the
@@ -65,8 +70,8 @@ export const roleWords: Record<SessionRoleKind, string> = {
  * — neither is ever shown as running.
  */
 export function health(row: WorkerRow, now: number): { tone: 'live' | 'stale' | 'ended'; text: string } {
-  if (row.stale) return { tone: 'stale', text: `Not seen since ${when(row.stale.since)}` };
-  if (row.state === 'running') return { tone: 'live', text: `Active ${formatAge(row.updatedAt, now)} ago` };
+  if (row.stale) return { tone: 'stale', text: `Not seen for ${spent(now - Date.parse(row.stale.since))}` };
+  if (row.state === 'running') return { tone: 'live', text: `Seen ${ago(row.updatedAt, now)}` };
   if (row.reconciled === 'vanished') return { tone: 'ended', text: 'Ended · stopped responding' };
   if (row.reconciled === 'superseded') return { tone: 'ended', text: 'Ended · replaced by a newer session' };
   if (row.reconciled === 'ended') return { tone: 'ended', text: 'Ended · its runtime closed it' };
@@ -76,7 +81,7 @@ export function health(row: WorkerRow, now: number): { tone: 'live' | 'stale' | 
 function Health({ row, now }: { row: WorkerRow; now: number }) {
   const { tone, text } = health(row, now);
   return <span className={`health ${tone}`} data-health={tone} data-stale={row.stale ? row.id : undefined}
-    data-reconciled={row.reconciled ?? undefined} title={row.outcome ?? undefined}><span className="health-dot" aria-hidden="true"/>{text}</span>;
+    data-reconciled={row.reconciled ?? undefined} title={row.outcome ? shortShas(row.outcome) : undefined}><span className="health-dot" aria-hidden="true"/>{text}</span>;
 }
 
 function Attach({ row }: { row: WorkerRow }) {
@@ -92,18 +97,24 @@ function Attach({ row }: { row: WorkerRow }) {
 
 /** What the session is doing now: a builder by its item's current step, anyone else by what it was launched for, an ended one by how it ended. */
 function doing(row: WorkerRow, item: Work | undefined, now: number) {
-  if (row.state !== 'running') return row.reconciled ? row.subject : row.outcome ?? row.subject;
+  if (row.state !== 'running') return shortShas(row.reconciled ? row.subject : row.outcome ?? row.subject);
   if (row.roleKind === 'worker' && item && !row.stale) return prSteps(item, now).label;
-  return row.subject;
+  return shortShas(row.subject);
+}
+
+/** Since when, relative to now: a running session by when it started, an ended one by when it ended and how long it ran. */
+function since(row: WorkerRow, now: number) {
+  if (row.state === 'running') return <>started <span className="spent">{spent(row.spentMs)}</span> ago</>;
+  return <>ended {ago(row.endedAt ?? row.updatedAt, now)} · ran <span className="spent">{spent(row.spentMs)}</span></>;
 }
 
 function Row({ row, item, now, setSelected }: { row: WorkerRow; item?: Work; now: number; setSelected(id: string | null): void }) {
   return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale ? 'stale' : undefined}>
-    <th scope="row" data-label="Agent"><span className="mono" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row}/></th>
+    <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row}/></th>
     <td data-label="Role">{roleWords[row.roleKind]}</td>
-    <td data-label="Working on"><button type="button" className="text-button" title={row.subject} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
+    <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
     <td data-label="Doing now">{doing(row, item, now)}</td>
-    <td data-label="Since" data-spent={row.spentMs} title={when(row.startedAt)}>{spent(row.spentMs)}</td>
+    <td data-label="Since" data-spent={row.spentMs}>{since(row, now)}</td>
     <td data-label="Health"><Health row={row} now={now}/></td>
   </tr>;
 }
@@ -139,11 +150,12 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
 export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
   const view = workersView(work, new Date(now));
+  // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
   const stale = view.running.filter(row => row.stale).length;
-  const open = view.running.length;
+  const open = view.running.length - stale;
   return <>
-    <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open{open ? `: ${open - stale} working` : ''}{stale ? `, ${stale} not seen recently` : ''}. {view.finished.length} ended.</p></div></div>
-    {open ? <Table rows={view.running} label="Agent sessions" work={work} now={now} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
+    <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
+    {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
     <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
     <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>
       {view.finished.length ? <Table rows={view.finished} label="Ended sessions" work={work} now={now} setSelected={setSelected}/> : <p className="muted">No session has ended yet.</p>}

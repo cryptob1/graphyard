@@ -275,8 +275,9 @@ img.mark{width:26px;height:26px}
 .sessions-table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--border);border-radius:var(--radius-lg);font-size:var(--type-body);color:var(--text)}
 .sessions-table th[scope=col]{font-size:var(--type-small);font-weight:500;color:var(--text-3);text-align:left;padding:12px var(--space-4)}
 .sessions-table td,.sessions-table th[scope=row]{padding:14px var(--space-4);border-top:1px solid var(--border);vertical-align:top;text-align:left;font-weight:400;overflow-wrap:anywhere}
-.sessions-table th[scope=row] .mono{display:block}.sessions-table .attach{display:flex;gap:0 var(--space-3);flex-wrap:wrap}.sessions-table .attach .text-button{padding:2px 0}.sessions-table .copy{font-size:var(--type-tiny)}
-.sessions-table td[data-label=Since]{color:var(--text-2);white-space:nowrap}
+.sessions-table th[scope=row] .mono{display:block}.sessions-table .attach{display:flex;gap:0 var(--space-3);flex-wrap:wrap}.sessions-table .attach .text-button{padding:2px 0}.sessions-table .copy{font-size:var(--type-tiny);white-space:nowrap}
+.sessions-table th[scope=row][data-label=Agent],.sessions-table td[data-label=Role]{overflow-wrap:normal;word-break:keep-all}.sessions-table .agent-name,.sessions-table td[data-label=Role]{white-space:nowrap}
+.sessions-table td[data-label=Since]{color:var(--text-2)}.sessions-table .spent{white-space:nowrap}
 .sessions-table .text-button{font-size:var(--type-body);color:var(--up-next);text-align:left}
 .health,.health.live{display:inline-flex;align-items:center;gap:6px;color:var(--text-2);font-size:var(--type-small)}.health-dot{width:8px;height:8px;border-radius:50%;border:1.5px solid var(--text-2);flex-shrink:0}
 .health.live{color:var(--shipped)}.health.live .health-dot{background:var(--shipped);border-color:var(--shipped)}

@@ -65,6 +65,39 @@ export function boardWork(): any[] {
   ];
 }
 
+/**
+ * Delivered items in the shape the real board returns them (GY-161, AC-11 and AC-12), modelled on
+ * GY-163 as `GET /api/work-snapshot` served it: merged, with a `delivery` that carries no per-item
+ * `deployment` (that record is written only when the policy asks for a post-deployment smoke
+ * proof), a merge gate still refusing on a speculative tip and a leftover queue entry — and the
+ * older shapes seen beside it: no observation at all, an observation without reviews, and no
+ * candidate or submission.
+ */
+export function realDeliveredWork(): any[] {
+  const template = (fixtureWork() as any[]).find(item => item.key === 'GY-13');
+  const merge = (n: number) => sha(String(n % 10));
+  const delivered = (n: number, title: string, mergedHoursAgo: number, fields: Record<string, unknown> = {}) => {
+    const mergedAt = at(-mergedHoursAgo * hour);
+    const head = sha('a'), candidate = { pr: 100 + n, sha: head, author: 'cryptob1', branch: `graphyard/gy-${n}-1`, baseSha: sha('b'), createdAt: at(-(mergedHoursAgo + 5) * hour) };
+    return { ...template, id: id(n), key: `GY-${n}`, title, description: `${title}.`, type: 'feature', stage: 'done', ready: true, epoch: 14, lease: null, blocker: null,
+      createdAt: at(-(mergedHoursAgo + 30) * hour), updatedAt: mergedAt, stageEnteredAt: mergedAt, policy: { checks: ['test', 'typecheck'], review: true },
+      submission: { pr: candidate.pr, epoch: 14 }, candidate, evidence: [], violations: [], sessions: [], reviewRequest: null, mergeAuthorization: null, mergeExecution: null,
+      lastAssignment: { epoch: 14, owner: 'graphyard-claude-1', runtime: 'Claude', claimedAt: at(-(mergedHoursAgo + 2) * hour), displayName: 'Juniper' },
+      delivery: { mergeSha: merge(n), mergedAt, evidenceAsOf: mergedAt, mergedAtRepository: mergedAt, authorizationRevision: 810, repositoryClockOffsetMs: -141 },
+      observation: { at: mergedAt, draft: false, files: ['web/app.tsx'], checks: [{ id: 1, name: 'test', appId: 15368, result: 'success' }, { id: 2, name: 'typecheck', appId: 15368, result: 'success' }],
+        merged: true, baseTip: merge(n), prState: 'closed', reviews: [{ id: 5303188884, sha: head, state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', submittedAt: at(-(mergedHoursAgo + 1) * hour) }],
+        mergeSha: merge(n), mergedAt, candidate, mergeable: true, protected: true, reviewIds: [5303188884], scopeFiles: [], conversations: { unresolved: 0 } },
+      gates: refusing({ merge: [`Speculative tip on predicted base ${sha('b').slice(0, 12)} is stale`] }),
+      queue: { sequence: 191, enqueuedAt: at(-(mergedHoursAgo + 1) * hour), speculation: null }, ...fields };
+  };
+  return [
+    delivered(163, 'Resolve review threads the reviewer listed', 2),
+    delivered(164, 'Bound the health check query', 20, { observation: null }),
+    delivered(165, 'Record the merge window size', 30, { observation: { at: at(-30 * hour), merged: true, mergeSha: merge(165), mergedAt: at(-30 * hour), checks: [], files: [], candidate: { pr: 265, sha: sha('c'), author: 'cryptob1', branch: 'graphyard/gy-165-1', baseSha: sha('b'), createdAt: at(-40 * hour) } } }),
+    delivered(166, 'Delivered before candidates were recorded', 60, { observation: null, candidate: null, submission: null, gates: allPassed(), queue: null }),
+  ];
+}
+
 /** The status read for the board: the audit fixture's, with the human-only row the server derives for GY-20. */
 export function boardStatus(role = 'admin') {
   return { ...fixtureStatus(role), repository: 'fixture/shop' };

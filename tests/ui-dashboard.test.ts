@@ -6,9 +6,9 @@ import { createElement, isValidElement, type ReactElement, type ReactNode } from
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { predictQueue } from '../src/merge-queue.js';
-import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
+import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
-import { visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { flowApi, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, nextActor, shippedAt, timedGroups, type OpenGroup } from '../web/groups.js';
 import { prSteps, stepIds } from '../web/pr-steps.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
@@ -18,13 +18,13 @@ import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
-import InsightsFlow from '../web/pages/insights-flow.js';
+import InsightsFlow, { readFlow } from '../web/pages/insights-flow.js';
 import Sidebar from '../web/components/sidebar.js';
 import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
-import WorkersPage, { roleWords } from '../web/pages/workers.js';
+import WorkersPage, { roleWords, shortShas } from '../web/pages/workers.js';
 import { CandidateSha } from '../web/candidate.js';
-import { gateFactStep } from '../src/flow-analytics.js';
+import { computeFlow, flowDrilldown, gateFactStep, servedAt, stepMoves } from '../src/flow-analytics.js';
 
 // GY-161: the dashboard, rendered over the board fixture the browser suite also serves
 // (browser-tests/ui-board.ts): an item parked on a human-only decision, one blocked, items building,
@@ -98,8 +98,8 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
     // The tile row still counts every group, so the numbers never change under the reader.
     for (const other of groups) assert.equal(tileCount(filtered, other), byGroup[other].length);
   }
-  // Merged work is Shipped only once the release serves it: waiting on the deployment or its
-  // post-deployment check it is still Moving (at Deploy), and a failed check is Blocked.
+  // Merged work is Shipped; only a policy that asks for a post-deployment check keeps it Moving (at
+  // Deploy) until that check passes on the recorded deployment, and a failed check is Blocked.
   const merged = find('GY-18', work);
   const release = (delivery: Record<string, unknown>) => ({ ...merged, policy: { ...merged.policy, deploySmoke: true }, delivery: { ...merged.delivery!, ...delivery } }) as Work;
   const deployment = { sha: merged.delivery!.mergeSha, covers: 'exact' };
@@ -107,9 +107,9 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   const awaiting = release({ deployment: null }), checking = release({ deployment, smoke: null }), failed = release({ deployment, smoke: smoke('fail') }), live = release({ deployment, smoke: smoke('pass') });
   assert.equal(groupOf(merged, NOW), 'shipped');
   assert.equal(groupOf(live, NOW), 'shipped');
-  // With no post-deployment check asked for, a merge is still Moving until the release is recorded serving it.
+  // With no post-deployment check asked for, no per-item deployment record is written: the merge has shipped (AC-11).
   const unverified = { ...merged, delivery: { ...merged.delivery!, deployment: undefined } } as Work;
-  assert.equal(groupOf(unverified, NOW), 'moving'); assert.equal(prSteps(unverified, NOW).current, 'deploy');
+  assert.equal(groupOf(unverified, NOW), 'shipped'); assert.equal(prSteps(unverified, NOW).current, null);
   assert.equal(groupOf(awaiting, NOW), 'moving'); assert.equal(groupOf(checking, NOW), 'moving'); assert.equal(groupOf(failed, NOW), 'blocked');
   const releasing = classify(work.map(item => item.key === 'GY-18' ? awaiting : item), NOW);
   assert.ok(releasing.byGroup.moving.some(item => item.key === 'GY-18'), 'a merge waiting on its release stays on the Work page');
@@ -117,8 +117,8 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   const releasingPage = home(dashboard({ work: work.map(item => item.key === 'GY-18' ? awaiting : item) }));
   assert.equal(tileCount(releasingPage, 'moving'), rowsOf(releasingPage, 'moving').length);
   assert.ok(rowsOf(releasingPage, 'moving').includes('GY-18'));
-  // "Shipped this week" counts what the page classifies as Shipped, dated from when the release served it:
-  // a merge from this morning still waiting on its release is in Moving, not in the footer.
+  // "Shipped this week" counts what the page classifies as Shipped: a merge from this morning still
+  // waiting on the post-deployment check its policy asks for is in Moving, not in the footer.
   const shippedLine = (html: string) => Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(html)?.[1]);
   const servedThisWeek = (items: Work[]) => items.filter(item => groupOf(item, NOW) === 'shipped' && NOW - shippedAt(item) <= 7 * 24 * hour).map(item => item.key);
   assert.equal(shippedLine(page), servedThisWeek(work).length);
@@ -294,7 +294,8 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     ['proofs pending', find('GY-16', work), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
     ['merging', find('GY-21', work), 'merge', 'Merging · Graphyard is merging it', 'Graphyard (automatic)'],
     ['queued to merge', withReasons(find('GY-21', work), { merge: ['Merge queue position 2 of 3: GY-5 is ahead'] }), 'merge', 'Merging · 2nd in line, after GY-5', 'Graphyard (automatic)'],
-    ['deploying', { ...find('GY-18', work), delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'deploy', 'Deploying · waiting for the live release to serve it', 'Graphyard (automatic)'],
+    // Deploy is a step only where the policy asks for the check after deploying (GY-161, AC-11).
+    ['deploying', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'deploy', 'Deploying · waiting for the live release to serve it', 'Graphyard (automatic)'],
     ['checking the live release', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true } } as Work, 'deploy', 'Deploying · checking the live release', 'Prover agent'],
     // A change request sends it back to the builder: the item waits at Build, not at Review.
     ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'build', 'Building · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
@@ -379,7 +380,7 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   // The page reads exactly that recorded history, and the Now view places each open item at its true step.
   const source = await read('web/pages/insights-flow.tsx');
   assert.match(source, /analytics\/flow\/drilldown\?window=7&metric=steps&key=/);
-  assert.match(source, /replayFrames\(transitionsFromRows\(rows\?\.rows \?\? \[\]\), now\)/);
+  assert.match(source, /replayFrames\(transitionsFromRows\(Array\.isArray\(rows\?\.rows\) \? rows\.rows : \[\]\), now\)/);
   assert.match(source, /analytics\/flow\?window=7/); assert.match(source, /report\?\.throughput/); assert.match(source, /report\?\.stepDwell/); assert.doesNotMatch(source, /stageDwell|stageStep/);
   const page = markup(createElement(InsightsFlow, dashboard()));
   for (const text of ['Now', 'Last 24 hours, replayed', 'Landed on main per day', 'Where the time goes']) assert.ok(page.includes(text), text);
@@ -454,14 +455,14 @@ test('unit:ui-workers-page — Workers is one table of agent sessions (agent, ro
   assert.match(builder, /<td data-label="Role">Builds code<\/td>/);
   assert.match(builder, /<span class="mono">GY-14<\/span> Export monthly reports as CSV<\/button>/);
   assert.match(builder, new RegExp(`<td data-label="Doing now">${prSteps(find('GY-14'), NOW).label}</td>`));
-  assert.match(builder, /<td data-label="Since"[^>]*>18m 00s<\/td>/);
-  assert.match(builder, /data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Active 1m ago/);
+  assert.match(builder, /<td data-label="Since"[^>]*>started <span class="spent">18m 00s<\/span> ago<\/td>/);
+  assert.match(builder, /data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Seen 1m 00s ago/);
   assert.match(row('r15'), /<td data-label="Role">Reviews code<\/td>/);
   // Recorded running but not seen for forty minutes: stale, in plain words, never running or active.
   const stale = row('s12');
-  assert.match(stale, /data-health="stale"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Not seen since/);
+  assert.match(stale, /data-health="stale"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Not seen for 40m 00s/);
   assert.doesNotMatch(stale, /running|Active/i);
-  assert.match(first, /3 agent sessions open: 2 working, 1 not seen recently\. 2 ended\./);
+  assert.match(first, /2 agent sessions open\. 1 not seen recently\. 2 ended\./);
   // A session the runtime stopped reporting is ended, in plain words, and is not in the open table.
   assert.doesNotMatch(first, /data-session="p16"/);
   assert.match(html, /data-session="p16"[\s\S]*?Ended · stopped responding/);
@@ -521,3 +522,125 @@ test('unit:ui-review-polish — step names sit over their segments, commits show
   for (const ac of find('GY-16').criteria) assert.ok(!shown.split(' ').includes(ac.id), `${ac.id} is folded away`);
 });
 
+
+test('unit:ui-delivered-without-deployment-record — a merged item is Shipped whether or not its delivery carries a deployment record: real-shaped deliveries without one never appear in Moving or at Deploy, and Insights counts none of them in the flow', async () => {
+  const real = realDeliveredWork() as unknown as Work[];
+  // Real-shaped: merged, delivered, no per-item deployment record, and a policy that asks for no post-deployment check.
+  for (const item of real) { assert.equal(item.stage, 'done'); assert.ok(item.delivery && !item.delivery.deployment && !item.policy.deploySmoke, item.key); }
+  const work = [...board(), ...real];
+  const keys = real.map(item => item.key);
+  for (const item of real) {
+    assert.equal(groupOf(item, NOW), 'shipped', `${item.key} is Shipped`);
+    const steps = prSteps(item, NOW);
+    assert.equal(steps.current, null, `${item.key} is at no step`);
+    assert.ok(steps.steps.every(step => step.state === 'done'), `${item.key} has every step done`);
+    // No production observation covers it, so it reads "Merged", not "Live"; it shipped at its merge.
+    assert.equal(steps.label, 'Merged');
+    assert.equal(servedAt(item), item.delivery!.mergedAt);
+    assert.equal(shippedAt(item), Date.parse(item.delivery!.mergedAt));
+  }
+  // Where the control plane observed a production release serving it, that is when it shipped, and it reads "Live".
+  const released = { ...real[0], releaseDeliveries: [{ environment: 'production', policyRevision: 1, releaseId: 'r1', releaseRevision: 1, generation: 1, verifiedAt: new Date(NOW - hour).toISOString(), interval: { from: new Date(NOW - hour).toISOString(), to: new Date(NOW).toISOString() } }] } as Work;
+  assert.equal(groupOf(released, NOW), 'shipped'); assert.equal(prSteps(released, NOW).label, 'Live'); assert.equal(servedAt(released), new Date(NOW - hour).toISOString());
+  // None of them is in an open group, a Moving row or a tile count.
+  const { byGroup, open } = classify(work, NOW);
+  assert.equal(open, classify(board(), NOW).open, 'no delivered item adds to the open count');
+  for (const group of groups) for (const item of byGroup[group]) assert.ok(!keys.includes(item.key), `${item.key} in ${group}`);
+  const page = home(dashboard({ work }));
+  for (const key of keys) assert.ok(!rowsOf(page, 'moving').includes(key) && !page.includes(`data-row="${key}"`), `${key} has no Work row`);
+  assert.equal(tileCount(page, 'moving'), byGroup.moving.length);
+  // Shipped this week counts the ones merged this week.
+  assert.equal(Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(page)?.[1]), work.filter(item => groupOf(item, NOW) === 'shipped' && NOW - shippedAt(item) <= 7 * 24 * hour).length);
+  assert.ok(real.filter(item => NOW - shippedAt(item) <= 7 * 24 * hour).length >= 3);
+  // Insights: none of them is a Now dot, none is counted in the flow, and the replay takes each out of Deploy.
+  const insights = markup(createElement(InsightsFlow, dashboard({ work })));
+  for (const key of keys) assert.doesNotMatch(insights, new RegExp(`class="now-dot[^"]*"[^>]*data-key="${key}"`), `${key} is no Now dot`);
+  const flowing = [...byGroup.moving, ...byGroup.blocked].filter(item => prSteps(item, NOW).current).length;
+  assert.match(insights, new RegExp(`${flowing} items are in the flow now`));
+  const api = flowApi(work);
+  const recorded = api('analytics/flow/drilldown?window=7&metric=steps') as { rows: { workKey: string; observedAt: string | null; detail: string }[] };
+  const replayed = positionsAt(replayFrames(transitionsFromRows(recorded.rows), NOW, 60 * 24 * hour), 1);
+  for (const key of keys) assert.equal(replayed.get(key), undefined, `${key} replays out of the flow`);
+  for (const key of keys.slice(0, 3)) assert.ok(recorded.rows.some(row => row.workKey === key && row.detail === 'deploy to outside'), `${key} leaves Deploy`);
+  // Leaving Deploy is never recorded before the move that put it there, even when the merge time comes first.
+  const dataset = { facts: [{ workId: real[0].id, kind: 'gates.changed', observedAt: new Date(NOW - hour).toISOString(), details: { stage: 'done', unmet: ['merge'] } }], carryIn: [] } as any;
+  const moves = stepMoves(dataset, { ...real[0], delivery: { ...real[0].delivery!, mergedAt: new Date(NOW - 2 * hour).toISOString() } } as Work);
+  assert.deepEqual(moves.map(move => `${move.from}>${move.to}@${(NOW - Date.parse(move.at)) / hour}`), ['null>deploy@1', 'deploy>null@1']);
+  // Only a policy that asks for the post-deployment check keeps a merge at Deploy, while that check is outstanding.
+  const smoke = { ...real[0], policy: { ...real[0].policy, deploySmoke: true } } as Work;
+  assert.equal(groupOf(smoke, NOW), 'moving'); assert.equal(prSteps(smoke, NOW).current, 'deploy');
+});
+
+test('unit:ui-insights-real-items — Insights builds its flow and 24-hour replay from real-shaped items (no observation, no reviews, no candidate) without failing, through the same code path the page reads', async () => {
+  const real = realDeliveredWork() as unknown as Work[];
+  assert.ok(real.some(item => item.observation === null), 'an item with no observation');
+  assert.ok(real.some(item => item.observation && !(item.observation as any).reviews), 'an item whose observation has no reviews');
+  assert.ok(real.some(item => item.candidate === null && item.submission === null), 'an item with no candidate');
+  // Open items as the real board has them too: building with no observation or candidate yet.
+  const building = { ...find('GY-14'), observation: null, candidate: null } as Work;
+  assert.equal(building.observation, null);
+  const work = [...board().filter(item => item.key !== 'GY-14'), building, ...real];
+  // The flow API over these items: the report and the steps drill-down the page reads.
+  const api = flowApi(work);
+  let report: any, rows: any;
+  assert.doesNotThrow(() => { report = api('analytics/flow?window=7'); rows = api(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(new Date(NOW - 24 * hour).toISOString())}`); });
+  assert.deepEqual(report.stepDwell.map((entry: any) => entry.step), [...stepIds]);
+  assert.ok(Array.isArray(report.throughput) && Array.isArray(rows.rows));
+  // The page's own reader, fed by that API, returns the report and replay frames built only from those rows.
+  const flow = await readFlow(async (path: string) => api(path), NOW);
+  assert.equal(flow.report, report);
+  assert.deepEqual(flow.frames.map(frame => frame.source), replayFrames(transitionsFromRows(rows.rows), NOW).map(frame => frame.source));
+  assert.ok(flow.frames.some(frame => real.some(item => item.key === frame.key)), 'the real items are in the replay');
+  // And a control plane that answers with less — no rows, no figures — still gives an empty replay, not a failure.
+  const empty = await readFlow(async () => null, NOW);
+  assert.deepEqual(empty, { report: null, frames: [], truncated: false });
+  // The same aggregation straight over the real items alone, as the server computes it.
+  const dataset = { observedAt: new Date(NOW).toISOString(), from: new Date(NOW - 30 * 24 * hour).toISOString(), to: new Date(NOW).toISOString(), days: 30, work: real, included: real, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [],
+    scanned: 0, truncated: false, workTruncated: false, deploymentsTruncated: false, deploymentMergesTruncated: false, projection: { lastEvent: 0, updatedAt: new Date(NOW).toISOString(), pendingEvents: 0, pendingCapped: false } } as any;
+  assert.doesNotThrow(() => flowDrilldown(dataset, computeFlow(dataset, { days: 30 } as any), { metric: 'steps', authorized: true }));
+  // The page renders over them: the Now view and the charts, without throwing.
+  let page = '';
+  assert.doesNotThrow(() => { page = markup(createElement(InsightsFlow, dashboard({ work, api: async (path: string) => api(path) }))); });
+  for (const text of ['Now', 'Last 24 hours, replayed', 'Landed on main per day', 'Where the time goes']) assert.ok(page.includes(text), text);
+  assert.match(page, /data-key="GY-14"/);
+});
+
+test('unit:ui-workers-finish — agent names and roles never break mid-word, Health and Since read as relative times, a session the runtime no longer reports is not counted as open, and commit SHAs show 8 characters in the text', async () => {
+  const sha = '23d8dfbf674cbc8586cc98238acac9143a1765fa';
+  const work = board().map(item => item.key !== 'GY-16' ? item : { ...item, sessions: [...(item.sessions ?? []), {
+    id: 'p16b', kind: 'proof', principal: 'production-acceptance-producer', epoch: null, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: 'w1:p16b', agentName: null, role: 'proof:unit', head: sha,
+    attach: 'herdr pane attach w1:p16b', transcript: null, subject: `GY-16: unit proofs on ${sha.slice(0, 12)} (unit:retry-after-copy)`, startedAt: new Date(NOW - 5 * 60_000).toISOString(),
+    updatedAt: new Date(NOW - 12_000).toISOString(), endedAt: null, state: 'running', outcome: null }, {
+    id: 'p16c', kind: 'proof', principal: 'production-acceptance-producer', epoch: null, runtime: 'claude', host: 'build-1', workspace: 'w1', tab: null, pane: 'w1:p16c', agentName: null, role: 'proof:unit', head: sha,
+    attach: null, transcript: null, subject: `GY-16: unit proofs on ${sha.slice(0, 12)}`, startedAt: new Date(NOW - 3 * hour).toISOString(), updatedAt: new Date(NOW - 2 * hour).toISOString(),
+    endedAt: new Date(NOW - 2 * hour).toISOString(), state: 'finished', outcome: `superseded: ${sha} was replaced by the next candidate` }] } as Work);
+  const html = markup(createElement(WorkersPage, dashboard({ work })));
+  const text = visibleWords(html).join(' ');
+  // Commit SHAs are 8 characters in the text itself, not only clipped by the stylesheet.
+  assert.ok(text.includes(sha.slice(0, 8)), 'the short SHA is shown');
+  assert.doesNotMatch(text, /\b[0-9a-f]{9,}\b/, 'no longer hex run in the page text');
+  assert.doesNotMatch(html, new RegExp(sha.slice(0, 9)), 'nor in any attribute');
+  assert.equal(shortShas(`on ${sha} and ${sha.slice(0, 12)}; PR #156`), 'on 23d8dfbf and 23d8dfbf; PR #156');
+  // Health and Since are relative: "Seen 12s ago", "started 5m 00s ago", never an absolute timestamp.
+  const row = (id: string) => { const start = html.indexOf(`data-session="${id}"`); assert.ok(start >= 0, id); return html.slice(start, html.indexOf('</tr>', start)); };
+  assert.match(row('p16b'), /<td data-label="Since"[^>]*>started <span class="spent">5m 00s<\/span> ago<\/td>/);
+  assert.match(row('p16b'), /data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Seen 12s ago<\/span>/);
+  assert.match(row('s12'), /Not seen for 40m 00s/);
+  assert.match(row('p16c'), /<td data-label="Since"[^>]*>ended 2h 00m 00s ago · ran <span class="spent">1h 00m 00s<\/span><\/td>/);
+  const stamps = work.flatMap(item => (item.sessions ?? []).flatMap(handle => [handle.startedAt, handle.updatedAt, handle.endedAt])).filter((at): at is string => !!at);
+  for (const at of stamps) { assert.ok(!html.includes(at), at); assert.ok(!html.includes(new Date(at).toLocaleString()), new Date(at).toLocaleString()); }
+  assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4}|\d{1,2}:\d{2}:\d{2}/, 'no date or clock time on the page');
+  // A session the runtime no longer reports (s12, not seen for 40 minutes) is listed, marked, and not counted among the open ones.
+  const open = work.flatMap(item => item.sessions ?? []).filter(handle => handle.state === 'running');
+  assert.equal(open.length, 4);
+  assert.match(html, /3 agent sessions open\. 1 not seen recently\. \d+ ended\./);
+  assert.doesNotMatch(row('s12'), /running|Active|Seen /);
+  // Names and roles never break mid-word: they do not wrap, and the copy links wrap below the name instead of squeezing it.
+  const css = await read('web/style.css');
+  assert.match(css, /\.sessions-table th\[scope=row\]\[data-label=Agent\],\.sessions-table td\[data-label=Role\]\{overflow-wrap:normal;word-break:keep-all\}/);
+  assert.match(css, /\.sessions-table \.agent-name,\.sessions-table td\[data-label=Role\]\{white-space:nowrap\}/);
+  assert.match(css, /\.sessions-table \.attach\{display:flex;[^}]*flex-wrap:wrap\}/); assert.match(css, /\.sessions-table \.copy\{[^}]*white-space:nowrap/);
+  assert.match(row('s14'), /<th scope="row" data-label="Agent"><span class="mono agent-name"[^>]*>claude-1<\/span><span class="attach">/);
+  // The browser suite measures both at 1440px and 390px: each name and role on one line.
+  assert.match(await read('browser-tests/screenshots.spec.ts'), /\.sessions-table \.agent-name, \.sessions-table td\[data-label=Role\][\s\S]*getClientRects[\s\S]*toEqual\(\[\]\)/);
+});

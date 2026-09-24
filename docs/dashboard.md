@@ -13,7 +13,7 @@ Each open item is in one group (`web/groups.ts`): **Needs you** (only you may de
 
 **Workers** is its own sidebar entry, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), the record a launcher writes on the item; the data comes from polled work items, not from Herdr.
 
-A handle recorded running whose `updatedAt` is older than **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *not seen since <updatedAt>*, never as running; GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
+A handle recorded running whose `updatedAt` is older than **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *not seen for <time since updatedAt>*, never as running, and is not counted among the open sessions; every time on the page is relative (*seen 12s ago*, *started 5m 00s ago*) and commits show 8 characters; GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
 
 Each running row offers two commands:
 
@@ -22,7 +22,7 @@ Each running row offers two commands:
 
 ## The status sentence
 
-Moving rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** from the gates (`web/pr-steps.ts`), the current one in plain words, and who acts next. An item page's first screen gives its state, why, who acts next and its pull request; the rest is under **More details**. Past thirty minutes a step reads `1h 12m overdue`.
+Moving rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** from the gates (`web/pr-steps.ts`), the current one in plain words, and who acts next. A merged item is **Shipped**; it reads *Live* where production was observed serving it, and waits at Deploy only while a post-deployment check its policy asks for is outstanding. An item page's first screen gives its state, why, who acts next and its pull request; the rest is under **More details**. Past thirty minutes a step reads `1h 12m overdue`.
 
 ## Insights
 

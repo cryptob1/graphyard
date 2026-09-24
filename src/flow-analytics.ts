@@ -1005,17 +1005,31 @@ export function gateFactStep(details: Record<string, any>): FlowStep | null {
 }
 
 /**
- * When the release was recorded serving a merged item, which is when it leaves Deploy: the
- * deployment `master verify-deployment` recorded, or, when the policy asks for a post-deployment
- * smoke proof, its passing verdict on that deployed commit. Null while it still waits on either
- * (a merge alone is not live), and for work closed without delivery.
+ * When the control plane last observed a live release serving a merged item: the first verified
+ * production release that included it (`releaseDeliveries`, written by the production watch), or
+ * the deployment `master verify-deployment` recorded for it. Null when no production observation
+ * covers it — which says nothing against it being delivered: most policies never record one.
+ */
+export function releaseObservedAt(work: Work): string | null {
+  if (work.stage !== 'done' || work.closure || !work.delivery) return null;
+  const verified = (work.releaseDeliveries ?? []).map(entry => entry.verifiedAt).filter(at => time(at) !== null).sort()[0];
+  return verified ?? work.delivery.deployment?.observedAt ?? null;
+}
+
+/**
+ * When a merged item leaves Deploy and counts as shipped. `delivery.deployment` is written only
+ * for policies that ask for a post-deployment smoke proof, so its absence never holds work at
+ * Deploy: without that proof the item has shipped when the release was observed serving it
+ * (`releaseObservedAt`), or at its merge when no production observation covers it. With the proof
+ * asked for, it leaves Deploy on the passing verdict bound to the deployed commit. Null while that
+ * verdict is outstanding (or failed), and for work closed without delivery.
  */
 export function servedAt(work: Work): string | null {
   const delivery = work.delivery;
-  if (work.stage !== 'done' || work.closure || !delivery?.deployment) return null;
-  if (!work.policy.deploySmoke) return delivery.deployment.observedAt;
+  if (work.stage !== 'done' || work.closure || !delivery) return null;
+  if (!work.policy?.deploySmoke) return releaseObservedAt(work) ?? delivery.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt;
   const smoke = delivery.smoke;
-  return smoke?.result === 'pass' && smoke.sha === delivery.deployment.sha && smoke.mergeSha === delivery.mergeSha ? smoke.at : null;
+  return delivery.deployment && smoke?.result === 'pass' && smoke.sha === delivery.deployment.sha && smoke.mergeSha === delivery.mergeSha ? smoke.at : null;
 }
 
 export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | null; pr: number | null; carried: boolean }
@@ -1036,9 +1050,11 @@ export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'>, item:
     moves.push({ at: fact.observedAt, from: at, to: step, pr: fact.details.pr ?? null, carried: false });
     at = step;
   }
+  // Recorded as merged before the gate fact that said so (a merge-time `servedAt`), it leaves
+  // Deploy at that fact, never before it.
   const served = servedAt(item);
-  if (at === 'deploy' && served && time(served) !== null && (!moves.length || time(served)! >= time(moves.at(-1)!.at)!))
-    moves.push({ at: served, from: 'deploy', to: null, pr: item.candidate?.pr ?? null, carried: false });
+  if (at === 'deploy' && served && time(served) !== null)
+    moves.push({ at: moves.length && time(served)! < time(moves.at(-1)!.at)! ? moves.at(-1)!.at : served, from: 'deploy', to: null, pr: item.candidate?.pr ?? null, carried: false });
   return moves;
 }
 export const drilldownCatalog = drilldownMetrics;
