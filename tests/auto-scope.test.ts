@@ -437,6 +437,19 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.ok(partial.plannedFiles.includes('src/cli/queue-status.ts'), `widened: ${partial.plannedFiles}`);
   assert.equal(partial.scopeRequest, null);
 
+  // A file the base lacks is a creation: however plainly a finding asks for it, the loop never grants
+  // it, and it stays refused and escalated to the master.
+  let creation = await claimed('finding asks for a new file');
+  await request(creation, { paths: ['src/new-helper.ts'], reason: 'The reviewer finding asks for src/new-helper.ts' });
+  const before = widened.length;
+  await cycle(state, { ...overrides, reviewFindings: async () => [{ ground: 'review thread PRRT_create04', text: 'Create src/new-helper.ts to hold the shared check' }] });
+  creation = await reload(creation.id);
+  assert.equal(widened.length, before, 'a creation is not widened by the loop');
+  assert.ok(!creation.plannedFiles.includes('src/new-helper.ts'));
+  assert.equal(creation.scopeRequest!.decision!.state, 'refused');
+  assert.ok(escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${creation.id}`)), 'the creation is escalated to the master');
+  assert.match(state.actions[`${scopeKey(creation, creation.scopeRequest!)}:finding:${creation.policyRevision}`].detail, /does not exist on the base branch/);
+
   // The reads take seconds. The asking attempt can lose its lease while they run — released, lapsed
   // or overtaken by a new claim — without a new policy revision, so the widening decided on them
   // answers an attempt that no longer stands: it is refused in its own transaction, nothing widens.
@@ -512,57 +525,25 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.match(moved.detail, /read for aaaaaaaaaaaa, which is no longer the item's head/);
 });
 
-test('unit:review-finding-scope — only a file a finding names literally is granted; a directory, a longer path, or a missing file the finding does not ask to create is not', async () => {
+test('unit:review-finding-scope — only a file on the base that a finding names literally is granted; a missing file, a directory, a longer path or an unnamed file is not', async () => {
   const findings = [{ ground: 'review 7', text: 'Change `src/merge-queue.ts:85-97` and create src/new-helper.ts; the whole src/ tree is fine.' }];
   const exists = (path: string) => path !== 'src/new-helper.ts' && path !== 'src/missing.ts';
   assert.deepEqual(findingScope(['src/merge-queue.ts'], findings, exists), { grounds: [{ path: 'src/merge-queue.ts', ground: 'review 7' }] });
-  assert.deepEqual(findingScope(['src/new-helper.ts'], findings, exists), { grounds: [{ path: 'src/new-helper.ts', ground: 'review 7' }] }, 'a new file the finding asks to create');
   assert.match((findingScope(['src/'], findings, exists) as { refusal: string }).refusal, /directory scope/);
+  assert.match((findingScope(['src/*'], findings, exists) as { refusal: string }).refusal, /directory scope/);
   assert.match((findingScope(['src/merge-queue.tsx'], findings, exists) as { refusal: string }).refusal, /no unresolved review finding on the head names/);
   assert.match((findingScope(['src/other.ts'], findings, exists) as { refusal: string }).refusal, /no unresolved review finding/);
-  assert.match((findingScope(['src/missing.ts'], [{ ground: 'review 8', text: 'src/missing.ts is wrong' }], exists) as { refusal: string }).refusal, /does not exist on the base branch/);
+  assert.match((findingScope(['src/merge-queue.ts', 'src/other.ts'], findings, exists) as { refusal: string }).refusal, /names src\/other\.ts/, 'one unnamed file refuses the whole request');
   assert.ok(namesPath('see src/a.ts.', 'src/a.ts') && namesPath('(src/a.ts:12)', 'src/a.ts') && !namesPath('lib/src/a.ts', 'src/a.ts') && !namesPath('src/a.ts.bak', 'src/a.ts'));
-  // Creation intent is the path's own: a verb about another file in the same finding grants nothing for it.
-  const elsewhere = (text: string) => findingScope(['src/missing.ts'], [{ ground: 'review 9', text }], exists);
-  assert.match((elsewhere('Create src/new-helper.ts; src/missing.ts is wrong') as { refusal: string }).refusal, /does not ask for it to be created/);
-  assert.match((elsewhere('Add a case to tests/scope.test.ts for the branch src/missing.ts takes') as { refusal: string }).refusal, /does not ask for it to be created/);
-  assert.match((elsewhere('src/missing.ts is wrong. Please create src/new-helper.ts instead.') as { refusal: string }).refusal, /does not ask for it to be created/);
-  assert.deepEqual(elsewhere('Fix src/merge-queue.ts:12 and add src/missing.ts for the helper'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
-  assert.deepEqual(elsewhere('src/missing.ts should be added next to the queue'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
-  // A negated creation verb forbids the very file it names.
-  for (const text of ['Do not create src/missing.ts; update src/merge-queue.ts instead', "Don't add src/missing.ts", 'src/missing.ts should not be added', 'Never introduce src/missing.ts',
-    'No need to create src/missing.ts', "You shouldn't create src/missing.ts here", 'Fix src/merge-queue.ts without adding src/missing.ts',
-    'Adding src/missing.ts is not needed; update src/merge-queue.ts instead', 'Creating src/missing.ts is unnecessary', "Adding src/missing.ts isn't the fix",
-    'We cannot create src/missing.ts; update src/merge-queue.ts instead', 'src/missing.ts cannot be added'])
-    assert.match((elsewhere(text) as { refusal: string }).refusal, /does not ask for it to be created/, text);
-  assert.deepEqual(elsewhere("Don't change src/merge-queue.ts, but add src/missing.ts"), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, 'a negation of another verb does not reach past the conjunction');
-  assert.deepEqual(elsewhere('Add src/missing.ts, not a second copy in src/merge-queue.ts'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, 'a negation after the verb stops at the comma');
-  assert.deepEqual(findingScope(['src/not.ts'], [{ ground: 'review 12', text: 'Add src/not.ts for the helper' }], path => path !== 'src/not.ts'),
-    { grounds: [{ path: 'src/not.ts', ground: 'review 12' }] }, 'a file name is not a negation');
-  assert.deepEqual(findingScope(['src/missing.ts'], [{ ground: 'review 10', text: 'src/missing.ts is wrong' }, { ground: 'review 11', text: 'create src/missing.ts' }], exists),
-    { grounds: [{ path: 'src/missing.ts', ground: 'review 11' }] }, 'the finding that asks for the file is its grounds');
-  // The latest instruction stands: a later trusted comment takes back an earlier creation request, and a later request renews it.
-  assert.match((elsewhere('Please create src/missing.ts for the helper\nOn reflection, do not create src/missing.ts; extend src/merge-queue.ts instead') as { refusal: string }).refusal, /does not ask for it to be created/);
-  assert.deepEqual(elsewhere('Do not create src/missing.ts yet\nNow create src/missing.ts for the helper'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
-  // Across findings too, in the order they were written rather than listed: a later thread or the reviewer's later change request takes it back.
-  const create = { ground: 'review thread A', text: 'create src/missing.ts', at: '2026-09-24T10:00:00Z' };
-  const forbid = { ground: 'review 17', text: 'Do not create src/missing.ts; extend src/merge-queue.ts', at: '2026-09-24T11:00:00Z' };
-  assert.match((findingScope(['src/missing.ts'], [create, forbid], exists) as { refusal: string }).refusal, /review 17 does not ask for it to be created/, 'a later finding forbidding the file takes back an earlier request');
-  assert.match((findingScope(['src/missing.ts'], [forbid, create].map(entry => entry === create ? { ...entry, at: '2026-09-24T09:00:00Z' } : entry), exists) as { refusal: string }).refusal, /does not ask for it to be created/, 'listed first but written later still decides');
-  assert.deepEqual(findingScope(['src/missing.ts'], [{ ...create, at: '2026-09-24T12:00:00Z' }, forbid, { ground: 'review thread B', text: 'src/missing.ts is wrong', at: '2026-09-24T13:00:00Z' }], exists),
-    { grounds: [{ path: 'src/missing.ts', ground: 'review thread A' }] }, 'a later request renews it, and a later finding that only names the file changes nothing');
-  // Names the file pattern cannot tokenize — extensionless, dot-prefixed — are still the requested file.
-  const absent = () => false;
-  assert.deepEqual(findingScope(['Dockerfile'], [{ ground: 'review 13', text: 'Create Dockerfile for the runner image' }], absent), { grounds: [{ path: 'Dockerfile', ground: 'review 13' }] });
-  assert.deepEqual(findingScope(['.github/CODEOWNERS'], [{ ground: 'review 14', text: 'Add .github/CODEOWNERS so the reviewer is requested' }], absent), { grounds: [{ path: '.github/CODEOWNERS', ground: 'review 14' }] });
-  assert.match((findingScope(['Dockerfile'], [{ ground: 'review 15', text: 'Do not add Dockerfile here' }], absent) as { refusal: string }).refusal, /does not ask for it to be created/);
-  assert.match((findingScope(['Dockerfile'], [{ ground: 'review 16', text: 'Create src/new-helper.ts; Dockerfile is fine' }], absent) as { refusal: string }).refusal, /does not ask for it to be created/);
-  // The verb has to act on the file itself: adding a file's name to another file or list creates nothing.
-  for (const text of ['Add `src/missing.ts` to `.gitignore`', 'Add src/missing.ts to .gitignore', 'add src/missing.ts to the exports list', 'src/missing.ts should be added to .gitignore',
-    'Add src/merge-queue.ts and src/missing.ts to `.gitignore`', 'Add src/missing.ts into tests/fixtures.json'])
-    assert.match((elsewhere(text) as { refusal: string }).refusal, /does not ask for it to be created/, text);
-  for (const text of ['Create src/missing.ts to hold the helper', 'Create src/new-helper.ts and src/missing.ts', 'Add a new file at `src/missing.ts` for the helper'])
-    assert.deepEqual(elsewhere(text), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] }, text);
+  // A file the base lacks is a creation, the master's to decide, however plainly a finding asks for it.
+  for (const text of ['src/missing.ts is wrong', 'Create src/missing.ts for the helper', 'Add a new file at `src/missing.ts`', 'src/missing.ts should be added next to the queue'])
+    assert.match((findingScope(['src/missing.ts'], [{ ground: 'review 9', text }], exists) as { refusal: string }).refusal, /src\/missing\.ts does not exist on the base branch/, text);
+  assert.match((findingScope(['src/new-helper.ts'], findings, exists) as { refusal: string }).refusal, /does not exist on the base branch/);
+  assert.match((findingScope(['src/merge-queue.ts', 'src/new-helper.ts'], findings, exists) as { refusal: string }).refusal, /does not exist on the base branch/, 'a creation beside an existing file refuses the whole request');
+  assert.match((findingScope(['Dockerfile'], [{ ground: 'review 13', text: 'Create Dockerfile for the runner image' }], () => false) as { refusal: string }).refusal, /does not exist on the base branch/);
+  // Names the file pattern of a path-like token would miss — extensionless, dot-prefixed — are named literally all the same.
+  assert.deepEqual(findingScope(['Dockerfile', '.github/CODEOWNERS'], [{ ground: 'review 14', text: 'Fix Dockerfile and .github/CODEOWNERS' }], () => true),
+    { grounds: [{ path: 'Dockerfile', ground: 'review 14' }, { path: '.github/CODEOWNERS', ground: 'review 14' }] });
 
   // The read: unresolved threads' comments by trusted authors, and the configured reviewer's latest change request on the head only.
   const run = (_command: string, args: string[]) => {
@@ -571,12 +552,12 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
       ? { pageInfo: { hasNextPage: true, endCursor: 'c2' }, nodes: [{ body: 'noise', author: { login: 'graphyard-reviewer' } }] }
       : { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ body: 'late: fix src/g.ts', author: { login: 'graphyard-reviewer' } }] } } } });
     if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
-      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts', createdAt: '2026-09-24T10:00:00Z', author: { login: 'chatgpt-codex-connector' } }, { body: 'and src/worker.ts', author: { login: 'cryptob1' } }] } },
+      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts', author: { login: 'chatgpt-codex-connector' } }, { body: 'and src/worker.ts', author: { login: 'cryptob1' } }] } },
       { id: 'PRRT_reviewer', isResolved: false, comments: { nodes: [{ body: 'fix src/e.ts', author: { login: 'graphyard-reviewer' } }] } },
       { id: 'PRRT_worker', isResolved: false, comments: { nodes: [{ body: 'please widen src/f.ts', author: { login: 'cryptob1' } }] } },
       { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts', author: { login: 'graphyard-reviewer' } }] } },
       { id: 'PRRT_long', isResolved: false, comments: { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [{ body: 'first', author: { login: 'graphyard-reviewer' } }] } }] } } } } });
-    return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts', submitted_at: '2026-09-24T11:00:00Z' },
+    return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
       { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' }]]);
   };
   // Existence on the base: only a genuine absence is false; a missing base ref or failing git throws, so the loop retries.
@@ -602,5 +583,4 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', ...Array(3).fill('review thread PRRT_long'), 'review 1'], 'one finding per trusted comment');
   assert.ok(read.some(entry => entry.ground === 'review thread PRRT_long' && namesPath(entry.text, 'src/g.ts')), 'a trusted comment past the first page of a long thread is a finding');
   assert.equal(read[0].text, 'fix src/a.ts', 'a comment by an untrusted author in a trusted thread is not a finding');
-  assert.deepEqual([read[0].at, read.at(-1)!.at], ['2026-09-24T10:00:00Z', '2026-09-24T11:00:00Z'], 'each finding carries when it was written');
 });
