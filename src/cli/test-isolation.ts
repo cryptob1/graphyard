@@ -132,3 +132,15 @@ export function abnormalTestExit(tap: string, status: number | null, signal: Nod
   const abnormal = failures.find(failure => failure.exited || !failure.type || !caseFailures[failure.type]?.includes(failure.failureType ?? ''));
   return abnormal ? `the test process exited with ${status} after "${abnormal.title}" failed as ${abnormal.failureType ?? 'an unclassified failure'}, not as a test case` : null;
 }
+
+/**
+ * `npm ci` arguments and environment for an install a build and its tests run against: the full
+ * tree always. An inherited NODE_ENV=production or npm_config_omit=dev would otherwise skip the
+ * devDependencies (typescript, tsx, playwright) while npm still exits 0.
+ */
+export const npmCiArgs = ['ci', '--include=dev', '--no-audit', '--no-fund'];
+export function npmCiEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) if (!/^(npm_config_(omit|only|production|also|dev|include)|NODE_ENV)$/i.test(name)) clean[name] = value;
+  return clean;
+}

@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment } from '../src/cli/test-isolation.js';
+import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
 import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
@@ -160,6 +160,15 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
 
     assert.equal(installMatchesLockfile(lock('1.0.0'), { packages: {} }), 'node_modules/left-pad is named by package-lock.json but not installed');
     assert.equal(installMatchesLockfile(lock('1.0.0'), null), 'the install records no hidden lockfile (node_modules/.package-lock.json)');
+    // A git or link dependency's identity is its `resolved` or `link`, usually with no integrity: a moved commit at the same version is a mismatch.
+    const git = (commit: string) => ({ packages: { 'node_modules/dep': { version: '1.0.0', resolved: `git+ssh://git@github.com/o/dep.git#${commit}` } } });
+    assert.equal(installMatchesLockfile(git('aaa'), git('aaa')), true);
+    assert.match(String(installMatchesLockfile(git('bbb'), git('aaa'))), /node_modules\/dep is installed from .*#aaa, package-lock.json names .*#bbb/);
+    assert.match(String(installMatchesLockfile({ packages: { 'node_modules/dep': { version: '1.0.0', resolved: '../dep', link: true } } }, git('aaa'))), /installed as a package, package-lock.json names a link/);
+    // The install always takes the full tree: an inherited production/omit config would skip devDependencies while npm exits 0.
+    assert.ok(npmCiArgs.includes('--include=dev'));
+    const cleared = npmCiEnvironment({ PATH: '/bin', NODE_ENV: 'production', npm_config_omit: 'dev', NPM_CONFIG_PRODUCTION: 'true' });
+    assert.deepEqual(cleared, { PATH: '/bin' });
 
     // A refused lease heartbeat stops the install and fails the worktree command.
     await rm(join(worktree, 'node_modules'), { recursive: true, force: true });

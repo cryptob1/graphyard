@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { contract } from './contracts.mjs';
 import { judgeUnitCases } from './unit-contract.mjs';
-import { abnormalTestExit } from '../src/cli/test-isolation.ts';
+import { abnormalTestExit, npmCiEnvironment } from '../src/cli/test-isolation.ts';
 
 const [metadataFile, candidateDirectory, output, proof] = process.argv.slice(2);
 if (!metadataFile || !candidateDirectory || !output || !proof) throw new Error('Usage: run-unit-acceptance metadata.json candidate-directory output.json proof');
@@ -21,8 +21,9 @@ let cases = selected.requiredCases.map(id => ({ id, result: 'skipped' })), passe
 try {
   // Dependencies are installed before the inventory lands: the candidate's lifecycle scripts
   // (preinstall/postinstall/prepare, or a dependency's) run during `npm ci` and could otherwise
-  // rewrite the file after it was copied.
-  execFileSync('npm', ['ci', '--no-audit', '--no-fund'], { cwd: candidate, stdio: ['ignore', 'inherit', 'inherit'] });
+  // rewrite the file after it was copied. The full tree: an inherited omit/production config would
+  // skip the devDependencies the suite needs while npm still exits 0.
+  execFileSync('npm', ['ci', '--include=dev', '--no-audit', '--no-fund'], { cwd: candidate, env: npmCiEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] });
   // The protected inventory replaces whatever the candidate carries at that path, so the cases
   // judged are the ones this checkout registers. The candidate's own source is what they import.
   // It is copied and byte-compared immediately before the run so nothing between the copy and the

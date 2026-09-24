@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
+import { npmCiArgs, npmCiEnvironment } from './cli/test-isolation.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -539,6 +540,9 @@ export function installMatchesLockfile(lockfile: { packages?: Record<string, any
     if (!want) return `${name} is installed but package-lock.json no longer names it`;
     if (want.version !== entry.version) return `${name} is installed at ${entry.version ?? 'no version'}, package-lock.json names ${want.version ?? 'no version'}`;
     if (want.integrity && entry.integrity && want.integrity !== entry.integrity) return `${name} is installed from a different tarball than package-lock.json names`;
+    // A git, file or link dependency carries its identity in `resolved` or `link`, usually with no integrity.
+    if (Boolean(want.link) !== Boolean(entry.link)) return `${name} is installed ${entry.link ? 'as a link' : 'as a package'}, package-lock.json names ${want.link ? 'a link' : 'a package'}`;
+    if ((!want.integrity || !entry.integrity) && (want.resolved ?? null) !== (entry.resolved ?? null)) return `${name} is installed from ${entry.resolved ?? 'no recorded source'}, package-lock.json names ${want.resolved ?? 'no recorded source'}`;
   }
   for (const [name, entry] of Object.entries(wanted)) if (name && !entry.optional && !held[name]) return `${name} is named by package-lock.json but not installed`;
   return true;
@@ -563,10 +567,10 @@ function parseJson(text: string): any {
 }
 
 export type DependencyInstaller = (cwd: string, signal?: AbortSignal) => Promise<void>;
-/** `npm ci` in the worktree, its output on stderr so a caller's JSON on stdout stays whole. */
+/** `npm ci` in the worktree, the full tree (npmCiArgs), its output on stderr so a caller's JSON on stdout stays whole. */
 export const npmCi: DependencyInstaller = (cwd, signal) => new Promise((done, fail) => {
   // An aborted signal stops npm (SIGTERM) and rejects with the abort.
-  const child = spawn('npm', ['ci', '--no-audit', '--no-fund'], { cwd, stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
+  const child = spawn('npm', npmCiArgs, { cwd, env: npmCiEnvironment(), stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
   child.once('error', fail);
   child.once('close', code => code === 0 ? done() : fail(new Error(`npm ci exited with ${code}`)));
 });
