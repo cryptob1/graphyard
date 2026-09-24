@@ -49,9 +49,10 @@ test('unit:overlap-detection — planned-file overlap holds an item behind claim
   ], 'a ready peer, an expired lease, delivered work and a disjoint scope are not ahead of the item; a submitted item is judged by the files its candidate changed, not the docs/ it declared');
   assert.deepEqual(dispatchOverlap(ready, [ready, item], clock), [], 'two ready items hold nothing; dispatchOrder decides between them');
   assert.deepEqual(dispatchOverlap(work('GY-9'), all, clock), [], 'an item with no planned files overlaps nothing');
-  const rework = submitted('GY-10', ['src/cli/'], 'd'.repeat(40), { reworkRequested: true, observation: { files: ['src/cli/index.ts'] } as any });
+  const rework = submitted('GY-10', ['src/cli/'], 'd'.repeat(40), { reworkRequested: true, observation: { files: ['src/cli/index.ts'], prState: 'open' } as any });
   assert.deepEqual(dispatchOverlap(rework, [rework, live], clock), [], 'rework is judged by the files its candidate changed, not the src/cli/ it declared: GY-2 on src/cli/master.ts is no conflict');
-  assert.deepEqual(dispatchOverlap(rework, [rework, claimed('GY-11', ['src/cli/index.ts'])], clock).map(entry => entry.key), ['GY-11'], 'the same file changed on both sides still holds');
+  // Its pull request is open: a claimed item naming the same file does not hold the rework round (the merge queue integrates whichever lands second).
+  assert.deepEqual(dispatchOverlap(rework, [rework, claimed('GY-11', ['src/cli/index.ts'])], clock), [], 'an open pull request is never held');
   assert.deepEqual(dispatchOverlap(work('GY-12', { plannedFiles: ['src/cli/index.ts'] }), [rework], clock), [], 'a reworked candidate nobody has claimed is a peer waiting for a worker, not an item ahead');
 });
 
@@ -185,23 +186,40 @@ test('integration:overlap-scheduler — the conflict probe is a real in-memory g
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('unit:overlap-priority-and-open-pr — work never waits behind lower-priority work, and an open pull request is not held by a directory another item merely declared', () => {
+test('unit:overlap-priority-and-open-pr — work never waits behind lower-priority work, and an item whose pull request is open is never held', () => {
   // 2026-09-24: priority-0 GY-164, PR #155 open on two test files, was held behind priority-1 GY-161, claimed later over the whole tests/ directory.
-  const fix = submitted('GY-164', ['tests/'], 'e'.repeat(40), { priority: 0, reworkRequested: true, observation: { files: ['tests/auto-scope.test.ts'] } as any });
+  const fix = submitted('GY-164', ['tests/'], 'e'.repeat(40), { priority: 0, reworkRequested: true, observation: { files: ['tests/auto-scope.test.ts'], prState: 'open' } as any });
   const redesign = claimed('GY-161', ['web/', 'tests/'], { priority: 1 });
   assert.deepEqual(dispatchOverlap(fix, [fix, redesign], clock), [], 'lower priority and only a declared directory: no hold');
   // Same priority, directory only: the open pull request still goes ahead.
   assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-170', ['tests/'], { priority: 0 })], clock), []);
   // Every directory spelling pathScope recognizes is a declared directory, not a named file.
   for (const spelling of ['tests/*', 'tests/**', './tests/']) assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-174', [spelling], { priority: 0 })], clock), [], spelling);
-  // A claimed item that names the very file the pull request changed still holds it.
-  assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-171', ['tests/auto-scope.test.ts'], { priority: 0 })], clock).map(entry => entry.key), ['GY-171']);
+  // Even a claimed item naming the very file the pull request changed does not hold it: the open pull request is never held.
+  assert.deepEqual(dispatchOverlap(fix, [fix, claimed('GY-171', ['tests/auto-scope.test.ts'], { priority: 0 })], clock), []);
   // A fresh item with no pull request is still held behind same- or higher-priority work on its directory.
   assert.deepEqual(dispatchOverlap(work('GY-172', { priority: 1, plannedFiles: ['tests/'] }), [redesign], clock).map(entry => entry.key), ['GY-161']);
   assert.deepEqual(dispatchOverlap(work('GY-173', { priority: 0, plannedFiles: ['tests/'] }), [redesign], clock), [], 'but never behind lower-priority work');
   // Effective concurrency reads the same exceptions: each of these pairs may be in flight at once.
   const pairs: [Work, Work][] = [[fix, redesign], [fix, claimed('GY-170', ['tests/'], { priority: 0 })], [work('GY-173', { priority: 0, plannedFiles: ['tests/'] }), redesign]];
   for (const pair of pairs) assert.deepEqual(effectiveConcurrency(pair, clock), { effective: 2, items: pair.map(entry => entry.key), nodes: 2, edges: 0, exact: true }, pair.map(entry => entry.key).join(' + '));
-  // A named file, at equal priority, still excludes in both directions.
-  assert.equal(effectiveConcurrency([fix, claimed('GY-171', ['tests/auto-scope.test.ts'], { priority: 0 })], clock).effective, 1);
+  // A named file at equal priority no longer excludes the pair: the open pull request is never held, so both may be in flight.
+  assert.equal(effectiveConcurrency([fix, claimed('GY-171', ['tests/auto-scope.test.ts'], { priority: 0 })], clock).effective, 2);
+});
+
+test('unit:open-pr-never-held — an item whose pull request is open is never held by other open pull requests, while a fresh item planning the same file still is', () => {
+  // 2026-09-24: ten workers sat idle while the rework rounds of GY-168, GY-175 and GY-176 were held
+  // behind GY-166 and GY-172, whose open pull requests (in review) changed the same hotspot file.
+  const hotspot = 'src/master-daemon.ts';
+  const inReview = ['GY-166', 'GY-172'].map((key, index) => submitted(key, ['src/'], String(index + 1).repeat(40), { priority: 1, observation: { files: [hotspot], prState: 'open' } as any }));
+  const reworks = ['GY-168', 'GY-175', 'GY-176'].map((key, index) => submitted(key, ['src/'], String(index + 4).repeat(40), { priority: 1, reworkRequested: true, observation: { files: [hotspot], prState: 'open' } as any }));
+  const all = [...inReview, ...reworks];
+  for (const item of reworks) assert.deepEqual(dispatchOverlap(item, all, clock), [], `${item.key}'s rework round is dispatchable`);
+  const fresh = work('GY-177', { priority: 1, plannedFiles: [hotspot] });
+  assert.deepEqual(dispatchOverlap(fresh, [...all, fresh], clock).map(entry => entry.key), ['GY-166', 'GY-172'], 'a fresh item planning the hotspot waits for the pull requests in review');
+  assert.deepEqual(dispatchSchedule([...all, fresh], clock).held.map(entry => entry.key), ['GY-177']);
+  // A candidate whose pull request was closed is fresh again: a claimed item naming the file it changed holds it.
+  const closed = { ...reworks[0], observation: { ...reworks[0].observation, prState: 'closed' } } as Work;
+  assert.deepEqual(dispatchOverlap(closed, [closed, claimed('GY-178', [hotspot], { priority: 1 })], clock).map(entry => entry.key), ['GY-178'], 'a closed pull request is not open');
+  assert.equal(effectiveConcurrency([closed, claimed('GY-178', [hotspot], { priority: 1 })], clock).effective, 1);
 });
