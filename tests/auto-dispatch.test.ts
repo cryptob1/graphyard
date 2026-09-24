@@ -827,3 +827,146 @@ test('manual:dispatcher-state-docs-review — the master guide states that the d
     'A tick failure is attributed and surfaced', 'dispatch.lastFailure', 'Three consecutive failures raise one attention item', 'no reviewer or producer session is being launched for any item',
     'A session that exits at launch is classified from its pane', 'agent_not_found', 'herdr pane read', 'provider limit notice', 'fails over exactly as a mid-session', "the pane's last words", 'exits **at launch**']) assert.ok(guide.includes(fragment), `docs/master-agent.md must state: ${fragment}`);
 });
+
+test('unit:review-waits-for-bot-reviewers — a reviewer launch waits, bounded, for the configured bot reviewers to review the head, launches once they have, and never waits when the bound is 0', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const reviewLaunches = (log: string[]) => log.filter(entry => entry.startsWith('review:'));
+    const codex = 'chatgpt-codex-connector[bot]';
+    // GY-163: Codex's inline findings landed after our reviewer approved, one rework round each.
+    for (const scenario of [
+      { name: 'within the bound, no bot review of the head', reviewers: [] as string[] | null, at: 60_000, launches: 0 },
+      { name: 'the bot reviewed the head', reviewers: [codex], at: 60_000, launches: 1 },
+      { name: 'the bound passed with no bot review', reviewers: [], at: 8 * 60_000 + 1, launches: 1 },
+      { name: 'the read failed: the launch is not held on GitHub', reviewers: null, at: 60_000, launches: 1 },
+    ]) {
+      const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
+      const effects = stubEffects(() => [item], log, { headReviewers: async (_work, request) => {
+        assert.equal(request.sha, H, 'the read asks about the requested head');
+        if (scenario.reviewers === null) throw new Error('gh: HTTP 502');
+        return scenario.reviewers;
+      } });
+      const tick = await runDispatchTick(masterConfig(token), emptyDispatchCursor(masterConfig(token)), effects, () => requested + scenario.at);
+      assert.equal(reviewLaunches(log).length, scenario.launches, scenario.name);
+      if (!scenario.launches) assert.ok(tick.waiting.some(entry => entry.kind === 'review' && /waits up to 8 min .* for chatgpt-codex-connector\[bot\]'s review/.test(entry.reason)), `${scenario.name}: ${JSON.stringify(tick.waiting)}`);
+    }
+    // Turned off: 0 minutes launches at once whatever the bots have done.
+    const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
+    const off = masterConfig(token, { run: { awaitReviewersMinutes: 0 } as Partial<MasterRun> });
+    await runDispatchTick(off, emptyDispatchCursor(off), stubEffects(() => [item], log, { headReviewers: async () => [] }), () => requested + 1000);
+    assert.equal(reviewLaunches(log).length, 1, 'awaitReviewersMinutes 0 never waits');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a bot-review read that never settles holds the tick only to its own deadline: producers on the same item and a later one launch in that tick, and the review launches as on a failed read', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-hung-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
+    const requested = Date.parse(first.autoDispatch!.review!.requestedAt);
+    let reads = 0;
+    const effects = stubEffects(() => [first, second], log, { headReviewers: () => { reads++; return new Promise<string[]>(() => { /* GitHub never answers */ }); } });
+    // Room for both items at once, so only the bot read could hold the later item back.
+    const config = masterConfig(token); for (const profile of [...config.reviewers, ...config.producers]) profile.concurrency = 2;
+    const started = Date.now();
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000, undefined, 200);
+    assert.ok(Date.now() - started < 5_000, `the tick is held only to the bot-read deadline, not the read: ${Date.now() - started}ms`);
+    assert.equal(reads, 2, 'each waiting review is read once, all together before any launch');
+    for (const key of [first.key, second.key]) {
+      assert.ok(log.some(entry => entry.startsWith(`producer:${key}:`)), `${key}'s producers launch in the tick: ${JSON.stringify(log)}`);
+      assert.ok(log.some(entry => entry.startsWith(`review:${key}:`)), `${key}'s review launches, the unanswered read counting as a failed one: ${JSON.stringify(log)}`);
+    }
+    assert.equal(tick.launched.filter(entry => entry.kind === 'review').length, 2);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a deferred reviewer launches as soon as its bot read settles, beside the producer pass rather than behind every producer start', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-race-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
+    const requested = Date.parse(first.autoDispatch!.review!.requestedAt), started = Date.now(), reviewedAt: number[] = [], producedAt: number[] = [];
+    const base = stubEffects(() => [first, second], log), slow = 300;
+    const effects = stubEffects(() => [first, second], log, {
+      // The bots have already reviewed both heads; the read answers a moment after the pass starts.
+      headReviewers: () => new Promise<string[]>(resolve => setTimeout(() => resolve(['chatgpt-codex-connector[bot]']), 20)),
+      launchProducer: async (...args) => { await new Promise(resolve => setTimeout(resolve, slow)); producedAt.push(Date.now() - started); return base.launchProducer(...args); },
+      launchReview: async (...args) => { reviewedAt.push(Date.now() - started); return base.launchReview(...args); },
+    });
+    const config = masterConfig(token); for (const profile of [...config.reviewers, ...config.producers]) profile.concurrency = 2;
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000);
+    assert.equal(reviewedAt.length, 2, `both reviews launch in the tick: ${JSON.stringify(log)}`);
+    assert.ok(producedAt.length >= 2, `the producers launch: ${JSON.stringify(log)}`);
+    assert.ok(Math.max(...reviewedAt) < slow, `each reviewer launches once its read settles, not behind the producer starts (${slow}ms each): reviews ${JSON.stringify(reviewedAt)}, producers ${JSON.stringify(producedAt)}`);
+    assert.equal(tick.launched.filter(entry => entry.kind === 'review').length, 2, 'the tick records the reviews it launched beside the pass');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('producers launch before any reviewer waits on a bot read: an unanswered read delays no producer on its item or a later one, only the reviewer launches after it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-order-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
+    const requested = Date.parse(first.autoDispatch!.review!.requestedAt), started = Date.now(), producedAt: number[] = [];
+    const base = stubEffects(() => [first, second], log);
+    const effects = stubEffects(() => [first, second], log, {
+      headReviewers: () => new Promise<string[]>(() => { /* GitHub never answers */ }),
+      launchProducer: async (...args) => { producedAt.push(Date.now() - started); return base.launchProducer(...args); },
+    });
+    const config = masterConfig(token); for (const profile of [...config.reviewers, ...config.producers]) profile.concurrency = 2;
+    const deadline = 1_500;
+    await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000, undefined, deadline);
+    const firstReview = log.findIndex(entry => entry.startsWith('review:'));
+    assert.ok(firstReview > 0 && log.slice(firstReview).every(entry => entry.startsWith('review:')), `every producer launches before the first reviewer: ${JSON.stringify(log)}`);
+    for (const key of [first.key, second.key]) assert.ok(log.some(entry => entry.startsWith(`producer:${key}:`)), `${key}'s producers launch: ${JSON.stringify(log)}`);
+    assert.ok(producedAt.length >= 2 && producedAt.every(ms => ms < deadline), `no producer waits on the unanswered bot read (${deadline}ms): ${JSON.stringify(producedAt)}`);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a reviewer launching beside the producer pass takes turns with a producer launch over a shared Herdr agent name, and reads its room again after the turn: a slot taken meanwhile is a capacity wait, not a refusal', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-names-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
+    const base = stubEffects(() => [item], log), seen: { kind: string; names: string[] }[] = [];
+    const effects = stubEffects(() => [item], log, {
+      headReviewers: () => new Promise<string[]>(resolve => setTimeout(() => resolve(['chatgpt-codex-connector[bot]']), 20)),
+      launchProducer: async (...args) => { seen.push({ kind: `producer:${args[2].name}`, names: args[3].map(agent => String(agent.name)) }); await new Promise(resolve => setTimeout(resolve, 200)); return base.launchProducer(...args); },
+      launchReview: async (...args) => { seen.push({ kind: 'review', names: args[3].map(agent => String(agent.name)) }); return base.launchReview(...args); },
+    });
+    // Profiles added out of order can share a name: the reviewer took producer-a's.
+    const config = masterConfig(token); config.reviewers[0].agentName = config.producers[0].agentName;
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000);
+    const producer = seen.findIndex(entry => entry.kind === 'producer:producer-a');
+    assert.ok(producer >= 0, `the producer launches first, its read never waited on: ${JSON.stringify(seen)}`);
+    // The reviewer's room is read again once the name is its turn: the producer took the one slot
+    // of the name they share, so the review waits on capacity rather than launching into a refusal.
+    assert.ok(!seen.some(entry => entry.kind === 'review'), `the reviewer never launches into the taken name: ${JSON.stringify(seen)}`);
+    assert.deepEqual(tick.refused, [], 'a slot taken during the reservation wait is not a failed launch');
+    assert.ok(tick.waiting.some(entry => entry.kind === 'review' && /every reviewer profile is busy/.test(entry.reason)), `the review waits on capacity: ${JSON.stringify(tick.waiting)}`);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a launch takes a turn only on the agent name of the profile it is launching on: a reviewer whose failover profile shares a producer\'s name launches on its own primary without waiting behind that producer launch', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-failover-names-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
+    const base = stubEffects(() => [item], log), started = Date.now(), slow = 600;
+    let reviewedAt = -1, reviewedOn = '';
+    const effects = stubEffects(() => [item], log, {
+      headReviewers: () => new Promise<string[]>(resolve => setTimeout(() => resolve(['chatgpt-codex-connector[bot]']), 20)),
+      launchProducer: async (...args) => { await new Promise(resolve => setTimeout(resolve, slow)); return base.launchProducer(...args); },
+      launchReview: async (...args) => { reviewedAt = Date.now() - started; reviewedOn = args[2].name; return base.launchReview(...args); },
+    });
+    // The reviewer's failover profile shares producer-a's name; its primary has a name of its own.
+    const config = masterConfig(token, { run: { reviewerProfile: 'claude-reviewer' } });
+    config.reviewers.push({ ...config.reviewers[0], name: 'codex-reviewer', agentName: config.producers[0].agentName, kind: 'codex' });
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000);
+    assert.equal(reviewedOn, 'claude-reviewer', `the reviewer launches on its primary profile: ${JSON.stringify({ log, waiting: tick.waiting })}`);
+    assert.ok(reviewedAt >= 0 && reviewedAt < slow, `the reviewer never waits on the producer launch holding its failover profile's name (${slow}ms): launched at ${reviewedAt}ms`);
+    assert.deepEqual(tick.refused, [], 'nothing is refused');
+    assert.ok(log.some(entry => entry.startsWith('producer:') && entry.endsWith(':producer-a')), `the producer launches on producer-a: ${JSON.stringify(log)}`);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

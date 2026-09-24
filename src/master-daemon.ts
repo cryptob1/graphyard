@@ -9,7 +9,7 @@ import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
+import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
@@ -23,8 +23,10 @@ import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
+import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
+import { defaultAwaitReviewers } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 
@@ -37,12 +39,14 @@ import { probeSupervisorAbsence } from './containment-probe.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
+/** The most an action's detail may carry: daemonActionSchema's bound, which record() enforces. */
+export const actionDetailMax = 2000;
 export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
   work: z.string().nullable().default(null),
   principal: z.string().nullable().default(null),
   state: z.enum(['started', 'done', 'failed', 'indeterminate']),
-  detail: z.string().max(2000),
+  detail: z.string().max(actionDetailMax),
   attempts: z.number().int().min(0).max(1000).default(1),
   // The item's attempt epoch when the action started. A dispatch that lands always advances it,
   // which is what separates a landed assignment from a submission left over from an earlier one.
@@ -458,6 +462,16 @@ export const closeKey = (profile: WorkerProfile, pane: string) => `close:${profi
 export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>) => `decision:${decision.action}:${work.id}:${decision.binding}:${work.policyRevision}`;
 /** One decision per request: the instant the worker recorded it identifies the ask. */
 export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${request.epoch}:${request.at}`;
+/**
+ * The requirements revision that widens `work` by `paths` in answer to `request`. It names the
+ * request it answers and the head its findings were read for, so the control plane refuses it once a
+ * claim or a lease end has cleared that request, or a push has replaced that head, while the loop
+ * was still reading the findings it is grounded on.
+ */
+export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => ({
+  expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
+  plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
+  reason, answers: { epoch: request.epoch, at: request.at, sha: work.candidate?.sha ?? null } });
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -763,6 +777,27 @@ export function fitDecisionReason(prefix: string, grounds: string, suffix: strin
   const room = decisionReasonMax - prefix.length - suffix.length;
   return prefix + (grounds.length <= room ? grounds : `${grounds.slice(0, Math.max(0, room - 1))}…`) + suffix;
 }
+/**
+ * An action detail within its bound. A scope request carries up to 50 paths of up to 500 characters,
+ * so a detail that lists them — or quotes an error that does — is cut, never left to fail record()
+ * after the action it records has already happened.
+ */
+export function boundDetail(detail: string, max = actionDetailMax): string {
+  return detail.length <= max ? detail : `${detail.slice(0, max - 1)}…`;
+}
+/** Paths named in a detail: every one while short, else the first few and a count of the rest. */
+export function namePaths(paths: readonly string[], room = 600): string {
+  const named: string[] = [];
+  let used = 0;
+  for (const path of paths) {
+    const text = path.length > 200 ? `${path.slice(0, 199)}…` : path;
+    if (named.length && used + text.length + 2 > room) break;
+    named.push(text);
+    used += text.length + 2;
+  }
+  const more = paths.length - named.length;
+  return `${paths.length} file${paths.length === 1 ? '' : 's'} (${named.join(', ')}${more ? ` and ${more} more` : ''})`;
+}
 /** The least of its own grounds a rework request keeps beside the refusals it cites; below it the request would not say why. */
 export const reworkGroundsMin = 160;
 /**
@@ -883,7 +918,7 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     try { assertDispatchable(item, work, new Date(now).toISOString()); add('dispatch', item, `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
     if (request && (!request.decision || redecidableScopeRefusal(item)) && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
-      add('scope', item, `${item.key}: ${request.requestedBy} is waiting for a decision on ${request.paths.join(', ')}`);
+      add('scope', item, boundDetail(`${item.key}: ${request.requestedBy} is waiting for a decision on ${namePaths(request.paths, 300)}`, 500));
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed') add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
     if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
     if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} is waiting for the control plane to bring its candidate onto the moved base`);
@@ -1262,6 +1297,18 @@ export interface DaemonEffects {
    * waits for the operator exactly as it did before.
    */
   decideScope?: (work: Work) => Promise<Work>;
+  /**
+   * The review findings standing against the item's head — its unresolved threads and its
+   * reviewer's latest change request (review-scope.ts) — read outside every transaction.
+   */
+  reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
+  /** Which of the paths exist on the base branch, read from one fetch of it per decision. */
+  basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
+  /**
+   * The master's own additive scope widening — the revision `master scope` applies — with its
+   * audited reason, bound to the scope request it answers (`answeringWidening`).
+   */
+  widenScope?: (work: Work, request: ScopeRequestState, paths: string[], reason: string) => Promise<unknown>;
   merge: (work: Work) => Promise<unknown>;
   /**
    * The deployed release and which deliveries it serves. The containment the previous observation
@@ -1383,6 +1430,8 @@ async function record(state: DaemonState, key: string, action: Omit<DaemonAction
 
 /** One preservation per attempt: the record an interrupted attempt leaves for the next one. */
 export const preserveKey = (work: Pick<Work, 'id'>, epoch: number) => `preserve:${work.id}:${epoch}`;
+/** How long a refusal on the review findings stands before the loop reads the findings again. */
+export const findingRecheckMs = 120_000;
 /** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
 export const launchAppearanceMs = 120_000;
 /**
@@ -1643,11 +1692,53 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //    What this pass decides is kept, so the budget below measures what is still waiting rather
   //    than what has just been answered.
   const settled = new Map<string, Work>();
+  // 2a. A refused request for files a review finding on the item's own change names. The finding
+  //     is the grounds the item's criteria lack: the loop reads it with its own GitHub access and
+  //     widens by exactly those files as the master's own additive intent, once per request and
+  //     policy revision; anything the findings do not name stays refused and escalated. Findings
+  //     change while the request and revision stand — a bot's thread lands after the refusal — so
+  //     a refusal on the findings is judged again every findingRecheckMs, never cached for good.
+  //     The reads take seconds; the widening names the request it answers, so a claim or lease
+  //     end that clears that request meanwhile makes the control plane refuse it, never apply it.
+  const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<boolean> => {
+    if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return false;
+    if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return false;
+    const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+    if (!paths.length) return false;
+    const key = `${scopeKey(item, request)}:finding:${item.policyRevision}`;
+    const previous = state.actions[key];
+    if (previous?.state === 'done' && /^Widened /.test(previous.detail)) return true;
+    const judged = previous?.state === 'done';
+    if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return false;
+    const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
+    try {
+      const findings = await effects.reviewFindings(item);
+      const existing = await effects.basePaths?.(paths) ?? new Set<string>();
+      const scoped = findingScope(paths, findings, path => existing.has(path));
+      if ('refusal' in scoped) {
+        const detail = boundDetail(`Not widened on a review finding: ${scoped.refusal}`);
+        const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
+        // An unchanged refusal is the same decision read again, not a new action.
+        if (judged && previous.detail !== detail) performed.push(entry);
+        return false;
+      }
+      const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
+      const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
+        `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+      await effects.widenScope(item, request, paths, reason);
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
+      return true;
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
+      return false;
+    }
+  };
   for (const item of open) {
     const request = item.scopeRequest;
     // A refusal is reconsidered only when the rules as they stand now would approve it — once per
     // policy revision of the item, backing off on failure — so a standing refusal never churns.
     const redecide = !!request?.decision && redecidableScopeRefusal(item);
+    if (request?.decision?.state === 'refused' && !redecide) { await widenOnFindings(item, request); continue; }
     if (!effects.decideScope || !request || (request.decision && !redecide)) continue;
     // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) continue;
@@ -1656,7 +1747,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!readyToRetry(previous, state.cycle)) continue;
     const attempts = (previous?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'started',
-      detail: `Deciding ${item.key}'s scope request for ${request.paths.join(', ') || 'no path'}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      detail: `Deciding ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'}`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
       const decided = await effects.decideScope(item);
       const decision = decided.scopeDecision;
@@ -1665,19 +1756,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: decision.at, waitedMs: decision.waitedMs, state: decision.state }));
       const waited = `${Math.round(decision.waitedMs / 1000)}s after ${request.requestedBy} asked`;
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
-        detail: decision.state === 'approved'
-          ? `Widened ${item.key} with ${request.paths.join(', ')} ${waited}: ${decision.reason}`
-          : `Refused ${item.key}'s scope request for ${request.paths.join(', ') || 'no path'} ${waited}: ${decision.reason}`,
+        detail: boundDetail(decision.state === 'approved'
+          ? `Widened ${item.key} with ${namePaths(request.paths)} ${waited}: ${decision.reason}`
+          : `Refused ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'} ${waited}: ${decision.reason}`),
         attempts, cycle: state.cycle }, now(), effects.persist));
+      if (decision.state === 'refused' && await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision })) continue;
       if (decision.state === 'refused') {
         const escalationKey = `escalation:scope:${item.id}:${request.at}`;
         performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
-          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.join(', ') || 'a requirements change'} because ${request.reason}, and the loop refused it because ${decision.reason}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
+          detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.length ? namePaths(request.paths) : 'a requirements change'} because ${boundDetail(request.reason, 400)}, and the loop refused it because ${boundDetail(decision.reason, 500)}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
           attempts: 1, cycle: state.cycle }, now(), effects.persist));
       }
     } catch (error) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed',
-        detail: `Could not decide ${item.key}'s scope request: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+        detail: boundDetail(`Could not decide ${item.key}'s scope request: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
 
@@ -2821,6 +2913,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
     recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
     decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+    // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
+    // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
+    reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
+      trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
+    basePaths: paths => basePaths(root, current().baseBranch, paths, run),
+    get widenScope() {
+      return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
+        asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;
+    },
     requestProof: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,

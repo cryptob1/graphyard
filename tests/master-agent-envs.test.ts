@@ -464,6 +464,14 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     const cleared = await saveMasterSettings(root, masterSettingsFromArgs(['deploymentUrl=', 'accounts:review-oc=']));
     assert.equal(cleared.run.deploymentUrl, undefined, 'an optional owned field can be cleared');
     assert.equal((await loadMasterConfig(root)).reviewers.find(profile => profile.name === 'review-oc')!.accounts, undefined, 'an empty account list clears the pinned order');
+    // The reviewer launch's bot-review wait is the master's to turn off or restore to its default;
+    // whose reviews it waits for (and whose threads ground a scope widening) stays the operator's.
+    const noWait = await saveMasterSettings(root, masterSettingsFromArgs(['awaitReviewersMinutes=0']));
+    assert.deepEqual(noWait.changed, ['awaitReviewersMinutes']);
+    assert.equal((await loadMasterConfig(root)).run.awaitReviewersMinutes, 0, 'master config awaitReviewersMinutes=0 turns the wait off');
+    await assert.rejects(saveMasterSettings(root, { awaitReviewersMinutes: 61 }), /60/, 'the schema bound still applies');
+    assert.equal((await saveMasterSettings(root, masterSettingsFromArgs(['awaitReviewersMinutes=']))).run.awaitReviewersMinutes, undefined, 'an empty value restores the default wait');
+    assert.throws(() => masterSettingsFromArgs(['awaitReviewers=someone[bot]']), /changes only what the master owns/, 'the awaited logins are the operator\'s');
   } finally { await cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 
