@@ -14,6 +14,7 @@ import { answeringWidening, daemonSummary, emptyDaemonState, runCycle, scopeRout
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { scopeOutcomeMessage, scopeRequestOutcome } from '../src/model/scope.js';
 import { awaitScopeOutcome } from '../src/cli/session-commands.js';
+import { approveScopeRequest } from '../src/cli/master-status.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-176: an additive scope request the implication rule refuses and no review finding grounds
@@ -382,4 +383,33 @@ test('unit:scope-outcome-delivered — a wait on a request whose lease passed it
   const deadline = Date.parse(lapsed.lease!.expiresAt);
   assert.equal(scopeRequestOutcome(lapsed, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'pending', 'while the lease is live the request is still pending');
   assert.equal(scopeRequestOutcome(lapsed, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline).state, 'ended');
+  // A decision that landed before the deadline is not the attempt's to act on once it has passed:
+  // neither an approval (the request cleared, the paths covered) nor a refusal says to go on.
+  const approvedLate = { ...lapsed, scopeRequest: null, plannedFiles: [...lapsed.plannedFiles, ...paths] };
+  assert.equal(scopeRequestOutcome(approvedLate, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'approved');
+  const approvedAfter = scopeRequestOutcome(approvedLate, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline);
+  assert.equal(approvedAfter.state, 'ended', 'an approval read after the deadline does not say to continue');
+  assert.doesNotMatch(approvedAfter.text, /continue/);
+  const refusedLate = { ...lapsed, scopeRequest: { ...lapsed.scopeRequest!, decision: { state: 'refused' as const, reason: 'Not this item', at, decidedBy: approver.id } } } as Work;
+  assert.equal(scopeRequestOutcome(refusedLate, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'refused');
+  assert.equal(scopeRequestOutcome(refusedLate, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline).state, 'ended', 'nor does a refusal');
+  assert.equal(scopeRequestOutcome({ ...approvedLate, lease: null }, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'ended', 'nor either once reconciliation has cleared the lease');
+});
+
+test('unit:scope-outcome-delivered — a request a master widens by hand with master scope is recorded as approved, so the waiting worker reads it', async () => {
+  const work = await claimed('outcome by master scope');
+  const asked = await ask(work, [helper], 'The layout needs its measuring helper');
+  assert.ok(asked.scopeRequest, 'the request is open and no rule or decision has answered it yet');
+  const config = { ...loopConfig(), url };
+  await approveScopeRequest(process.cwd(), config, [work.key, 'The helper is part of the layout criterion'], { coordinator: path => ok(token(coordinator), 'GET', path), operatorToken: async () => master.token });
+  const widened = await reload(work.id);
+  assert.equal(widened.scopeRequest, null, 'the widening answered the request');
+  assert.equal(widened.lease?.epoch, work.epoch, 'and the worker keeps its lease');
+  assert.equal(widened.scopeDecision?.state, 'approved', 'the outcome is kept although the widening carried no routed answers');
+  assert.equal(widened.scopeDecision?.epoch, work.epoch);
+  assert.equal(widened.scopeDecision?.decidedBy, master.id);
+  assert.equal(widened.scopeDecision?.reason, 'The helper is part of the layout criterion');
+  const heard = await awaitScopeOutcome({ api: path => ok(token(implementer), 'GET', path) }, widened, work.epoch, { waitMs: 1_000, everyMs: 20, cli: 'graphyard' });
+  assert.equal(heard.state, 'approved', 'the wait reads the approval instead of finding no request');
+  assert.match(heard.text, /master-operator/);
 });
