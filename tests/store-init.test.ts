@@ -18,7 +18,7 @@ before(async () => {
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-store-init-'));
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['migrated', 'changed', 'pending', 'tables']) await postgres.createDatabase(name);
+  for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline']) await postgres.createDatabase(name);
 });
 after(async () => { if (postgres) await postgres.stop(); });
 
@@ -106,6 +106,25 @@ test('integration:migration-lock-bounded a migration blocked on a table lock nam
     assert.ok(boot.ms < 5000, `startup failed only after ${boot.ms} ms`);
     assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} gave up after 500 ms waiting for a lock on table jobs`));
   } finally { await release(); await next.close(); await deployed.close(); }
+});
+
+test('integration:migration-lock-bounded lock waits share one deadline: a lock released just before its timeout does not restart the budget for the next', async () => {
+  const deployed = new Store(url('deadline'));
+  await deployed.init();
+  await deployed.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
+  // The live replica holds the coordination lock for most of the budget, while another session
+  // keeps a read open on jobs that outlasts it: a per-lock budget would wait on each in turn.
+  const coordination = await liveReplica('deadline', async db => { await db.query('SELECT pg_advisory_xact_lock(71490321)'); });
+  const reader = await liveReplica('deadline', async db => { await db.query('SELECT count(*) FROM jobs'); });
+  let released: Promise<void> | undefined;
+  const handoff = setTimeout(() => { released = coordination(); }, 1200);
+  const next = new Store(url('deadline'));
+  try {
+    const boot = await timed(() => next.init({ lockTimeoutMs: 1500 }));
+    assert.ok(boot.error, 'the migration cannot alter jobs while the read is open');
+    assert.ok(boot.ms < 2300, `startup failed only after ${boot.ms} ms, past its 1500 ms deadline`);
+    assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} gave up after 1500 ms waiting for a lock on table jobs`));
+  } finally { clearTimeout(handoff); await (released ?? coordination()); await reader(); await next.close(); await deployed.close(); }
 });
 
 test('unit:startup-lock-documented operations.md states how startup takes coordination locks', async () => {

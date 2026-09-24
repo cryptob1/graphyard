@@ -10,7 +10,7 @@ export * from './snapshot-delta.js';
 
 /** The advisory lock every coordination transaction takes (Store.transaction). */
 const coordinationLock = 71490321;
-/** How long a migrating release waits for any one lock: well inside Railway's 120-second health check. */
+/** How long a migrating release may wait for locks in total: well inside Railway's 120-second health check. */
 export const migrationLockTimeoutMs = 30_000;
 /** The migration's statements ahead of the first table's DDL: the shared trigger function. */
 const migrationPrelude = migration.slice(0, migration.indexOf(tables[0].ddl));
@@ -28,9 +28,11 @@ export class Store {
    * A release whose generation and migration are already recorded starts without any
    * coordination or table lock: it reads graphyard_schema and its comment (the digest of the
    * migration that last ran) and skips the DDL, so a new container never queues behind a busy
-   * live replica. Only a release that must migrate takes the coordination lock, and it waits
-   * at most `lockTimeoutMs` for it and for each table lock the DDL needs before startup fails
-   * naming the lock, well inside the platform's health window.
+   * live replica. Only a release that must migrate takes the coordination lock, and the whole
+   * migration shares one `lockTimeoutMs` deadline: every statement's lock_timeout and
+   * statement_timeout are the time left, so waits on the coordination lock and on each table
+   * lock the DDL needs never add up past it. Startup then fails naming the lock, well inside
+   * the platform's health window.
    */
   async init(options: { lockTimeoutMs?: number } = {}) {
     const digest = `migration sha256:${createHash('sha256').update(migration).digest('hex')}`;
@@ -38,27 +40,31 @@ export class Store {
     if (recorded && recorded.version > schemaVersion) throw newerSchema(recorded.version);
     if (recorded?.version === schemaVersion && recorded.digest === digest) return;
     const timeout = Math.max(1, Math.floor(options.lockTimeoutMs ?? migrationLockTimeoutMs));
+    const deadline = Date.now() + timeout;
     const db = await this.pool.connect();
     let waitingOn = `the coordination advisory lock pg_advisory_xact_lock(${coordinationLock})`;
+    // Every statement may wait only for what is left of the migration's single deadline.
+    const step = async (waiting: string, sql: string, values?: unknown[]) => {
+      waitingOn = waiting;
+      const left = deadline - Date.now();
+      if (left < 1) throw Object.assign(new Error('migration deadline passed'), { code: '55P03' });
+      await db.query(`SET LOCAL lock_timeout = ${left}; SET LOCAL statement_timeout = ${left}`);
+      return db.query(sql, values);
+    };
     try {
       await db.query('BEGIN');
-      await db.query(`SET LOCAL lock_timeout = ${timeout}`);
-      await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
-      waitingOn = 'a lock on the migration\'s shared function graphyard_immutable';
-      await db.query(migrationPrelude);
-      for (const table of tables) {
-        waitingOn = `a lock on table ${table.name} (or an object its migration touches)`;
-        await db.query(table.ddl);
-      }
-      waitingOn = 'a lock on table graphyard_schema';
-      const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
+      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
+      for (const table of tables) await step(`a lock on table ${table.name} (or an object its migration touches)`, table.ddl);
+      const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
       if (current > schemaVersion) throw newerSchema(current);
-      if (current < schemaVersion) await db.query('INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
-      await db.query(`COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
+      if (current < schemaVersion) await step(waitingOn, 'INSERT INTO graphyard_schema(version, graphyard_version) VALUES($1,$2)', [schemaVersion, releaseInfo().version]);
+      await step(waitingOn, `COMMENT ON TABLE graphyard_schema IS ${literal(digest)}`);
       await db.query('COMMIT');
     } catch (error) {
       await db.query('ROLLBACK').catch(() => {});
-      if ((error as { code?: string }).code === '55P03') throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session (usually the live replica); startup fails instead of outlasting the health check — retry the deploy when the live replica is idle`, { cause: error });
+      // 55P03: a lock wait hit the time left; 57014: a statement ran into the deadline.
+      if (['55P03', '57014'].includes((error as { code?: string }).code ?? '')) throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session (usually the live replica); startup fails instead of outlasting the health check — retry the deploy when the live replica is idle`, { cause: error });
       throw error;
     } finally { db.release(); }
   }
