@@ -2190,6 +2190,16 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (standing && decision.action === 'requirements' && JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles)) {
         throw new Error(`requirements decision ${standing.id} is ${standing.state} for another planned-files revision, not the widening ${item.key}'s scope request asks for; the control plane holds one at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
+      // The same widening is not the same decision: a scope decision answers the one request it
+      // names (`answers`). One standing for a request the worker has since withdrawn and asked again
+      // can never apply — the server refuses it as no longer open — so adopting it would settle this
+      // request unasked. As with a merge for an earlier candidate, the loop takes it back and asks.
+      if (standing && decision.action === 'requirements' && JSON.stringify(standing.input?.answers) !== JSON.stringify(decision.input?.answers)) {
+        const stale = `requirements decision ${standing.id} is ${standing.state} for ${standing.input?.answers ? `the scope request made at ${standing.input.answers.at}` : 'a widening that answers no scope request'}, not the one ${item.key}'s worker made at ${decision.scope?.at ?? 'now'}`;
+        if (!standing.input?.answers || standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}; ${!standing.input?.answers ? 'it is left to its requester' : effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}, and this one is requested once it settles: graphyard master decisions ${item.key}`);
+        await effects.withdraw(item, standing.id, `${stale}; the request it answers was withdrawn, so it can never apply and is withdrawn for a decision that answers the current request`);
+        standing = undefined;
+      }
       // A rework request names the observation it was decided from (GY-144), so its approver sees
       // at once whether the item has moved since; the watch keeps the same pair.
       const observed = decision.action === 'rework' && item.observation ? { at: item.observation.at, sha: item.observation.candidate.sha } : null;

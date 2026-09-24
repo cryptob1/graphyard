@@ -227,6 +227,32 @@ test('unit:scope-approver-routine — a refusal answers only the request it name
   assert.deepEqual(work.plannedFiles, [layout, helper]);
 });
 
+test('unit:scope-approver-routine — a decision standing for a withdrawn request is never adopted by the same paths asked again: it is withdrawn and the new request is asked', async () => {
+  let work = await claimed('re-asked before judgement');
+  const first = await ask(work, [helper], 'The layout needs its helper');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [old] = await standing(work);
+  assert.equal(old.state, 'requested');
+  // Before any approver judges it, the worker withdraws the ask and makes it again for the same paths.
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: first.epoch, paths: [], reason: 'Withdrawn by the worker' });
+  const again = await ask(await reload(work.id), [helper], 'AC-1 renders every breakpoint, and the breakpoints are measured only in the helper');
+  assert.notEqual(again.scopeRequest!.at, first.scopeRequest!.at);
+  await loop.cycle(state);
+  assert.equal(loop.about(work).decided.length, 2, 'the new request is asked, not settled by adopting the old decision');
+  assert.deepEqual(loop.about(work).decided[1].input.answers, { epoch: again.epoch, at: again.scopeRequest!.at });
+  const decisions = await standing(work);
+  assert.notEqual(decisions.find((decision: any) => decision.id === old.id).state, 'requested', 'the decision for the withdrawn request is taken back');
+  const current = decisions.find((decision: any) => decision.state === 'requested');
+  assert.ok(current && current.id !== old.id, 'a decision stands for the new request');
+  assert.deepEqual(current.input.answers, { epoch: again.epoch, at: again.scopeRequest!.at });
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: current.id, reason: 'Still no ground in the criteria' });
+  await loop.cycle(state);
+  work = await reload(work.id);
+  assert.equal(scopeRequestOutcome(work, { epoch: again.epoch, at: again.scopeRequest!.at, paths: [helper] }).state, 'refused', 'the refusal reaches the request the worker is waiting on');
+  assert.deepEqual(work.plannedFiles, [layout]);
+});
+
 test('unit:scope-approver-routine — a refusal that arrives after the asking lease expired writes nothing onto the attempt', async () => {
   let work = await claimed('late refusal');
   await ask(work, ['src/server/routes/work.ts'], 'The route would be easier to change here too');
