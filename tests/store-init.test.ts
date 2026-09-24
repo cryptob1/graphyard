@@ -18,7 +18,7 @@ before(async () => {
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-store-init-'));
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline']) await postgres.createDatabase(name);
+  for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'work']) await postgres.createDatabase(name);
 });
 after(async () => { if (postgres) await postgres.stop(); });
 
@@ -125,6 +125,36 @@ test('integration:migration-lock-bounded lock waits share one deadline: a lock r
     assert.ok(boot.ms < 2300, `startup failed only after ${boot.ms} ms, past its 1500 ms deadline`);
     assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} gave up after 1500 ms waiting for a lock on table jobs`));
   } finally { clearTimeout(handoff); await (released ?? coordination()); await reader(); await next.close(); await deployed.close(); }
+});
+
+test('integration:migration-lock-bounded lock waits inside one table\'s DDL share the deadline: the next statement\'s wait does not start a fresh lock_timeout', async () => {
+  const deployed = new Store(url('statements'));
+  await deployed.init();
+  await deployed.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
+  // production_observation_merges' DDL drops the guard trigger on production_observations and
+  // then on itself, in one query: a read on each makes those two statements wait in turn.
+  const observations = await liveReplica('statements', async db => { await db.query('SELECT count(*) FROM production_observations'); });
+  const merges = await liveReplica('statements', async db => { await db.query('SELECT count(*) FROM production_observation_merges'); });
+  let released: Promise<void> | undefined;
+  const handoff = setTimeout(() => { released = observations(); }, 1200);
+  const next = new Store(url('statements'));
+  try {
+    const boot = await timed(() => next.init({ lockTimeoutMs: 1500 }));
+    assert.ok(boot.error, 'the migration cannot drop the trigger on production_observation_merges while the read is open');
+    assert.ok(boot.ms < 2300, `startup failed only after ${boot.ms} ms, past its 1500 ms deadline`);
+    assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} gave up after 1500 ms waiting for a lock on table production_observation_merges`));
+  } finally { clearTimeout(handoff); await (released ?? observations()); await merges(); await next.close(); await deployed.close(); }
+});
+
+test('integration:migration-lock-bounded the budget bounds lock waits only: a migration whose own work outlasts it completes', async () => {
+  // A whole migration of an empty database takes far longer than 1 ms, none of it waiting on a lock.
+  const store = new Store(url('work'));
+  try {
+    const boot = await timed(() => store.init({ lockTimeoutMs: 1 }));
+    assert.equal(boot.error, null, `init failed: ${boot.error?.message}`);
+    assert.ok(boot.ms > 1, `the migration took only ${boot.ms} ms`);
+    assert.equal(await store.schema(), schemaVersion);
+  } finally { await store.close(); }
 });
 
 test('unit:startup-lock-documented operations.md states how startup takes coordination locks', async () => {

@@ -28,11 +28,13 @@ export class Store {
    * A release whose generation and migration are already recorded starts without any
    * coordination or table lock: it reads graphyard_schema and its comment (the digest of the
    * migration that last ran) and skips the DDL, so a new container never queues behind a busy
-   * live replica. Only a release that must migrate takes the coordination lock, and the whole
-   * migration shares one `lockTimeoutMs` deadline: every statement's lock_timeout and
-   * statement_timeout are the time left, so waits on the coordination lock and on each table
-   * lock the DDL needs never add up past it. Startup then fails naming the lock, well inside
-   * the platform's health window.
+   * live replica. Only a release that must migrate takes the coordination lock, and every
+   * lock wait of the migration shares one `lockTimeoutMs` deadline: each step's lock_timeout
+   * is the time left, and a watchdog cancels any lock wait still running at the deadline, so
+   * waits on the coordination lock, across tables, and between the statements of one table's
+   * DDL never add up past it. Startup then fails naming the lock, well inside the platform's
+   * health window. The migration's own work is not timed: a backfill or index build that takes
+   * longer than the lock budget (the offline `graphyard db migrate` Job) still completes.
    */
   async init(options: { lockTimeoutMs?: number } = {}) {
     const digest = `migration sha256:${createHash('sha256').update(migration).digest('hex')}`;
@@ -43,15 +45,23 @@ export class Store {
     const deadline = Date.now() + timeout;
     const db = await this.pool.connect();
     let waitingOn = `the coordination advisory lock pg_advisory_xact_lock(${coordinationLock})`;
-    // Every statement may wait only for what is left of the migration's single deadline.
+    // Each step may wait for a lock only for what is left of the migration's single deadline.
     const step = async (waiting: string, sql: string, values?: unknown[]) => {
       waitingOn = waiting;
-      const left = deadline - Date.now();
-      if (left < 1) throw Object.assign(new Error('migration deadline passed'), { code: '55P03' });
-      await db.query(`SET LOCAL lock_timeout = ${left}; SET LOCAL statement_timeout = ${left}`);
+      await db.query(`SET LOCAL lock_timeout = ${Math.max(1, deadline - Date.now())}`);
       return db.query(sql, values);
     };
+    // lock_timeout restarts for every lock one step's statements wait on; past the deadline
+    // the watchdog cancels whichever lock wait is still running.
+    let cancelledWaiting = false, watching = true, poll: NodeJS.Timeout | undefined, polling = Promise.resolve();
+    const watch = async (pid: number) => {
+      const { rows } = await this.pool.query("SELECT pg_cancel_backend(pid) AS cancelled FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pid]).catch(() => ({ rows: [] }));
+      if (rows[0]?.cancelled) cancelledWaiting = true;
+      else if (watching) poll = setTimeout(() => { polling = watch(pid); }, 100);
+    };
     try {
+      const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+      poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
       await db.query('BEGIN');
       await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
       await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
@@ -63,10 +73,15 @@ export class Store {
       await db.query('COMMIT');
     } catch (error) {
       await db.query('ROLLBACK').catch(() => {});
-      // 55P03: a lock wait hit the time left; 57014: a statement ran into the deadline.
-      if (['55P03', '57014'].includes((error as { code?: string }).code ?? '')) throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session (usually the live replica); startup fails instead of outlasting the health check — retry the deploy when the live replica is idle`, { cause: error });
+      // 55P03: a lock wait hit the time left; 57014 after the watchdog fired: it cancelled a lock wait past the deadline.
+      const code = (error as { code?: string }).code;
+      if (code === '55P03' || (code === '57014' && cancelledWaiting)) throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session (usually the live replica); startup fails instead of outlasting the health check — retry the deploy when the live replica is idle`, { cause: error });
       throw error;
-    } finally { db.release(); }
+    } finally {
+      // A cancel still in flight must not reach whatever this connection runs next.
+      watching = false; clearTimeout(poll); await polling;
+      db.release();
+    }
   }
   /** The recorded generation and migration digest, read without any lock a replica holds; null before the first migration. */
   private async recordedGeneration(): Promise<{ version: number; digest: string | null } | null> {
