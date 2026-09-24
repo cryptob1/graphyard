@@ -31,7 +31,8 @@ export interface RunResult { code: number; base: number; environment: Record<str
 
 export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   const cwd = resolve(options.cwd ?? process.cwd()), args = options.args ?? [];
-  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 1, last: 65_000, ...options.ports } : options.ports);
+  // The browser window is the dev server's port and the sentinel above it that holds the window.
+  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : options.ports);
   try {
     const set = options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base);
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);

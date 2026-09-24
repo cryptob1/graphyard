@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mechanicalProof } from '../model/dispatch.js';
 import type { CliCommand } from './registry.js';
-import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from './test-isolation.js';
+import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from './test-isolation.js';
 
 /**
  * `graphyard verify GY-N`: the worker's own mechanical check before `complete` (GY-115).
@@ -18,7 +18,7 @@ import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type Re
  * never evidence: trusted evidence still comes only from an independent producer, and the control
  * plane requests no review until that evidence has passed on the head.
  */
-export interface ProofRun { proof: string; criteria: string[]; result: 'pass' | 'fail'; executed: number; failed: number; skipped: number; files: string[] }
+export interface ProofRun { proof: string; criteria: string[]; result: 'pass' | 'fail'; executed: number; failed: number; skipped: number; files: string[]; abnormal?: string }
 export interface Outstanding { proof: string; criteria: string[]; reason: string }
 export interface VerifyRecord { key: string; head: string; clean: boolean; at: string; ran: ProofRun[]; outstanding: Outstanding[] }
 type Criterion = { id: string; proofs: string[]; bootstrap?: unknown };
@@ -64,7 +64,7 @@ async function proofFiles(root: string, proof: string) {
  * producer then has to explain away. The run gets the suite's isolation (test-isolation.ts): this
  * session's credentials withheld and a window of free ports held for it alone.
  */
-export async function runProof(root: string, proof: string, files: string[], ports: ReserveOptions = {}): Promise<Pick<ProofRun, 'result' | 'executed' | 'failed' | 'skipped' | 'files'>> {
+export async function runProof(root: string, proof: string, files: string[], ports: ReserveOptions = {}): Promise<Pick<ProofRun, 'result' | 'executed' | 'failed' | 'skipped' | 'files' | 'abnormal'>> {
   if (!files.length) return { result: 'fail', executed: 0, failed: 0, skipped: 0, files };
   const reservation = await reserveTestPorts(ports);
   let run: ReturnType<typeof spawnSync>;
@@ -72,9 +72,11 @@ export async function runProof(root: string, proof: string, files: string[], por
     run = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=tap', ...files],
       { cwd: root, encoding: 'utf8', env: isolatedTestEnvironment(process.env, testPortEnvironment(reservation.base)), maxBuffer: 64 * 1024 * 1024 });
   } finally { reservation.release(); }
-  const { executed, failed, skipped } = countProofCases(String(run.stdout ?? ''), proof);
-  // The file's other cases are the ordinary suite's business: only the proof's own decide its result.
-  return { result: executed > 0 && failed === 0 && skipped === 0 ? 'pass' : 'fail', executed, failed, skipped, files };
+  const tap = String(run.stdout ?? ''), { executed, failed, skipped } = countProofCases(tap, proof);
+  // The file's other cases are the ordinary suite's business: only the proof's own decide its
+  // result. A run that did not end normally — a hook, the file or the process failing — passes none.
+  const abnormal = run.error ? `the test process could not run: ${run.error.message}` : abnormalTestExit(tap, run.status, run.signal);
+  return { result: !abnormal && executed > 0 && failed === 0 && skipped === 0 ? 'pass' : 'fail', executed, failed, skipped, files, ...(abnormal ? { abnormal } : {}) };
 }
 
 /** The proof's cases in a TAP stream, attributed by title prefix. */
@@ -108,7 +110,7 @@ export async function selfVerification(root: string, key: string) {
     return { state: 'not-run' as const, reason: `graphyard verify ${key} was not run in this worktree; no proof was checked before submission`, ran: [], outstanding: [] };
   }
   const head = git(root, ['rev-parse', 'HEAD']);
-  const summary = { ran: record.ran.map(({ proof, criteria, result, executed, failed, skipped }) => ({ proof, criteria, result, executed, failed, skipped })),
+  const summary = { ran: record.ran.map(({ proof, criteria, result, executed, failed, skipped, abnormal }) => ({ proof, criteria, result, executed, failed, skipped, ...(abnormal ? { abnormal } : {}) })),
     outstanding: record.outstanding.map(({ proof, criteria, reason }) => ({ proof, criteria, reason })), verifiedAt: record.at };
   if (record.head !== head) return { state: 'stale' as const, reason: `verified ${record.head.slice(0, 12)}, not HEAD ${head.slice(0, 12)}; run graphyard verify ${key} again`, ...summary };
   const failing = record.ran.filter(entry => entry.result !== 'pass');

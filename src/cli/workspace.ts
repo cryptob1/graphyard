@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
-import { ensureWorktreeDependencies, managedInstructions } from '../repository-setup.js';
+import { ensureWorktreeDependencies, managedInstructions, type DependencyInstaller } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
@@ -122,6 +122,20 @@ async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) 
   if (refused.length) process.exitCode = 1;
 }
 
+/**
+ * Bring a new worktree's dependencies in line with its lockfile while renewing the lease every
+ * `intervalMs`. The first refused renewal stops the install and fails the call with the refusal:
+ * the epoch that asked for the worktree is no longer held, so nothing more is done in it.
+ */
+export async function installUnderLease(worktree: string, renew: () => Promise<unknown>, subject: string,
+  options: { install?: DependencyInstaller; intervalMs?: number } = {}) {
+  const stop = new AbortController();
+  const keepalive = setInterval(() => {
+    renew().catch(error => stop.abort(new Error(`The lease heartbeat for ${subject} was refused while installing dependencies, so the install was stopped: ${error instanceof Error ? error.message : String(error)}`)));
+  }, options.intervalMs ?? 30_000);
+  try { return await ensureWorktreeDependencies(worktree, options.install, stop.signal); } finally { clearInterval(keepalive); }
+}
+
 /** Local worktrees and the supervised worker launch. */
 export const workspaceCommands = defineCommands([
   {
@@ -220,10 +234,10 @@ export const workspaceCommands = defineCommands([
       catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
       // A checkout whose lockfile the reachable install does not match gets its own install now,
       // so the session never starts on the wrong dependency versions. The lease is kept alive
-      // while npm runs; the session's supervisor takes over heartbeats once it starts.
-      const keepalive = setInterval(() => { mutate('heartbeat', { epoch }).catch(() => {}); }, 30_000);
-      let dependencies;
-      try { dependencies = await ensureWorktreeDependencies(path); } finally { clearInterval(keepalive); }
+      // while npm runs; the session's supervisor takes over heartbeats once it starts. A refused
+      // heartbeat means this epoch is no longer held: npm is stopped there and the command fails
+      // rather than reporting a worktree ready for work nobody may do.
+      const dependencies = await installUnderLease(path, () => mutate('heartbeat', { epoch }), `${work.key} epoch ${epoch}`);
       return print({ path, branch, epoch, dependencies });
     },
   },

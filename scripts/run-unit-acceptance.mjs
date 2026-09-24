@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { contract } from './contracts.mjs';
 import { judgeUnitCases } from './unit-contract.mjs';
+import { abnormalTestExit } from '../src/cli/test-isolation.ts';
 
 const [metadataFile, candidateDirectory, output, proof] = process.argv.slice(2);
 if (!metadataFile || !candidateDirectory || !output || !proof) throw new Error('Usage: run-unit-acceptance metadata.json candidate-directory output.json proof');
@@ -33,12 +34,15 @@ try {
   // The inventory file runs whole and its cases are judged by title: narrowing the run with
   // --test-name-pattern would report the file's other cases as skipped. Those other cases are the
   // ordinary CI suite's business, so the verdict is the required cases' alone, read from the TAP
-  // stream on stdout.
+  // stream on stdout — provided the run ended normally: a failing hook, a crash or unhandled
+  // rejection after the last case, or a signal fails the proof whatever its cases printed.
   const run = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=tap', selected.file],
     { cwd: candidate, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (run.error) throw run.error;
   process.stderr.write(run.stderr ?? '');
   cases = judgeUnitCases(selected, run.stdout ?? '');
+  const abnormal = abnormalTestExit(run.stdout ?? '', run.status, run.signal);
+  if (abnormal) throw new Error(`${abnormal}; the inventory run did not end normally`);
   passed = cases.every(entry => entry.result === 'pass');
   console.log(`Trusted unit acceptance completed: ${cases.filter(entry => entry.result === 'pass').length}/${cases.length} ${proof} cases passed.`);
 } catch (error) { console.error(`Trusted unit acceptance failed: ${error.message}. No passing evidence was produced.`); }

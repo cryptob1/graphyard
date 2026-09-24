@@ -558,10 +558,11 @@ async function resolvedInstall(worktree: string): Promise<string | null> {
   }
 }
 
-export type DependencyInstaller = (cwd: string) => Promise<void>;
+export type DependencyInstaller = (cwd: string, signal?: AbortSignal) => Promise<void>;
 /** `npm ci` in the worktree, its output on stderr so a caller's JSON on stdout stays whole. */
-export const npmCi: DependencyInstaller = cwd => new Promise((done, fail) => {
-  const child = spawn('npm', ['ci', '--no-audit', '--no-fund'], { cwd, stdio: ['ignore', 2, 2] });
+export const npmCi: DependencyInstaller = (cwd, signal) => new Promise((done, fail) => {
+  // An aborted signal stops npm (SIGTERM) and rejects with the abort.
+  const child = spawn('npm', ['ci', '--no-audit', '--no-fund'], { cwd, stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
   child.once('error', fail);
   child.once('close', code => code === 0 ? done() : fail(new Error(`npm ci exited with ${code}`)));
 });
@@ -571,9 +572,10 @@ export interface WorktreeDependencyReport { state: 'current' | 'installed' | 'fa
  * Make `worktree` resolve dependencies installed from its own package-lock.json: nothing is done
  * when the install it resolves already matches, and `install` (npm ci) runs in the worktree when it
  * does not — a changed lockfile, or no install at all. A failed install is reported, never thrown:
- * the worktree still exists for the session, which sees the reason.
+ * the worktree still exists for the session, which sees the reason. An install stopped through
+ * `signal` is thrown instead, with the signal's reason: the caller no longer holds the right to it.
  */
-export async function ensureWorktreeDependencies(worktree: string, install: DependencyInstaller = npmCi): Promise<WorktreeDependencyReport> {
+export async function ensureWorktreeDependencies(worktree: string, install: DependencyInstaller = npmCi, signal?: AbortSignal): Promise<WorktreeDependencyReport> {
   const text = await readFile(resolve(worktree, 'package-lock.json'), 'utf8').catch(() => null);
   if (text === null) return { state: 'none', install: null, reason: 'The checkout has no package-lock.json; nothing is installed for it' };
   const lockfile = JSON.parse(text);
@@ -582,7 +584,8 @@ export async function ensureWorktreeDependencies(worktree: string, install: Depe
   const matches = current ? installMatchesLockfile(lockfile, installed) : `no node_modules is reachable from ${worktree}`;
   if (matches === true) return { state: 'current', install: current, reason: `${current} was installed from this package-lock.json` };
   const own = resolve(worktree, 'node_modules');
-  try { await install(worktree); }
-  catch (error) { return { state: 'failed', install: current, reason: `package-lock.json differs from the install (${matches}), and installing it failed: ${error instanceof Error ? error.message : String(error)}` }; }
+  signal?.throwIfAborted();
+  try { await install(worktree, signal); }
+  catch (error) { if (signal?.aborted) throw signal.reason; return { state: 'failed', install: current, reason: `package-lock.json differs from the install (${matches}), and installing it failed: ${error instanceof Error ? error.message : String(error)}` }; }
   return { state: 'installed', install: own, reason: `package-lock.json differs from the install it resolved (${matches}); installed its own` };
 }

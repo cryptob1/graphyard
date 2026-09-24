@@ -1,7 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
 
 /**
  * What a clean test run needs from the host, done by the tooling rather than remembered by the
@@ -61,71 +58,77 @@ export function freePort(host = '127.0.0.1'): Promise<number> {
   });
 }
 
-/**
- * Where reservations are recorded: one directory every session of this user on this host shares.
- * A session's own TMPDIR is private to it, so the per-user directory under /tmp comes first.
- */
-export function defaultLockDirectory() {
-  let user = String(process.getuid?.() ?? '');
-  if (!user) try { user = userInfo().username; } catch { user = 'user'; }
-  return [join('/tmp', `graphyard-test-ports-${user}`), join(tmpdir(), `graphyard-test-ports-${user}`)];
+/** A listening socket this process holds on `port`; the kernel frees it when the process exits, however it exits. */
+export function holdPort(port: number, host = '127.0.0.1'): Promise<{ close(): void } | null> {
+  return new Promise(resolve => {
+    const server = createServer();
+    server.once('error', () => resolve(null));
+    server.listen({ port, host, exclusive: true }, () => { server.unref(); resolve({ close: () => { server.close(); } }); });
+  });
 }
 
-const alive = (pid: number) => {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; }
-};
-
-/** Take the lock for one base, reclaiming a lock whose holder is gone. False while a live run holds it. */
-function lock(directory: string, base: number, pid: number): string | false {
-  const file = join(directory, `${base}.lock`);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try { const fd = openSync(file, 'wx', 0o600); writeSync(fd, `${pid}\n`); closeSync(fd); return file; }
-    catch (error: any) {
-      if (error?.code !== 'EEXIST') throw error;
-      let holder = NaN;
-      try { holder = Number(readFileSync(file, 'utf8').trim()); } catch { /* removed meanwhile */ }
-      if (alive(holder)) return false;
-      rmSync(file, { force: true });
-    }
-  }
-  return false;
-}
-
-export interface TestPortReservation { base: number; span: number; lock: string | null; release(): void }
+export interface TestPortReservation { base: number; span: number; sentinel: number; release(): void }
 export interface ReserveOptions {
   span?: number; first?: number; last?: number;
-  /** Directories tried in order for the shared lock files; with none writable the window is probed only. */
-  lockDirectories?: string[];
-  /** The process the reservation belongs to; a lock whose process has exited is reclaimed. */
-  pid?: number;
   probe?: (port: number) => Promise<boolean>;
+  hold?: typeof holdPort;
 }
 
 /**
- * Reserve a window of `span` ports for one test run: no other live run holds it (a lock file per
- * base, named by the holder's pid, in a directory every session of this user shares), and nothing
- * listens on any port of it now. The window stays reserved until `release`, or until the holder
- * exits, so a concurrent run starting while this one's databases are still coming up picks another.
+ * Reserve a window of `span` ports for one test run. The window's last port is its sentinel: the
+ * run listens on it until `release`, so taking the window is one exclusive bind the kernel decides
+ * between concurrent runs — of any user on the host — and a run that exits, even killed, leaves no
+ * lock behind to reclaim. No test listens on the sentinel (every per-file offset is below
+ * `testPortSpan - 1`). With the sentinel held, every other port of the window must be free now, so
+ * a leftover test Postgres from an earlier run moves this run to the next window.
  */
 export async function reserveTestPorts(options: ReserveOptions = {}): Promise<TestPortReservation> {
   const span = options.span ?? testPortSpan, first = options.first ?? defaultTestPortBase, last = options.last ?? highestBase;
-  const pid = options.pid ?? process.pid, probe = options.probe ?? portFree;
-  let directory: string | null = null;
-  for (const candidate of options.lockDirectories ?? defaultLockDirectory()) {
-    try { mkdirSync(candidate, { recursive: true, mode: 0o700 }); directory = candidate; break; } catch { /* next candidate */ }
-  }
+  const probe = options.probe ?? portFree, hold = options.hold ?? holdPort;
+  if (!Number.isInteger(span) || span < 2) throw new Error(`A test port window needs its ports and a sentinel: span ${span} is below 2`);
   for (let base = first; base + span - 1 <= last; base += span) {
-    let file: string | false | null = null;
-    if (directory) {
-      try { file = lock(directory, base, pid); } catch { directory = null; file = null; }
-      if (file === false) continue;
-    }
+    const sentinel = base + span - 1;
+    const held = await hold(sentinel);
+    if (!held) continue;
     let free = true;
-    for (let port = base; port < base + span && free; port++) free = await probe(port);
-    if (!free) { if (file) rmSync(file, { force: true }); continue; }
-    const held = file || null;
-    return { base, span, lock: held, release: () => { if (held) rmSync(held, { force: true }); } };
+    for (let port = base; port < sentinel && free; port++) free = await probe(port);
+    if (!free) { held.close(); continue; }
+    return { base, span, sentinel, release: () => held.close() };
   }
   throw new Error(`No free window of ${span} test ports between ${first} and ${last}; stop a leftover test Postgres (ss -ltnp) and retry`);
+}
+
+/** Failures a test case or suite reports of its own code; any other `not ok` is a hook, a file or the process failing. */
+const caseFailures: Record<string, string[]> = { test: ['testCodeFailure', 'testTimeoutFailure'], suite: ['subtestsFailed'] };
+
+/**
+ * Why a node:test run that proof runners judge by case title must not pass, or null. A proof's
+ * files run whole, so another case of the same file failing is that case's business and leaves the
+ * exit status nonzero on its own. Anything else behind a nonzero exit — a failing before/after
+ * hook, an unhandled rejection or a crash after the last case (reported against the file, with
+ * the child's exit code), or a signal — means the run did not complete normally, and no case it
+ * reported passing is trusted.
+ */
+export function abnormalTestExit(tap: string, status: number | null, signal: NodeJS.Signals | string | null): string | null {
+  if (signal) return `the test process was stopped by ${signal}`;
+  if (status === 0) return null;
+  const lines = tap.split('\n'), failures: { title: string; type?: string; failureType?: string; exited: boolean }[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const match = lines[index].match(/^(\s*)not ok \d+ - (.*?)(?: # (?:SKIP|TODO)\b.*)?$/);
+    if (!match) continue;
+    const failure: (typeof failures)[number] = { title: match[2], exited: false };
+    // The case's YAML diagnostics follow it, indented two more spaces, between `---` and `...`.
+    const indent = `${match[1]}  `;
+    if (lines[index + 1] === `${indent}---`) for (let next = index + 2; next < lines.length && lines[next] !== `${indent}...`; next++) {
+      const field = lines[next].slice(indent.length).match(/^(type|failureType|exitCode|signal): '?([^']*)'?$/);
+      if (!field || lines[next].slice(0, indent.length) !== indent) continue;
+      if (field[1] === 'type') failure.type = field[2];
+      else if (field[1] === 'failureType') failure.failureType = field[2];
+      else failure.exited = true;
+    }
+    failures.push(failure);
+  }
+  if (!failures.length) return `the test process exited with ${status} and reported no failing case`;
+  const abnormal = failures.find(failure => failure.exited || !failure.type || !caseFailures[failure.type]?.includes(failure.failureType ?? ''));
+  return abnormal ? `the test process exited with ${status} after "${abnormal.title}" failed as ${abnormal.failureType ?? 'an unclassified failure'}, not as a test case` : null;
 }

@@ -6,11 +6,12 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment } from '../src/cli/test-isolation.js';
+import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
 import { bindEvidence, leaseCommands } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
 import { ensureWorktreeDependencies, installMatchesLockfile } from '../src/repository-setup.js';
+import { installUnderLease } from '../src/cli/workspace.js';
 import { runTests } from './helpers/run-tests.js';
 
 const repository = new URL('..', import.meta.url);
@@ -20,8 +21,6 @@ const listen = (port = 0) => new Promise<{ port: number; close(): Promise<void> 
   server.once('error', reject);
   server.listen({ port, host: '127.0.0.1', exclusive: true }, () => resolve({ port: (server.address() as { port: number }).port, close: () => new Promise(done => server.close(() => done())) }));
 });
-/** A pid no process holds any more: a child that has already exited. */
-const exitedPid = () => new Promise<number>(resolve => { const child = spawn(process.execPath, ['-e', '']); child.once('exit', () => resolve(child.pid!)); });
 
 test('unit:test-isolation strips every GRAPHYARD_* and HERDR_* variable the runner did not set', () => {
   const environment = isolatedTestEnvironment({
@@ -39,31 +38,44 @@ test('unit:test-isolation strips every GRAPHYARD_* and HERDR_* variable the runn
   assert.equal(environment.NODE_TEST_CONTEXT, undefined);
 });
 
-test('unit:test-isolation reserves a free port window per run: held and busy windows are skipped, an exited holder is reclaimed', async () => {
-  const locks = await scratch('locks');
+test('unit:test-isolation reserves a free port window per run: held and busy windows are skipped, concurrent reservations never share one, a killed holder leaves none behind', async () => {
+  const busy = await listen();
   try {
-    const busy = await listen();
-    try {
-      const options = { first: busy.port, span: 4, last: busy.port + 400, lockDirectories: [locks] };
-      const first = await reserveTestPorts(options);
-      assert.ok(first.base > busy.port, 'the window holding a listening port is skipped');
-      const second = await reserveTestPorts(options);
-      assert.ok(second.base >= first.base + first.span, 'a window another live run holds is skipped');
-      first.release();
-      const again = await reserveTestPorts(options);
-      assert.equal(again.base, first.base, 'a released window is free again');
-      again.release(); second.release();
-      await writeFile(join(locks, `${first.base}.lock`), `${await exitedPid()}\n`);
-      const reclaimed = await reserveTestPorts(options);
-      assert.equal(reclaimed.base, first.base, 'a lock whose run has exited does not hold the window');
-      reclaimed.release();
-      assert.deepEqual(await readdir(locks), []);
-    } finally { await busy.close(); }
-  } finally { await rm(locks, { recursive: true, force: true }); }
+    const options = { first: busy.port, span: 4, last: busy.port + 400 };
+    const first = await reserveTestPorts(options);
+    assert.ok(first.base > busy.port, 'the window holding a listening port is skipped');
+    assert.equal(first.sentinel, first.base + first.span - 1);
+    const second = await reserveTestPorts(options);
+    assert.ok(second.base >= first.base + first.span, 'a window another live run holds is skipped');
+    first.release(); await new Promise(done => setTimeout(done, 50));
+    const again = await reserveTestPorts(options);
+    assert.equal(again.base, first.base, 'a released window is free again');
+    again.release(); second.release(); await new Promise(done => setTimeout(done, 50));
+
+    // Reservations racing for the same windows: the sentinel bind is the kernel's decision, so no
+    // two of them take one window, however their probes interleave.
+    const racing = await Promise.all(Array.from({ length: 6 }, () => reserveTestPorts(options)));
+    assert.equal(new Set(racing.map(entry => entry.base)).size, racing.length, 'each concurrent reservation holds its own window');
+    for (const entry of racing) entry.release();
+    await new Promise(done => setTimeout(done, 50));
+
+    // A run killed while holding its window leaves nothing behind to reclaim.
+    const holder = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+      `const { reserveTestPorts } = await import(${JSON.stringify(new URL('src/cli/test-isolation.ts', repository).href)}); const held = await reserveTestPorts(${JSON.stringify(options)}); console.log(held.base); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const heldBase = await new Promise<number>((resolve, reject) => { holder.stdout!.once('data', chunk => resolve(Number(String(chunk).trim()))); holder.once('exit', code => reject(new Error(`holder exited ${code}`))); });
+    assert.equal(heldBase, first.base);
+    const beside = await reserveTestPorts(options);
+    assert.notEqual(beside.base, heldBase, 'a window held by another process is skipped');
+    beside.release();
+    await new Promise(done => { holder.once('exit', done); holder.kill('SIGKILL'); });
+    const after = await reserveTestPorts(options);
+    assert.equal(after.base, heldBase, 'the killed holder\'s window is free at once');
+    after.release();
+  } finally { await busy.close(); }
 });
 
 test('unit:test-isolation two concurrent test runs on one host both pass', async () => {
-  const project = await scratch('project'), locks = await scratch('locks');
+  const project = await scratch('project');
   try {
     await mkdir(join(project, 'tests'));
     // Stands in for a database-backed test file: it holds base + 7 for a while, as its Postgres
@@ -81,11 +93,11 @@ test('holds its database port', async () => {
 });
 `);
     const environment = { ...process.env, GRAPHYARD_TOKEN: 'session-credential', GRAPHYARD_TOKEN_FILE: '/run/credential', HERDR_PANE: 'w1:p1', GRAPHYARD_TEST_PORT: '15438' };
-    const runs = await Promise.all([0, 1].map(() => runTests({ cwd: project, environment, stdio: 'pipe', ports: { span: 20, lockDirectories: [locks] } })));
+    const runs = await Promise.all([0, 1].map(() => runTests({ cwd: project, environment, stdio: 'pipe', ports: { span: 20 } })));
     for (const run of runs) assert.equal(run.code, 0, run.stdout + run.stderr);
     assert.notEqual(runs[0].base, runs[1].base, 'each run held its own window');
     assert.ok(runs.every(run => run.environment.GRAPHYARD_TOKEN === undefined && run.environment.HERDR_PANE === undefined));
-  } finally { await rm(project, { recursive: true, force: true }); await rm(locks, { recursive: true, force: true }); }
+  } finally { await rm(project, { recursive: true, force: true }); }
 });
 
 test('unit:test-isolation npm test and the browser suite start through the isolating runner, and no test file fixes its own Postgres port', async () => {
@@ -135,6 +147,18 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
 
     assert.equal(installMatchesLockfile(lock('1.0.0'), { packages: {} }), 'node_modules/left-pad is named by package-lock.json but not installed');
     assert.equal(installMatchesLockfile(lock('1.0.0'), null), 'the install records no hidden lockfile (node_modules/.package-lock.json)');
+
+    // A refused lease heartbeat stops the install and fails the worktree command.
+    await rm(join(worktree, 'node_modules'), { recursive: true, force: true });
+    let stoppedBy: unknown = null, renewals = 0;
+    const slow = (cwd: string, signal?: AbortSignal) => new Promise<void>((_, fail) => { signal!.addEventListener('abort', () => { stoppedBy = signal!.reason; fail(new Error('npm ci stopped')); }); });
+    await assert.rejects(installUnderLease(worktree, async () => { renewals++; throw new Error('Lease epoch is stale'); }, 'GY-1 epoch 1', { install: slow, intervalMs: 20 }),
+      /lease heartbeat for GY-1 epoch 1 was refused while installing dependencies, so the install was stopped: Lease epoch is stale/);
+    assert.equal(renewals, 1); assert.ok(stoppedBy instanceof Error, 'the installer was told to stop');
+    let kept = 0;
+    const brief = (cwd: string) => new Promise<void>(done => setTimeout(done, 70));
+    assert.equal((await installUnderLease(worktree, async () => { kept++; }, 'GY-1 epoch 1', { install: brief, intervalMs: 20 })).state, 'installed');
+    assert.ok(kept >= 1, 'accepted heartbeats keep the install going');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -153,10 +177,32 @@ test('unit:demo-other is another proof', () => assert.ok(true));
 test('an ordinary case of the same file', () => { writeFileSync(${JSON.stringify(marker)}, 'ran'); });
 `);
     process.env.GRAPHYARD_TOKEN = 'session-credential'; process.env.HERDR_PANE = 'w1:p1';
-    const locks = join(project, 'locks');
-    const run = await runProof(project, 'unit:demo', ['tests/demo.test.ts'], { span: 20, lockDirectories: [locks] });
+    const run = await runProof(project, 'unit:demo', ['tests/demo.test.ts'], { span: 20 });
     assert.deepEqual(run, { result: 'pass', executed: 2, failed: 0, skipped: 0, files: ['tests/demo.test.ts'] });
     assert.ok(existsSync(marker), 'the file ran whole: its other cases ran too, rather than being reported as skipped');
+
+    // Another case of the file failing is that case's business; a hook or the process failing after
+    // the proof's cases printed ok is not, and fails the proof.
+    const head = `import { test, after } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('unit:demo first case', () => assert.ok(true));\n`;
+    await writeFile(join(project, 'tests', 'other.test.ts'), `${head}test('an ordinary case that fails', () => assert.fail('not the proof'));\n`);
+    assert.deepEqual(await runProof(project, 'unit:demo', ['tests/other.test.ts'], { span: 20 }), { result: 'pass', executed: 1, failed: 0, skipped: 0, files: ['tests/other.test.ts'] });
+    await writeFile(join(project, 'tests', 'hook.test.ts'), `${head}after(() => { throw new Error('cleanup failed'); });\n`);
+    const hooked = await runProof(project, 'unit:demo', ['tests/hook.test.ts'], { span: 20 });
+    assert.equal(hooked.result, 'fail'); assert.equal(hooked.executed, 1); assert.equal(hooked.failed, 0);
+    assert.match(hooked.abnormal ?? '', /failed as hookFailed, not as a test case/);
+    await writeFile(join(project, 'tests', 'late.test.ts'), `${head}setTimeout(() => { process.exitCode = 3; }, 10);\n`);
+    assert.match((await runProof(project, 'unit:demo', ['tests/late.test.ts'], { span: 20 })).abnormal ?? '', /after "tests\/late\.test\.ts" failed as testCodeFailure, not as a test case/);
+
+    const yaml = (title: string, fields: string[], indent = '') => [`${indent}not ok 1 - ${title}`, `${indent}  ---`, ...fields.map(field => `${indent}  ${field}`), `${indent}  ...`].join('\n');
+    assert.equal(abnormalTestExit('ok 1 - unit:demo first case', 0, null), null);
+    assert.equal(abnormalTestExit(yaml('another case', ["type: 'test'", "failureType: 'testCodeFailure'"]), 1, null), null);
+    assert.equal(abnormalTestExit([yaml('inner', ["type: 'test'", "failureType: 'testTimeoutFailure'"], '    '), yaml('suite', ["type: 'suite'", "failureType: 'subtestsFailed'"])].join('\n'), 1, null), null);
+    assert.match(abnormalTestExit(yaml('tests/a.test.ts', ["type: 'test'", "failureType: 'testCodeFailure'", 'exitCode: 1', 'signal: ~']), 1, null)!, /after "tests\/a\.test\.ts" failed/);
+    assert.match(abnormalTestExit(yaml('a case', ["type: 'test'", "failureType: 'hookFailed'"]), 1, null)!, /hookFailed/);
+    assert.match(abnormalTestExit('ok 1 - unit:demo first case', 1, null)!, /reported no failing case/);
+    assert.match(abnormalTestExit('ok 1 - unit:demo first case', null, 'SIGKILL')!, /stopped by SIGKILL/);
+    const runner = await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8');
+    assert.match(runner, /const abnormal = abnormalTestExit\(run\.stdout \?\? '', run\.status, run\.signal\);\n\s*if \(abnormal\) throw/, 'the trusted unit runner fails a run that did not end normally');
 
     const tap = ['ok 1 - unit:demo first case', 'ok 2 - unit:demo-other is another proof # SKIP test name does not match pattern', 'ok 3 - an ordinary case # SKIP', '    not ok 1 - unit:demo nested case', 'ok 4 - unit:demo skipped case # SKIP'].join('\n');
     assert.deepEqual(countProofCases(tap, 'unit:demo'), { executed: 2, failed: 1, skipped: 1 });
