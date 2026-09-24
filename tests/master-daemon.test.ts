@@ -583,6 +583,32 @@ test('record() bounds an over-long action detail instead of failing the cycle', 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('a stable detail over the bound is recorded once, not re-recorded every cycle', async () => {
+  const { directory, token } = await privateDirectory();
+  const credential = join(directory, 'worker.token');
+  await writeFile(credential, workerToken, { mode: 0o600 });
+  try {
+    const master = config(token, { workers: [profile('codex', credential)] });
+    const ready = work({ id: 'ready-long', key: 'GY-179' });
+    const reason = `Worker credential file is unreadable: ${'y'.repeat(actionDetailMax * 2)}`;
+    const broken = effects({ snapshot: async () => ({ work: [ready], now: iso(0) }), credentials: async () => ({ codex: { available: false, reason } }) });
+    const state = emptyDaemonState(master);
+    const key = 'escalation:dispatch:ready-long';
+    const first = await runCycle(master, state, broken, () => clock);
+    const escalation = state.actions[key];
+    assert.ok(escalation, 'the escalation is recorded');
+    assert.ok(escalation.detail.length <= actionDetailMax && escalation.detail.endsWith('…'), 'the stored detail is the bounded form');
+    assert.ok(first.actions.includes(escalation), 'the first cycle performed the escalation');
+    assert.equal(escalation.attempts, 1);
+    for (let cycle = 1; cycle <= 4; cycle++) {
+      const again = await runCycle(master, state, broken, () => clock + cycle * 20_000);
+      assert.equal(again.actions.some(action => action.kind === 'escalation'), false, `cycle ${cycle} does not report the unchanged escalation again`);
+      assert.equal(state.actions[key], escalation, `cycle ${cycle} does not rewrite the stored action`);
+      assert.equal(state.actions[key].attempts, 1, `cycle ${cycle} leaves the attempts count unchanged`);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('a persistently refused merge backs off instead of calling the provider every cycle', async () => {
   const { directory, token } = await privateDirectory();
   try {

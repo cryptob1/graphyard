@@ -829,6 +829,15 @@ export function fitDecisionReason(prefix: string, grounds: string, suffix: strin
 export function boundDetail(detail: string, max = actionDetailMax): string {
   return detail.length <= max ? detail : `${detail.slice(0, max - 1)}…`;
 }
+
+/**
+ * Whether a detail differs from the one an action already stores. record() stores the bounded form,
+ * so a stable detail over the bound compares equal and is not re-recorded every cycle (GY-179).
+ */
+export function detailChanged(previous: { detail: string } | undefined, detail: string): boolean {
+  return previous?.detail !== boundDetail(detail);
+}
+
 /** Paths named in a detail: every one while short, else the first few and a count of the rest. */
 export function namePaths(paths: readonly string[], room = 600): string {
   const named: string[] = [];
@@ -1833,7 +1842,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock);
   for (const breach of budget.breaches) {
     const key = `escalation:scope-budget:${breach.id}`;
-    if (state.actions[key]?.detail === breach.detail) continue;
+    if (!detailChanged(state.actions[key], breach.detail)) continue;
     performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
 
@@ -1880,7 +1889,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       const inventory = await effects.herdr?.();
       const report = await effects.reclaimResources(snapshot.work, inventory ? (inventory.available ? inventory.agents : null) : agents);
       const detail = describeReclaim(report);
-      if (detail) performed.push(await record(state, `reclaim:resources:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done', detail: detail.slice(0, 2000), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      if (detail) performed.push(await record(state, `reclaim:resources:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, `reclaim:resources:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Resource reclaim failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
     }
@@ -1901,7 +1910,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!assessment.settleable) {
       const escalationKey = `escalation:containment:${item.id}:${epoch}`;
       const detail = `${item.key}: containment quarantine from epoch ${epoch} cannot be settled automatically: ${assessment.refusals.join('; ')}`;
-      if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
+      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
       continue;
     }
     if (!effects.settleContainment) continue;
@@ -1958,7 +1967,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
           catch (error) { performed.push(await record(state, `${key}:${item.id}`, { kind: 'capacity', work: item.key, principal: null, state: 'failed', detail: `Could not record the ${capacity.role} capacity escalation on ${item.key}: ${message(error)}`, attempts: (state.actions[`${key}:${item.id}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); }
         }
         const detail = `${describeCapacity(capacity.role, capacity.accounts)}${waiting.length ? `; waiting: ${waiting.map(item => item.key).join(', ')}` : ''}`;
-        if (previous?.detail !== detail) performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(previous, detail)) performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         continue;
       }
       const restored = open.filter(item => standingCapacity(item, capacity.role).length);
@@ -2003,8 +2012,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // A plane that cannot record what a launch produces is not dispatched into (GY-132): the worker
   // could not claim, and its work would be recorded nowhere. One escalation names the cause.
   const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await effects.planeHealth() : null;
-  if (unrecordable && state.actions['escalation:dispatch:plane']?.detail !== `Dispatch held: ${unrecordable}`)
-    performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`.slice(0, 2000), attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
+    performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   const taken = new Set<string>();
   for (const item of workersSpent || unrecordable ? [] : claimable) {
     const key = dispatchKey(item);
@@ -2018,7 +2027,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (!launchable.some(entry => entry.healthy || entry.busy)) {
         const detail = `No worker profile can take ${item.key}: ${launchable.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`;
         const escalationKey = `escalation:dispatch:${item.id}`;
-        if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
       break;
     }
@@ -2091,7 +2100,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
-    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail: detail.slice(0, 2000), attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
   /** Close the approver session a watch names, if Herdr still lists it. False only when it could not be closed. */
   const closeApprover = async (item: Work, watch: ApprovalWatch, why: string) => {
     const session = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
@@ -2187,9 +2196,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // launches again, inside the same bound.
       // A retired watch's approver is judging this decision already; supervision relaunches it if it ends.
       const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding` : await launch(item, watch, true);
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
   };
   /** Look again at a decision already requested: its state on the control plane, and its session. */
@@ -2245,8 +2254,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // has already escalated an open item whose fence this host assessed and could not settle.
       const withheld = withheldDecision(item, config, clock, assessment);
       const escalationKey = `escalation:decision-withheld:${item.id}:${item.containmentQuarantine?.epoch ?? item.epoch}`;
-      const detail = withheld ? `${withheld.reason}. Stop the supervisor on its registered host and settle the fence there (graphyard master settle-containment ${item.key}), or request the decision yourself on an attestation you verified`.slice(0, 2000) : '';
-      if (withheld && !(item.stage !== 'done' && assessment) && state.actions[escalationKey]?.detail !== detail) await note(escalationKey, item, 'escalation', 'done', detail);
+      const detail = withheld ? `${withheld.reason}. Stop the supervisor on its registered host and settle the fence there (graphyard master settle-containment ${item.key}), or request the decision yourself on an attestation you verified` : '';
+      if (withheld && !(item.stage !== 'done' && assessment) && detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
       continue;
     }
     const key = decisionKey(item, decision);
@@ -2258,7 +2267,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
-      if (state.actions[waitKey]?.detail !== wait.slice(0, 2000)) await note(waitKey, item, 'decision', 'done', wait);
+      if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
       continue;
     }
     if (watch) { if (!watch.settledAt) await supervise(item, decision, key, watch); continue; }
@@ -2269,7 +2278,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     if (!effects.decide || !effects.approver) {
       const escalationKey = `escalation:decision:${item.id}:${decision.binding}`;
       const detail = `${item.key} needs a ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action} REASON, then graphyard master approver ${item.key} DECISION`;
-      if (state.actions[escalationKey]?.detail !== detail) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       continue;
     }
     await request(item, decision, key, null);
@@ -2324,7 +2333,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         const detail = provider === 'github' ? `${item.key}: an independent GitHub approval of the current commit is required; the coordinator cannot supply it`
           : item.reviewRequest ? `${item.key}: Graphyard dispatched ${provider} review to profile ${item.reviewRequest.profile ?? provider}; waiting for a verdict on ${item.candidate!.sha.slice(0, 12)}`
             : `${item.key}: waiting for Graphyard to dispatch a ${provider} review for ${item.candidate!.sha.slice(0, 12)}`;
-        if (state.actions[key]?.detail !== detail) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
     }
     const outstanding = missingProofs(item, new Date(clock));
@@ -2386,7 +2395,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
           : watch ? `Automatic merging is disabled; ${item.key} merges as soon as approver session ${watch.agentName ?? '(not launched yet)'} (launch ${watch.launches} of ${maxApproverLaunches}) applies merge decision ${watch.decision}, which this loop requested`
           : effects.decide ? `Automatic merging is disabled; ${item.key} merges once an approver agent applies a merge decision for candidate ${item.candidate!.sha.slice(0, 12)}`
             : `Automatic merging is disabled; ${item.key} awaits explicit operator approval before the guarded merge runs: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION`;
-        if (state.actions[waitKey]?.detail !== detail) performed.push(await record(state, waitKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(state.actions[waitKey], detail)) performed.push(await record(state, waitKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         continue;
       }
     }
@@ -2410,7 +2419,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   try {
     const observation = await effects.observeDeployment(delivered, state.deployment?.containment ?? null);
     state.deployment = deploymentObservationSchema.parse(observation);
-    if (state.actions[deploymentKey]?.detail !== deploymentDetail(state.deployment)) {
+    if (detailChanged(state.actions[deploymentKey], deploymentDetail(state.deployment))) {
       performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: observation.source === 'unavailable' ? 'failed' : 'done', detail: deploymentDetail(state.deployment), attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }
   } catch (error) {
@@ -2768,7 +2777,7 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
     state.actions[`escalation:config:${reload.at}`] = entry; noted.push(entry);
   }
   if (reload.changed.length) {
-    const entry = daemonActionSchema.parse({ kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`.slice(0, 2000), attempts: 1, cycle: state.cycle, at: reload.at });
+    const entry = daemonActionSchema.parse({ kind: 'config', work: null, principal: null, state: 'done', detail: boundDetail(`Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`), attempts: 1, cycle: state.cycle, at: reload.at });
     state.actions[`config:${reload.at}`] = entry; noted.push(entry);
   }
   if (noted.length || previous?.refused !== state.config.refused) await persist(state);
