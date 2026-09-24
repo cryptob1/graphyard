@@ -8,7 +8,7 @@ import { ciReportingEnvironment } from './install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
-import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
+import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
@@ -708,9 +708,10 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   return null;
 }
 
-export const routineDecisionActions = ['rework', 'recover', 'merge'] as const;
+export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
-export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string }
+/** `input` is what the decision names beyond what `decisionInput` derives from the item (a resolve's trigger). */
+export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown> }
 /**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
  * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
@@ -721,6 +722,8 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
   const needed = neededDecision(work, config);
   if (!needed) return null;
   if (needed.action === 'merge') return needed;
+  // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
+  if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
   // The grounds travel with the request: the approver cannot verify this host, so it is told
   // exactly what the requester verified and judges the attestation on that.
@@ -751,7 +754,36 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? blockingThreads(work) : [];
   if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
     binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
+  // A lease-loss the control plane raised is operational: once the lost attempt can no longer act,
+  // settling it is a routine two-party decision, not a wait on a human master session (GY-161,
+  // 2026-09-24: its first worker exited five minutes in, a new attempt took the item, and the
+  // standing escalation would have refused the merge until somebody asked for the resolution).
+  const lost = supersededLeaseLoss(work);
+  if (lost) return { action: 'resolve', input: { trigger: 'lease-loss' }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
+    reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
+  return null;
+}
+/**
+ * The standing control-plane lease-loss the loop may ask to settle, and why. `superseded` when a
+ * newer attempt took the item: a claim needs the old lease ended, and a newer attempt's containment
+ * fence can only be raised once the lost epoch's fence was lowered, so the record alone shows the
+ * lost attempt can no longer act. Otherwise the item is between attempts, and the request also
+ * rests on this host verifying the worker stopped (`workerStopped`, applied in `routineDecision`).
+ * A lead-raised concern, another trigger, or a lost epoch whose fence still stands is never asked.
+ */
+export function supersededLeaseLoss(work: Work): { escalation: ReturnType<typeof standingEscalations>[number]; epoch: number; superseded: boolean; evidence: string } | null {
+  if (work.stage === 'done') return null;
+  for (const escalation of standingEscalations(work)) {
+    const epoch = leaseLossEpoch(escalation);
+    if (escalation.trigger !== 'lease-loss' || escalation.actor !== 'graphyard' || epoch === null) continue;
+    const fence = work.containmentQuarantine;
+    if (fence && fence.epoch <= epoch) continue;
+    const newer = work.epoch > epoch && (work.lease && work.lease.epoch > epoch ? `epoch ${work.lease.epoch} is held by ${work.lease.owner}`
+      : work.submission && work.submission.epoch > epoch ? `epoch ${work.submission.epoch} submitted PR #${work.submission.pr}` : null);
+    if (newer) return { escalation, epoch, superseded: true, evidence: `A newer attempt superseded it: ${newer}, a claim is granted only after the epoch ${epoch} lease has ended, and ${fence ? `the containment fence now standing belongs to epoch ${fence.epoch}, so the epoch ${epoch} fence was lowered` : 'no containment fence stands'}. ` };
+    if (work.epoch === epoch && (!work.lease || work.lease.epoch !== epoch)) return { escalation, epoch, superseded: false, evidence: `No newer attempt holds the item. ` };
+  }
   return null;
 }
 /** The control plane's bound on a decision's reason (`src/model/approval.ts`); a longer one is refused on every retry. */
@@ -836,7 +868,7 @@ export function workerStopped(work: Work, now: number, assessment?: ContainmentA
 /** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
 export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
   const needed = neededDecision(work, config);
-  if (!needed || needed.action === 'merge') return null;
+  if (!needed || needed.action === 'merge' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
   const unverified = workerStopped(work, now, assessment).unverified;
   return unverified ? { action: needed.action, reason: `${work.key} needs a ${needed.action} decision, but it attests that the previous worker is stopped and that is not verified: ${unverified}` } : null;
 }
@@ -1338,7 +1370,7 @@ export interface DaemonEffects {
    * A loop configured without these three keeps cycling: each routine decision is then recorded as
    * an escalation naming the command a master session runs, exactly as before.
    */
-  decide?: (work: Work, action: RoutineDecisionAction, reason: string) => Promise<{ id: string }>;
+  decide?: (work: Work, action: RoutineDecisionAction, reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
   /**
    * Launches the independent approver session for one requested decision, under the name
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
@@ -2105,7 +2137,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused rework decisions that no later refused request cited, and a rework request must cite each by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then request it with graphyard master decide ${item.key} rework --precedent ID[,ID] REASON citing them, or act on the item yourself`);
         return;
       }
-      const requested = standing ?? await effects.decide!(item, decision.action, reason);
+      const requested = standing ?? await effects.decide!(item, decision.action, reason, decision.input);
       // A standing request another watch holds is the same decision under a binding that has since
       // changed (a rework's unresolved-thread set moved while it was requested). That watch is
       // retired here, its sessions and counts carried over, so the cleanup below does not withdraw
@@ -2845,7 +2877,18 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
     return result;
   };
-  const decide: DaemonEffects['decide'] = async (work, action, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, {}), reason });
+  const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
+    const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
+    try { return await post(work); }
+    catch (error) {
+      // A resolve names the item's revision, and a heartbeat between the snapshot and this request
+      // moves it: ask once more at the revision the refusal names. Its approval is pinned by
+      // resolvePin, so later heartbeats do not refuse it.
+      const moved = action === 'resolve' ? /Task revision changed \(now (\d+)\)/.exec(message(error)) : null;
+      if (!moved) throw error;
+      return post({ ...work, revision: Number(moved[1]) });
+    }
+  };
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
   const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
