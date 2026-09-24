@@ -570,7 +570,14 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     for (const entry of tick.waiting) { const reason = bounded(`${entry.kind} for ${entry.work} ${entry.sha.slice(0, 12)}: ${entry.reason}`, cursorTextLimit); if (!reasons.has(reason)) reasons.set(reason, entry); }
     return [...reasons.entries()].slice(0, 20);
   };
-  const persist = async () => { try { await effects.persist(cursor); } catch (error) { throw attributePersistFailure(error, cursor, composed().map(([, entry]) => entry)); } };
+  // One write at a time: a deferred reviewer launches beside the producer pass, and two writes of
+  // the cursor racing each other could land the older state last.
+  let persisting: Promise<unknown> = Promise.resolve();
+  const persist = () => {
+    const write = persisting.then(async () => { try { await effects.persist(cursor); } catch (error) { throw attributePersistFailure(error, cursor, composed().map(([, entry]) => entry)); } });
+    persisting = write.catch(() => { /* the caller that wrote it sees the failure */ });
+    return write;
+  };
   // The failover for a session that exited at launch on its provider's limit notice: the account
   // the launcher selected is held until the reset the notice named, the exhaustion goes on the
   // item's record as a mid-session one would, and the caller launches the profile's next account.
@@ -611,7 +618,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // unanswered read is a failed one.
   const awaited = config.run.awaitReviewers ?? defaultAwaitReviewers.logins, minutes = config.run.awaitReviewersMinutes ?? defaultAwaitReviewers.minutes;
   const waitUntil = (review: DispatchRequest) => Date.parse(review.requestedAt) + minutes * 60_000;
-  const botReads = new Map<string, Promise<string[] | null>>(), pending = new Set<string>();
+  const botReads = new Map<string, Promise<string[] | null>>();
   if (awaited.length && minutes > 0 && effects.headReviewers) {
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), botReadTimeoutMs); timer.unref?.(); });
@@ -619,9 +626,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       const review = item.autoDispatch!.review;
       if (review?.state !== 'requested' || review.provider !== 'github' || !(now() < waitUntil(review))) continue;
       const read = effects.headReviewers(item, review).then(logins => logins.map(login => login.toLowerCase()), () => null);
-      const answer = Promise.race([read, deadline]);
-      pending.add(review.id); void answer.then(() => pending.delete(review.id));
-      botReads.set(review.id, answer);
+      botReads.set(review.id, Promise.race([read, deadline]));
     }
     if (botReads.size) void Promise.allSettled([...botReads.values()]).then(() => clearTimeout(timer)); else clearTimeout(timer);
   }
@@ -637,11 +642,19 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     wait('review', item, review, `review of ${item.key} at ${review.sha.slice(0, 12)} waits up to ${minutes} min (until ${new Date(until).toISOString()}) for ${missing.join(', ')}'s review of the head, so its findings are judged in the same round`);
     return true;
   };
-  // A reviewer whose bot read has not answered yet is decided after every item's producers: the
-  // wait on that read is the reviewer's alone, and no producer request, on this item or a later
-  // one, is held behind it past its 30-second launch bound.
-  const deferred: Work[] = [];
-  const dispatchReview = async (item: Work, review: DispatchRequest, deferPending: boolean) => {
+  // A reviewer with a bot read is decided the moment that read settles, beside the producer pass
+  // rather than in it: the wait on that read is the reviewer's alone, so no producer request, on
+  // its item or a later one, is held behind it, and a read that settles at once launches its
+  // reviewer without waiting behind the producer starts ahead of it in the pass. Reviewer launches
+  // take turns with each other, never with producers, so two of them never both count the same
+  // free reviewer slot.
+  let reviewTurn: Promise<unknown> = Promise.resolve();
+  const inReviewTurn = (item: Work, review: DispatchRequest) => {
+    const turn = reviewTurn.then(() => dispatchReview(item, review));
+    reviewTurn = turn.catch(() => { /* the caller of this turn sees the failure */ });
+    return turn;
+  };
+  const dispatchReview = async (item: Work, review: DispatchRequest) => {
     if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
     else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
@@ -654,7 +667,6 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       const order = profile ? [profile, ...config.reviewers.filter(other => other.name !== profile.name)].filter(candidate => room(candidate, reviews).free > 0) : [];
       if (!profile) wait('review', item, review, reason!);
       else if (!order.length) wait('review', item, review, `every reviewer profile is busy: ${[profile, ...config.reviewers.filter(other => other.name !== profile.name)].map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
-      else if (pending.has(review.id) && deferPending) deferred.push(item);
       else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
       else {
         try {
@@ -670,36 +682,43 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       }
     }
   };
-  for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
-    const review = item.autoDispatch!.review;
-    if (review?.state === 'requested' && review.provider === 'github') await dispatchReview(item, review, true);
-    for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
-      if (!session('producer', item, request, producers)) continue;
-      if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
-      if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
-      if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
-      // Independence is per item, never per process: a profile whose principal held an assignment
-      // on this item is skipped for this item however many slots it has, and the launcher selects
-      // among the rest up to each one's concurrency.
-      const independent = independentProducerProfiles(item, config.producers);
-      const usable = independent.filter(profile => credentials[profile.name]?.available !== false && room(profile, producers).free > 0);
-      if (!usable.length) {
-        wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
-          : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
-          : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
-        continue;
+  // Settled into a value, so a failure is rethrown once the pass ends and never left unhandled; a
+  // pass that fails still waits for these reviewers, so none is left launching into the next tick.
+  const deferred = snapshot.work.filter(work => work.stage !== 'done' && botReads.has(work.autoDispatch?.review?.id ?? ''))
+    .map(item => botReads.get(item.autoDispatch!.review!.id)!.then(() => inReviewTurn(item, item.autoDispatch!.review!)).then(() => null, (error: unknown) => ({ error })));
+  let outcomes: ({ error: unknown } | null)[] = [];
+  try {
+    for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
+      const review = item.autoDispatch!.review;
+      if (review?.state === 'requested' && review.provider === 'github' && !botReads.has(review.id)) await inReviewTurn(item, review);
+      for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
+        if (!session('producer', item, request, producers)) continue;
+        if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
+        if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
+        if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
+        // Independence is per item, never per process: a profile whose principal held an assignment
+        // on this item is skipped for this item however many slots it has, and the launcher selects
+        // among the rest up to each one's concurrency.
+        const independent = independentProducerProfiles(item, config.producers);
+        const usable = independent.filter(profile => credentials[profile.name]?.available !== false && room(profile, producers).free > 0);
+        if (!usable.length) {
+          wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
+            : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
+            : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
+          continue;
+        }
+        try {
+          const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
+          started.push({ name: launchedName(launched.profile, request, launched.result) }); delete cursor.failures[request.id]; delete cursor.capacity.producer;
+          await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
+            .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
+          tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
+        } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
+        await persist();
       }
-      try {
-        const launched = await launchWithFailover(usable, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
-        started.push({ name: launchedName(launched.profile, request, launched.result) }); delete cursor.failures[request.id]; delete cursor.capacity.producer;
-        await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
-          .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
-        tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
-      } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
-      await persist();
     }
-  }
-  for (const item of deferred) await dispatchReview(item, item.autoDispatch!.review!, false);
+  } finally { outcomes = await Promise.all(deferred); }
+  for (const outcome of outcomes) if (outcome) throw outcome.error;
   // A failure for a request the control plane resolved is history the cursor need not keep.
   const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];

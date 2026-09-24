@@ -512,6 +512,13 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   // The latest instruction stands: a later trusted comment takes back an earlier creation request, and a later request renews it.
   assert.match((elsewhere('Please create src/missing.ts for the helper\nOn reflection, do not create src/missing.ts; extend src/merge-queue.ts instead') as { refusal: string }).refusal, /does not ask for it to be created/);
   assert.deepEqual(elsewhere('Do not create src/missing.ts yet\nNow create src/missing.ts for the helper'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
+  // Across findings too, in the order they were written rather than listed: a later thread or the reviewer's later change request takes it back.
+  const create = { ground: 'review thread A', text: 'create src/missing.ts', at: '2026-09-24T10:00:00Z' };
+  const forbid = { ground: 'review 17', text: 'Do not create src/missing.ts; extend src/merge-queue.ts', at: '2026-09-24T11:00:00Z' };
+  assert.match((findingScope(['src/missing.ts'], [create, forbid], exists) as { refusal: string }).refusal, /review 17 does not ask for it to be created/, 'a later finding forbidding the file takes back an earlier request');
+  assert.match((findingScope(['src/missing.ts'], [forbid, create].map(entry => entry === create ? { ...entry, at: '2026-09-24T09:00:00Z' } : entry), exists) as { refusal: string }).refusal, /does not ask for it to be created/, 'listed first but written later still decides');
+  assert.deepEqual(findingScope(['src/missing.ts'], [{ ...create, at: '2026-09-24T12:00:00Z' }, forbid, { ground: 'review thread B', text: 'src/missing.ts is wrong', at: '2026-09-24T13:00:00Z' }], exists),
+    { grounds: [{ path: 'src/missing.ts', ground: 'review thread A' }] }, 'a later request renews it, and a later finding that only names the file changes nothing');
   // Names the file pattern cannot tokenize — extensionless, dot-prefixed — are still the requested file.
   const absent = () => false;
   assert.deepEqual(findingScope(['Dockerfile'], [{ ground: 'review 13', text: 'Create Dockerfile for the runner image' }], absent), { grounds: [{ path: 'Dockerfile', ground: 'review 13' }] });
@@ -526,12 +533,12 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
       ? { pageInfo: { hasNextPage: true, endCursor: 'c2' }, nodes: [{ body: 'noise', author: { login: 'graphyard-reviewer' } }] }
       : { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ body: 'late: fix src/g.ts', author: { login: 'graphyard-reviewer' } }] } } } });
     if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
-      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts', author: { login: 'chatgpt-codex-connector' } }, { body: 'and src/worker.ts', author: { login: 'cryptob1' } }] } },
+      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts', createdAt: '2026-09-24T10:00:00Z', author: { login: 'chatgpt-codex-connector' } }, { body: 'and src/worker.ts', author: { login: 'cryptob1' } }] } },
       { id: 'PRRT_reviewer', isResolved: false, comments: { nodes: [{ body: 'fix src/e.ts', author: { login: 'graphyard-reviewer' } }] } },
       { id: 'PRRT_worker', isResolved: false, comments: { nodes: [{ body: 'please widen src/f.ts', author: { login: 'cryptob1' } }] } },
       { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts', author: { login: 'graphyard-reviewer' } }] } },
       { id: 'PRRT_long', isResolved: false, comments: { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [{ body: 'first', author: { login: 'graphyard-reviewer' } }] } }] } } } } });
-    return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
+    return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts', submitted_at: '2026-09-24T11:00:00Z' },
       { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' }]]);
   };
   // Existence on the base: only a genuine absence is false; a missing base ref or failing git throws, so the loop retries.
@@ -548,7 +555,8 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
   await rm(repo, { recursive: true, force: true });
 
   const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: ['chatgpt-codex-connector[bot]'] }, run);
-  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', 'review thread PRRT_long', 'review 1']);
-  assert.ok(namesPath(read[2].text, 'src/g.ts'), 'a trusted comment past the first page of a long thread is a finding');
+  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', ...Array(3).fill('review thread PRRT_long'), 'review 1'], 'one finding per trusted comment');
+  assert.ok(read.some(entry => entry.ground === 'review thread PRRT_long' && namesPath(entry.text, 'src/g.ts')), 'a trusted comment past the first page of a long thread is a finding');
   assert.equal(read[0].text, 'fix src/a.ts', 'a comment by an untrusted author in a trusted thread is not a finding');
+  assert.deepEqual([read[0].at, read.at(-1)!.at], ['2026-09-24T10:00:00Z', '2026-09-24T11:00:00Z'], 'each finding carries when it was written');
 });

@@ -881,6 +881,28 @@ test('a bot-review read that never settles holds the tick only to its own deadli
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('a deferred reviewer launches as soon as its bot read settles, beside the producer pass rather than behind every producer start', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-race-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], first = requestedWork(), second = requestedWork({ id: 'work-65', key: 'GY-65', candidate: { sha: H2, baseSha: B, pr: 65, branch: 'graphyard/gy-65-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
+    const requested = Date.parse(first.autoDispatch!.review!.requestedAt), started = Date.now(), reviewedAt: number[] = [], producedAt: number[] = [];
+    const base = stubEffects(() => [first, second], log), slow = 300;
+    const effects = stubEffects(() => [first, second], log, {
+      // The bots have already reviewed both heads; the read answers a moment after the pass starts.
+      headReviewers: () => new Promise<string[]>(resolve => setTimeout(() => resolve(['chatgpt-codex-connector[bot]']), 20)),
+      launchProducer: async (...args) => { await new Promise(resolve => setTimeout(resolve, slow)); producedAt.push(Date.now() - started); return base.launchProducer(...args); },
+      launchReview: async (...args) => { reviewedAt.push(Date.now() - started); return base.launchReview(...args); },
+    });
+    const config = masterConfig(token); for (const profile of [...config.reviewers, ...config.producers]) profile.concurrency = 2;
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000);
+    assert.equal(reviewedAt.length, 2, `both reviews launch in the tick: ${JSON.stringify(log)}`);
+    assert.ok(producedAt.length >= 2, `the producers launch: ${JSON.stringify(log)}`);
+    assert.ok(Math.max(...reviewedAt) < slow, `each reviewer launches once its read settles, not behind the producer starts (${slow}ms each): reviews ${JSON.stringify(reviewedAt)}, producers ${JSON.stringify(producedAt)}`);
+    assert.equal(tick.launched.filter(entry => entry.kind === 'review').length, 2, 'the tick records the reviews it launched beside the pass');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('producers launch before any reviewer waits on a bot read: an unanswered read delays no producer on its item or a later one, only the reviewer launches after it', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-order-'));
   try {
