@@ -285,3 +285,32 @@ test('integration:cycle-time-attributed — the cycle reports where its time wen
     assert.match(waitingItems[0].next, /in the deployment step \(80s\)/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('unit:deployment-source-is-a-release — the observation takes the newest successful base-branch release, never the CI reporting environment or another branch', async () => {
+  const fixture = await deliveredHistory(3);
+  try {
+    await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const [old, , release] = fixture.shas;
+    // As GitHub listed them on 2026-09-24: Railway records its release with the commit SHA as ref;
+    // CI proof reporting records deployments on branches and on main; neither is a release.
+    const listed = [
+      { id: 1, sha: 'b'.repeat(40), ref: 'graphyard/gy-9-1', environment: 'graphyard-reporting' },
+      { id: 2, sha: release, ref: release, environment: 'graphyard / production' },
+      { id: 3, sha: old, ref: 'main', environment: 'graphyard-reporting' },
+    ];
+    const run = (command: string, args: string[]) => {
+      if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      if (args[1].includes('/deployments?')) { assert.doesNotMatch(args[1], /ref=/, 'the listing is not filtered by ref'); return JSON.stringify(listed); }
+      if (/\/deployments\/\d+\/statuses/.test(args[1])) return JSON.stringify([{ state: 'success' }]);
+      throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
+    };
+    const observation = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    assert.equal(observation.source, 'github-deployment');
+    assert.equal(observation.sha, release, 'the Railway release, not the reporting record on main');
+    assert.deepEqual(observation.pending, []);
+    // A SHA-ref deployment of a commit that is not on the base branch is not a release.
+    listed[1] = { id: 2, sha: 'c'.repeat(40), ref: 'c'.repeat(40), environment: 'graphyard / production' };
+    const offBranch = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    assert.equal(offBranch.source, 'unavailable', 'nothing on the list is a release of the base branch');
+  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
+});
