@@ -136,7 +136,7 @@ test('a failed thread read at launch is recorded on the session and told to the 
 
 const listedThread = (id: string) => ({ id, author: 'codex', path: 'src/a.ts', line: 3, outdated: false, excerpt: 'finding', createdAt: '2026-09-23T11:00:00Z' });
 
-test('an approval without a Resolved threads line vouches for exactly the threads its prompt listed', async () => {
+test('unit:threads-listed-resolution — an approval without a Resolved threads line vouches for exactly the threads its prompt listed', async () => {
   for (const scenario of [
     { name: 'no line', body: 'All listed findings are fixed at this head.', resolved: ['PRRT_fixed0001'] },
     { name: 'explicit none', body: 'Looks good.\nResolved threads: none', resolved: [] as string[] },
@@ -154,7 +154,7 @@ test('an approval without a Resolved threads line vouches for exactly the thread
   }
 });
 
-test('a settlement that named nothing before listed threads were recorded is judged once more, by launch time', async () => {
+test('unit:threads-listed-resolution — a settlement that named nothing before listed threads were recorded is judged once more, by launch time', async () => {
   const { root, cleanup } = await boundMaster();
   try {
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });

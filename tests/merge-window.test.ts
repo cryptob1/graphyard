@@ -44,7 +44,7 @@ function github(options: { check?: unknown; put?: () => string } = {}) {
   return { calls, run };
 }
 
-test('a GitHub 4xx from the merge call is a refusal that releases the committed execution', async () => {
+test('unit:merge-window-sizing — a GitHub 4xx from the merge call is a refusal that releases the committed execution', async () => {
   assert.match(definiteProviderRefusal(new Error('Command failed: gh api --method PUT x\ngh: Required status check "Graphyard / merge" is failing. (HTTP 405)\n'))!, /^Required status check "Graphyard \/ merge" is failing\. \(HTTP 405\)$/);
   assert.equal(definiteProviderRefusal(new Error('provider response lost')), null);
   assert.equal(definiteProviderRefusal(new Error('gh: Server Error (HTTP 502)')), null, 'a 5xx leaves the outcome unknown');
@@ -54,7 +54,7 @@ test('a GitHub 4xx from the merge call is a refusal that releases the committed 
   assert.equal(cancelled, execution.id);
 });
 
-test('a lagging Graphyard / merge check is refused before commit, and the execution is released', async () => {
+test('unit:merge-window-sizing — a lagging Graphyard / merge check is refused before commit, and the execution is released', async () => {
   const item = work(); const store = broker(() => item); let cancelled = ''; let committed = false;
   const gh = github({ check: { check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'failure', started_at: new Date().toISOString() }] } });
   await assert.rejects(mergeWork(config, item, store.snapshot, store.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, gh.run, execution.owner, async () => { committed = true; return store.commit(); }),
@@ -63,7 +63,7 @@ test('a lagging Graphyard / merge check is refused before commit, and the execut
   assert.equal(gh.calls.some(args => args[1] === '--method'), false);
 });
 
-test('an observation too old for a provider-sized window acquires nothing; with a refresh the attempt re-reads and continues', async () => {
+test('unit:merge-window-sizing — an observation too old for a provider-sized window acquires nothing; with a refresh the attempt re-reads and continues', async () => {
   const stale = work({ observation: observed(120_000 - mergeWindowFloorMs + 5_000) });
   let acquired = false; const store = broker(() => stale);
   await assert.rejects(mergeWork(config, stale, store.snapshot, async () => { acquired = true; return { execution }; }, async () => ({}), verify, github().run, execution.owner, store.commit),
