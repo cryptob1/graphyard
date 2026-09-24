@@ -2032,7 +2032,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         return;
       }
       const requested = standing ?? await effects.decide!(item, decision.action, reason);
-      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: stamp, requests: (carried?.requests ?? 0) + 1, ended: carried?.ended ?? [], observation: observed });
+      // A standing request another watch holds is the same decision under a binding that has since
+      // changed (a rework's unresolved-thread set moved while it was requested). That watch is
+      // retired here, its sessions and counts carried over, so the cleanup below does not withdraw
+      // the decision this watch just adopted and close its approver — on every cycle the set moves.
+      const [retired, prior] = standing ? Object.entries(state.approvals).find(([other, entry]) => other !== key && entry.decision === requested.id && !entry.settledAt) ?? [] : [];
+      if (retired) delete state.approvals[retired];
+      const kept = prior ? { launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt, exhaustedAt: prior.exhaustedAt } : {};
+      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: prior?.requestedAt ?? stamp, ...kept, requests: prior ? prior.requests : (carried?.requests ?? 0) + 1, ended: (prior ?? carried)?.ended ?? [], observation: observed });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it
       // needs. A base conflict has no verdict behind it, so it is not part of that measurement. It
       // is sampled with the request, before the launch: a request whose first launch throws is
@@ -2043,7 +2050,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // The request alone changes nothing; the approver session is what applies it. A launch that
       // fails leaves the watch behind, so the next cycle sees a decision with no session and
       // launches again, inside the same bound.
-      const how = await launch(item, watch, true);
+      // A retired watch's approver is judging this decision already; supervision relaunches it if it ends.
+      const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding` : await launch(item, watch, true);
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
@@ -2142,6 +2150,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // action: left `requested`, it would be adopted for some later round on a reason that describes
     // an older head. One the item still calls for stays, and is adopted when it can be attested.
     let withdrawn = true;
+    // Another current watch holds this decision: the request is not moved past, only re-keyed.
+    if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) { delete state.approvals[key]; continue; }
     if (item && !watch.settledAt && !unattestable.has(key) && effects.withdraw && effects.decisions) {
       try {
         const standing = (await effects.decisions(item)).decisions.find(entry => entry.id === watch.decision);
@@ -2366,20 +2376,21 @@ function deploymentDetail(observation: DeploymentObservation) {
 }
 
 /**
- * How many release candidates (base-branch deployments) the observation reads the status of, how
- * many listing pages of `deploymentPageSize` it reads to find them, and therefore how many GitHub
- * requests one observation may make: the listing pages plus at most one status listing per release
- * candidate. Records that are not releases (the CI reporting environment, other branches) cost no
- * status read and never use up the candidate bound: on 2026-09-24 a single 20-entry page could be
- * filled by reporting records, hiding the release behind them. Nothing below this bound scales with
- * how much has been delivered — containment is derived locally — so the cycle's deployment step
- * costs the same on the first delivery as on the five hundredth. A configured `--deployment-url`
- * costs zero GitHub requests.
+ * How many listing pages of `deploymentPageSize` the observation reads to find the release, and
+ * therefore how many GitHub requests one observation may make: per page, the listing and at most
+ * one batched read of its release candidates' latest statuses. Records that are not releases (the
+ * CI reporting environment, other branches) are never asked about: on 2026-09-24 a single 20-entry
+ * page could be filled by reporting records, hiding the release behind them. The statuses are read
+ * a page at a time rather than one attempt at a time, so failed and pending production attempts
+ * newer than the release production serves cost nothing extra and never stop the read short of it
+ * (a per-attempt read bound left deliveries pending behind 20 failed attempts). Nothing below this
+ * bound scales with how much has been delivered — containment is derived locally — so the cycle's
+ * deployment step costs the same on the first delivery as on the five hundredth. A configured
+ * `--deployment-url` costs zero GitHub requests.
  */
-export const deploymentListingSize = 20;
 export const deploymentPageSize = 100;
 export const deploymentListingPages = 5;
-export const maxDeploymentRequests = deploymentListingPages + deploymentListingSize;
+export const maxDeploymentRequests = deploymentListingPages * 2;
 
 /**
  * Local ancestry over this checkout's own object store, which is what "does the release contain
@@ -2436,6 +2447,35 @@ function localAncestry(root: string, baseBranch: string, run: ChildRun) {
  */
 export const productionEnvironmentRecord = (environment: unknown, production: string) => environment === production;
 
+/** GitHub's node ids are opaque base64-like tokens; anything else is not sent inside a query. */
+const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
+/**
+ * The latest status of each listed deployment, in listing order, in one GraphQL read: the REST API
+ * has only a per-deployment status listing. A deployment whose status could not be read has no
+ * entry (`undefined`); one with no status yet is `pending`.
+ */
+async function deploymentStates(repository: string, deployments: any[], run: ChildRun): Promise<{ states: (string | undefined)[]; failure: string | null }> {
+  const ids = deployments.map(deployment => typeof deployment?.node_id === 'string' && deploymentNodeId.test(deployment.node_id) ? deployment.node_id : null);
+  const readable = ids.filter((id): id is string => id !== null);
+  if (!readable.length) return { states: [], failure: 'GitHub listed it without a node id' };
+  let nodes: any[];
+  try {
+    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } } } }`;
+    const answer = JSON.parse(await run('gh', ['api', 'graphql', '-f', `query=${query}`]));
+    nodes = Array.isArray(answer?.data?.nodes) ? answer.data.nodes : [];
+  } catch (error) { return { states: [], failure: message(error) }; }
+  const byId = new Map(readable.map((id, index) => [id, nodes[index]]));
+  return {
+    failure: null,
+    states: deployments.map((deployment, index) => {
+      const node = ids[index] === null ? undefined : byId.get(ids[index]!);
+      // A node that answers for another deployment is not this one's status.
+      if (!node || (node.databaseId !== undefined && node.databaseId !== deployment.id)) return undefined;
+      return typeof node.latestStatus?.state === 'string' ? node.latestStatus.state.toLowerCase() : 'pending';
+    }),
+  };
+}
+
 export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now(),
   options: { root: string; retained?: ContainmentRetention | null }): Promise<DeploymentObservation> {
   const at = new Date(now()).toISOString();
@@ -2461,11 +2501,11 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
     let production: string;
     try { production = config.run.productionEnvironment ?? productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
-    let listed = 0, candidates = 0, exhausted = false;
+    let listed = 0, exhausted = false;
     // Environments named like production under another identity, reported when no release is found
     // so an unconfigured Railway installation is told the name to configure rather than left pending.
     const namesake = new Set<string>();
-    for (let page = 1; page <= deploymentListingPages && !sha && !exhausted && candidates < deploymentListingSize; page++) {
+    for (let page = 1; page <= deploymentListingPages && !sha && !exhausted; page++) {
       let deployments: any[];
       requests++;
       try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentPageSize}&page=${page}`])); }
@@ -2476,6 +2516,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       if (!Array.isArray(deployments)) deployments = [];
       listed += deployments.length;
       exhausted = deployments.length < deploymentPageSize;
+      const candidates: any[] = [];
       for (const deployment of deployments) {
         // CI proof reporting records deployments too; it is never a release.
         if (deployment?.environment === ciReportingEnvironment) continue;
@@ -2492,24 +2533,24 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
           if (typeof deployment.sha !== 'string' || ref.toLowerCase() !== deployment.sha.toLowerCase()) continue;
           if (await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) !== true) continue;
         }
-        if (candidates >= deploymentListingSize) break;
-        candidates++;
-        let statuses: any[];
-        requests++;
-        // An attempt whose status cannot be read may be the newest success, so no older release is
-        // taken past it: the observation is unavailable, and every delivery stays pending.
-        try { statuses = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
-        catch (error) { return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves: ${message(error)}`); }
-        if (!Array.isArray(statuses)) return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves`);
-        if (statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
+        candidates.push(deployment);
+      }
+      if (!candidates.length) continue;
+      requests++;
+      const states = await deploymentStates(config.repository, candidates, run);
+      // Newest first: the first success is the release. An attempt whose status cannot be read may
+      // be the newest success, so no older release is taken past it: the observation is
+      // unavailable, and every delivery stays pending.
+      for (const [index, deployment] of candidates.entries()) {
+        const state = states.states[index];
+        if (state === undefined) return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves${states.failure ? `: ${states.failure}` : ''}`);
+        if (state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
       }
     }
     if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
-    // Failed and pending production attempts each cost a status read, so a run of them newer than
-    // the release production serves can use up the bound before it is reached. What lies past the
-    // bound is unread — a rollback to an older release included — so no release is asserted, the
-    // last one observed neither: the observation is unavailable and says why.
-    if (!sha && candidates >= deploymentListingSize) return unavailable(`None of the ${candidates} newest ${production} deployment attempt(s) of the managed base branch reports a successful status, and older ones are past the ${deploymentListingSize}-attempt read bound, so the release production serves is not known`);
+    // What lies past the listing bound is unread — a rollback to an older release included — so no
+    // release is asserted, the last one observed neither: the observation is unavailable and says why.
+    if (!sha && !exhausted) return unavailable(`None of the newest ${listed} GitHub deployment(s) is a successful ${production} release of the managed base branch, and older ones are past the ${deploymentListingPages}-page read bound, so the release production serves is not known`);
     if (!sha) return unavailable(`No GitHub deployment of the managed base branch to the ${production} environment reports a successful status${namesake.size
       ? `; deployments to ${[...namesake].map(name => `'${name}'`).join(', ')} are not the '${production}' environment — name the one production serves with graphyard master config productionEnvironment='${[...namesake][0]}' (or GRAPHYARD_PRODUCTION_ENVIRONMENT)`
       : ''}`);
