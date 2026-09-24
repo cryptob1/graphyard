@@ -160,19 +160,22 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     // Producers: one live request per proof group with something left to prove. A head whose
     // trusted evidence already failed is not asked for again; the master routes that finding.
     const outcomes = automatableOutcomes(work, all, now);
+    const decisions = producerGroupDecisions(work, all, now, outcomes);
     const kept: DispatchRequest[] = [];
+    // A retained request answers to its whole group's decision, not only the proofs it named: a
+    // sibling proof that failed since makes the group `failed`, and the planner returns the head.
     for (const request of state.producers) {
       if (!binds(request, work)) { resolve(request, 'cancelled', staleReason(request)); continue; }
+      const decision = decisions.find(entry => entry.group === request.group);
       const mine = outcomes.filter(entry => request.proofs!.includes(entry.proof));
-      const failed = mine.filter(entry => entry.outcome === 'failed'), unproven = mine.filter(entry => entry.outcome === 'unproven');
-      if (failed.length) resolve(request, 'satisfied', `trusted evidence failed for ${failed.map(entry => `${entry.proof} (${entry.producer})`).join(', ')}; the next head is requested afresh`);
-      else if (!unproven.length) resolve(request, 'satisfied', `trusted passing evidence binds every proof: ${mine.map(entry => `${entry.proof} (${entry.producer})`).join(', ')}`);
-      else kept.push(request);
+      if (decision?.state === 'failed') resolve(request, 'satisfied', `trusted evidence failed for ${decision.failed.map(entry => `${entry.proof} (${entry.producer})`).join(', ')}; the next head is requested afresh`);
+      else if (decision?.state === 'request' && mine.some(entry => entry.outcome === 'unproven')) kept.push(request);
+      else resolve(request, 'satisfied', `trusted passing evidence binds every proof: ${mine.map(entry => `${entry.proof} (${entry.producer})`).join(', ')}`);
     }
     state.producers = kept;
     // Opened exactly for the groups the shared decision calls `request` — the same predicate the
     // planner reads before it names a proof dispatch (next-action.ts).
-    for (const decision of producerGroupDecisions(work, all, now, outcomes)) {
+    for (const decision of decisions) {
       if (decision.state !== 'request' || state.producers.some(request => request.group === decision.group)) continue;
       state.producers.push(open({ kind: 'producer', group: decision.group, proofs: decision.unproven, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: decision.reason }));
     }

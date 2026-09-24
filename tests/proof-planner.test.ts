@@ -110,6 +110,25 @@ test('unit:planner-matches-reconciler — a group with something left to prove a
   assert.equal(proofDispatch(draft), null);
 });
 
+test('unit:planner-matches-reconciler — a retained request answers to its whole group: a sibling proof that fails later resolves it, so no producer is launched on a head the planner escalates', () => {
+  // A mechanical failure already refuses the build gate and cancels every request; a manual one
+  // does not, so the manual group is where a retained request could outlive its group's failure.
+  // manual:live-y already passed, so the manual request asks only for manual:live-x.
+  const options = { producerProofs: ['manual:live-x', 'manual:live-y'], approved: true };
+  const held = reconciled(item({ 'unit:a': 'pass', 'manual:live-x': 'none', 'manual:live-y': 'pass' }, options));
+  const request = openProducerRequest(held, 'manual')!;
+  assert.deepEqual(request.proofs, ['manual:live-x']);
+  // A later trusted run fails manual:live-y on the same head: the group is failed as a whole.
+  const failedAgain = grade({ ...held, evidence: [...held.evidence, { ...evidence('manual:live-y', 'fail', 9), at: at(0) }] });
+  assert.deepEqual(producerGroupDecisions(failedAgain, [failedAgain], now).filter(entry => entry.group === 'manual').map(entry => entry.state), ['failed']);
+  const transitions = reconcileAutoDispatch(failedAgain, [failedAgain], now);
+  assert.deepEqual(transitions.map(entry => [entry.event, entry.request.id]), [['dispatch.satisfied', request.id]], 'the retained manual:live-x request is resolved, not kept');
+  assert.match(transitions[0].request.resolution!, /trusted evidence failed for manual:live-y \(ci-runner\); the next head is requested afresh/);
+  assert.equal(openProducerRequest(failedAgain, 'manual'), null);
+  assert.equal(proofDispatch(failedAgain), null);
+  assert.equal(nextAction(failedAgain, [failedAgain], now)?.kind, 'escalate');
+});
+
 /** A deterministic generator, so a failing case reproduces from its seed. */
 function random(seed: number) {
   let state = seed >>> 0;
