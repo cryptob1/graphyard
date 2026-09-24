@@ -71,11 +71,16 @@ export function dispatchOverlap(work: Work, all: Work[], now: number): OverlapAh
  */
 function overlapHolds(work: Work, other: Work): { paths: string[]; theirs: string[] } | null {
   if (other.priority > work.priority) return null;
+  // A hold keeps a fresh item from starting on files another item is changing. An item whose pull
+  // request is already open is past that point: holding its rework round prevents no conflict (both
+  // changes exist either way; the merge queue lands them in order and base refresh re-integrates
+  // the second), it only idles workers. On 2026-09-24 ten workers sat idle while the rework rounds
+  // of GY-168, GY-175 and GY-176 were held behind other open pull requests changing the same files.
+  if (work.candidate) return null;
   const mine = exclusionPaths(work), theirs = exclusionPaths(other);
   const paths = mine.filter(path => theirs.some(entry => pathScopesOverlap(path, entry)));
   if (!paths.length) return null;
   const overlapping = theirs.filter(entry => mine.some(path => pathScopesOverlap(path, entry)));
-  if (work.candidate && !other.candidate && overlapping.every(entry => pathScope(entry).prefix)) return null;
   return { paths, theirs: overlapping };
 }
 
@@ -135,8 +140,8 @@ export interface EffectiveConcurrency { effective: number; items: string[]; node
 export function effectiveConcurrency(all: Work[], now: number): EffectiveConcurrency {
   const nodes = all.filter(work => inFlight(work, now) || dispatchable(work, now));
   // Two items exclude each other only when neither may be dispatched while the other is in flight:
-  // under the scheduler's own exceptions, a higher-priority item or an open candidate over another's
-  // declared directory goes ahead, so the pair can be in flight at once.
+  // under the scheduler's own exceptions a higher-priority item, or any item whose pull request is
+  // already open, goes ahead, so the pair can be in flight at once.
   const adjacent = nodes.map((a, i) => nodes.map((b, j) => i !== j && !!overlapHolds(a, b) && !!overlapHolds(b, a)));
   const edges = adjacent.reduce((total, row) => total + row.filter(Boolean).length, 0) / 2;
   let budget = 100_000, exhausted = false, best: number[] = [];
