@@ -130,8 +130,12 @@ export class ProductionWatch {
     if (this.containment.has(key)) return this.containment.get(key)!;
     if (!this.options.github) return null;
     try {
-      const comparison = await this.options.github.request(`/compare/${mergeSha}...${serving}`);
-      const contained = comparison?.status === 'ahead' || comparison?.status === 'identical';
+      // Ancestry between two commits never changes: the adapter answers it with a one-commit compare,
+      // memoized and persisted across restarts. The full compare this used to fetch held the tick for
+      // minutes after every deploy, one request per delivered item.
+      const github = this.options.github as { contains?: (base: string, head: string) => Promise<boolean>; request: (path: string) => Promise<any> };
+      const contained = github.contains ? await github.contains(mergeSha, serving)
+        : await github.request(`/compare/${mergeSha}...${serving}`).then(comparison => comparison?.status === 'ahead' || comparison?.status === 'identical');
       if (this.containment.size > 500) this.containment.delete(this.containment.keys().next().value!);
       this.containment.set(key, contained);
       return contained;
