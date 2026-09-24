@@ -40,7 +40,7 @@ export interface Evidence {
    * CI producer principal writes this lane; see docs/protocol/evidence.md.
    */
   ciRun?: CiRun;
-  /** What a validation result was attributed to: the exact manifest, compatibility signature and independently observed target; see docs/attribution.md. */
+  /** What a validation result was attributed to: the exact manifest, compatibility signature and independently observed target; see docs/delivery.md, "Attribution". */
   attribution?: EvidenceAttribution;
   /**
    * D6: this entry was derived from an executed attempt's pass by a recorded reuse decision

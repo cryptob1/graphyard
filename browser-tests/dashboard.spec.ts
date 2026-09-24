@@ -39,82 +39,14 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.goto('/docs/how-graphyard-works');
     await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
     const flow = page.locator('.how-guide > ol').first();
-    await expect(flow.locator(':scope > li')).toHaveCount(10);
+    await expect(flow.locator(':scope > li')).toHaveCount(6);
     const cards = await flow.locator(':scope > li').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().top));
     expect(cards).toEqual([...cards].sort((a, b) => a - b));
     expect(new Set(cards).size).toBe(cards.length);
-    await expect(flow.getByText('Setup', { exact: true })).toBeVisible();
+    await expect(flow.getByText('Ready', { exact: true })).toBeVisible();
     await expect(flow.getByText('Done', { exact: true })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Two phases, one clear handoff' })).toBeVisible();
-    const phases = page.getByRole('heading', { name: 'Two phases, one clear handoff' }).locator('xpath=following-sibling::ol[1]/li');
-    await expect(phases).toHaveCount(2);
-    await expect(phases.nth(0)).toContainText('Human operator → one implementation agent');
-    await expect(phases.nth(0)).toContainText('the human operator connects the managed (target) repository and activates its gates');
-    await expect(phases.nth(0)).toContainText('directly supervising a single, worker-scoped implementation agent');
-    await expect(phases.nth(0)).toContainText('never receives the operator or GitHub credentials used for setup');
-    await expect(phases.nth(1)).toContainText('Human → goals, required decisions, oversight');
-    await expect(phases.nth(1)).toContainText('after the managed repository is connected, its gates are active');
-    await expect(phases.nth(1)).toContainText('GY-30 scoped operator automation is configured');
-    await expect(phases.nth(1)).toContainText('supplies goals, required decisions, and oversight');
-    await expect(phases.nth(1)).toContainText('not expected to perform the routine Operator, Master, Worker, or Reviewer/proof-producer duties');
-    await expect(phases.nth(1)).toContainText('shipped and available as an opt-in, least-privilege credential');
-    await expect(phases.nth(1)).toContainText('a configuration step, not future work');
-    await expect(phases.nth(1)).toContainText('this installation provisions the scoped operator-agent principal');
-    await expect(phases.nth(1)).toContainText('the unrestricted human administrator still makes requirements and policy changes');
-    const phaseBoxes = await phases.evaluateAll(elements => elements.map(element => {
-      const box = element.getBoundingClientRect();
-      return { left: box.left, top: box.top, width: box.width };
-    }));
-    if (viewport.name === 'desktop') {
-      expect(Math.abs(phaseBoxes[0].top - phaseBoxes[1].top)).toBeLessThan(2);
-      expect(phaseBoxes[1].left).toBeGreaterThan(phaseBoxes[0].left + phaseBoxes[0].width);
-    } else {
-      expect(phaseBoxes[1].top).toBeGreaterThan(phaseBoxes[0].top);
-    }
-    await expect(page.getByRole('heading', { name: 'Four AI agent sessions' })).toBeVisible();
-    const duties = ['Operator agent', 'Master agent', 'Worker agent', 'Reviewer/proof-producer agent'];
-    for (const duty of duties) await expect(page.getByRole('cell', { name: duty, exact: true })).toBeVisible();
-    const dutiesTable = page.getByRole('heading', { name: 'Four AI agent sessions' }).locator('xpath=following-sibling::table[1]');
-    if (viewport.name === 'mobile') {
-      const geometry = await dutiesTable.evaluate(table => {
-        const cells = Array.from(table.querySelectorAll('tbody td:first-child'));
-        const box = table.getBoundingClientRect();
-        return {
-          clientWidth: table.clientWidth,
-          scrollWidth: table.scrollWidth,
-          right: box.right,
-          viewportWidth: document.documentElement.clientWidth,
-          labels: cells.map(cell => ({
-            width: cell.getBoundingClientRect().width,
-            whiteSpace: getComputedStyle(cell).whiteSpace,
-          })),
-        };
-      });
-      expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
-      expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
-      expect(geometry.labels).toHaveLength(4);
-      for (const label of geometry.labels) {
-        expect(label.width).toBeGreaterThanOrEqual(190);
-        expect(label.whiteSpace).toBe('nowrap');
-      }
-    }
-    const operatorRow = page.getByRole('row', { name: /Operator agent/ });
-    await expect(operatorRow).toContainText('human-approved bounded intent');
-    await expect(operatorRow).toContainText('may add requirements but never remove or rewrite them');
-    await expect(operatorRow).toContainText('Exceptions and approval decisions stay with the human operator');
-    await expect(operatorRow).toContainText('least-privilege, never unrestricted admin authority');
-    await expect(operatorRow).toContainText('GY-30 credential behind this duty is shipped and opt-in');
-    await expect(operatorRow).toContainText('an administrator provisions it per installation');
-    await expect(operatorRow).toContainText('the unrestricted human administrator holds this authority');
-    const separation = page.locator('p', { hasText: 'These are distinct AI sessions' });
-    await expect(separation).toContainText('authenticated principal identities, scoped credentials, and authority checks');
-    await expect(separation).toContainText('must keep the sessions independent');
-    await expect(separation).toContainText('Graphyard does not verify runtime isolation');
-    await expect(separation).toContainText('Worker, Master/coordinator, and Reviewer/proof-producer map to enforced credentials today');
-    await expect(separation).toContainText('shipped credential type that each installation provisions before that session becomes active');
-    await expect(page.getByText('Workers stay untrusted.', { exact: true })).toBeVisible();
-    await expect(page.getByText('Graphyard: delivery authority')).toBeVisible();
-    await expect(page.getByText('Herdr: runtime supervision')).toBeVisible();
+    for (const heading of ['One trip from setup to Done', 'Who holds which authority', 'Correctness rules']) await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible();
+    await expect(page.getByText('Gates are deterministic checks of one candidate', { exact: false })).toBeVisible();
     const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth }));
     expect(bounds.content).toBeLessThanOrEqual(bounds.width);
   });
@@ -149,9 +81,9 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
 
     await page.goto('/docs/how-graphyard-works');
     await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
-    await diagramsLoad(2);
-    await expect(page.getByText('Text equivalent of the diagram above. Phase 1, bootstrap:', { exact: false })).toBeVisible();
-    await expect(page.getByRole('link', { name: "glossary's diagram legend" }).first()).toHaveAttribute('href', '/docs/glossary#diagram-legend');
+    await diagramsLoad(3);
+    await expect(page.getByText('Text equivalent: in bootstrap the human operator supervises one worker', { exact: false })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'legend', exact: true }).first()).toHaveAttribute('href', '/docs/glossary#diagram-legend');
     await fits();
 
     await page.goto('/docs/glossary');
@@ -163,14 +95,10 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(page.getByRole('cell', { name: 'Amber rounded box' })).toBeVisible();
     await fits();
 
-    await page.goto('/docs/architecture');
-    await diagramsLoad(1);
-    await fits();
-
     await page.goto('/docs/operations');
     await expect(page.getByRole('heading', { name: 'Operations and recovery', level: 1 })).toBeVisible();
     for (const heading of ['Daily checklist', 'Incident decision tree', 'Recovery recipes', 'Safety facts that never change', 'Deeper references']) await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'lost worker' })).toHaveAttribute('href', '#lost-worker-before-submission');
+    await expect(page.getByRole('link', { name: 'lost worker' })).toHaveAttribute('href', '/docs/operations-reference#lost-worker-before-submission');
     await expect(page.getByRole('main').getByRole('link', { name: 'Operations reference', exact: true })).toHaveAttribute('href', '/docs/operations-reference');
     await expect(page.locator('img.docs-diagram')).toHaveCount(0);
     await fits();

@@ -1,80 +1,30 @@
-<!-- page: Build integrations | 3 | candidates, dispatch, attempts, and trusted results. -->
-# Validation candidates and runner protocol
+<!-- page: Build integrations | 2 | E2E test cases and the runner protocol. -->
+# Validation: E2E test cases and the runner protocol
 
-The operator pins a candidate, an approved test bundle and separate runner and collector identities; only the pinned collector publishes a result. The packaged path is in [runner setup](runner-setup.md).
+An `e2e:` proof passes only from a pinned candidate and bundle, published by a separately trusted collector ([runner setup](runner-setup.md)).
 
-## Identities and trust
+## Test cases
 
-| Identity | Credential | Authority |
-| --- | --- | --- |
-| Human operator | `admin` | Define environments and bundles, register, select candidates, request/cancel/recover |
-| Runner | `worker` + runner registration | Dispatch, ACK, heartbeat its attempt |
-| Build producer | `producer` + builder registration | Attest source → artifacts |
-| Collector | `producer` + collector registration | Verify and publish the result |
+Define a test case in **Settings → Test cases** or with `graphyard scenario scenario.json` (`admin`): `id`, `title`, `purpose`, `setup`, `steps`, `expected`, `environment`, `runner`, `testPath`. Revisions are immutable. A criterion naming `e2e:ID` pins the latest revision at creation; adopting a newer one needs a follow-up item.
 
-Registrations name principal IDs and have immutable revisions; a collector that attested the candidate's build is refused. Rotate by disabling, replacing the credential, then enabling a new revision.
+## Identities
 
-## Commands
+- Human operator (`admin`): defines environments and bundles, registers identities, selects candidates, requests, cancels and recovers.
+- Runner (`worker` + runner registration): polls `dispatch`, acknowledges and heartbeats its attempt.
+- Builder and collector (`producer` + registration): attest source → artifacts, and verify and publish the result. A collector that attested the build is refused.
 
-```bash
-graphyard validation [requests CURSOR]
-graphyard validation definitions
-graphyard validation show-candidate CANDIDATE_UUID
-graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json
-```
-
-API: `GET /api/validation`, `/definitions`, `/candidate/UUID`; `POST /api/validation/ACTION` with an `Idempotency-Key`.
+`graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`.
 
 ## Configure a candidate
 
-Define an [E2E scenario](test-cases.md), create work requiring `e2e:SCENARIO_ID`, then define the environment (`delivery` sets its [release policy](delivery.md#environment-policy)):
+Define the environment, the runner registration (a local `unix://` Docker socket, the attestor's key, an isolated `executionNetwork`, `testAccountDigest`), and a `kind: bundle` pinning `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest` and `reportFormat`. The builder attests `sourceSha`, `baseSha`, `buildInputsDigest`, `artifacts` and `provenanceUrl`; the operator then creates the candidate with `proof`, `environment`, `bundle`, `buildAttestationId` and `requiredArtifacts`.
 
-```json
-{
-  "kind": "environment",
-  "id": "preview",
-  "expectedRevision": 0,
-  "repository": "owner/repository",
-  "url": "https://preview.example.test",
-  "instance": "immutable-deployment-123",
-  "immutable": true,
-  "services": ["api"],
-  "resources": ["booking-test-account"]
-}
-```
+## Requests and results
 
-`immutable: false` (shared staging) is granted only against an observed match ([attribution](attribution.md)). A runner registration:
+A request names the candidate, runner, collector, `deadline` and `maxAttempts`, and binds the observed target; a target running another manifest supersedes it. The runner must `ack` before executing (30-second window) and heartbeat every 20 seconds; the collector's `collection-authority` call ends the runner's authority.
 
-```json
-{
-  "kind": "registration",
-  "id": "preview-runner",
-  "expectedRevision": 0,
-  "principalId": "runner-1",
-  "role": "runner",
-  "environment": {"id": "preview", "revision": 1},
-  "adapterVersion": "custom-v1",
-  "executionHost": "unix:///var/run/docker.sock",
-  "attestationPublicKey": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n",
-  "executionNetwork": "gy-preview-isolated",
-  "testAccountDigest": "sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e",
-  "proofs": [],
-  "enabled": true
-}
-```
+Only a measured, whole-run `matched` target with verified artifacts and settled execution passes. `cancel`, `settle` (with evidence the process stopped) and `retry` recover a request; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stuck ones.
 
-`executionHost` must be a local `unix://` socket; `executionNetwork` cannot be a built-in network; `testAccountDigest` comes from `graphyard runner account-digest FILE`. Collectors use `role: collector`, builders `role: builder`; `observer`, `promoter` and `rollback` are for [delivery](delivery.md) and [recovery](recovery.md#rollback).
+## Report formats
 
-A `kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest` and optional `reportFormat` ([report adapters](report-adapters.md)). The builder attests `sourceSha`, `baseSha`, `buildInputsDigest`, `artifacts` and `provenanceUrl`; the operator then creates the candidate with `proof`, `environment`, `bundle`, `buildAttestationId` and `requiredArtifacts`.
-
-## Requests and attempts
-
-A request names the candidate, runner and collector, a `deadline` within the hour and `maxAttempts` 1–5, and binds the observed target; a moved target [re-anchors](attribution.md#re-anchoring) it. The runner polls `dispatch`, must `ack` `{requestId, attemptId, epoch}` **before executing** (30-second window) and heartbeats every 20 seconds. The collector's `collection-authority` call revokes the runner. `graphyard validation capacity` diagnoses stuck requests ([recovery](recovery.md#runner-capacity-and-request-diagnostics)).
-
-## Trusted results
-
-`result` carries the attempt identity, `execution`, `behavior`, `executed`, `skipped`, `inventoryComplete`, `target` (`measurement`, `coversEntireRun`, `attribution`), executed digests, verified `artifacts`, `artifactState` and `executionSettled`. Only measured, whole-run `matched` targets with `verified` artifacts and settled execution pass. `accepted: true` means the report is current, **not** that tests passed.
-
-## Recovery
-
-`cancel`, `settle` (with `settlementEvidence` proving the process stopped) and `retry` take `{requestId, epoch, reason}`. Replay and reuse: [evidence reuse](evidence-reuse.md).
+`reportFormat` is pinned in the bundle: `graphyard-playwright-v1` (default; every offline-enumerated test ran exactly once and passed) or `junit-xml-v1` (every inventory identity, `sha256(suitePath ␟ classname ␟ name)`, appears once as passed and the counts agree). Skips, retries, timeouts and count mismatches never pass. `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews a verdict without producing evidence;
