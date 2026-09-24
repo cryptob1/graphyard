@@ -223,13 +223,33 @@ export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState
 }
 
 /**
- * What the worker is told in its session once the approver has judged its request: carry on, or
- * the approver's reason and that the attempt stays inside plannedFiles — withdrawing the ask, which
+ * What the worker reads in its own session once its request is judged (GY-176) — from its own
+ * `scope-request --wait` or `status`, never a message pasted into the session: carry on, or the
+ * approver's reason and that the attempt stays inside plannedFiles, withdrawing the ask, which
  * lifts the refusal holding the item, rather than waiting on a master that will not come.
  */
 export function scopeOutcomeMessage(key: string, epoch: number, outcome: { state: 'approved' | 'refused'; paths: readonly string[]; approver: string | null; reason: string | null }, cli = 'graphyard') {
-  const paths = outcome.paths.join(', '), approver = `the independent approver${outcome.approver ? ` ${outcome.approver}` : ''}`;
+  const paths = outcome.paths.join(', ');
   return outcome.state === 'approved'
-    ? `Graphyard: your scope request on ${key} (epoch ${epoch}) was approved by ${approver}${outcome.reason ? `: ${outcome.reason}` : ''}. plannedFiles now include ${paths} and you keep your lease: continue the work.`
-    : `Graphyard: your scope request on ${key} (epoch ${epoch}) for ${paths} was refused by ${approver}: ${outcome.reason ?? 'no reason recorded'}. Stay inside plannedFiles: withdraw the request with ${cli} scope-request ${key} ${epoch} - and finish the work without those files, or record a blocker if the criteria cannot be met without them.`;
+    ? `Graphyard: your scope request on ${key} (epoch ${epoch}) was approved${outcome.approver ? ` by ${outcome.approver}` : ''}${outcome.reason ? `: ${outcome.reason}` : ''}. plannedFiles now include ${paths} and you keep your lease: continue the work.`
+    : `Graphyard: your scope request on ${key} (epoch ${epoch}) for ${paths} was refused by the independent approver${outcome.approver ? ` ${outcome.approver}` : ''}: ${outcome.reason ?? 'no reason recorded'}. Stay inside plannedFiles: withdraw the request with ${cli} scope-request ${key} ${epoch} - and finish the work without those files, or record a blocker if the criteria cannot be met without them.`;
+}
+
+export type ScopeRequestOutcome = { state: 'pending' | 'ended'; text: string } | { state: 'approved' | 'refused'; text: string };
+/**
+ * The outcome of one ask (its epoch and the instant it was recorded), read from the item as the
+ * control plane holds it now. A refusal by the widening rule (`decidedBy` graphyard) is not the
+ * answer: the loop puts it to the independent approver, so it is still pending. An approval by
+ * any path — the rule, a finding, the approver or a master — shows as the paths now planned.
+ */
+export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly string[]; lease?: { epoch: number } | null; scopeRequest?: ScopeRequestState | null; scopeDecision?: ScopeDecision | null },
+  ask: { epoch: number; at: string; paths: readonly string[] }, cli = 'graphyard'): ScopeRequestOutcome {
+  const own = item.scopeRequest?.epoch === ask.epoch && item.scopeRequest.at === ask.at ? item.scopeRequest : null;
+  const decided = item.scopeDecision?.requestedAt === ask.at ? item.scopeDecision : null;
+  const covered = ask.paths.every(path => (item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+  if (!own && covered) return { state: 'approved', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'approved', paths: ask.paths, approver: decided?.state === 'approved' && decided.decidedBy !== 'graphyard' ? decided.decidedBy : null, reason: decided?.state === 'approved' ? decided.reason : null }, cli) };
+  const refusal = own?.decision ?? decided;
+  if (refusal?.state === 'refused' && refusal.decidedBy !== 'graphyard') return { state: 'refused', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'refused', paths: ask.paths, approver: refusal.decidedBy, reason: refusal.reason }, cli) };
+  if (!own || item.lease?.epoch !== ask.epoch) return { state: 'ended', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) is no longer open — withdrawn, re-asked or outlived by its lease — and nothing widened plannedFiles for it` };
+  return { state: 'pending', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) for ${ask.paths.join(', ')} is ${own.decision ? 'with the independent approver: the widening rule could not ground it' : 'waiting for the widening rule'}; you keep your lease` };
 }

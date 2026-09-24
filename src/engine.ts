@@ -43,7 +43,7 @@ const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
-    answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable() }).strict().optional() }).strict(),
+    answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional() }).strict().optional() }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
@@ -515,8 +515,9 @@ export class Engine {
           demand(widening, 'Only an additive planned-files widening answers a scope request');
           demand(work.scopeRequest?.epoch === data.answers.epoch && work.scopeRequest?.at === data.answers.at, 'The scope request this widening answers is no longer open');
           demand(leaseLive && work.lease!.epoch === data.answers.epoch, `Epoch ${data.answers.epoch}, which asked for this scope, no longer holds the lease`);
-          // Its grounds are findings read against one head; a push since then makes them another head's.
-          demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
+          // Grounds read against one head (review findings) are another head's after a push; an
+          // approver's judgement of the worker's reason and the criteria (GY-176) names no head.
+          if (data.answers.sha !== undefined) demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
         }
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         if (actor.role === 'operator-agent') {
@@ -557,6 +558,10 @@ export class Engine {
         // A request the widened scope fully covers is answered; a partial one stays open for the
         // master. Answering it also lifts the refusal that was blocking the item on scope.
         if (work.scopeRequest && work.scopeRequest.paths.every(path => data.plannedFiles.some((scope: string) => pathScopeContains(scope, path)))) {
+          // A widening that answers the request is its decision, kept where the asking worker's own
+          // `status` and `scope-request --wait` read it (GY-176): approved, and by whom and why.
+          if (data.answers) work.scopeDecision = { state: 'approved', reason: data.reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(work.scopeRequest.at)),
+            paths: work.scopeRequest.paths, requestedBy: work.scopeRequest.requestedBy, requestedAt: work.scopeRequest.at };
           work.scopeRequest = null;
           if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
         }

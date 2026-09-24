@@ -12,13 +12,16 @@ import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import { routedScopeRequests } from '../src/cli/status-attention.js';
 import { answeringWidening, daemonSummary, emptyDaemonState, runCycle, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { scopeOutcomeMessage } from '../src/model/scope.js';
+import { scopeOutcomeMessage, scopeRequestOutcome } from '../src/model/scope.js';
+import { awaitScopeOutcome } from '../src/cli/session-commands.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-176: an additive scope request the implication rule refuses and no review finding grounds
 // used to wait for a master to run `master scope`. The loop now requests a `requirements`
 // decision as the master's operator-agent identity and launches the independent approver, as it
-// does for rework, recovery, resolution and merge; the worker is told the outcome in its session.
+// does for rework, recovery, resolution and merge. The decision is bound to the asking attempt's
+// request and lease, and its outcome is held on the item, where the worker's own command reads it:
+// nothing is pasted into the worker's session.
 // Each test is named for the proof it produces.
 const repository = 'owner/scope-approver';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -60,11 +63,11 @@ const loopConfig = () => masterConfigSchema.parse({ version: 1, url, credentialF
 
 /**
  * The loop with the decision effects wired as `daemonEffects` wires them: requests and withdrawals
- * as the master's operator-agent identity, the approver launch recorded rather than spawned, and
- * every message the worker session is sent kept for the test to read.
+ * as the master's operator-agent identity, and the approver launch recorded rather than spawned.
+ * There is no effect that reaches the worker's session: the loop has no way to paste into it.
  */
 function harness() {
-  const sessions: HerdrAgent[] = [], told: { key: string; agentName: string; text: string }[] = [], launched: string[] = [], closed: string[] = [], decided: { key: string; action: string; reason: string; input: any }[] = [];
+  const sessions: HerdrAgent[] = [], launched: string[] = [], closed: string[] = [], decided: { key: string; action: string; reason: string; input: any }[] = [];
   const effects: DaemonEffects = {
     agents: () => sessions,
     herdr: () => ({ agents: sessions, available: true }),
@@ -90,13 +93,12 @@ function harness() {
     },
     decisions: work => ok(master.token, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => ok(master.token, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
-    tellWorker: async (work, agentName, text) => { told.push({ key: work.key, agentName, text }); },
     persist: async () => {},
   };
   const cycle = (state: DaemonState) => runCycle(loopConfig(), state, effects);
   // The store is shared by every test, so each reads what the loop did about its own item.
-  const about = (work: Work) => ({ told: told.filter(entry => entry.key === work.key), decided: decided.filter(entry => entry.key === work.key) });
-  return { effects, cycle, sessions, told, launched, closed, decided, about };
+  const about = (work: Work) => ({ decided: decided.filter(entry => entry.key === work.key) });
+  return { effects, cycle, sessions, launched, closed, decided, about };
 }
 const standing = async (work: Work) => (await ok(master.token, 'GET', `work/${work.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements');
 
@@ -125,13 +127,14 @@ test('unit:scope-approver-routine — an additive request the rules refuse is re
   assert.equal(work.scopeRequest!.decision!.state, 'refused', 'the implication rule refused it');
   assert.equal(loop.about(work).decided.length, 1, 'the loop requested one decision');
   assert.equal(loop.about(work).decided[0].action, 'requirements');
-  assert.deepEqual(loop.about(work).decided[0].input, { plannedFiles: [layout, helper] }, 'an additive widening by exactly the requested paths');
+  assert.deepEqual(loop.about(work).decided[0].input, { plannedFiles: [layout, helper], answers: { epoch: asked.epoch, at: asked.scopeRequest!.at } }, 'an additive widening by exactly the requested paths, bound to the ask');
   assert.match(loop.about(work).decided[0].reason, new RegExp(reason), "the request cites the worker's reason");
   assert.match(loop.about(work).decided[0].reason, /AC-1: The widget layout renders/, "the request cites the item's criteria");
   assert.match(loop.about(work).decided[0].reason, /src\/widget\/measure\.ts/, 'the request names the paths');
   const [requested] = await standing(work);
   assert.equal(requested.state, 'requested');
   assert.equal(requested.requestedBy, master.id, "requested as the master's operator-agent identity");
+  assert.deepEqual(requested.input.answers, { epoch: asked.epoch, at: asked.scopeRequest!.at }, 'the enforceable input names the request and its lease epoch');
   assert.deepEqual(loop.launched, [requested.id], 'the independent approver was launched for it');
   assert.equal(Object.values(state.actions).filter(action => action.kind === 'escalation' && /master scope/.test(action.detail)).length, 0, 'nothing sends a master to run master scope');
   assert.ok(work.lease && work.lease.epoch === asked.epoch, 'the worker holds its lease while the approver judges');
@@ -154,9 +157,10 @@ test('unit:scope-approver-routine — an additive request the rules refuse is re
   const revision = (await events(work)).filter(entry => entry.kind === 'requirements').at(-1)!;
   assert.equal(revision.payload.details.liveScopeWidening ?? revision.payload.liveScopeWidening ?? true, true);
 
-  // Cycle 3: the item no longer needs the decision; the approver session goes and the worker is told.
+  assert.equal(work.scopeDecision!.state, 'approved', 'the outcome is held on the item');
+  // Cycle 3: the item no longer needs the decision; the approver session goes and the outcome is noted.
   await loop.cycle(state);
-  assert.equal(loop.about(work).told.length, 1);
+  assert.equal(Object.values(state.actions).filter(action => action.kind === 'scope' && action.work === work.key && /^Approved/.test(action.detail)).length, 1);
   assert.equal(Object.keys(state.approvals).length, 0, 'the watch is retired once applied');
   assert.deepEqual(loop.closed, ['pane-1'], 'the approver session is closed');
 });
@@ -176,7 +180,28 @@ test('unit:scope-approver-routine — a refused decision is recorded, never re-r
   assert.equal(loop.about(work).decided.length, 1, 'a refused decision is not requested again');
   assert.equal(loop.launched.length, 1, 'and no other approver is launched');
   assert.equal(Object.values(state.actions).filter(action => action.kind === 'escalation' && /master scope/.test(action.detail)).length, 0);
-  assert.equal(loop.about(work).told.length, 1, 'the worker is told once');
+  assert.equal(work.scopeDecision!.decidedBy, approver.id, 'the refusal is held on the item, by the approver');
+  assert.match(work.blocker!, /^Scope request refused by the independent approver independent-approver/);
+});
+
+test('unit:scope-approver-routine — an approval is refused once the asking attempt no longer holds the lease, with the policy revision unchanged', async () => {
+  let work = await claimed('stale approval');
+  const asked = await ask(work, [helper], 'The layout measures through the helper');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [requested] = await standing(work);
+  // The asking attempt ends and a new one claims the item while the approver is still deciding.
+  await engine.execute(implementer, 'release', work.id, { epoch: asked.epoch }, randomUUID());
+  const released = await reload(work.id);
+  await ok(master.token, 'POST', `work/${work.id}/unblock`, { expectedRevision: released.revision, reason: 'The refusal belonged to the attempt that ended' });
+  work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  assert.equal(work.policyRevision, asked.policyRevision, 'nothing moved the policy revision');
+  const late = await call(approver.token, 'POST', `work/${work.id}/approve`, { decision: requested.id, reason: 'The helper is AC-1 spelled out' });
+  assert.equal(late.body.state, 'failed', JSON.stringify(late.body));
+  assert.match(JSON.stringify(late.body), /no longer open|no longer holds the lease/);
+  work = await reload(work.id);
+  assert.deepEqual(work.plannedFiles, [layout], 'the new attempt, which never asked, is not widened');
+  assert.equal(work.lease!.epoch, asked.epoch + 1);
 });
 
 test('unit:scope-approver-routine — a root-level directory scope is requested as the broad-scope exception, granted only with a stated reason', async () => {
@@ -213,31 +238,38 @@ test('unit:scope-approver-routine — only a live, additive, rule-refused reques
   assert.equal(scopeRoutineDecision({ ...base, lease: { ...lease, expiresAt: '2031-03-01T09:00:00Z' } } as Work, now, true), null);
 });
 
-test('unit:scope-outcome-delivered — the worker is told the outcome in its session, and master status stops naming master scope for a routed request', async () => {
+test('unit:scope-outcome-delivered — the worker reads the outcome in its session from its own command, and master status stops naming master scope for a routed request', async () => {
+  // The worker's own command, run with the worker's own credential: durable control-plane state.
+  const own = (work: Work, waitMs = 0) => awaitScopeOutcome({ api: path => ok(token(implementer), 'GET', path) }, work, work.epoch, { waitMs, everyMs: 20, cli: 'graphyard' });
   // Approved: continue.
   let work = await claimed('outcome approved');
-  await ask(work, [helper], 'The layout measures through the helper');
+  const asked = await ask(work, [helper], 'The layout measures through the helper');
   const approved = harness(), approvedState = emptyDaemonState(loopConfig());
   await approved.cycle(approvedState);
+  const pending = await own(await reload(work.id));
+  assert.equal(pending.state, 'pending', 'a rule refusal the loop routed is not the answer');
+  assert.match(pending.text, /with the independent approver/);
 
   // While the approver judges it, status names no `master scope` for it; without the routing it would.
   const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot') as { work: Work[]; now: string };
-  const own = { work: snapshot.work.filter(item => item.id === work.id), now: snapshot.now };
-  assert.match(scopeRequestAttention(own).map(item => item.next).join('\n'), new RegExp(`graphyard master scope ${work.key}`), 'an unrouted refusal still names master scope');
+  const mine = { work: snapshot.work.filter(item => item.id === work.id), now: snapshot.now };
+  assert.match(scopeRequestAttention(mine).map(item => item.next).join('\n'), new RegExp(`graphyard master scope ${work.key}`), 'an unrouted refusal still names master scope');
   const approvals = daemonSummary(approvedState, Date.now(), 30_000).approvals;
-  assert.ok(routedScopeRequests(approvals)(own.work[0]), 'the loop has routed this request');
-  assert.deepEqual(scopeRequestAttention(own, approvals).filter(item => /master scope/.test(`${item.next} ${item.text}`)), [], 'a routed request names no master scope');
+  assert.ok(routedScopeRequests(approvals)(mine.work[0]), 'the loop has routed this request');
+  assert.deepEqual(scopeRequestAttention(mine, approvals).filter(item => /master scope/.test(`${item.next} ${item.text}`)), [], 'a routed request names no master scope');
 
   const [first] = await standing(work);
+  // The worker is already waiting on its own command when the approver decides.
+  const waiting = own(await reload(work.id), 10_000);
   await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: first.id, reason: 'The helper is AC-1 spelled out' });
+  const heard = await waiting;
+  assert.equal(heard.state, 'approved');
+  assert.match(heard.text, /approved/);
+  assert.match(heard.text, /The helper is AC-1 spelled out/, "with the approver's reason");
+  assert.match(heard.text, /you keep your lease: continue the work/);
+  assert.match(heard.text, /src\/widget\/measure\.ts/);
   await approved.cycle(approvedState);
-  assert.equal(approved.about(work).told.length, 1);
-  assert.equal(approved.about(work).told[0].agentName, workerSession, 'told in the worker\'s own session');
-  assert.match(approved.about(work).told[0].text, /approved by the independent approver independent-approver/);
-  assert.match(approved.about(work).told[0].text, /you keep your lease: continue the work/);
-  assert.match(approved.about(work).told[0].text, /src\/widget\/measure\.ts/);
-  await approved.cycle(approvedState);
-  assert.equal(approved.about(work).told.length, 1, 'told once');
+  assert.equal(scopeRequestOutcome(await reload(work.id), { epoch: asked.epoch, at: asked.scopeRequest!.at, paths: [helper] }).state, 'approved', 'and it stays readable after the loop moves on');
 
   // Refused: the approver's reason, and that the worker stays inside plannedFiles.
   work = await claimed('outcome refused');
@@ -246,13 +278,14 @@ test('unit:scope-outcome-delivered — the worker is told the outcome in its ses
   await refused.cycle(refusedState);
   const [second] = await standing(work);
   await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: second.id, reason: 'The route belongs to another item' });
+  const told = await own(await reload(work.id));
+  assert.equal(told.state, 'refused');
+  assert.match(told.text, /refused by the independent approver independent-approver: The route belongs to another item/);
+  assert.match(told.text, /Stay inside plannedFiles/);
+  assert.match(told.text, new RegExp(`scope-request ${work.key} ${work.epoch} -`), 'with the command that withdraws the ask');
   await refused.cycle(refusedState);
-  assert.equal(refused.about(work).told.length, 1);
-  assert.match(refused.about(work).told[0].text, /refused by the independent approver independent-approver: The route belongs to another item/);
-  assert.match(refused.about(work).told[0].text, /Stay inside plannedFiles/);
-  assert.match(refused.about(work).told[0].text, new RegExp(`scope-request ${work.key} ${work.epoch} -`), 'with the command that withdraws the ask');
   const after = await ok(token(coordinator), 'GET', 'work-snapshot') as { work: Work[]; now: string };
-  const mine = { work: after.work.filter(item => item.id === work.id), now: after.now };
-  assert.deepEqual(scopeRequestAttention(mine, daemonSummary(refusedState, Date.now(), 30_000).approvals), [], 'status still names no master scope once the approver refused');
+  const refusedOwn = { work: after.work.filter(item => item.id === work.id), now: after.now };
+  assert.deepEqual(scopeRequestAttention(refusedOwn, daemonSummary(refusedState, Date.now(), 30_000).approvals), [], 'status still names no master scope once the approver refused');
   assert.equal(scopeOutcomeMessage('GY-1', 1, { state: 'refused', paths: ['a.ts'], approver: null, reason: null }).includes('no reason recorded'), true);
 });

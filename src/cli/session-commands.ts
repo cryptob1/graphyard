@@ -1,5 +1,7 @@
 import type { Work } from '../model.js';
 import { humanDecisionKinds, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
+import { scopeRequestOutcome } from '../model/scope.js';
+import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
 
 /**
@@ -15,18 +17,19 @@ export const scopeRequestCommand: CliCommand = {
   scope: 'work',
   help: [
     '  scope-request GY-N EPOCH PATH... -- REASON',
-    '                                Ask the master to widen plannedFiles with PATH... for a',
-    "                                reason; `scope-request GY-N EPOCH -` withdraws the open",
-    '                                request. The master approves it with one command:',
-    '                                `graphyard master scope GY-N`, and the attempt keeps its',
-    '                                lease — a free-text blocker that waits on a human is never',
-    '                                needed for scope',
+    '                                Ask to widen plannedFiles with PATH... for a reason; the',
+    '                                widening rule, a review finding or the independent approver',
+    '                                decides it and the attempt keeps its lease. `scope-request',
+    '                                GY-N EPOCH --wait` waits up to 9 minutes and prints the',
+    '                                outcome; `scope-request GY-N EPOCH -` withdraws the request.',
+    '                                A free-text blocker is never needed for scope',
   ],
   async run(context, work) {
     const { args, print } = context;
     const epoch = Number(args[0]);
-    if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use scope-request GY-N EPOCH PATH... -- REASON, or scope-request GY-N EPOCH - to withdraw');
+    if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use scope-request GY-N EPOCH PATH... -- REASON, scope-request GY-N EPOCH --wait, or scope-request GY-N EPOCH - to withdraw');
     if (args[1] === '-') return print(await workMutation(context, work)('scope', { epoch, paths: [], reason: 'Withdrawn by the worker' }));
+    if (args[1] === '--wait') return print(await awaitScopeOutcome(context, work, epoch));
     const separator = args.indexOf('--');
     const paths = args.slice(1, separator < 0 ? args.length : separator);
     const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
@@ -34,6 +37,25 @@ export const scopeRequestCommand: CliCommand = {
     return print(await workMutation(context, work)('scope', { epoch, paths, reason }));
   },
 };
+
+/**
+ * The outcome of this attempt's open scope request, read from the item as the control plane holds
+ * it (GY-176): the worker's own command reads durable state, so nothing is pasted into its session.
+ * Polls until the request is decided or no longer open, or the wait (bounded under a shell tool's
+ * ten-minute limit) runs out, and reports it pending then.
+ */
+export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: Work, epoch: number, options: { waitMs?: number; everyMs?: number; cli?: string } = {}) {
+  const request = work.scopeRequest?.epoch === epoch ? work.scopeRequest : null;
+  if (!request) throw new Error(`${work.key} has no open scope request for epoch ${epoch}; ask with scope-request ${work.key} ${epoch} PATH... -- REASON`);
+  const ask = { epoch, at: request.at, paths: request.paths }, cli = options.cli ?? 'graphyard';
+  const deadline = Date.now() + (options.waitMs ?? 540_000);
+  for (let item = work; ; ) {
+    const outcome = scopeRequestOutcome(item, ask, cli);
+    if (outcome.state !== 'pending' || Date.now() >= deadline) return { key: work.key, epoch, paths: ask.paths, ...outcome, ...(outcome.state === 'pending' ? { next: `Run scope-request ${work.key} ${epoch} --wait again` } : {}) };
+    await new Promise(resolve => setTimeout(resolve, Math.min(options.everyMs ?? 10_000, Math.max(0, deadline - Date.now()))));
+    item = ((await context.api('work')) as Work[]).find(entry => entry.id === work.id) ?? item;
+  }
+}
 
 /**
  * The worker half of a human-only wait (GY-89): record the decision only a human may make as a

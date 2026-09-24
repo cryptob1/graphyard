@@ -25,7 +25,7 @@ import { routedScopeRequests } from './status-attention.js';
  * `master scope` for a verdict already determined, and an item one file short of finishing waited
  * on that line being read. The verdict is recomputed from the item itself, never taken from the
  * request; a request from a lease that ended is never surfaced. Nor is one the loop has routed to
- * the independent approver (its `approvals` watch, GY-176): that is being decided, and the worker is told.
+ * the independent approver (its `approvals` watch, GY-176): that is being decided, and the worker reads the outcome.
  */
 export function scopeRequestAttention(snapshot: { work: Work[]; now: string }, approvals: Parameters<typeof routedScopeRequests>[0] = []): AttentionItem[] {
   const routed = routedScopeRequests(approvals);

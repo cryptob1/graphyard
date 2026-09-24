@@ -9,7 +9,7 @@ import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { pathScopeContains, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, scopeOutcomeMessage, type ScopeRequestState } from './model/scope.js';
+import { pathScopeContains, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
@@ -26,7 +26,7 @@ import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.j
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, deliverPrompt, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 
@@ -245,7 +245,7 @@ export const approvalWatchSchema = z.object({
   closeAttempts: z.number().int().min(0).default(0),
   /** The GitHub observation a rework request was decided from (GY-144): its time and candidate head. */
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
-  /** The worker scope request a `requirements` decision answers (GY-176): whom to tell, and what. */
+  /** The worker scope request a `requirements` decision answers (GY-176): whose, and for what. */
   scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
@@ -714,7 +714,7 @@ export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item (a resolve's trigger). */
 /** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
-/** `scope` is the worker request a `requirements` decision answers, so its outcome can be told to that worker. */
+/** `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
 export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string }; scope?: NonNullable<ApprovalWatch['scope']> }
 /**
  * The scope decision one item needs right now, or null (GY-176). A worker's additive request the
@@ -734,7 +734,7 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
   let broad: string | null = null;
   try { guardBroadScope({ ...work, plannedFiles }, request.reason, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
   catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
-  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad),
+  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad),
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
@@ -1431,11 +1431,6 @@ export interface DaemonEffects {
    * for a later round on a reason that describes an older head.
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
-  /**
-   * Tells a live worker session something in its own session (GY-176): the approver's judgement of
-   * its scope request. A loop wired without it records the outcome but cannot deliver it.
-   */
-  tellWorker?: (work: Work, agentName: string, text: string) => Promise<unknown>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
   containment?: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number } }) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
   /** Settles one quarantine this host verified dead, so the item can be claimed again. */
@@ -2183,7 +2178,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (judged) {
         const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: judged.id, requestedAt: stamp, settledAt: stamp, scope: decision.scope ?? null });
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${judged.id} for this widening was already refused by ${judged.refusal?.approver ?? 'its approver'}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-        await tellScopeOutcome(item, watch, judged);
+        await noteScopeOutcome(item, watch, judged);
         return;
       }
       // The control plane holds one requirements decision at a time. One standing for another
@@ -2237,23 +2232,17 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     }
   };
   /**
-   * Tell the worker whose scope request a judged `requirements` decision answered (GY-176): approved,
-   * carry on; refused, the approver's reason and that the attempt stays inside plannedFiles. Told
-   * once per decision, and only to the attempt that asked while it still holds the lease.
+   * Record how the approver judged the scope request a `requirements` decision answered (GY-176).
+   * The worker is never sent it: the control plane holds the outcome on the item, in the same
+   * transaction as the approval or refusal, and the worker reads it with its own
+   * `scope-request GY-N EPOCH --wait` or `status` (a paste carries no authority in its session).
    */
-  const tellScopeOutcome = async (item: Work, watch: ApprovalWatch, judged: { state: string; approvedBy: string | null; approvalReason?: string | null; refusal?: { approver: string; reason: string } | null; outcome?: string | null }) => {
+  const noteScopeOutcome = async (item: Work, watch: ApprovalWatch, judged: { state: string; approvedBy: string | null; approvalReason?: string | null; refusal?: { approver: string; reason: string } | null; outcome?: string | null }) => {
     const scope = watch.scope, key = `scope:outcome:${watch.decision}`;
     if (!scope || state.actions[key]?.state === 'done') return;
-    const approved = judged.state === 'applied';
-    const text = scopeOutcomeMessage(item.key, scope.epoch, { state: approved ? 'approved' : 'refused', paths: scope.paths, approver: approved ? judged.approvedBy : judged.refusal?.approver ?? null,
-      reason: approved ? judged.approvalReason ?? null : judged.refusal?.reason ?? judged.outcome ?? null }, config.cliPath ? `node ${config.cliPath}` : 'graphyard');
-    const live = item.lease && item.lease.epoch === scope.epoch && item.lease.owner === scope.requestedBy && Date.parse(item.lease.expiresAt) > clock;
-    const profile = config.workers.find(worker => worker.principal === scope.requestedBy);
-    const summary = `${approved ? 'Approved' : 'Refused'} ${item.key}'s scope request for ${namePaths(scope.paths)} through ${watch.action} decision ${watch.decision}`;
-    if (!live || !profile) { await note(key, item, 'scope', 'done', `${summary}; no live session of epoch ${scope.epoch} is left to tell`); return; }
-    if (!effects.tellWorker) { await note(key, item, 'scope', 'failed', `${summary}; this loop cannot reach worker session ${profile.agentName}, which reads it from graphyard status ${item.key}`); return; }
-    try { await effects.tellWorker(item, profile.agentName, text); await note(key, item, 'scope', 'done', `${summary}; told worker session ${profile.agentName}: ${text}`); }
-    catch (error) { await note(key, item, 'scope', 'failed', `${summary}; worker session ${profile.agentName} could not be told: ${message(error)}`); }
+    const approved = judged.state === 'applied', by = approved ? judged.approvedBy : judged.refusal?.approver;
+    const why = approved ? judged.approvalReason : judged.refusal?.reason ?? judged.outcome;
+    await note(key, item, 'scope', 'done', `${approved ? 'Approved' : 'Refused'} ${item.key}'s scope request (epoch ${scope.epoch}) for ${namePaths(scope.paths)} through ${watch.action} decision ${watch.decision}${by ? ` by ${by}` : ''}${why ? `: ${boundDetail(why, 400)}` : ''}; ${scope.requestedBy} reads it with ${config.cliPath ? `node ${config.cliPath}` : 'graphyard'} scope-request ${item.key} ${scope.epoch} --wait`);
   };
   /** Look again at a decision already requested: its state on the control plane, and its session. */
   const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
@@ -2266,7 +2255,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       await closeApprover(item, watch, 'its decision is applied');
       watch.settledAt = stamp;
       await note(`${base}:settled`, item, 'decision', 'done', step.detail);
-      if (judged) await tellScopeOutcome(item, watch, judged);
+      if (judged) await noteScopeOutcome(item, watch, judged);
       return;
     }
     if (step.step === 'refused') {
@@ -2274,9 +2263,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // `master status` until the master answers it with a request that cites it, or acts on it.
       await closeApprover(item, watch, 'its decision is refused');
       watch.settledAt = stamp;
-      // A refused widening is the worker's answer, not the master's: it is told to stay inside
-      // plannedFiles, and the request it withdraws lifts the refusal holding the item.
-      if (watch.scope && judged) { await tellScopeOutcome(item, watch, judged); return; }
+      // A refused widening is the worker's answer, not the master's: the control plane recorded it
+      // on the item, and the worker reads there that it stays inside plannedFiles.
+      if (watch.scope && judged) { await noteScopeOutcome(item, watch, judged); return; }
       await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }
@@ -2366,10 +2355,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // an older head. One the item still calls for stays, and is adopted when it can be attested.
     let withdrawn = true;
     // An applied widening clears the request it answered, so the item stops needing it at once:
-    // the worker is told here, before the watch goes.
+    // its outcome is noted here, before the watch goes.
     if (item && watch.scope && !watch.settledAt && effects.decisions) {
       const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision), () => undefined);
-      if (judged?.state === 'applied') { watch.settledAt = stamp; await tellScopeOutcome(item, watch, judged); }
+      if (judged?.state === 'applied') { watch.settledAt = stamp; await noteScopeOutcome(item, watch, judged); }
     }
     // Another current watch holds this decision: the request is not moved past, only re-keyed.
     if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) { delete state.approvals[key]; continue; }
@@ -3082,7 +3071,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
     recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
     decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
-    tellWorker: (_work, agentName, text) => deliverPrompt(agentName, text, run),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,

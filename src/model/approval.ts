@@ -32,7 +32,10 @@ export const decisionInputs = {
   unblock: z.object({ expectedRevision: revision }).strict(),
   // Rewrites and removals are exactly what an operator agent cannot do alone; approved, they
   // still raise the requirement-weakening escalation the engine records for any narrowing.
-  requirements: z.object({ expectedPolicyRevision: revision, criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
+  // `answers` binds a widening to the worker scope request it answers (GY-176): the engine applies
+  // it only while that request is open and its attempt holds the lease, in the same transaction.
+  requirements: z.object({ expectedPolicyRevision: revision, criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
+    answers: z.object({ epoch: revision, at: z.iso.datetime(), sha: sha.nullable().optional() }).strict().optional() }).strict(),
   resolve: z.object({ trigger: z.enum(escalationTriggers), expectedRevision: revision }).strict(),
   attest: z.object({ proof: proofSchema.refine(proof => proof.startsWith('manual:'), 'Only manual: proofs are attested; automated proofs come from producers'), sha, baseSha: sha, policyRevision: revision, result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: z.url().max(2000).optional(), exercise: proofExerciseSchema.optional() }).strict(),
   merge: z.object({ sha, baseSha: sha, policyRevision: revision }).strict(),
