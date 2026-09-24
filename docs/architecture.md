@@ -9,6 +9,8 @@ Graphyard owns coordination decisions. Git owns source history. GitHub owns PR a
 
 ![Graphyard control-plane components: agent sessions, the dashboard and proof producers call the HTTP API and CLI under their own principals; the coordination engine runs one advisory-locked transaction per mutation against Postgres; a reconciliation worker ticks every two seconds, exchanges facts with GitHub, publishes the required check and runs the guarded merge. Webhooks only wake jobs.](diagrams/control-plane-components.svg)
 
+Text equivalent of the diagram: agent sessions (violet), the dashboard (amber) and a proof producer (green) call the **HTTP API and CLI**; commands go to the **coordination engine**, one advisory-locked transaction per mutation with no external I/O; it writes the aggregate and an event to **Postgres**; the **reconciliation worker** leases jobs, exchanges facts with **GitHub** (grey, two-headed arrow), publishes the required check and runs the guarded merge; a dashed arrow marks the signed webhook, which only wakes a job. Legend: [diagram legend](glossary.md#diagram-legend).
+
 ## Storage
 
 - `work_items.document` is the current aggregate (intent, requirements, assignment, workspaces, candidate, evidence, gates, observed facts). Each mutation appends an event with the new snapshot in the same transaction; `events.seq` defines order.

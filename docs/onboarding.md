@@ -8,6 +8,8 @@ Done. Roles are defined in the [glossary](glossary.md).
 
 ![Who holds which authority in Graphyard: the human operator sends human-only decisions to the control plane; Herdr hosts the master, lead and worker sessions, each with one credential; the reviewer, proof producer and optional operator agent sit beside them; the worker pushes and opens the PR, the reviewer approves the exact head, and Graphyard merges only through the guarded path.](diagrams/roles-and-authority.svg)
 
+Text equivalent: the **human operator** holds `admin` and makes the human-only decisions; the **master** dispatches ready items to **workers**, each with its own lease and worktree; workers push and open PRs; the **reviewer** approves the exact head; **proof producers** submit evidence; Graphyard merges only through the guarded path; Herdr hosts the sessions.
+
 The **human operator** holds `admin` and the human-only decisions. The **master**
 (`coordinator`) dispatches ready items to **workers** (each with its own lease and worktree)
 and merges exact candidates when every gate passes. The **reviewer** (a separate GitHub
