@@ -471,3 +471,50 @@ test('unit:recurring-class-item — a failing run ends when its action is retire
   assert.equal(state.actions['refresh:running'], undefined);
   assert.deepEqual(Object.keys(state.faults.failing), ['refresh:retrying']);
 });
+
+test('unit:recurring-class-item — the loop reads status-level faults with coordinator visibility, so held jobs and production recur', async () => {
+  const secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  try {
+    const coordinatorToken = join(secrets, 'coordinator.token'), operatorToken = join(secrets, 'operator.token');
+    await writeFile(coordinatorToken, 'coordinator-token-'.padEnd(48, 'c'), { mode: 0o600 });
+    await writeFile(operatorToken, 'operator-token-'.padEnd(48, 'o'), { mode: 0o600 });
+    // What /api/status answers a coordinator: the held jobs and production an operator-agent read withholds.
+    const coordinatorView = { github: true, heldJobs: 2, jobs: [], production: { error: 'The deployment provider answered 503' } };
+    const reads: { url: string; auth: string | null; method: string }[] = [];
+    const fetcher = (async (url: string, init: RequestInit = {}) => {
+      reads.push({ url, auth: new Headers(init.headers).get('Authorization'), method: init.method ?? 'GET' });
+      return new Response(JSON.stringify(coordinatorView), { status: 200 });
+    }) as typeof fetch;
+    const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' }, fetcher };
+    const withCoordinator = { ...config(), credentialFile: coordinatorToken } as MasterConfig;
+    for (const source of [withCoordinator, { ...withCoordinator, operatorAgent: { id: 'graphyard-master-operator', credentialFile: operatorToken } } as MasterConfig]) {
+      reads.length = 0;
+      const status = await daemonEffects('/nonexistent', source, deps).controlPlane!();
+      assert.deepEqual(reads, [{ url: 'https://graphyard.example/api/status', auth: `Bearer ${'coordinator-token-'.padEnd(48, 'c')}`, method: 'GET' }], 'the coordinator credential, never the operator-agent read that withholds these');
+      const faults = cycleFaults(emptyDaemonState(source), [], clock, { config: source, status }).map(fault => `${fault.kind}:${fault.faultClass}`);
+      assert.ok(faults.includes('held-jobs:configuration'), `held jobs are a configuration fault: ${faults.join(', ')}`);
+      assert.ok(faults.includes('production:deployment'), `a production incident is a deployment fault: ${faults.join(', ')}`);
+      assert.ok(!faults.includes('integration-job:observation'), 'held jobs are not reclassified as generic integration-job faults');
+    }
+    // Recurring past the threshold, the deployment class files its item.
+    const filed: any[] = [];
+    let status: Record<string, unknown> = { github: true };
+    const effects = {
+      agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+      faultClassPolicy: policy, persist: async () => {}, controlPlane: async () => status,
+      fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${300 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
+    } as unknown as DaemonEffects;
+    const state = emptyDaemonState(config());
+    let now = clock;
+    for (let round = 0; round < 3; round++) {
+      status = { github: true, production: { error: `The deployment provider answered 503 (round ${round})` } };
+      now = clock + round * 2 * 60_000; await runCycle(config(), state, effects, () => now);
+      status = { github: true };
+      now += 60_000; await runCycle(config(), state, effects, () => now);
+    }
+    assert.deepEqual(filed.map(input => input.origin.faultClass.class), ['deployment'], 'the recurring production fault files the deployment class once');
+  } finally {
+    await rm(secrets, { recursive: true, force: true });
+  }
+});

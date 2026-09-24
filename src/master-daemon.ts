@@ -26,7 +26,7 @@ import { independentProducerProfiles, launchProducer, readProducerLedger, reclai
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers } from './auto-dispatch.js';
-import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
+import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, readCredentialFile, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, buildMasterStatus, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
@@ -1505,9 +1505,9 @@ export interface DaemonEffects {
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
   /**
-   * The control plane's status, read as the operator-agent identity, whose status-level problems
-   * (App permissions, a GitHub pause, unserved executors) are classified and tracked each cycle.
-   * Absent without that identity; a read that fails leaves the cycle to the faults it has.
+   * The control plane's status, read with the coordinator's visibility, whose status-level problems
+   * (App permissions, held jobs, production, a GitHub pause, unserved executors) are classified and
+   * tracked each cycle. A read that fails leaves the cycle to the faults it has.
    */
   controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
   /**
@@ -3078,6 +3078,18 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
     return result;
   };
+  /**
+   * The status read faults are classified from, with the loop's own coordinator credential: the
+   * operator-agent read withholds held jobs, integration jobs and production (routes/status.ts),
+   * so faults in those catalogued kinds could never recur to the loop and file their class (GY-173).
+   */
+  const coordinatorStatus = async () => {
+    const config = current();
+    const response = await fetcher(`${config.url}/api/status`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(30_000) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(`Graphyard refused status (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    return result as ControlPlaneStatus & Record<string, unknown>;
+  };
   const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
     const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
     try { return await post(work); }
@@ -3210,8 +3222,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
-    // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173).
-    get controlPlane() { return current().operatorAgent ? () => asOperatorAgent('GET', 'status') : undefined; },
+    // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);
+    // the faults it counts are read with the coordinator's visibility.
+    controlPlane: coordinatorStatus,
     get reportedAttention() {
       return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) =>
         // Imported when first read: the status report imports this module, so a static import would be a cycle.
