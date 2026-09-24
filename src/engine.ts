@@ -42,7 +42,8 @@ export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
-  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
+  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
+    answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable() }).strict().optional() }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
@@ -505,6 +506,18 @@ export class Engine {
           demand(!leaseLive, 'Stop and release the active worker before revising requirements');
         }
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
+        // A widening that answers one attempt's scope request (the loop's, on a review finding)
+        // holds only while that request is open, its attempt holds a live lease and the head the
+        // findings were read for is still the candidate: a claim, a lease end or a push changes
+        // one of those without a new policy revision, so a widening decided on reads made before
+        // that is moot and refused here, in the same transaction.
+        if (data.answers) {
+          demand(widening, 'Only an additive planned-files widening answers a scope request');
+          demand(work.scopeRequest?.epoch === data.answers.epoch && work.scopeRequest?.at === data.answers.at, 'The scope request this widening answers is no longer open');
+          demand(leaseLive && work.lease!.epoch === data.answers.epoch, `Epoch ${data.answers.epoch}, which asked for this scope, no longer holds the lease`);
+          // Its grounds are findings read against one head; a push since then makes them another head's.
+          demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
+        }
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         if (actor.role === 'operator-agent') {
           demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');

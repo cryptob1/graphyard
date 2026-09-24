@@ -211,6 +211,19 @@ export const masterRunSchema = z.object({
   dispatchIntervalSeconds: z.number().int().min(5).max(30).default(10),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
+  /**
+   * Automatic bot reviewers whose review of a head the reviewer launch waits for, so their inline
+   * findings are open threads the reviewer judges in the same round rather than arriving after its
+   * approval and costing a rework round each (GY-163). A bot with nothing to say posts no review,
+   * so `awaitReviewersMinutes` bounds the wait from the review request; 0 turns it off.
+   * Unset: the Codex connector, for 8 minutes (`defaultAwaitReviewers`). The duration is the
+   * master's to tune (`master config awaitReviewersMinutes=0`, an empty value restores the
+   * default). The login list stays the operator's, edited in .graphyard/master.json: it also
+   * decides whose review threads are trusted grounds for automatic scope widening, so the master
+   * cannot add a login whose findings would widen scope.
+   */
+  awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
+  awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
   // How long a launched reviewer or producer session may show no activity before the loop
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.
@@ -312,8 +325,13 @@ Review and proof collection start on their own. When a candidate passes the buil
 the control plane records a review request and one producer request per proof group,
 each bound to the exact head, base and policy revision, and \`graphyard master run\`
 launches the configured reviewer profile and a producer session for each of them within
-30 seconds, without a keystroke. A head change cancels those sessions and requests the
-new head afresh unless the merge queue carried the approval or the proof. You handle
+30 seconds, without a keystroke, except that a reviewer launch first waits, up to
+\`run.awaitReviewersMinutes\` (default 8, 0 disables) from the request, for the automatic
+bot reviewers in \`run.awaitReviewers\` (default the Codex connector) to review the
+head, so their findings are judged in the same round; the wait is named in \`master
+status\`, and a failed GitHub read, or one unanswered within 5 seconds, launches at once. A head change cancels those
+sessions and requests the new head afresh unless the merge queue carried the
+approval or the proof. You handle
 findings, rework and merges; you never launch reviews or producers by hand. \`master
 status\` shows, per candidate, what is requested, what is running and since when, and
 any launch the loop refused; \`graphyard master review GY-N [PROFILE]\` is the recovery
@@ -621,17 +639,18 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
 /**
  * The settings the master may tune on its own: the loop and dispatch cadence, the workflows the
  * provider runs with its own secret, the deployment the loop verifies, which reviewer profile
- * answers first, the producer session budget, the quota ceiling, and a profile's account order.
+ * answers first, the producer session budget, how long a reviewer launch waits for bot reviews,
+ * the quota ceiling, and a profile's account order.
  * Everything else — autoMerge, the merge method, server and repository binding, credential and
  * identity paths, the environment inventory — is onboarding's or the operator's: no CLI path
  * writes it, and the master's harness grants no direct edit of master.json, so flipping autoMerge
  * or re-pointing a credential can never be a routine master action.
  */
-export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent'] as const;
-const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'quotaCeilingPercent'] as const;
+export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'awaitReviewersMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent'] as const;
+const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'awaitReviewersMinutes', 'quotaCeilingPercent'] as const;
 export interface MasterOwnedSettings {
   intervalSeconds?: number | null; dispatchIntervalSeconds?: number | null; proofWorkflow?: string | null; smokeWorkflow?: string | null;
-  deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
+  deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; awaitReviewersMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
   accounts?: { profile: string; accounts: string[] }[];
 }
 

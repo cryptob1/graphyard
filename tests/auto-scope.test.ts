@@ -1,6 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -9,11 +10,12 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
-import { emptyDaemonState, runCycle, scopeBudget, scopeKey, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
+import { actionDetailMax, emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, answeringWidening, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker } from '../src/model/scope.js';
+import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
-import type { Principal, ScopeFile, Work } from '../src/model.js';
+import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } from '../src/review-scope.js';
+import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
 // records the ask as structured state; the master loop asks the control plane to decide it on the
@@ -122,7 +124,7 @@ test('integration:auto-scope-approval — the loop decides an implied additive r
   assert.equal(action.state, 'done');
   assert.equal(action.work, work.key);
   assert.equal(action.principal, implementer.id);
-  assert.match(action.detail, new RegExp(`Widened ${work.key} with ${theme.replace(/\./g, '\\.')}, docs/widget\\.md`));
+  assert.match(action.detail, new RegExp(`Widened ${work.key} with 2 files \\(${theme.replace(/\./g, '\\.')}, docs/widget\\.md\\)`));
   assert.match(action.detail, /AC-2 names src\/widget\/Theme\.ts/);
   assert.match(action.detail, /docs\/ is documentation this repository requires updating/);
   assert.ok(result.actions.some(entry => entry.kind === 'scope' && entry.state === 'done'), 'the cycle reports the decision it took');
@@ -366,4 +368,262 @@ test('integration:scope-redecision — a refusal the current rules would approve
   assert.equal((await reload(work.id)).policyRevision, work.policyRevision);
   const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
   assert.equal(again.status, 404, JSON.stringify(again.body));
+});
+
+test('integration:scope-from-review-finding — a refused request for a file a review finding on the item names is widened by the loop, as the master, with the finding as its grounds', async () => {
+  let work = await claimed('finding names the file');
+  const state = emptyDaemonState(loopConfig());
+  const widened: { paths: string[]; reason: string }[] = [];
+  const findings = [{ ground: 'review thread PRRT_finding01', text: 'Not fixed: `src/merge-queue.ts:85-97` still marks every item with blocking threads; see also src/cli/master-status.ts:128.' }];
+  const widen = async (item: Work, asked: ScopeRequestState, paths: string[], reason: string) => {
+    widened.push({ paths, reason });
+    return ok(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
+  };
+  const overrides: Partial<DaemonEffects> = { reviewFindings: async () => findings, basePaths: async paths => new Set(paths.filter(path => path !== 'src/new-helper.ts')), widenScope: widen };
+
+  // Named by the finding: the control plane refuses it (no criterion names it), and the loop widens it.
+  await request(work, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  await cycle(state, overrides);
+  work = await reload(work.id);
+  assert.ok(work.plannedFiles.includes('src/merge-queue.ts'), `widened: ${work.plannedFiles}`);
+  assert.equal(work.scopeRequest, null, 'the answered request is cleared');
+  assert.equal(work.blocker, null, 'the item is not left blocked on scope');
+  assert.ok(work.lease, 'the attempt keeps its lease');
+  assert.match(widened[0].reason, /review thread PRRT_finding01/);
+  assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)), 'nothing is escalated to a master session');
+
+  // Not named by any finding: it stays refused and escalated, and the loop does not widen.
+  await request(work, { paths: ['src/server/routes/work.ts'], reason: 'Easier to change here too' });
+  await cycle(state, overrides);
+  work = await reload(work.id);
+  assert.equal(widened.length, 1, 'no widening without a finding naming the file');
+  assert.equal(work.scopeRequest!.decision!.state, 'refused');
+  assert.ok(work.blocker?.startsWith(scopeRefusalBlocker));
+  assert.ok(escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)));
+  // A standing refusal is not re-read from GitHub every cycle...
+  let reads = 0;
+  const counted: Partial<DaemonEffects> = { ...overrides, reviewFindings: async () => { reads++; return findings; } };
+  await cycle(state, counted);
+  assert.equal(widened.length, 1);
+  assert.equal(reads, 0, 'a fresh refusal on the findings is not judged again within findingRecheckMs');
+  // ...but it is judged again once the findings may have changed: unchanged findings stay refused,
+  // and a trusted thread naming the file that lands after the refusal widens it.
+  await cycle(state, counted, findingRecheckMs + 1_000);
+  assert.equal(reads, 1);
+  assert.equal(widened.length, 1, 'the same findings are the same refusal');
+  findings.push({ ground: 'review thread PRRT_later02', text: 'src/server/routes/work.ts:40 still returns the stale revision' });
+  await cycle(state, counted, 2 * findingRecheckMs + 2_000);
+  work = await reload(work.id);
+  assert.equal(widened.length, 2, 'a finding posted after the refusal widens the request');
+  assert.ok(work.plannedFiles.includes('src/server/routes/work.ts'));
+  assert.match(widened[1].reason, /PRRT_later02/);
+
+  // A path a prefix already in plannedFiles covers is not outstanding: after an operator plans
+  // src/queue/ for half of a refused request, a finding naming only the other half widens it.
+  let partial = await claimed('prefix covers part of the request');
+  await request(partial, { paths: ['src/queue/entry.ts', 'src/cli/queue-status.ts'], reason: 'The reviewer finding names src/cli/queue-status.ts:12' });
+  const partialFindings = [{ ground: 'review thread PRRT_partial03', text: 'src/cli/queue-status.ts:12 still prints the stale count' }];
+  const partialEffects: Partial<DaemonEffects> = { ...overrides, reviewFindings: async () => partialFindings };
+  await cycle(state, partialEffects);
+  partial = await reload(partial.id);
+  assert.equal(partial.scopeRequest!.decision!.state, 'refused', 'no finding names src/queue/entry.ts yet');
+  await ok(master.token, 'POST', `work/${partial.id}/requirements`, { expectedPolicyRevision: partial.policyRevision, criteria: partial.criteria, dependencies: partial.dependencies,
+    plannedFiles: [...partial.plannedFiles, 'src/queue/'], exclusiveResources: partial.exclusiveResources ?? [], producerProofs: partial.producerProofs ?? [], reason: 'The item owns the queue module' });
+  partial = await reload(partial.id);
+  assert.ok(partial.scopeRequest, 'a partly covered request stays open');
+  await cycle(state, partialEffects);
+  partial = await reload(partial.id);
+  assert.deepEqual(widened.at(-1)!.paths, ['src/cli/queue-status.ts'], 'only the uncovered path is widened');
+  assert.ok(partial.plannedFiles.includes('src/cli/queue-status.ts'), `widened: ${partial.plannedFiles}`);
+  assert.equal(partial.scopeRequest, null);
+
+  // A request at the bounds a scope request allows — 50 paths of 500 characters — that a finding names
+  // in full is widened, and its record is bounded: the widening already happened, so recording it
+  // must not fail and leave the request to be escalated as though nothing were widened.
+  let many = await claimed('finding names many long paths');
+  const long = Array.from({ length: 50 }, (_, index) => `src/${String(index).padStart(2, '0')}-${'x'.repeat(480)}.ts`);
+  await request(many, { paths: long, reason: 'The reviewer finding names every one of these files' });
+  const manyEffects: Partial<DaemonEffects> = { ...overrides, basePaths: async paths => new Set(paths), reviewFindings: async () => [{ ground: 'review thread PRRT_many05', text: long.join(' and ') }] };
+  await cycle(state, manyEffects);
+  many = await reload(many.id);
+  assert.ok(long.every(path => many.plannedFiles.includes(path)), 'every named path is widened');
+  assert.equal(many.scopeRequest, null);
+  const recorded = Object.entries(state.actions).filter(([key]) => key.includes(many.id));
+  assert.ok(recorded.every(([, action]) => action.detail.length <= actionDetailMax), 'every action detail is within its bound');
+  const widenedMany = recorded.find(([key]) => key.includes(':finding:'))![1];
+  assert.equal(widenedMany.state, 'done', widenedMany.detail);
+  assert.match(widenedMany.detail, new RegExp(`^Widened ${many.key} with 50 files \\(src/00-x+…, src/01-x+… and 48 more\\) on the review finding that names them: src/00-`));
+  assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${many.id}`)), 'a widened request is not escalated');
+
+  // A file the base lacks is a creation: however plainly a finding asks for it, the loop never grants
+  // it, and it stays refused and escalated to the master.
+  let creation = await claimed('finding asks for a new file');
+  await request(creation, { paths: ['src/new-helper.ts'], reason: 'The reviewer finding asks for src/new-helper.ts' });
+  const before = widened.length;
+  await cycle(state, { ...overrides, reviewFindings: async () => [{ ground: 'review thread PRRT_create04', text: 'Create src/new-helper.ts to hold the shared check' }] });
+  creation = await reload(creation.id);
+  assert.equal(widened.length, before, 'a creation is not widened by the loop');
+  assert.ok(!creation.plannedFiles.includes('src/new-helper.ts'));
+  assert.equal(creation.scopeRequest!.decision!.state, 'refused');
+  assert.ok(escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${creation.id}`)), 'the creation is escalated to the master');
+  assert.match(state.actions[`${scopeKey(creation, creation.scopeRequest!)}:finding:${creation.policyRevision}`].detail, /does not exist on the base branch/);
+
+  // The reads take seconds. The asking attempt can lose its lease while they run — released, lapsed
+  // or overtaken by a new claim — without a new policy revision, so the widening decided on them
+  // answers an attempt that no longer stands: it is refused in its own transaction, nothing widens.
+  let raced = await claimed('lease ends during the finding reads');
+  await request(raced, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const stale = (await reload(raced.id)).scopeRequest!;
+  const attempted: string[] = [];
+  const racing: Partial<DaemonEffects> = {
+    reviewFindings: async item => {
+      if (item.id === raced.id && item.lease) await engine.execute(implementer, 'release', raced.id, { epoch: raced.epoch }, randomUUID());
+      return findings;
+    },
+    basePaths: async paths => new Set(paths),
+    widenScope: async (item, asked, paths, reason) => {
+      attempted.push(item.id);
+      const answer = await call(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
+      if (answer.status !== 200) throw new Error(answer.body.error ?? JSON.stringify(answer.body));
+      return answer.body;
+    },
+  };
+  await cycle(state, racing);
+  raced = await reload(raced.id);
+  assert.deepEqual(attempted, [raced.id], `the loop tried to widen on the stale reads: ${JSON.stringify(Object.entries(state.actions).filter(([key]) => key.includes(raced.id)))}`);
+  assert.ok(!raced.plannedFiles.includes('src/merge-queue.ts'), `not widened: ${raced.plannedFiles}`);
+  assert.equal(raced.lease, null);
+  const refused = state.actions[`${scopeKey(raced, stale)}:finding:${raced.policyRevision}`];
+  assert.equal(refused.state, 'failed');
+  assert.match(refused.detail, /no longer open|no longer holds the lease/);
+  // A request that no longer stands — withdrawn, or asked afresh — is refused the same way, however live the lease.
+  let asked = await claimed('request asked afresh during the finding reads');
+  await request(asked, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const first = (await reload(asked.id)).scopeRequest!;
+  await request(asked, { paths: ['src/merge-queue.ts', 'src/cli/master-status.ts'], reason: 'Both files the finding names' });
+  asked = await reload(asked.id);
+  assert.notEqual(asked.scopeRequest!.at, first.at);
+  const superseded = await call(master.token, 'POST', `work/${asked.id}/requirements`, answeringWidening(asked, first, ['src/merge-queue.ts'], 'stale request'));
+  assert.notEqual(superseded.status, 200);
+  assert.match(JSON.stringify(superseded.body), /scope request this widening answers is no longer open/);
+  const answered = await call(master.token, 'POST', `work/${asked.id}/requirements`, answeringWidening(asked, asked.scopeRequest!, ['src/merge-queue.ts', 'src/cli/master-status.ts'], 'the open request'));
+  assert.equal(answered.status, 200, JSON.stringify(answered.body));
+  assert.ok(answered.body.lease, 'the attempt keeps its lease');
+
+  // A push during the reads replaces the head the findings were read for, with the request and the
+  // lease both still standing: the reviewer's change request is another head's, so nothing widens.
+  const observed = (item: Work, sha: string): Observation => ({ clockOffset: { min: 0, max: 0 },
+    candidate: { sha, baseSha: 'b'.repeat(40), pr: item.submission!.pr, branch: item.workspaces.at(-1)!.branch, author: implementer.id },
+    checks: [], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: [layout], scopeFiles: [], at: new Date().toISOString() });
+  let pushed = await claimed('head moves during the finding reads');
+  pushed = await engine.execute(implementer, 'submit', pushed.id, { epoch: pushed.epoch, pr: 164_001 }, randomUUID());
+  pushed = await engine.observe(pushed.id, pushed.revision, observed(pushed, 'a'.repeat(40)));
+  pushed = await engine.execute(operator, 'rework', pushed.id, { reason: 'Review finding to address', previousWorkerStopped: true }, randomUUID());
+  pushed = await engine.execute(implementer, 'claim', pushed.id, {}, randomUUID());
+  pushed = await engine.execute(implementer, 'workspace', pushed.id, { epoch: pushed.epoch, host: 'scope-host', path: `/tmp/auto-scope/${pushed.id}-${pushed.epoch}`, branch: pushed.workspaces.at(-1)!.branch }, randomUUID());
+  await request(pushed, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const readFor: string[] = [];
+  const moving: Partial<DaemonEffects> = { ...racing,
+    reviewFindings: async item => {
+      if (item.id === pushed.id) {
+        readFor.push(item.candidate!.sha);
+        const current = await reload(pushed.id);
+        await engine.observe(pushed.id, current.revision, observed(current, 'c'.repeat(40)));
+      }
+      return findings;
+    } };
+  await cycle(state, moving);
+  pushed = await reload(pushed.id);
+  assert.deepEqual(readFor, ['a'.repeat(40)], 'the findings were read for the head the request stood against');
+  assert.equal(pushed.candidate!.sha, 'c'.repeat(40));
+  assert.ok(pushed.lease && pushed.scopeRequest, 'the lease and the request both still stand');
+  assert.ok(!pushed.plannedFiles.includes('src/merge-queue.ts'), `not widened: ${pushed.plannedFiles}`);
+  const moved = state.actions[`${scopeKey(pushed, pushed.scopeRequest!)}:finding:${pushed.policyRevision}`];
+  assert.equal(moved.state, 'failed');
+  assert.match(moved.detail, /read for aaaaaaaaaaaa, which is no longer the item's head/);
+});
+
+test('unit:review-finding-scope — only a file on the base that a finding names literally is granted; a missing file, a directory, a longer path or an unnamed file is not', async () => {
+  const findings = [{ ground: 'review 7', text: 'Change `src/merge-queue.ts:85-97` and create src/new-helper.ts; the whole src/ tree is fine.' }];
+  const exists = (path: string) => path !== 'src/new-helper.ts' && path !== 'src/missing.ts';
+  assert.deepEqual(findingScope(['src/merge-queue.ts'], findings, exists), { grounds: [{ path: 'src/merge-queue.ts', ground: 'review 7' }] });
+  assert.match((findingScope(['src/'], findings, exists) as { refusal: string }).refusal, /directory scope/);
+  assert.match((findingScope(['src/*'], findings, exists) as { refusal: string }).refusal, /directory scope/);
+  assert.match((findingScope(['src/merge-queue.tsx'], findings, exists) as { refusal: string }).refusal, /no unresolved review finding on the head names/);
+  assert.match((findingScope(['src/other.ts'], findings, exists) as { refusal: string }).refusal, /no unresolved review finding/);
+  assert.match((findingScope(['src/merge-queue.ts', 'src/other.ts'], findings, exists) as { refusal: string }).refusal, /names src\/other\.ts/, 'one unnamed file refuses the whole request');
+  assert.ok(namesPath('see src/a.ts.', 'src/a.ts') && namesPath('(src/a.ts:12)', 'src/a.ts') && !namesPath('lib/src/a.ts', 'src/a.ts') && !namesPath('src/a.ts.bak', 'src/a.ts'));
+  // A file a finding names in a negated clause is the reviewer ruling it out, not asking for it: refused, even beside an affirmative mention.
+  const ruledOut = [{ ground: 'review 15', text: 'Do not change `src/security.ts`; update `src/caller.ts` instead.' }];
+  assert.match((findingScope(['src/security.ts'], ruledOut, () => true) as { refusal: string }).refusal, /review 15 names src\/security\.ts in a negated clause/);
+  assert.deepEqual(findingScope(['src/caller.ts'], ruledOut, () => true), { grounds: [{ path: 'src/caller.ts', ground: 'review 15' }] });
+  for (const text of ["Don't touch src/security.ts, src/a.ts or src/b.ts", 'Leave src/security.ts alone.', 'Fix src/caller.ts rather than src/security.ts', 'src/security.ts must never change', 'Change the caller instead of src/security.ts'])
+    assert.match((findingScope(['src/security.ts'], [{ ground: 'review 16', text }], () => true) as { refusal: string }).refusal, /negated clause/, text);
+  assert.match((findingScope(['src/security.ts'], [{ ground: 'review 17', text: 'Fix src/security.ts:12' }, { ground: 'review 18', text: 'Do not change src/security.ts' }], () => true) as { refusal: string }).refusal, /review 18 names src\/security\.ts in a negated clause/, 'a negated mention anywhere refuses the file');
+  assert.deepEqual(findingScope(['src/no-op.ts'], [{ ground: 'review 19', text: 'Fix src/no-op.ts. Do not change src/other.ts' }], () => true), { grounds: [{ path: 'src/no-op.ts', ground: 'review 19' }] }, 'a path is not read as a negation, and a negation in another sentence is not this path\'s');
+  assert.ok(!negatesPath('**Not fixed: PRRT_x (src/a.ts:87, reject it).**', 'src/a.ts') && negatesPath('Not fixed, and do not change src/a.ts', 'src/a.ts'), 'a review\'s "not fixed" verdict is no negation of the file');
+  assert.ok(!negatesPath('Fix src/a.ts\nDo not change src/b.ts', 'src/a.ts') && negatesPath('Fix src/a.ts\nDo not change src/b.ts', 'src/b.ts'));
+  // A file the base lacks is a creation, the master's to decide, however plainly a finding asks for it.
+  for (const text of ['src/missing.ts is wrong', 'Create src/missing.ts for the helper', 'Add a new file at `src/missing.ts`', 'src/missing.ts should be added next to the queue'])
+    assert.match((findingScope(['src/missing.ts'], [{ ground: 'review 9', text }], exists) as { refusal: string }).refusal, /src\/missing\.ts does not exist on the base branch/, text);
+  assert.match((findingScope(['src/new-helper.ts'], findings, exists) as { refusal: string }).refusal, /does not exist on the base branch/);
+  assert.match((findingScope(['src/merge-queue.ts', 'src/new-helper.ts'], findings, exists) as { refusal: string }).refusal, /does not exist on the base branch/, 'a creation beside an existing file refuses the whole request');
+  assert.match((findingScope(['Dockerfile'], [{ ground: 'review 13', text: 'Create Dockerfile for the runner image' }], () => false) as { refusal: string }).refusal, /does not exist on the base branch/);
+  // Names the file pattern of a path-like token would miss — extensionless, dot-prefixed — are named literally all the same.
+  assert.deepEqual(findingScope(['Dockerfile', '.github/CODEOWNERS'], [{ ground: 'review 14', text: 'Fix Dockerfile and .github/CODEOWNERS' }], () => true),
+    { grounds: [{ path: 'Dockerfile', ground: 'review 14' }, { path: '.github/CODEOWNERS', ground: 'review 14' }] });
+
+  // The read: unresolved threads' comments by trusted authors, and the configured reviewer's latest change request on the head only.
+  const run = (_command: string, args: string[]) => {
+    // A long thread: the listing carries its first page of comments, the rest is read by the thread's id.
+    if (args[1] === 'graphql' && args.includes('id=PRRT_long')) return JSON.stringify({ data: { node: { comments: args.includes('after=c1')
+      ? { pageInfo: { hasNextPage: true, endCursor: 'c2' }, nodes: [{ body: 'noise', author: { login: 'graphyard-reviewer' } }] }
+      : { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ body: 'late: fix src/g.ts', author: { login: 'graphyard-reviewer' } }] } } } });
+    if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts', author: { login: 'chatgpt-codex-connector' } }, { body: 'and src/worker.ts', author: { login: 'cryptob1' } }] } },
+      { id: 'PRRT_reviewer', isResolved: false, comments: { nodes: [{ body: 'fix src/e.ts', author: { login: 'graphyard-reviewer' } }] } },
+      { id: 'PRRT_worker', isResolved: false, comments: { nodes: [{ body: 'please widen src/f.ts', author: { login: 'cryptob1' } }] } },
+      { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts', author: { login: 'graphyard-reviewer' } }] } },
+      { id: 'PRRT_long', isResolved: false, comments: { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [{ body: 'first', author: { login: 'graphyard-reviewer' } }] } }] } } } } });
+    return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
+      { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' },
+      // A thread reply is a COMMENTED review on the head: it withdraws no verdict, so review 1 still stands.
+      { id: 3, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'COMMENTED', body: '' }]]);
+  };
+  // Existence on the base: only a genuine absence is false; a missing base ref or failing git throws, so the loop retries.
+  const repo = await mkdtemp(join(tmpdir(), 'gy-finding-base-'));
+  const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  git(['-C', repo, 'init', '-q']); await mkdir(join(repo, 'src')); await writeFile(join(repo, 'src', 'present.ts'), 'export {};\n');
+  git(['-C', repo, 'add', '.']); git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base']);
+  git(['-C', repo, 'branch', '-M', 'main']);
+  // The loop's checkout: its origin/main is read once and then left stale while the remote moves on.
+  const checkout = await mkdtemp(join(tmpdir(), 'gy-finding-checkout-'));
+  git(['clone', '-q', repo, checkout]);
+  await writeFile(join(repo, 'src', 'added.ts'), 'export {};\n'); git(['-C', repo, 'rm', '-q', 'src/present.ts']); git(['-C', repo, 'add', '.']);
+  git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base moves']);
+  const gitRun = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  // One decision is one fetch: however many paths it asks about, they are judged against one pinned tree.
+  const calls: string[][] = [];
+  const counted = (command: string, args: string[]) => { calls.push(args); return gitRun(command, args); };
+  assert.deepEqual([...await basePaths(checkout, 'main', ['src/added.ts', 'src/present.ts', 'src/absent.ts', 'src'], counted)], ['src/added.ts'],
+    'a file added to the base since the last fetch exists; one deleted since, one never there, and a directory are absent');
+  assert.equal(calls.filter(args => args.includes('fetch')).length, 1, `one fetch per decision: ${JSON.stringify(calls)}`);
+  assert.equal(calls.length, 3, `fetch, pin the commit, one ls-tree for every path: ${JSON.stringify(calls)}`);
+  // Asked about alone, ls-tree lists a directory as its own tree entry: it is still not a file.
+  assert.deepEqual([...await basePaths(checkout, 'main', ['src'], gitRun)], [], 'a bare directory on its own is not a file on the base');
+  assert.match((findingScope(['src'], [{ ground: 'review 14', text: 'see src for the pattern' }], path => path !== 'src') as { refusal: string }).refusal, /src does not exist on the base branch as a file/);
+  assert.deepEqual([...await basePaths(checkout, 'main', [], () => { throw new Error('no git for no paths'); })], []);
+  await assert.rejects(basePaths(checkout, 'gone', ['src/added.ts'], gitRun), 'a missing base branch is a failure, not an absent file');
+  await assert.rejects(basePaths(checkout, 'main', ['src/added.ts'], () => { throw new Error('git timed out'); }), /timed out/);
+  await rm(repo, { recursive: true, force: true }); await rm(checkout, { recursive: true, force: true });
+
+  const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: ['chatgpt-codex-connector[bot]'] }, run);
+  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', ...Array(3).fill('review thread PRRT_long'), 'review 1'], 'one finding per trusted comment');
+  assert.ok(read.some(entry => entry.ground === 'review thread PRRT_long' && namesPath(entry.text, 'src/g.ts')), 'a trusted comment past the first page of a long thread is a finding');
+  assert.equal(read[0].text, 'fix src/a.ts', 'a comment by an untrusted author in a trusted thread is not a finding');
+  // A later verdict does replace it: an approval of the head leaves no change request standing.
+  const approved = (command: string, args: string[]) => args[1] === 'graphql' ? run(command, args)
+    : JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
+      { id: 4, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'APPROVED', body: 'ok' }]]);
+  assert.ok(!(await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: [] }, approved)).some(entry => entry.ground.startsWith('review ') && !entry.ground.startsWith('review thread')), 'an approval after the change request withdraws it');
 });
