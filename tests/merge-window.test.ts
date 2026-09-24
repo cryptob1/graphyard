@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { definiteProviderRefusal, mergeWindowFloorMs, mergeWork } from '../src/master.js';
+import { assertMergeCheckPublished, definiteProviderRefusal, mergeWindowFloorMs, mergeWork } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
 // GY-159, 2026-09-24: GitHub refused the provider call while the published check lagged (HTTP
@@ -36,7 +36,7 @@ function github(options: { check?: unknown; put?: () => string } = {}) {
     calls.push(args);
     if (args[1] === 'view') return JSON.stringify({ headRefOid: sha, baseRefName: 'main', state: 'OPEN', isDraft: false });
     if (args[1]?.includes('/git/ref/heads/')) return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: baseSha } });
-    if (args[1]?.includes('/check-runs')) return JSON.stringify(options.check ?? { check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', started_at: new Date().toISOString() }] });
+    if (args[1]?.includes('/check-runs')) return JSON.stringify(options.check ?? { check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', started_at: new Date().toISOString(), app: { id: 1234 } }] });
     if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
     if (args[1] === '--method') return options.put ? options.put() : JSON.stringify({ merged: true, sha: 'c'.repeat(40) });
     return JSON.stringify(validProtection);
@@ -56,11 +56,24 @@ test('unit:merge-window-sizing — a GitHub 4xx from the merge call is a refusal
 
 test('unit:merge-window-sizing — a lagging Graphyard / merge check is refused before commit, and the execution is released', async () => {
   const item = work(); const store = broker(() => item); let cancelled = ''; let committed = false;
-  const gh = github({ check: { check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'failure', started_at: new Date().toISOString() }] } });
+  const gh = github({ check: { check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'failure', started_at: new Date().toISOString(), app: { id: 1234 } }] } });
   await assert.rejects(mergeWork(config, item, store.snapshot, store.acquire, async (_work, authority) => { cancelled = authority.id; }, verify, gh.run, execution.owner, async () => { committed = true; return store.commit(); }),
     /does not yet show Graphyard \/ merge as passed .*completed\/failure/);
   assert.equal(committed, false); assert.equal(cancelled, execution.id);
   assert.equal(gh.calls.some(args => args[1] === '--method'), false);
+});
+
+test('unit:merge-window-sizing — only the control plane App\'s Graphyard / merge run counts: a newer same-named run from another App neither defers nor satisfies the merge', async () => {
+  const now = Date.now(), at = (offset: number) => new Date(now + offset).toISOString();
+  assert.doesNotThrow(() => assertMergeCheckPublished({ check_runs: [
+    { name: 'Graphyard / merge', status: 'completed', conclusion: 'failure', started_at: at(0), app: { id: 999 } },
+    { name: 'Graphyard / merge', status: 'completed', conclusion: 'success', started_at: at(-60_000), app: { id: 1234 } }] }, 'GY-1', 'a'.repeat(40), 1234));
+  assert.throws(() => assertMergeCheckPublished({ check_runs: [
+    { name: 'Graphyard / merge', status: 'completed', conclusion: 'success', started_at: at(0), app: { id: 999 } }] }, 'GY-1', 'a'.repeat(40), 1234), /not published/);
+  const item = work(); const store = broker(() => item);
+  const gh = github({});
+  await mergeWork(config, item, store.snapshot, store.acquire, async () => {}, verify, gh.run, execution.owner, async () => store.commit()).catch(() => {});
+  assert.ok(gh.calls.some(args => args[1]?.includes('/check-runs?') && args[1].includes('app_id=1234')), 'the check read names the App');
 });
 
 test('unit:merge-window-sizing — an observation too old for a provider-sized window acquires nothing; with a refresh the attempt re-reads and continues', async () => {

@@ -159,8 +159,9 @@ test('unit:threads-listed-resolution — a settlement that named nothing before 
   try {
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
     const gh = github({ body: 'All listed findings are fixed at this head.' });
-    // As GY-159's record was left on 2026-09-24: no threadsListed, and a settlement that named nothing.
-    await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, state: 'completed', verdict: verdict() as any,
+    // As GY-159's record was left on 2026-09-24: launched while prompts listed threads but before the
+    // listing was recorded, so no threadsListed, and a settlement that named nothing.
+    await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, requestedAt: '2026-09-24T05:00:00.000Z', state: 'completed', verdict: verdict() as any,
       threadResolution: { at: new Date().toISOString(), reviewId: 77, named: [], resolved: [], refused: [], attempts: 1 } }; });
     const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
     // Opened before the launch and before the approval: both pre-existing threads; the later one is refused.
@@ -172,16 +173,25 @@ test('unit:threads-listed-resolution — a settlement that named nothing before 
   } finally { await cleanup(); }
 });
 
-test('unit:threads-listed-resolution — a session launched before prompts listed threads vouches for none of them', async () => {
-  const { root, cleanup } = await boundMaster();
-  try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
-    const gh = github({ body: 'All listed findings are fixed at this head.' });
+test('unit:threads-listed-resolution — a session with no recorded listing launched outside the legacy span, or never settled as legacy, vouches for none of them', async () => {
+  for (const scenario of [
     // Launched before dabdf14e: the reviewer was never shown the thread IDs or findings.
-    await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, requestedAt: '2026-09-24T04:00:00.000Z', state: 'completed', verdict: verdict() as any,
-      threadResolution: { at: new Date().toISOString(), reviewId: 77, named: [], resolved: [], refused: [], attempts: 1 } }; });
-    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
-    assert.deepEqual(gh.resolved, []);
-    assert.equal(settled.reviews[0].threadResolution?.implicit, false);
-  } finally { await cleanup(); }
+    { name: 'before the span', requestedAt: '2026-09-24T04:00:00.000Z', legacy: true },
+    // Launched after listings were recorded, by a binary that recorded none (an older binary still
+    // running): nothing on the record says its prompt showed the threads.
+    { name: 'after the span', requestedAt: '2026-09-24T09:00:00.000Z', legacy: true },
+    // Inside the span, but with no legacy settlement: only a settlement that named nothing is judged again.
+    { name: 'no legacy settlement', requestedAt: '2026-09-24T05:00:00.000Z', legacy: false },
+  ]) {
+    const { root, cleanup } = await boundMaster();
+    try {
+      await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+      const gh = github({ body: 'All listed findings are fixed at this head.' });
+      await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, requestedAt: scenario.requestedAt, state: 'completed', verdict: verdict() as any,
+        ...(scenario.legacy ? { threadResolution: { at: new Date().toISOString(), reviewId: 77, named: [], resolved: [], refused: [], attempts: 1 } } : {}) }; });
+      const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+      assert.deepEqual(gh.resolved, [], scenario.name);
+      assert.equal(settled.reviews[0].threadResolution?.implicit, false, scenario.name);
+    } finally { await cleanup(); }
+  }
 });

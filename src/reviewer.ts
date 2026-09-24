@@ -856,7 +856,7 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     const current = item.candidate.sha === record.sha || !!carried && carried.originalSha === record.sha && (carried.reviewId === undefined || carried.reviewId === verdict.reviewId);
     if (!current) continue;
     const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
-      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : { launchedAt: record.requestedAt }) }, run, now);
+      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : predatesImplicit ? { launchedAt: record.requestedAt } : {}) }, run, now);
     record.threadResolution = { ...outcome, refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
     const fresh = outcome.resolved.filter(id => !previous?.resolved.includes(id));

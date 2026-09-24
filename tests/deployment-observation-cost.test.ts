@@ -314,3 +314,31 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
     assert.equal(offBranch.source, 'unavailable', 'nothing on the list is a release of the base branch');
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
+
+test('unit:deployment-source-is-a-release — records that are not releases never hide the release behind them: the listing is paged, and only release candidates cost a status read', async () => {
+  const fixture = await deliveredHistory(3);
+  try {
+    await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const release = fixture.shas[2];
+    // 130 CI reporting and feature-branch records follow the release, so it sits on the second page.
+    const listed = [...Array.from({ length: 130 }, (_, index) => index % 2
+      ? { id: 1000 + index, sha: 'b'.repeat(40), ref: `graphyard/gy-${index}-1`, environment: 'graphyard / production' }
+      : { id: 1000 + index, sha: release, ref: 'main', environment: 'graphyard-reporting' }),
+      { id: 2, sha: release, ref: release, environment: 'graphyard / production' }];
+    const pages: number[] = [], statuses: string[] = [];
+    const run = (command: string, args: string[]) => {
+      if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      const listing = /\/deployments\?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
+      if (listing) { const size = Number(listing[1]), page = Number(listing[2]); pages.push(page); return JSON.stringify(listed.slice((page - 1) * size, page * size)); }
+      const status = /\/deployments\/(\d+)\/statuses/.exec(args[1]);
+      if (status) { statuses.push(status[1]); return JSON.stringify([{ state: 'success' }]); }
+      throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
+    };
+    const observation = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    assert.equal(observation.source, 'github-deployment');
+    assert.equal(observation.sha, release, 'the release behind 130 non-release records');
+    assert.deepEqual(pages, [1, 2]);
+    assert.deepEqual(statuses, ['2'], 'no status is read for a record that is not a release');
+    assert.ok(observation.requests! <= maxDeploymentRequests);
+  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
+});

@@ -3284,10 +3284,15 @@ export function definiteProviderRefusal(error: unknown) {
   const line = message.split('\n').find(entry => entry.includes(`(HTTP ${status})`)) ?? '';
   return `${line.replace(/^gh:\s*/, '').trim() || `HTTP ${status}`}`.slice(0, 500);
 }
-/** The latest `Graphyard / merge` run on the head must have succeeded before the provider is asked. */
-export function assertMergeCheckPublished(payload: any, key: string, sha: string) {
+/**
+ * The latest `Graphyard / merge` run on the head must have succeeded before the provider is asked.
+ * Only runs published by the control plane's own GitHub App count: branch protection binds the
+ * required check to that App, so a same-named run from another App or workflow neither satisfies
+ * nor defers the merge.
+ */
+export function assertMergeCheckPublished(payload: any, key: string, sha: string, appId: number) {
   if (!Array.isArray(payload?.check_runs)) return;
-  const runs = payload.check_runs.filter((entry: any) => entry?.name === CHECK_NAME)
+  const runs = payload.check_runs.filter((entry: any) => entry?.name === CHECK_NAME && entry?.app?.id === appId)
     .sort((a: any, b: any) => Date.parse(b?.started_at ?? b?.completed_at ?? '') - Date.parse(a?.started_at ?? a?.completed_at ?? ''));
   const latest = runs[0];
   if (latest?.status !== 'completed' || latest?.conclusion !== 'success')
@@ -3396,7 +3401,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     // GitHub refuses the merge while the published `Graphyard / merge` check lags the gates it
     // reports (HTTP 405, GY-159 2026-09-24). Read it before committing, while a refusal still
     // releases the execution.
-    assertMergeCheckPublished(JSON.parse(await run('gh', ['api', `repos/${config.repository}/commits/${authorization.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}`])), work.key, authorization.sha);
+    assertMergeCheckPublished(JSON.parse(await run('gh', ['api', `repos/${config.repository}/commits/${authorization.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&app_id=${config.githubAppId}`])), work.key, authorization.sha, config.githubAppId);
     if (!commit) throw new Error(`${work.key} merge broker commit callback is unavailable`);
     const committed = await commit(latest, granted.execution);
     const committingTime = Date.parse(committed.committingAt);

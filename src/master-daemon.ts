@@ -2316,14 +2316,20 @@ function deploymentDetail(observation: DeploymentObservation) {
 }
 
 /**
- * How many deployments of the base branch the observation reads, and therefore how many GitHub
- * requests one observation may make: the listing itself, plus at most one status listing for each
- * deployment in it. Nothing below this bound scales with how much has been delivered — containment
- * is derived locally — so the cycle's deployment step costs the same on the first delivery as on
- * the five hundredth. A configured `--deployment-url` costs zero GitHub requests.
+ * How many release candidates (base-branch deployments) the observation reads the status of, how
+ * many listing pages of `deploymentPageSize` it reads to find them, and therefore how many GitHub
+ * requests one observation may make: the listing pages plus at most one status listing per release
+ * candidate. Records that are not releases (the CI reporting environment, other branches) cost no
+ * status read and never use up the candidate bound: on 2026-09-24 a single 20-entry page could be
+ * filled by reporting records, hiding the release behind them. Nothing below this bound scales with
+ * how much has been delivered — containment is derived locally — so the cycle's deployment step
+ * costs the same on the first delivery as on the five hundredth. A configured `--deployment-url`
+ * costs zero GitHub requests.
  */
 export const deploymentListingSize = 20;
-export const maxDeploymentRequests = 1 + deploymentListingSize;
+export const deploymentPageSize = 100;
+export const deploymentListingPages = 5;
+export const maxDeploymentRequests = deploymentListingPages + deploymentListingSize;
 
 /**
  * Local ancestry over this checkout's own object store, which is what "does the release contain
@@ -2388,30 +2394,42 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     if (typeof value !== 'string' || !/^[0-9a-f]{7,40}$/i.test(value)) return unavailable(`Deployment endpoint did not report a commit at ${config.run.deploymentShaField}`);
     sha = value.toLowerCase(); source = 'endpoint';
   } else {
-    let deployments: any[];
-    requests++;
     // Not filtered by ref: a platform that deploys the base branch (Railway) records each release
     // with its commit SHA as the ref, so `ref=main` saw only the CI reporting environment's records,
-    // and on 2026-09-24 GY-159 stayed pending behind a release production had already served.
-    try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentListingSize}`])); }
-    catch (error) { return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`); }
-    if (!Array.isArray(deployments) || !deployments.length) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
+    // and on 2026-09-24 GY-159 stayed pending behind a release production had already served. The
+    // listing is read page by page, newest first, until a release answers or a bound is reached.
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
-    for (const deployment of deployments.slice(0, deploymentListingSize)) {
-      // CI proof reporting records deployments too; it is never a release.
-      if (deployment?.environment === ciReportingEnvironment) continue;
-      // A release is the base branch or a commit on it; another branch's deployment is not.
-      const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
-      if (ref && ref !== config.baseBranch) {
-        if (typeof deployment.sha !== 'string' || ref.toLowerCase() !== deployment.sha.toLowerCase()) continue;
-        if (await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) !== true) continue;
-      }
-      let statuses: any[];
+    let listed = 0, candidates = 0, exhausted = false;
+    for (let page = 1; page <= deploymentListingPages && !sha && !exhausted && candidates < deploymentListingSize; page++) {
+      let deployments: any[];
       requests++;
-      try { statuses = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
-      catch { continue; }
-      if (Array.isArray(statuses) && statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
+      try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentPageSize}&page=${page}`])); }
+      catch (error) {
+        if (page === 1) return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`);
+        return unavailable(`No release was found in the first ${listed} GitHub deployment(s), and page ${page} of the listing could not be read: ${message(error)}`);
+      }
+      if (!Array.isArray(deployments)) deployments = [];
+      listed += deployments.length;
+      exhausted = deployments.length < deploymentPageSize;
+      for (const deployment of deployments) {
+        // CI proof reporting records deployments too; it is never a release.
+        if (deployment?.environment === ciReportingEnvironment) continue;
+        // A release is the base branch or a commit on it; another branch's deployment is not.
+        const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
+        if (ref && ref !== config.baseBranch) {
+          if (typeof deployment.sha !== 'string' || ref.toLowerCase() !== deployment.sha.toLowerCase()) continue;
+          if (await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) !== true) continue;
+        }
+        if (candidates >= deploymentListingSize) break;
+        candidates++;
+        let statuses: any[];
+        requests++;
+        try { statuses = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments/${deployment.id}/statuses?per_page=10`])); }
+        catch { continue; }
+        if (Array.isArray(statuses) && statuses[0]?.state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
+      }
     }
+    if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
     if (!sha) return unavailable('No GitHub deployment for the managed base branch reports a successful status');
   }
   const ancestry = localAncestry(options.root, config.baseBranch, run);

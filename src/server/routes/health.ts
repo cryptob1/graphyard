@@ -31,9 +31,20 @@ export const healthRoutes = defineRoutes('health', [
     // every pooled connection for minutes, and an unbounded SELECT 1 then fails the deploy's health check.
     // Only a probe queued behind a full pool is that busy pool: one that held or was opening a
     // connection when the bound passed met a database that did not answer — a blackholed network
-    // hangs rather than refusing — and that is a database the process cannot reach.
-    const reachable = await Promise.race([pool.query('SELECT 1').then(() => true), new Promise<false>(resolve => setTimeout(() => resolve(false), healthCheckWaitMs).unref())]);
-    if (!reachable && !(Number(pool.waitingCount) > 0)) throw new Error(`database probe did not finish within ${healthCheckWaitMs} ms and was not waiting for a pooled connection; the database is unreachable`);
+    // hangs rather than refusing — and that is a database the process cannot reach. Whether the probe
+    // queued is recorded when it asks for its client, not sampled at the deadline: a queued probe
+    // handed a client just before the bound has left the queue, and is still the busy pool.
+    const waiting = Number(pool.waitingCount) || 0, idle = Number(pool.idleCount) || 0;
+    const connecting = pool.connect();
+    const queued = idle === 0 && (Number(pool.waitingCount) || 0) > waiting;
+    const answered = connecting.then(async client => {
+      try { await client.query('SELECT 1'); client.release(); } catch (error) { client.release(error as Error); throw error; }
+      return true as const;
+    });
+    // A probe that finishes after the bound has already been answered for; its failure is not unhandled.
+    answered.catch(() => {});
+    const reachable = await Promise.race([answered, new Promise<false>(resolve => setTimeout(() => resolve(false), healthCheckWaitMs).unref())]);
+    if (!reachable && !queued) throw new Error(`database probe did not finish within ${healthCheckWaitMs} ms and was not waiting for a pooled connection; the database is unreachable`);
     if (!reachable) return { ok: true, healthy: true, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued

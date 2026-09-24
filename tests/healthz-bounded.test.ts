@@ -4,8 +4,23 @@ import { healthCheckWaitMs, healthRoutes } from '../src/server/routes/health.js'
 
 // On a fresh process the reconciliation step can hold every pooled connection for minutes; an
 // unbounded SELECT 1 then failed the deploy's health check. The probe is bounded like the resource checks.
-function probe(query: () => Promise<unknown>, waitingCount = 1) {
-  const services = { engine: { store: { pool: { query, waitingCount } } }, github: null, build: { commit: 'c'.repeat(40), protocol: 1 } } as any;
+/**
+ * A pool as pg-pool presents it to the probe: `queued` puts the probe's request behind a full pool
+ * (no idle client, the waiting count rises when it asks), and `handedAt` hands it a client that long
+ * after it asked, when the probe leaves the queue and runs `query` on that client.
+ */
+function probe(query: () => Promise<unknown>, options: { queued?: boolean; handedAt?: number } = { queued: true }) {
+  let waiting = 0;
+  const client = { query, release: () => {} };
+  const pool = {
+    get waitingCount() { return waiting; }, idleCount: options.queued ? 0 : 1,
+    connect: () => {
+      if (!options.queued) return Promise.resolve(client);
+      waiting++;
+      return new Promise(resolve => { if (options.handedAt !== undefined) setTimeout(() => { waiting--; resolve(client); }, options.handedAt).unref(); });
+    },
+  };
+  const services = { engine: { store: { pool } }, github: null, build: { commit: 'c'.repeat(40), protocol: 1 } } as any;
   const context = { services, url: new URL('http://plane/healthz'), send: () => { throw new Error('the busy pool is not a 503'); } } as any;
   return healthRoutes.routes[0].handle(context, []);
 }
@@ -23,12 +38,19 @@ test('unit:healthz-select-bounded — /healthz answers within its bound while th
 });
 
 test('unit:healthz-select-bounded — a database the process cannot reach still fails the probe', async () => {
-  await assert.rejects(probe(() => Promise.reject(new Error('connect ECONNREFUSED'))), /ECONNREFUSED/);
+  await assert.rejects(probe(() => Promise.reject(new Error('connect ECONNREFUSED')), { queued: false }), /ECONNREFUSED/);
 });
 
 test('unit:healthz-select-bounded — a probe that held a connection the database never answered fails within the bound', async () => {
   const started = Date.now();
   // Not queued behind a full pool (nothing waiting for a client): a blackholed connection, not a busy pool.
-  await assert.rejects(probe(() => new Promise(() => {}), 0), /database is unreachable/);
+  await assert.rejects(probe(() => new Promise(() => {}), { queued: false }), /database is unreachable/);
   assert.ok(Date.now() - started < healthCheckWaitMs + 1000);
+});
+
+test('unit:healthz-select-bounded — a probe queued behind the busy pool and handed a client just before the bound is still the busy pool, not an unreachable database', async () => {
+  // The waiting count is back to zero at the deadline; the probe's own queueing is what counts.
+  const body = await probe(() => new Promise(() => {}), { queued: true, handedAt: healthCheckWaitMs - 100 }) as any;
+  assert.equal(body.ok, true);
+  assert.deepEqual(body.causes, [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`]);
 });

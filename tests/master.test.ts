@@ -769,7 +769,7 @@ test('integration:landing-follower-merges — the broker lands a queued follower
       calls.push(args);
       if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: staleCached, baseRefName: 'main', state: 'OPEN', isDraft: false });
       if (args[1] === 'repos/owner/project/git/ref/heads/main') return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: head } });
-      if (args[1]?.includes('/check-runs')) return JSON.stringify({ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success' }] });
+      if (args[1]?.includes('/check-runs')) return JSON.stringify({ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] });
       if (args[1]?.startsWith('repos/owner/project/commits/')) { const sha = args[1].split('/commits/')[1]; assert.ok(sha in trees, `unexpected commit read ${sha}`); return JSON.stringify({ sha, commit: { tree: { sha: trees[sha] } } }); }
       if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
       return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
