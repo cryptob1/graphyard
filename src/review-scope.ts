@@ -71,10 +71,12 @@ export async function readReviewFindings(input: { repository: string; pr: number
 
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** Whether `text` names `path` itself — as a whole token, optionally with `:line` — not a longer path that contains it. */
-export const namesPath = (text: string, path: string) => new RegExp(`(^|[^A-Za-z0-9_./-])${escape(path)}(?=$|[^A-Za-z0-9_./-]|\\.(?:$|\\s))`).test(text);
+const pathPattern = (path: string, flags = '') => new RegExp(`(^|[^A-Za-z0-9_./-])(${escape(path)})(?=$|[^A-Za-z0-9_./-]|\\.(?:$|\\s))`, flags);
+export const namesPath = (text: string, path: string) => pathPattern(path).test(text);
 
 // A file-like token: a path with a directory or an extension, with any `:line` suffix and trailing
-// sentence punctuation left off.
+// sentence punctuation left off. The requested path itself is matched literally as well, so a name
+// this pattern cannot see — `Dockerfile`, `.github/CODEOWNERS` — is still a file of its clause.
 const fileToken = /[A-Za-z0-9_][A-Za-z0-9_./-]*(?:\/[A-Za-z0-9_./-]*|\.[A-Za-z][A-Za-z0-9]{0,7})/g;
 const creationVerb = /\b(create[sd]?|creating|add(?:s|ed|ing)?|new file|introduce[sd]?|introducing)\b/gi;
 // A negation governing a creation verb: "do not create", "src/a.ts should not be added", "no new
@@ -84,30 +86,34 @@ const creationVerb = /\b(create[sd]?|creating|add(?:s|ed|ing)?|new file|introduc
 // are masked first: `src/not.ts` names a file, it negates nothing.
 const negation = /\b(?:not|cannot|never|no|without|avoid(?:s|ing)?|instead of|rather than|unnecessary|unneeded)\b|n[’']t\b/i;
 const boundary = /[,:]|\b(?:but|and|then|so)\b/i;
-const negated = (clause: string, at: number, end: number) => {
-  const masked = clause.replace(fileToken, name => ' '.repeat(name.length));
+const negated = (clause: string, files: readonly { at: number; end: number }[], at: number, end: number) => {
+  let masked = clause.replace(fileToken, name => ' '.repeat(name.length));
+  for (const file of files) masked = masked.slice(0, file.at) + ' '.repeat(file.end - file.at) + masked.slice(file.end);
   return negation.test(masked.slice(0, at).split(boundary).at(-1)!) || negation.test(masked.slice(end).split(boundary)[0]);
 };
 
 /**
- * Whether `text` asks for `path` to be created: some clause naming the path has a creation verb
- * whose nearest file named in that clause is `path` itself, so a verb about another file — "create
- * src/b.ts; src/a.ts is wrong", "add a case to src/b.ts next to src/a.ts" — grants nothing for it,
- * and neither does a negated one: "do not create src/a.ts" and "adding src/a.ts is not needed"
- * forbid exactly the file they name.
+ * Whether `text` asks for `path` to be created: a clause naming the path has a creation verb whose
+ * nearest file named in that clause is `path` itself, so a verb about another file — "create
+ * src/b.ts; src/a.ts is wrong", "add a case to src/b.ts next to src/a.ts" — grants nothing for it.
+ * A negated verb — "do not create src/a.ts", "adding src/a.ts is not needed" — forbids exactly the
+ * file it names, and the latest such instruction stands: a trusted comment that later writes "do
+ * not create src/a.ts" takes back an earlier "create src/a.ts", and a later request renews it.
  */
 export function asksToCreate(text: string, path: string): boolean {
+  let asked = false;
   for (const clause of text.split(/[;!?\n]|\.(?=\s|$)/)) {
     if (!namesPath(clause, path)) continue;
-    const files = [...clause.matchAll(fileToken)].map(match => ({ at: match.index!, end: match.index! + match[0].length, name: match[0].replace(/\.+$/, '') }));
+    const named = [...clause.matchAll(pathPattern(path, 'g'))].map(match => ({ at: match.index! + match[1].length, end: match.index! + match[0].length, name: path }));
+    const files = [...[...clause.matchAll(fileToken)].map(match => ({ at: match.index!, end: match.index! + match[0].length, name: match[0].replace(/\.+$/, '') }))
+      .filter(token => !named.some(file => token.at < file.end && file.at < token.end)), ...named];
     for (const verb of clause.matchAll(creationVerb)) {
-      if (negated(clause, verb.index!, verb.index! + verb[0].length)) continue;
       const at = verb.index!, distance = (file: { at: number; end: number }) => file.at >= at ? file.at - at : at - file.end;
       const nearest = files.reduce<(typeof files)[number] | null>((best, file) => !best || distance(file) < distance(best) ? file : best, null);
-      if (nearest?.name === path) return true;
+      if (nearest?.name === path) asked = !negated(clause, files, at, at + verb[0].length);
     }
   }
-  return false;
+  return asked;
 }
 
 /**

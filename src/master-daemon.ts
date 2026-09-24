@@ -9,7 +9,7 @@ import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
+import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
@@ -1679,7 +1679,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<boolean> => {
     if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return false;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return false;
-    const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).includes(path));
+    const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
     if (!paths.length) return false;
     const key = `${scopeKey(item, request)}:finding:${item.policyRevision}`;
     const previous = state.actions[key];

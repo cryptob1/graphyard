@@ -418,6 +418,25 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.ok(work.plannedFiles.includes('src/server/routes/work.ts'));
   assert.match(widened[1].reason, /PRRT_later02/);
 
+  // A path a prefix already in plannedFiles covers is not outstanding: after an operator plans
+  // src/queue/ for half of a refused request, a finding naming only the other half widens it.
+  let partial = await claimed('prefix covers part of the request');
+  await request(partial, { paths: ['src/queue/entry.ts', 'src/cli/queue-status.ts'], reason: 'The reviewer finding names src/cli/queue-status.ts:12' });
+  const partialFindings = [{ ground: 'review thread PRRT_partial03', text: 'src/cli/queue-status.ts:12 still prints the stale count' }];
+  const partialEffects: Partial<DaemonEffects> = { ...overrides, reviewFindings: async () => partialFindings };
+  await cycle(state, partialEffects);
+  partial = await reload(partial.id);
+  assert.equal(partial.scopeRequest!.decision!.state, 'refused', 'no finding names src/queue/entry.ts yet');
+  await ok(master.token, 'POST', `work/${partial.id}/requirements`, { expectedPolicyRevision: partial.policyRevision, criteria: partial.criteria, dependencies: partial.dependencies,
+    plannedFiles: [...partial.plannedFiles, 'src/queue/'], exclusiveResources: partial.exclusiveResources ?? [], producerProofs: partial.producerProofs ?? [], reason: 'The item owns the queue module' });
+  partial = await reload(partial.id);
+  assert.ok(partial.scopeRequest, 'a partly covered request stays open');
+  await cycle(state, partialEffects);
+  partial = await reload(partial.id);
+  assert.deepEqual(widened.at(-1)!.paths, ['src/cli/queue-status.ts'], 'only the uncovered path is widened');
+  assert.ok(partial.plannedFiles.includes('src/cli/queue-status.ts'), `widened: ${partial.plannedFiles}`);
+  assert.equal(partial.scopeRequest, null);
+
   // The reads take seconds. The asking attempt can lose its lease while they run — released, lapsed
   // or overtaken by a new claim — without a new policy revision, so the widening decided on them
   // answers an attempt that no longer stands: it is refused in its own transaction, nothing widens.
@@ -490,6 +509,15 @@ test('unit:review-finding-scope — only a file a finding names literally is gra
     { grounds: [{ path: 'src/not.ts', ground: 'review 12' }] }, 'a file name is not a negation');
   assert.deepEqual(findingScope(['src/missing.ts'], [{ ground: 'review 10', text: 'src/missing.ts is wrong' }, { ground: 'review 11', text: 'create src/missing.ts' }], exists),
     { grounds: [{ path: 'src/missing.ts', ground: 'review 11' }] }, 'the finding that asks for the file is its grounds');
+  // The latest instruction stands: a later trusted comment takes back an earlier creation request, and a later request renews it.
+  assert.match((elsewhere('Please create src/missing.ts for the helper\nOn reflection, do not create src/missing.ts; extend src/merge-queue.ts instead') as { refusal: string }).refusal, /does not ask for it to be created/);
+  assert.deepEqual(elsewhere('Do not create src/missing.ts yet\nNow create src/missing.ts for the helper'), { grounds: [{ path: 'src/missing.ts', ground: 'review 9' }] });
+  // Names the file pattern cannot tokenize — extensionless, dot-prefixed — are still the requested file.
+  const absent = () => false;
+  assert.deepEqual(findingScope(['Dockerfile'], [{ ground: 'review 13', text: 'Create Dockerfile for the runner image' }], absent), { grounds: [{ path: 'Dockerfile', ground: 'review 13' }] });
+  assert.deepEqual(findingScope(['.github/CODEOWNERS'], [{ ground: 'review 14', text: 'Add .github/CODEOWNERS so the reviewer is requested' }], absent), { grounds: [{ path: '.github/CODEOWNERS', ground: 'review 14' }] });
+  assert.match((findingScope(['Dockerfile'], [{ ground: 'review 15', text: 'Do not add Dockerfile here' }], absent) as { refusal: string }).refusal, /does not ask for it to be created/);
+  assert.match((findingScope(['Dockerfile'], [{ ground: 'review 16', text: 'Create src/new-helper.ts; Dockerfile is fine' }], absent) as { refusal: string }).refusal, /does not ask for it to be created/);
 
   // The read: unresolved threads' comments by trusted authors, and the configured reviewer's latest change request on the head only.
   const run = (_command: string, args: string[]) => {
