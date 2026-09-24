@@ -947,3 +947,26 @@ test('a reviewer launching beside the producer pass takes turns with a producer 
     assert.ok(tick.waiting.some(entry => entry.kind === 'review' && /every reviewer profile is busy/.test(entry.reason)), `the review waits on capacity: ${JSON.stringify(tick.waiting)}`);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('a launch takes a turn only on the agent name of the profile it is launching on: a reviewer whose failover profile shares a producer\'s name launches on its own primary without waiting behind that producer launch', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-await-bots-failover-names-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const log: string[] = [], item = requestedWork(), requested = Date.parse(item.autoDispatch!.review!.requestedAt);
+    const base = stubEffects(() => [item], log), started = Date.now(), slow = 600;
+    let reviewedAt = -1, reviewedOn = '';
+    const effects = stubEffects(() => [item], log, {
+      headReviewers: () => new Promise<string[]>(resolve => setTimeout(() => resolve(['chatgpt-codex-connector[bot]']), 20)),
+      launchProducer: async (...args) => { await new Promise(resolve => setTimeout(resolve, slow)); return base.launchProducer(...args); },
+      launchReview: async (...args) => { reviewedAt = Date.now() - started; reviewedOn = args[2].name; return base.launchReview(...args); },
+    });
+    // The reviewer's failover profile shares producer-a's name; its primary has a name of its own.
+    const config = masterConfig(token, { run: { reviewerProfile: 'claude-reviewer' } });
+    config.reviewers.push({ ...config.reviewers[0], name: 'codex-reviewer', agentName: config.producers[0].agentName, kind: 'codex' });
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => requested + 60_000);
+    assert.equal(reviewedOn, 'claude-reviewer', `the reviewer launches on its primary profile: ${JSON.stringify({ log, waiting: tick.waiting })}`);
+    assert.ok(reviewedAt >= 0 && reviewedAt < slow, `the reviewer never waits on the producer launch holding its failover profile's name (${slow}ms): launched at ${reviewedAt}ms`);
+    assert.deepEqual(tick.refused, [], 'nothing is refused');
+    assert.ok(log.some(entry => entry.startsWith('producer:') && entry.endsWith(':producer-a')), `the producer launches on producer-a: ${JSON.stringify(log)}`);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

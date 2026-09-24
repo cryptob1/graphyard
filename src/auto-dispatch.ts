@@ -651,15 +651,32 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   let reviewTurn: Promise<unknown> = Promise.resolve();
   // A reviewer launching beside the producer pass must still never take a Herdr name a producer
   // launch is taking: both read the tick's inventory, and a name joins it only once its launch
-  // returns. A launch holds the agent names of every profile it may fail over to until its name is
-  // in the inventory; a launch sharing none of them never waits on it.
+  // returns. A launch holds the agent name of the one profile it is launching on until that name is
+  // in the inventory, and takes a failover profile's name only when failover reaches it, so a launch
+  // never waits on a name it would not have used.
   const nameTurns = new Map<string, Promise<unknown>>();
-  const reserveNames = <T>(profiles: readonly { agentName: string }[], launch: () => Promise<T>): Promise<T> => {
-    const names = [...new Set(profiles.map(profile => profile.agentName))];
-    const turn = Promise.all(names.map(name => nameTurns.get(name))).then(launch);
-    const held = turn.catch(() => { /* the launcher sees the failure */ });
-    for (const name of names) nameTurns.set(name, held);
+  const reserveName = <T>(name: string, launch: () => Promise<T>): Promise<T> => {
+    const turn = (nameTurns.get(name) ?? Promise.resolve()).then(launch);
+    nameTurns.set(name, turn.catch(() => { /* the launcher sees the failure */ }));
     return turn;
+  };
+  // Launch over `profiles` in order, each in its own name's turn. Room is read again once the name
+  // is this launch's: the launch it waited on may have just taken the last slot of that name, and a
+  // profile left without room is passed over like one without quota. A launch every profile of which
+  // lost its room meanwhile is a capacity wait (null), not a failure.
+  const launchInTurns = async <P extends ReviewerProfile | ProducerProfile>(request: DispatchRequest, profiles: P[], hasRoom: (profile: P) => boolean, launch: (profile: P) => Promise<unknown>, exhausted?: (profile: P, exit: InstantExit) => Promise<string>) => {
+    let passed = 0;
+    try {
+      return await launchWithFailover(profiles, profile => reserveName(profile.agentName, async () => {
+        if (!hasRoom(profile)) { passed++; throw Object.assign(new Error(`${profile.agentName} has no free slot`), { accountsExhausted: true, capacityExhausted: true }); }
+        const result = await launch(profile);
+        started.push({ name: launchedName(profile, request, result) });
+        return result;
+      }), exhausted);
+    } catch (error) {
+      if (passed === profiles.length && (error as { accountsExhausted?: boolean })?.accountsExhausted) return null;
+      throw error;
+    }
   };
   const inReviewTurn = (item: Work, review: DispatchRequest) => {
     const turn = reviewTurn.then(() => dispatchReview(item, review));
@@ -684,15 +701,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
       else {
         try {
-          // Room is read again once the names are this launch's: the launch it waited on may have
-          // just taken the last slot of a name they share, which is a capacity wait, not a failure.
-          const launched = await reserveNames(candidates, async () => {
-            const order = withRoom();
-            if (!order.length) return null;
-            const launched = await launchWithFailover(order, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
-            started.push({ name: launchedName(launched.profile, review, launched.result) });
-            return launched;
-          });
+          const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
           if (!launched) busy();
           else {
             delete cursor.failures[review.id]; delete cursor.capacity.review;
@@ -732,14 +741,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
           : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
         if (!usable().length) { busy(); continue; }
         try {
-          // As for a reviewer: room is read again once the names are this launch's.
-          const launched = await reserveNames(available, async () => {
-            const order = usable();
-            if (!order.length) return null;
-            const launched = await launchWithFailover(order, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
-            started.push({ name: launchedName(launched.profile, request, launched.result) });
-            return launched;
-          });
+          const launched = await launchInTurns(request, usable(), profile => room(profile, producers).free > 0, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
           if (!launched) busy();
           else {
             delete cursor.failures[request.id]; delete cursor.capacity.producer;
