@@ -6,6 +6,7 @@ import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { agentOwner, assertMergeCandidate, buildMasterStatus, mergeWork } from '../src/master.js';
 import { nameUnresolvedThreads, queueRef } from '../src/merge-queue.js';
+import { routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
 
 // GY-139. Each test is named for the proof it produces: integration:unresolved-threads-fail-merge-gate,
 // unit:unresolved-threads-surfaced, integration:blocked-merge-refused-before-execution.
@@ -192,4 +193,19 @@ test('integration:blocked-merge-refused-before-execution — master merge refuse
     assert.equal(record.mergeExecution, null, 'no merge execution is recorded');
     assert.throws(() => assertMergeCandidate(record, new Date().toISOString(), 'graphyard-master#interactive'), /conversation resolution and 1 review thread is unresolved/);
   }
+});
+
+test('the loop requests thread rework only after the current head\'s review settled without resolving the threads', () => {
+  const now = new Date('2026-09-24T06:00:00Z');
+  const thread = { author: reviewer, path: 'src/claims.ts', line: 42, outdated: false };
+  const item = (reviews: Observation['reviews'], sessions: unknown[] = []) => ({ ...candidate({ ...observation([thread], now), reviews }), sessions } as unknown as Work);
+  const decide = (work: Work) => routineDecision(work, { autoMerge: true }, now.getTime())?.action ?? null;
+  const approvedAt = (ms: number) => [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 7, submittedAt: new Date(now.getTime() - ms).toISOString() }];
+  const running = { id: 'r-1', kind: 'review', state: 'running', head, principal: 'reviewer', runtime: 'claude', host: 'h', subject: 'review', startedAt: now.toISOString(), updatedAt: now.toISOString(), endedAt: null, outcome: null };
+  assert.equal(decide(item([])), null, 'no review of this head yet: the reviewer judges the threads first');
+  assert.equal(decide(item([{ reviewer: 'chatgpt-codex-connector[bot]', sha: head, state: 'COMMENTED', id: 8 }])), null, 'a bot comment is not the review');
+  assert.equal(decide(item(approvedAt(threadResolutionGraceMs * 2), [running])), null, 'a review session for this head is still running');
+  assert.equal(decide(item(approvedAt(60_000))), null, 'approved moments ago: the loop is still resolving the threads it named');
+  assert.equal(decide(item(approvedAt(threadResolutionGraceMs + 1))), 'rework', 'approved and the threads still stand');
+  assert.equal(decide({ ...item([]), policy: { checks: ['test'], review: false } } as Work), 'rework', 'no review policy: nothing else judges the threads');
 });

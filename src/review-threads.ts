@@ -67,6 +67,12 @@ export function parseResolvedThreads(body: unknown): string[] {
 /** Whether a verdict carries a `Resolved threads:` line at all; `Resolved threads: none` names nothing, explicitly. */
 export const hasResolvedThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^resolved threads:/i.test(entry.trim()));
 
+/**
+ * When launch prompts began listing thread IDs (dabdf14e, live in the loop from this instant). A
+ * session launched earlier was never shown the threads, so its approval vouches for none of them.
+ */
+export const threadAwarePromptSince = Date.parse('2026-09-24T04:32:57Z');
+
 /** `implicit`: the approval had no `Resolved threads:` line, so it vouches for every thread its launch prompt listed. */
 export interface ThreadResolution { at: string; reviewId: number; named: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; implicit?: boolean }
 
@@ -79,8 +85,9 @@ export interface ThreadResolution { at: string; reviewId: number; named: string[
  * because that prompt made any unfixed or unverified thread a REQUEST_CHANGES: on 2026-09-24 GY-159's
  * reviewer approved a head that fixed all eight listed threads but omitted the line, nothing was
  * resolved, and the merge sat behind conversation resolution. `listed` names the prompt's threads;
- * a record from before it was kept falls back to the threads opened before `launchedAt`. Neither is
- * passed when the launch could not read the threads, so that prompt vouches for nothing.
+ * a record from before it was kept falls back to the threads opened before `launchedAt`, but only
+ * when that launch came after `threadAwarePromptSince`. Neither is passed when the launch could not
+ * read the threads, so that prompt vouches for nothing.
  */
 export async function resolveNamedThreads(input: { repository: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: ThreadResolution; listed?: string[]; launchedAt?: string }, run: ChildRun, now: Date): Promise<ThreadResolution> {
   const attempts = (input.previous?.attempts ?? 0) + 1;
@@ -90,7 +97,7 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
   catch (error) { return { ...base, named: [], resolved: [], refused: [], failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
   if (review?.state !== 'APPROVED' || review?.commit_id !== input.sha || String(review?.user?.login).toLowerCase() !== input.reviewer.toLowerCase())
     return { ...base, named: [], resolved: [], refused: [], failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
-  const implicit = !hasResolvedThreadsLine(review.body) && (!!input.listed || !!input.launchedAt);
+  const implicit = !hasResolvedThreadsLine(review.body) && (!!input.listed || Date.parse(input.launchedAt ?? '') >= threadAwarePromptSince);
   let named = parseResolvedThreads(review.body);
   if (!named.length && !implicit) return { ...base, named, resolved: [], refused: [] };
   let open: LaunchThread[];

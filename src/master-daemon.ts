@@ -724,10 +724,32 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: work.candidate!.sha };
   // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
   // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a human.
-  const threads = !work.reworkRequested && work.candidate ? unresolvedThreadRefusal(work) : null;
+  // The review of the current head judges those threads first: its approval names the ones fixed and
+  // the loop resolves them, so a rework requested before it settles invalidated the review that
+  // would have cleared them, and the same open threads carried to the next head — without end.
+  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? unresolvedThreadRefusal(work) : null;
   if (threads) return { action: 'rework', reason: `${work.key}: ${threads}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`, binding: work.candidate!.sha };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/** How long after an approval of the current head the loop's thread resolution is waited for. */
+export const threadResolutionGraceMs = 300_000;
+/**
+ * Whether unresolved threads still wait on the current head's review rather than on a worker: a
+ * reviewed item's review session for this head is still running, no reviewer has yet approved or
+ * refused this head (the reviewer answers every listed thread with one or the other; a refusal is a
+ * standing verdict), or it approved within the grace the loop takes to resolve the threads it named.
+ */
+export function threadsAwaitReview(work: Work, observedAt: number): boolean {
+  if (!work.policy.review || !work.candidate) return false;
+  const sha = work.candidate.sha, observation = work.observation;
+  if (work.sessions?.some(session => session.kind === 'review' && session.state === 'running' && session.head === sha)) return true;
+  const judged = (observation?.reviews ?? []).filter(review => review.sha === sha && (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED'));
+  const agent = observation?.agentReview?.sha === sha && (observation.agentReview.approved || observation.agentReview.verdict === 'changes-requested') ? observation.agentReview : null;
+  if (!judged.length && !agent) return true;
+  const approvedAt = Math.max(...judged.filter(review => review.state === 'APPROVED').map(review => Date.parse(review.submittedAt ?? '')).filter(Number.isFinite),
+    ...(agent?.approved ? [Date.parse(agent.completedAt ?? '')].filter(Number.isFinite) : []));
+  return Number.isFinite(approvedAt) && !(observedAt - approvedAt >= threadResolutionGraceMs);
 }
 /**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`

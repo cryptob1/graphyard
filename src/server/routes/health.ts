@@ -18,7 +18,8 @@ import { defineRoutes } from '../routes.js';
  * The plain endpoint still answers 200 for that verdict: it is the liveness and readiness probe of
  * the Helm chart and Railway, and restarting a plane, or pulling it from its Service, would not give
  * back a spent budget or a full volume — it would only take away the API the operator recovers
- * through. It fails (500) when the process cannot reach its database at all. `/healthz?strict`
+ * through. It fails (500) when the process cannot reach its database at all, including when a
+ * connection hangs past the bound without the pool being full. `/healthz?strict`
  * answers 503 whenever the verdict is unhealthy, for a monitor that alerts on the status alone.
  */
 /** How long the health probe waits for its resource checks before answering alive without them. */
@@ -28,7 +29,11 @@ export const healthRoutes = defineRoutes('health', [
     const pool = services.engine.store.pool;
     // Even the reachability probe is bounded: on a fresh process the reconciliation step can hold
     // every pooled connection for minutes, and an unbounded SELECT 1 then fails the deploy's health check.
+    // Only a probe queued behind a full pool is that busy pool: one that held or was opening a
+    // connection when the bound passed met a database that did not answer — a blackholed network
+    // hangs rather than refusing — and that is a database the process cannot reach.
     const reachable = await Promise.race([pool.query('SELECT 1').then(() => true), new Promise<false>(resolve => setTimeout(() => resolve(false), healthCheckWaitMs).unref())]);
+    if (!reachable && !(Number(pool.waitingCount) > 0)) throw new Error(`database probe did not finish within ${healthCheckWaitMs} ms and was not waiting for a pooled connection; the database is unreachable`);
     if (!reachable) return { ok: true, healthy: true, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued

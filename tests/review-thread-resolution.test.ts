@@ -171,3 +171,17 @@ test('unit:threads-listed-resolution — a settlement that named nothing before 
     assert.equal(gh.calls.length, before, 'judged once');
   } finally { await cleanup(); }
 });
+
+test('unit:threads-listed-resolution — a session launched before prompts listed threads vouches for none of them', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    const gh = github({ body: 'All listed findings are fixed at this head.' });
+    // Launched before dabdf14e: the reviewer was never shown the thread IDs or findings.
+    await updateReviewLedger(root, ledger => { const { threadsListed: _listed, ...record } = ledger.reviews[0]; ledger.reviews[0] = { ...record, requestedAt: '2026-09-24T04:00:00.000Z', state: 'completed', verdict: verdict() as any,
+      threadResolution: { at: new Date().toISOString(), reviewId: 77, named: [], resolved: [], refused: [], attempts: 1 } }; });
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+    assert.deepEqual(gh.resolved, []);
+    assert.equal(settled.reviews[0].threadResolution?.implicit, false);
+  } finally { await cleanup(); }
+});
