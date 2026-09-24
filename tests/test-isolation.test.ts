@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
-import { bindEvidence, leaseCommands } from '../src/cli/lease.js';
+import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
 import { ensureWorktreeDependencies, installMatchesLockfile } from '../src/repository-setup.js';
 import { installUnderLease } from '../src/cli/workspace.js';
@@ -159,6 +159,13 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     const brief = (cwd: string) => new Promise<void>(done => setTimeout(done, 70));
     assert.equal((await installUnderLease(worktree, async () => { kept++; }, 'GY-1 epoch 1', { install: brief, intervalMs: 20 })).state, 'installed');
     assert.ok(kept >= 1, 'accepted heartbeats keep the install going');
+    // A heartbeat still in flight when the install finishes is awaited: refused, it fails the call.
+    let late = 0;
+    const quick = (cwd: string) => new Promise<void>(done => setTimeout(done, 30));
+    const refusedLate = () => { late++; return new Promise((_, fail) => setTimeout(() => fail(new Error('Lease epoch is superseded')), 60)); };
+    await assert.rejects(installUnderLease(worktree, refusedLate, 'GY-1 epoch 1', { install: quick, intervalMs: 20 }),
+      /lease heartbeat for GY-1 epoch 1 was refused while installing dependencies, so the install was stopped: Lease epoch is superseded/);
+    assert.equal(late, 1, 'renewals run one at a time: none starts while one is in flight');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -217,19 +224,43 @@ test('an ordinary case of the same file', () => { writeFileSync(${JSON.stringify
 
 test('unit:proof-and-cli-self-sufficient graphyard evidence fills sha, baseSha and policyRevision from the current candidate when omitted', async () => {
   const sha = 'a'.repeat(40), baseSha = 'b'.repeat(40), work = { id: 'work-1', key: 'GY-1', candidate: { sha, baseSha }, policyRevision: 4 };
-  assert.deepEqual(bindEvidence({ proof: 'unit:x', result: 'pass', executed: 3, skipped: 0 }, work), { proof: 'unit:x', result: 'pass', executed: 3, skipped: 0, sha, baseSha, policyRevision: 4 });
+  const request = { source: 'the producer request for GY-1', sha, baseSha, policyRevision: 4 }, checkout = { source: 'the checkout HEAD', sha };
+  const bare = { proof: 'unit:x', result: 'pass', executed: 3, skipped: 0 };
+  assert.deepEqual(bindEvidence(bare, work, request), { ...bare, sha, baseSha, policyRevision: 4 });
+  assert.deepEqual(bindEvidence(bare, work, checkout), { ...bare, sha, baseSha, policyRevision: 4 }, 'a checkout at the current head binds to it');
   const explicit = { proof: 'unit:x', sha: 'c'.repeat(40), baseSha: 'd'.repeat(40), policyRevision: 2 };
-  assert.deepEqual(bindEvidence(explicit, work), explicit, 'values the file carries are sent as written');
-  assert.throws(() => bindEvidence({ proof: 'unit:x' }, { key: 'GY-1', candidate: null, policyRevision: 1 }), /GY-1 has no observed candidate yet/);
+  assert.deepEqual(bindEvidence(explicit, work, null), explicit, 'values the file carries are sent as written');
+  assert.throws(() => bindEvidence({ proof: 'unit:x' }, { key: 'GY-1', candidate: null, policyRevision: 1 }, request), /GY-1 has no observed candidate yet/);
+  // A candidate that moved after the run is never stamped onto the evidence.
+  const moved = 'e'.repeat(40);
+  assert.throws(() => bindEvidence(bare, { ...work, candidate: { sha: moved, baseSha } }, request), /current sha is e{40}, but the evidence was produced for a{40} \(the producer request for GY-1\); the candidate moved after the run/);
+  assert.throws(() => bindEvidence(bare, { ...work, candidate: { sha: moved, baseSha } }, checkout), /produced for a{40} \(the checkout HEAD\)/);
+  assert.throws(() => bindEvidence(bare, { ...work, candidate: { sha, baseSha: moved } }, request), /current baseSha is e{40}/);
+  assert.throws(() => bindEvidence(bare, { ...work, policyRevision: 5 }, request), /current policyRevision is 5, but the evidence was produced for 4/);
+  assert.throws(() => bindEvidence({ ...bare, sha: moved }, work, checkout), /produced for e{40} \(the evidence file\)/, 'the others are not defaulted beside a sha the candidate no longer is');
+  assert.throws(() => bindEvidence(bare, work, null), /Nothing records which head this evidence tested/);
+  // The binding comes from the producer request the session was launched with, else the checkout's HEAD.
+  assert.deepEqual(testedBinding('GY-1', { GRAPHYARD_PRODUCER_BINDING: `GY-1@${sha}@${baseSha}@4` }), request);
+  const repo = await scratch('tested');
+  try {
+    assert.equal(testedBinding('GY-1', {}, repo), null, 'no checkout, no binding');
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    git('init', '-q'); git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x');
+    assert.deepEqual(testedBinding('GY-1', { GRAPHYARD_PRODUCER_BINDING: `GY-2@${sha}@${baseSha}@4` }, repo), { source: `the checkout HEAD in ${repo}`, sha: git('rev-parse', 'HEAD') }, 'another item\'s request does not bind this one');
+  } finally { await rm(repo, { recursive: true, force: true }); }
 
-  const file = join(await scratch('evidence'), 'evidence.json');
+  const file = join(await scratch('evidence'), 'evidence.json'), saved = process.env.GRAPHYARD_PRODUCER_BINDING;
   try {
     await writeFile(file, JSON.stringify({ proof: 'unit:x', result: 'pass', executed: 1, skipped: 0 }));
     const sent: { path: string; data: unknown }[] = [];
     const command = leaseCommands.find(entry => entry.name === 'evidence')!;
+    process.env.GRAPHYARD_PRODUCER_BINDING = `GY-1@${sha}@${baseSha}@4`;
     await command.run({ args: [file], api: async (path: string, data: unknown) => { sent.push({ path, data }); return { ok: true }; }, print: () => {} } as any, work);
     assert.deepEqual(sent, [{ path: 'work/work-1/evidence', data: { proof: 'unit:x', result: 'pass', executed: 1, skipped: 0, sha, baseSha, policyRevision: 4 } }]);
-  } finally { await rm(join(file, '..'), { recursive: true, force: true }); }
+  } finally {
+    if (saved === undefined) delete process.env.GRAPHYARD_PRODUCER_BINDING; else process.env.GRAPHYARD_PRODUCER_BINDING = saved;
+    await rm(join(file, '..'), { recursive: true, force: true });
+  }
 });
 
 test('unit:proof-and-cli-self-sufficient graphyard complete refused during a GitHub request pause waits for the named reset and submits again, bounded', async () => {
