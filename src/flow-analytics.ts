@@ -212,13 +212,16 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   // different reason (protection, then freshness) is a new durable fact, so refusal history
   // never keeps reporting a reason the evaluator has already replaced.
   const reasons = (firstUnmet?.reasons ?? []).slice(0, 5);
-  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0, firstUnmet?.name ?? null, reasons]);
+  // A pending rework sends the work back to its builder (the dashboard's Build step) whichever gate
+  // refuses first; it joins the identity only while set, so facts recorded before it keep their key.
+  const reworkRequested = !!work.reworkRequested;
+  const gateKey = JSON.stringify([work.stage, unmet, dependencyWaiting, !!work.candidate, blocker, !!work.ready, work.violations?.length ?? 0, queued, mergeBlockers > 0, firstUnmet?.name ?? null, reasons, ...(reworkRequested ? ['rework'] : [])]);
   if (gateKey !== state.gateKey)
     push('gates.changed', recordedAt, 'graphyard', String(sourceEvent), {
       stage: work.stage, unmet, firstUnmet: firstUnmet?.name ?? null, firstUnmetReason: firstUnmet?.reasons[0] ?? null,
       reasons, dependencyWaiting, hasCandidate: !!work.candidate,
       released: !!work.ready, blocker, violations: work.violations?.length ?? 0, pr: work.candidate?.pr ?? null,
-      queued, mergeBlockers,
+      queued, mergeBlockers, reworkRequested,
     });
 
   state.created = true;
@@ -987,9 +990,9 @@ const gateStep: [string, FlowStep][] = [['build', 'validate'], ['test', 'test'],
  * dashboard shows blocked work at Build); Build until the work is handed in, which is exactly when
  * the build gate refuses with "Worker has not submitted implementation for this attempt" (read
  * from the recorded reasons when the build gate refuses first, otherwise from whether a pull
- * request was seen); then the first step in travel order whose gate refuses — Test before
- * Review, unlike the evaluation order the stage follows — and Merge when none does; Deploy once
- * it merged.
+ * request was seen) and while a rework or a change request is pending (`reworkRequested`); then
+ * the first step in travel order whose gate refuses — Test before Review, unlike the evaluation
+ * order the stage follows — and Merge when none does; Deploy once it merged.
  */
 export function gateFactStep(details: Record<string, any>): FlowStep | null {
   if (details.stage === 'done') return 'deploy';
@@ -999,7 +1002,9 @@ export function gateFactStep(details: Record<string, any>): FlowStep | null {
   const building = !unmet.includes('build') ? false : details.firstUnmet === 'build'
     ? (details.reasons ?? []).includes('Worker has not submitted implementation for this attempt') : !details.hasCandidate;
   if (building) return 'build';
-  // A change request sends the work back to its builder: it waits at Build, not at Review.
+  // A requested rework or a change request sends the work back to its builder: it waits at Build,
+  // not at the step whose gate refuses first (`prSteps` reads `reworkRequested` the same way).
+  if (details.reworkRequested) return 'build';
   if ((details.reasons ?? []).some((reason: string) => reason.startsWith('Outstanding change requests'))) return 'build';
   return gateStep.find(([gate]) => unmet.includes(gate))?.[1] ?? 'merge';
 }
@@ -1192,21 +1197,43 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
       row(fact.workKey, String(fact.details.reviewState), fact.observedAt, null, null, fact.details.sha ?? null, `independent=${fact.details.independent}; timestamp=${fact.details.timestampSource}`);
   } else if (metric === 'steps') {
     // Each item's moves between the seven pull-request steps (`stepMoves`). `key`, when given, is
-    // an instant: moves before it are left out.
-    for (const item of scoped)
+    // an instant (moves before it are left out) and/or `after:<work key>`, the page cursor: only
+    // items ordered after that key (see `next` below).
+    const { since, after } = stepsKey(key);
+    for (const item of scoped.filter(item => after === null || workKeyOrder(item.key) > workKeyOrder(after)))
       for (const move of stepMoves(dataset, item, report.productionEnvironment))
-        if (!move.carried && (!key || time(move.at)! >= (time(key) ?? -Infinity)))
+        if (!move.carried && time(move.at)! >= since)
           row(item.key, move.to ?? 'outside', move.at, null, move.pr, null, `${move.from ?? 'outside'} to ${move.to ?? 'outside'}`);
   } else if (metric === 'blockers') {
     // The aggregate keys on the bounded reason label; the drill-down must match the same label.
     for (const fact of dataset.facts.filter(fact => fact.kind === 'blocker.set' && scopedIds.has(fact.workId) && (!key || blockerReasonKey(fact) === key)))
       row(fact.workKey, blockerReasonKey(fact) ?? 'blocker', fact.observedAt, null, null, null, String(fact.details.reason ?? ''));
   } else {
-    return { metric, key, supported: drilldownMetrics, error: `Unknown drill-down metric; choose one of ${drilldownMetrics.join(', ')}`, columns, rows: [], total: 0, truncated: false };
+    return { metric, key, supported: drilldownMetrics, error: `Unknown drill-down metric; choose one of ${drilldownMetrics.join(', ')}`, columns, rows: [], total: 0, truncated: false, next: null };
   }
-  const order = (value: Record<string, any>) => `${String(value.workKey).replace(/\d+/, match => match.padStart(8, '0'))}|${value.bucket ?? ''}|${value.observedAt ?? ''}|${value.commit ?? ''}|${value.detail}`;
+  const order = (value: Record<string, any>) => `${workKeyOrder(String(value.workKey))}|${value.bucket ?? ''}|${value.observedAt ?? ''}|${value.commit ?? ''}|${value.detail}`;
   rows.sort((left, right) => order(left).localeCompare(order(right)));
-  return { metric, key, supported: drilldownMetrics, columns, total: rows.length, truncated: rows.length > flowLimits.drilldown, rows: rows.slice(0, flowLimits.drilldown), authorized };
+  let page = rows.slice(0, flowLimits.drilldown);
+  const truncated = rows.length > flowLimits.drilldown;
+  // A steps page holds whole items: an item cut at the bound moves to the next page (unless it is
+  // the page's only item), so no reader takes an item's partial history for all of it. `next` is
+  // the cursor for that page, `after:<the last item on this one>`.
+  if (metric === 'steps' && truncated) {
+    const cut = page.at(-1)!.workKey;
+    if (rows[flowLimits.drilldown].workKey === cut && page.some(entry => entry.workKey !== cut)) page = page.filter(entry => entry.workKey !== cut);
+  }
+  const next = metric === 'steps' && truncated ? `${stepsKey(key).instant ?? ''} after:${page.at(-1)!.workKey}`.trim() : null;
+  return { metric, key, supported: drilldownMetrics, columns, total: rows.length, truncated, next, rows: page, authorized };
+}
+
+/** A work key in the drill-down's row order: its number padded, so GY-9 sorts before GY-10. */
+const workKeyOrder = (key: string) => key.replace(/\d+/, match => match.padStart(8, '0'));
+/** The steps drill-down's `key`: an optional instant and an optional `after:<work key>` page cursor. */
+function stepsKey(key: string | null) {
+  const tokens = (key ?? '').trim().split(/\s+/).filter(Boolean);
+  const after = tokens.find(token => token.startsWith('after:'))?.slice('after:'.length) || null;
+  const instant = tokens.find(token => !token.startsWith('after:')) ?? null;
+  return { instant, after, since: instant === null ? -Infinity : time(instant) ?? -Infinity };
 }
 
 function csvCell(value: unknown) {

@@ -22,7 +22,7 @@ Each running row offers two commands:
 
 ## The status sentence
 
-Moving rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** from the gates (`web/pr-steps.ts`), the current one in plain words. A merged item is **Shipped**: *Merged*, then *Live* (counted this week) once production serves it; a pending post-deployment check, or production seen not serving it, keeps it at Deploy. An item page opens on its state, why, who acts next and its pull request. Moving and Blocked rows time their step; past thirty minutes it reads `1h 12m overdue`.
+Moving rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** from the gates (`web/pr-steps.ts`), the current one in plain words. A merged item is **Shipped**: *Merged*, then *Live* (counted this week) once production serves it; a pending post-deployment check, or watched production not serving it, keeps it at Deploy. An item page opens on its state, why, who acts next and its pull request. Moving and Blocked rows time their step; past thirty minutes it reads `1h 12m overdue`.
 
 ## Insights
 

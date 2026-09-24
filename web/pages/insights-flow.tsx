@@ -4,6 +4,7 @@ import { releaseView } from '../release';
 import { prSteps, stepIds, stepLabel, type StepId } from '../pr-steps';
 import { positionsAt, replayFrames, replaySeconds, replayWindowMs, transitionsFromRows, type ReplayFrame } from '../flow-replay';
 import { formatDuration } from '../duration';
+import { readStepRows } from '../step-moves';
 import type { Dashboard } from './dashboard';
 
 const column = (step: StepId) => `${(stepIds.indexOf(step) + 0.5) / stepIds.length * 100}%`;
@@ -12,14 +13,14 @@ const minutes = (ms: number | null | undefined) => ms === null || ms === undefin
 
 /**
  * What the Flow panel reads from the control plane: the flow report and the replay frames of the
- * last day's recorded step moves. Tolerant of what a real board returns — a report without step
+ * last day's recorded step moves, read page by page (`readStepRows`). Tolerant of what a real board returns — a report without step
  * or throughput figures, a drill-down without rows — so an item with no observation, reviews or
  * candidate never stops the panel (GY-161, AC-12).
  */
 export async function readFlow(api: Dashboard['api'], now: number) {
   const since = new Date(now - replayWindowMs).toISOString();
-  const [flow, rows] = await Promise.all([api('analytics/flow?window=7'), api(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(since)}`)]);
-  return { report: flow ?? null, frames: replayFrames(transitionsFromRows(Array.isArray(rows?.rows) ? rows.rows : []), now), truncated: !!rows?.truncated };
+  const [flow, moves] = await Promise.all([api('analytics/flow?window=7'), readStepRows(api, since)]);
+  return { report: flow ?? null, frames: replayFrames(transitionsFromRows(moves.rows), now), truncated: !moves.complete };
 }
 
 /**

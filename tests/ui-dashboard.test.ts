@@ -22,6 +22,7 @@ import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
 import InsightsFlow, { ReplayLane, readFlow } from '../web/pages/insights-flow.js';
+import { readStepRows } from '../web/step-moves.js';
 import Sidebar from '../web/components/sidebar.js';
 import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
@@ -396,8 +397,9 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   assert.ok(recent.rows.length < recorded.rows.length && recent.rows.every(row => Date.parse(row.observedAt!) >= Date.parse(since)), 'the key leaves out moves before the instant');
   // The page reads exactly that recorded history, and the Now view places each open item at its true step.
   const source = await read('web/pages/insights-flow.tsx');
-  assert.match(source, /analytics\/flow\/drilldown\?window=7&metric=steps&key=/);
-  assert.match(source, /replayFrames\(transitionsFromRows\(Array\.isArray\(rows\?\.rows\) \? rows\.rows : \[\]\), now\)/);
+  assert.match(source, /readStepRows\(api, since\)/);
+  assert.match(await read('web/step-moves.ts'), /analytics\/flow\/drilldown\?window=7&metric=steps\$\{key \? `&key=\$\{encodeURIComponent\(key\)\}` : ''\}/);
+  assert.match(source, /replayFrames\(transitionsFromRows\(moves\.rows\), now\)/);
   assert.match(source, /analytics\/flow\?window=7/); assert.match(source, /report\?\.throughput/); assert.match(source, /report\?\.stepDwell/); assert.doesNotMatch(source, /stageDwell|stageStep/);
   const page = markup(createElement(InsightsFlow, dashboard()));
   for (const text of ['Now', 'Last 24 hours, replayed', 'Landed on main per day', 'Where the time goes']) assert.ok(page.includes(text), text);
@@ -826,3 +828,75 @@ test('GY-161 review: where the production watch observes production, a merge wai
   }
 });
 
+
+test('GY-161 review: a check fails on the latest trusted run across Apps; closed work has no step; a pending rework replays at Build; step moves are read page by page; a merge after the watch\'s last pass waits at Deploy', async () => {
+  // The latest run across every trusted App decides, as the test gate's `latestCheck` does: an
+  // older pending run from one App never hides a newer failure from another.
+  const handedIn = find('GY-22');
+  const ci = 'Required CI check test has not passed on the current candidate';
+  const withChecks = (checks: unknown[]) => ({ ...handedIn, observation: { ...handedIn.observation!, checks }, gates: handedIn.gates.map(gate => gate.name === 'test' ? { ...gate, passed: false, reasons: [ci] } : gate) }) as Work;
+  const trusted = { ...noRelease, ciAppIds: [1, 15368] };
+  const newerFailure = withChecks([{ id: 1, name: 'test', result: 'in_progress', appId: 1 }, { id: 2, name: 'test', result: 'failure', appId: 15368 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }]);
+  assert.equal(checkStates(newerFailure, trusted.ciAppIds).find(check => check.name === 'test')!.state, 'failed');
+  const failedSteps = prSteps(newerFailure, NOW, trusted);
+  assert.equal(failedSteps.current, 'test'); assert.equal(failedSteps.label, 'Testing · the check test failed'); assert.equal(failedSteps.who, 'Builder agent');
+  const newerPending = withChecks([{ id: 1, name: 'test', result: 'failure', appId: 1 }, { id: 2, name: 'test', result: 'queued', appId: 15368 }]);
+  assert.equal(checkStates(newerPending, trusted.ciAppIds).find(check => check.name === 'test')!.state, 'running', 'a newer re-run replaces the older failure');
+
+  // Closed without merging: no step done or current, never "Merged", nobody acts, no step bar.
+  const closed = { ...handedIn, stage: 'done', delivery: undefined, closure: { kind: 'obsolete', ref: null, reason: 'No longer needed', by: 'operator', at: new Date(NOW - hour).toISOString(), from: 'review' } } as unknown as Work;
+  const closedSteps = prSteps(closed, NOW);
+  assert.equal(closedSteps.current, null); assert.ok(closedSteps.steps.every(step => step.state === 'pending'));
+  assert.doesNotMatch(closedSteps.label, /Merged|Live/);
+  assert.equal(groupOf(closed, NOW), null);
+  assert.doesNotMatch(nextActor(closed, null, NOW).who, /merged/);
+  const closedPage = firstScreen(markup(createElement(WorkDetails, { ...dashboard({ work: [...board().filter(item => item.id !== closed.id), closed] }), item: closed })));
+  assert.doesNotMatch(closedPage, /class="steps-detail"/); assert.doesNotMatch(closedPage, /Merged/); assert.match(closedPage, /Closed as obsolete/);
+
+  // A pending rework puts the recorded gate fact at Build whichever gate refuses first, as prSteps does.
+  const rework = { stage: 'build', unmet: ['ready', 'build', 'review'], firstUnmet: 'ready', reasons: ['Lease expired'], hasCandidate: true };
+  assert.equal(gateFactStep(rework), 'validate', 'without the rework the build gate reads as Validate');
+  assert.equal(gateFactStep({ ...rework, reworkRequested: true }), 'build');
+  const sentBack = { ...handedIn, reworkRequested: true, gates: handedIn.gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons: ['Lease expired'] } : gate) } as Work;
+  assert.equal(prSteps(sentBack, NOW).current, 'build');
+  const sentBackRows = flowApi([...board().filter(item => item.id !== sentBack.id), sentBack])('analytics/flow/drilldown?window=7&metric=steps') as { rows: { workKey: string; observedAt: string | null; detail: string }[] };
+  assert.equal(positionsAt(replayFrames(transitionsFromRows(sentBackRows.rows), NOW, 60 * 24 * hour), 1).get(sentBack.key)?.step, 'build', 'the replay ends where the live step is');
+
+  // More recorded moves than one drill-down page: every page holds whole items and names the next,
+  // and the dashboard's reader follows them to the whole history.
+  const many = Array.from({ length: 60 }, (_, index) => board().filter(item => item.stage !== 'backlog').map(item => ({ ...item, id: `${item.id}-${index}`, key: `GY-${1000 + index * 40 + Number(item.key.slice(3))}` }))).flat() as Work[];
+  const manyApi = flowApi(many);
+  const first = manyApi('analytics/flow/drilldown?window=7&metric=steps') as { rows: { workKey: string; observedAt: string | null; detail: string }[]; truncated: boolean; next: string | null; total: number };
+  assert.ok(first.truncated && first.total > 400, `${first.total} rows span several pages`);
+  const second = manyApi(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(first.next!)}`) as typeof first;
+  const firstKeys = new Set(first.rows.map(row => row.workKey));
+  assert.ok(second.rows.every(row => !firstKeys.has(row.workKey)), 'no item is split across pages');
+  const whole = await readStepRows(async (path: string) => manyApi(path));
+  assert.equal(whole.complete, true); assert.equal(whole.rows.length, first.total);
+  // An instant and the cursor combine: the replay's last day, still whole.
+  const since = new Date(NOW - 24 * hour).toISOString();
+  const recent = await readStepRows(async (path: string) => manyApi(path), since);
+  assert.equal(recent.complete, true);
+  assert.equal(recent.rows.length, (manyApi(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(since)}`) as typeof first).total);
+  assert.ok(recent.rows.every(row => Date.parse(row.observedAt!) >= Date.parse(since)));
+  // A control plane that stops naming pages leaves the answer marked incomplete, never taken as whole.
+  const stuck = await readStepRows(async () => ({ rows: first.rows, truncated: true, next: null }));
+  assert.equal(stuck.complete, false);
+  assert.match(await read('web/step-moves.ts'), /readStepRows\(api\)/);
+  assert.match(await read('web/pages/insights-flow.tsx'), /readStepRows\(api, since\)/);
+
+  // Where the production watch observes production, a merge after its last pass has not been
+  // looked for yet: it waits at Deploy until a live observation is recorded. Older merges the
+  // watch does not list (outside its window) and boards with no watch stay Shipped (AC-11).
+  const [merged] = realDeliveredWork() as unknown as Work[];
+  const lastPass = NOW - 10 * 60_000;
+  const watch = releaseView({ ...boardStatus('admin'), production: { observedAt: new Date(lastPass).toISOString(), serving: 'a'.repeat(40), error: null, deployed: [], pending: [], incidents: [] } });
+  assert.equal(watch.observedAt, lastPass);
+  const fresh = { ...merged, delivery: { ...merged.delivery!, mergedAt: new Date(NOW - 5 * 60_000).toISOString() } } as Work;
+  assert.equal(groupOf(fresh, NOW, undefined, undefined, watch), 'moving');
+  assert.equal(prSteps(fresh, NOW, watch).current, 'deploy');
+  assert.equal(prSteps(fresh, NOW, watch).label, 'Deploying · waiting for the live release to serve it');
+  const older = { ...merged, delivery: { ...merged.delivery!, mergedAt: new Date(NOW - 48 * hour).toISOString() } } as Work;
+  assert.equal(groupOf(older, NOW, undefined, undefined, watch), 'shipped');
+  assert.equal(groupOf(fresh, NOW), 'shipped', 'with no production observation a merge alone is Shipped');
+});

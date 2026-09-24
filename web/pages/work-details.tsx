@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { deliveryState, deploySmokeRequired, type Work } from '../../src/model';
+import { deliveryState, deploySmokeRequired, isClosed, type Work } from '../../src/model';
 import { sessionSummary } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanRequestRow } from '../../src/model/human-request';
@@ -78,7 +78,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const group = groupWithin(item, work, now, status?.humanOnly, release);
   const steps = prSteps(item, now, release);
   const actor = nextActor(item, group, now, release);
-  const showSteps = group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog');
+  // Work closed without merging has no step: no bar, nothing left, nobody acting (`prSteps`).
+  const closed = isClosed(item);
+  const showSteps = !closed && (group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog'));
   // The why, in plain words and without the pull request, which the header links once.
   const why = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}: ${item.humanRequest.reason}`
     : group === 'moving' ? `${steps.label}.`
@@ -92,7 +94,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // Deploy has no gate: merged work held there is left with what the release lacks (the same
   // release-aware detail the why line and the step bar say), never "nothing blocks it".
   const stepGateName = steps.current && steps.current !== 'build' ? stepGate[steps.current] : undefined;
-  const failing = steps.current === 'deploy' ? undefined : (stepGateName ? item.gates.find(g => g.name === stepGateName && !g.passed) : undefined) ?? item.gates.find(g => !g.passed);
+  const failing = closed || steps.current === 'deploy' ? undefined : (stepGateName ? item.gates.find(g => g.name === stepGateName && !g.passed) : undefined) ?? item.gates.find(g => !g.passed);
   // A proof still owed is named by the proof: each criterion is listed once, under Requirements.
   const left = steps.current === 'deploy' ? [`${steps.detail.replace(/^./, c => c.toUpperCase())}.`]
     : failing ? [...new Set(failing.reasons.map(r => r.match(/^AC-\d+: (\S+) needs trusted/)?.[1]).map((proof, i) => proof ? `The proof ${proof} has not passed yet` : plainReason(failing.reasons[i], failing.name).text))] : [];

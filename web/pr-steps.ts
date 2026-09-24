@@ -1,4 +1,4 @@
-import { deliveryState, type Gate, type Work } from '../src/model';
+import { deliveryState, isClosed, type Gate, type Work } from '../src/model';
 import { latestCheck } from '../src/merge-queue';
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
 import type { PipelineTimeline } from '../src/pipeline-speed';
@@ -52,12 +52,12 @@ export type CheckState = 'passed' | 'failed' | 'running';
  * Each required CI check as the test gate reads it. The gate's own reasons decide which checks
  * have not passed: a check it does not name has passed, and no run from another App with the same
  * name can make a named one read passed. A named check reads failed only on evidence that a
- * trusted CI App (status `ciAppIds`, the Apps the gate counts) failed it: once every trusted App's
- * latest run of it has finished and one did not succeed. An untrusted App's failure, no trusted
- * run at all, or not being told which Apps are trusted leaves it running — the gate says only that
- * the trusted check has not passed. Only each App's latest run counts, as in the test gate: a
- * re-run replaces an old failure or success. The Test step and the item page's Checks line both
- * read this.
+ * trusted CI App (status `ciAppIds`, the Apps the gate counts) failed it: the latest run of it
+ * across every trusted App, the one run the test gate reads (src/model/gates.ts `latestCheck`),
+ * finished without succeeding. An untrusted App's failure, no trusted run at all, or not being
+ * told which Apps are trusted leaves it running — the gate says only that the trusted check has
+ * not passed. A re-run replaces an old failure or success, whichever App ran it. The Test step
+ * and the item page's Checks line both read this.
  */
 export function checkStates(work: Work, ciAppIds: readonly number[] | null = null): { name: string; state: CheckState }[] {
   const gate = work.gates.find(entry => entry.name === 'test');
@@ -66,8 +66,8 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
   return (work.policy.checks ?? []).map(name => {
     if (!named(name)) return { name, state: 'passed' };
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name && !!ciAppIds?.includes(check.appId));
-    const latest = [...new Set(runs.map(check => check.appId))].map(app => latestCheck(runs.filter(check => check.appId === app))?.result ?? '');
-    return { name, state: latest.length > 0 && latest.every(result => !pendingCheck.has(result)) && latest.some(result => result !== 'success') ? 'failed' : 'running' };
+    const latest = latestCheck(runs)?.result;
+    return { name, state: latest !== undefined && !pendingCheck.has(latest) && latest !== 'success' ? 'failed' : 'running' };
   });
 }
 
@@ -127,13 +127,15 @@ function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, 
  * every gate passes the item is merging. A merged item has every step done — reading "Live" where
  * production was observed serving it — unless its policy asks for a post-deployment check that has
  * not passed, or the production watch observes production not serving it yet (web/release.ts),
- * which keeps it at Deploy.
+ * which keeps it at Deploy. Work closed without merging has no step at all.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
   const make = (state: (id: StepId) => StepState, current: StepId | null, detail: string, who: string): PrSteps => ({
     steps: stepIds.map(id => ({ id, label: stepLabel[id], state: state(id) })), current,
     label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who,
   });
+  // Closed without merging (src/model/closure.ts): no step is done or current, and nobody acts.
+  if (isClosed(work)) return make(() => 'pending', null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
   if (work.stage === 'done') {
     // Delivered once merged, unless a post-deployment check or the production watch holds it at
     // Deploy (web/groups.ts reads the same `leftFlowAt`). "Live" only once the release is observed serving it.
