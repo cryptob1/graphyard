@@ -226,12 +226,8 @@ export function recurringClasses(instances: readonly FaultInstance[], work: read
   });
 }
 
-/**
- * The problems the control plane's own status reports, beside no single item: App permissions,
- * held and failed integration jobs, a GitHub pause, unserved executors, capacity limits and a
- * missing GitHub connection. The dashboard groups them with the items' faults, so a page whose
- * items are all fine still counts what its notices show.
- */
+/** Problems the control plane's status reports beside any item (App permissions, integration jobs, a GitHub
+ *  pause, unserved executors): the dashboard groups them with the items' faults, as its notices show them. */
 export function statusFaults(status: any): FaultObservation[] {
   if (!status) return [];
   const lines = (value: unknown): string[] => Array.isArray(value) ? value.filter((line): line is string => typeof line === 'string') : [];
@@ -246,10 +242,7 @@ export function statusFaults(status: any): FaultObservation[] {
   return found;
 }
 
-/**
- * The loop's record of fault instances: every instance it retains, the one each standing fault is,
- * and per loop action in a run of failures the instance that run is.
- */
+/** The loop's record: every instance it retains, the one each standing fault is, and each failing action's run. */
 export interface FaultRecord { instances: FaultInstance[]; open: Record<string, string>; failing: Record<string, string> }
 export const retainedFaultInstances = 1000;
 const instanceOf = (observation: FaultObservation, at: string): FaultInstance => ({ id: `${observation.kind}|${observation.subject.slice(0, 200)}|${at}`, kind: observation.kind, faultClass: observation.faultClass,
@@ -287,10 +280,8 @@ export function noteFault(record: FaultRecord, observation: FaultObservation, at
 }
 
 /**
- * A loop action's outcome against the record. The action history keeps every failure it ever saw,
- * so failures are never read back from it: an action becoming failed (or indeterminate) is one
- * instance, further failures of the same action before it succeeds are that same instance, and a
- * success ends the run. An old failure that nothing retries is therefore never counted again.
+ * A loop action's outcome. The action history keeps every failure it saw, so none is read back from it: an
+ * action failing opens one instance, its further failures before a success are that instance, a success ends it.
  */
 export function noteActionOutcome(record: FaultRecord, action: string, outcome: 'started' | 'done' | 'failed' | 'indeterminate', observation: FaultObservation, at: string): FaultInstance | null {
   if (outcome === 'done') { delete record.failing[action]; return null; }
