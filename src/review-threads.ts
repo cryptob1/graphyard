@@ -131,6 +131,9 @@ export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
 /** Whether a verdict carries a `Resolved threads:` line at all; `Resolved threads: none` names nothing, explicitly. */
 export const hasResolvedThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^resolved threads:/i.test(entry.trim()));
 
+/** Whether a verdict carries a `Follow-up threads:` line at all. */
+export const hasFollowUpThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^follow-up threads:/i.test(entry.trim()));
+
 /** `implicit`: the approval had no `Resolved threads:` line, so it vouches for every thread its launch prompt listed. */
 export interface ThreadResolution { at: string; reviewId: number; named: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; implicit?: boolean }
 
@@ -148,8 +151,13 @@ export interface ThreadResolution { at: string; reviewId: number; named: string[
  * binary launched it, and a binary from before thread-aware prompts, still running past any cutoff,
  * writes records that look the same while its reviewers saw no threads. `listed` is not passed when
  * the launch could not read the threads, so that prompt vouches for nothing either.
+ *
+ * `classified`: the launch carried the criteria-only rule (GY-166), under which an approval means only
+ * that no thread is BLOCKING. Its approval vouches implicitly only when it wrote the `Follow-up
+ * threads:` line, classifying what stands; one with neither line resolves nothing, so a nonblocking
+ * finding it failed to name is never erased without a backlog item.
  */
-export async function resolveNamedThreads(input: { repository: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: ThreadResolution; listed?: string[] }, run: ChildRun, now: Date): Promise<ThreadResolution> {
+export async function resolveNamedThreads(input: { repository: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: ThreadResolution; listed?: string[]; classified?: boolean }, run: ChildRun, now: Date): Promise<ThreadResolution> {
   const attempts = (input.previous?.attempts ?? 0) + 1;
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts, implicit: false };
   let review: any;
@@ -157,7 +165,7 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
   catch (error) { return { ...base, named: [], resolved: [], refused: [], failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
   if (review?.state !== 'APPROVED' || review?.commit_id !== input.sha || String(review?.user?.login).toLowerCase() !== input.reviewer.toLowerCase())
     return { ...base, named: [], resolved: [], refused: [], failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
-  const implicit = !hasResolvedThreadsLine(review.body) && !!input.listed;
+  const implicit = !hasResolvedThreadsLine(review.body) && !!input.listed && (!input.classified || hasFollowUpThreadsLine(review.body));
   let named = parseResolvedThreads(review.body).slice(0, listedThreadLimit);
   if (!named.length && !implicit) return { ...base, named, resolved: [], refused: [] };
   let open: LaunchThread[];

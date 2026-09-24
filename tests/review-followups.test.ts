@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { coalescedScope, followUpItem, parseFollowUpFindings, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
-import { bindReviewer, followUpExhaustedRetryMs, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts } from '../src/reviewer.js';
+import { bindReviewer, followUpExhaustedRetryMs, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts, updateReviewLedger } from '../src/reviewer.js';
 import { routineDecision, setAsideFollowUpThreads, threadResolutionGraceMs } from '../src/master-daemon.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -580,5 +580,57 @@ test('unit:review-followups-filed — an approval with findings only keeps retry
     assert.ok(items.created[0].item.description.includes('src/c.ts:12 — the retry is unbounded'));
     assert.equal(settled.reviews[0].followUps?.item, 'GY-201');
     assert.equal(settled.reviews[0].followUps?.failure, undefined);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a criteria-only approval naming neither line resolves no thread, so an unnamed follow-up is never erased', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    assert.equal((await readReviewLedger(root)).reviews[0].criteriaOnly, true);
+    const gh = github('AC-1 met. AC-2 met. The retry could be bounded, but that is beyond the criteria.'), items = creator();
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.deepEqual(gh.resolved, [], 'no listed thread is vouched fixed without an explicit classification');
+    assert.equal(settled.reviews[0].threadResolution?.implicit, false);
+    assert.equal(items.created.length, 0);
+    assert.equal(gh.replies.length, 0);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a findings-only filing retried past 50 attempts is still recorded, so the ledger keeps saving', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github('AC-1 met.\nFollow-up finding: src/c.ts:12 — the retry is unbounded\nResolved threads: none\nFollow-up threads: none'), config = await loadMasterConfig(root);
+    const refusing = async () => { throw new Error('Graphyard refused the follow-up item (503): unavailable'); };
+    let clock = Date.parse('2026-09-24T13:00:00Z');
+    const now = () => new Date(clock);
+    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: refusing, now });
+    await updateReviewLedger(root, ledger => { ledger.reviews[0].followUps!.attempts = 50; });
+    clock += followUpExhaustedRetryMs;
+    const settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: refusing, now });
+    assert.equal(settled.reviews[0].followUps?.attempts, 51);
+    assert.equal((await readReviewLedger(root)).reviews[0].followUps?.attempts, 51, 'attempt 51 is saved, not refused by the ledger schema');
+    const items = creator();
+    clock += followUpExhaustedRetryMs;
+    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create, now });
+    assert.equal(items.created.length, 1);
+    assert.equal((await readReviewLedger(root)).reviews[0].followUps?.item, 'GY-201');
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — an approval whose item merged before the first filing pass still files its findings', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github('AC-1 met.\nFollow-up finding: src/c.ts:12 — the retry is unbounded\nResolved threads: none\nFollow-up threads: none'), items = creator();
+    const delivered = work({ stage: 'done' } as Partial<Work>, { merged: true, mergeSha: 'c1'.padEnd(40, 'f'), prState: 'closed' } as Partial<Observation>);
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [delivered], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.equal(items.created.length, 1, 'the daemon merging first does not lose what the approval judged FOLLOW-UP');
+    assert.ok(items.created[0].item.description.includes('src/c.ts:12 — the retry is unbounded'));
+    assert.equal(settled.reviews[0].followUps?.item, 'GY-201');
+    // Filed once: the next pass leaves the delivered item alone.
+    await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [delivered], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.equal(items.created.length, 1);
   } finally { await cleanup(); }
 });

@@ -83,7 +83,10 @@ export const reviewRecordSchema = z.object({
     /** The observation (the control plane's `at`) the loop last checked the resolved threads against, and those GitHub showed reopened since. */
     observedAt: z.string().min(1).max(40).optional(), reopened: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
     item: z.string().min(1).max(40).optional(), replied: z.array(z.string().min(1).max(200)).max(listedThreadLimit), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
-    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50) }).optional(),
+    // Unbounded: a filing that created no item is retried for as long as its approval stands (fileApprovedFollowUps).
+    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1) }).optional(),
+  /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
+  criteriaOnly: z.literal(true).optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
@@ -586,7 +589,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         record = await updateReviewLedger(root, ledger => {
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id) }) });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id) }) });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
@@ -874,10 +877,15 @@ function operatorAgentCreate(root: string, config: MasterConfig): CreateFollowUp
 
 /** Whether a completed approval binds the item's current candidate, or the head whose approval was carried onto it. */
 function approvesCurrentHead(record: ReviewRecord, work: Work[]): boolean {
+  const item = work.find(entry => entry.key === record.key);
+  return !!item && item.stage !== 'done' && !item.observation?.merged && approvesFinalHead(record, work);
+}
+/** Whether a completed approval binds the item's last candidate, delivered or not: its follow-ups are still owed after the merge. */
+function approvesFinalHead(record: ReviewRecord, work: Work[]): boolean {
   const verdict = record.verdict;
   if (record.state !== 'completed' || verdict?.state !== 'APPROVED') return false;
   const item = work.find(entry => entry.key === record.key);
-  if (!item?.candidate || item.stage === 'done' || item.observation?.merged || item.candidate.pr !== record.pr) return false;
+  if (!item?.candidate || item.candidate.pr !== record.pr) return false;
   const carried = carriedApproval(item);
   return item.candidate.sha === record.sha || !!carried && carried.originalSha === record.sha && (carried.reviewId === undefined || carried.reviewId === verdict.reviewId);
 }
@@ -906,10 +914,14 @@ async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, 
   if (!run || !work || !create) return { events, changed };
   for (const record of records) {
     const verdict = record.verdict;
-    if (!verdict || !approvesCurrentHead(record, work)) continue;
+    // The approval of the head that landed still files: the daemon may merge before the dispatcher's
+    // first filing pass, and a finding with no thread has nothing holding the merge back.
+    if (!verdict || !approvesFinalHead(record, work)) continue;
     const previous = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
     const item = work.find(entry => entry.key === record.key)!, observedAt = item.observation?.at && item.observation.at.length <= 40 ? item.observation.at : undefined;
     if (previous && !previous.failure) {
+      // Once delivered there is no merge left for a reopened thread to hold.
+      if (!approvesCurrentHead(record, work)) continue;
       const event = await checkReopenedFollowUps(record, previous, item, repository, run);
       if (event) { changed++; events.push(event); }
       continue;
@@ -1013,7 +1025,7 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     const predatesImplicit = !!previous && previous.implicit === undefined && !previous.named.length && !previous.failure;
     if (previous && !predatesImplicit && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
     if (!approvesCurrentHead(record, work)) continue;
-    const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous,
+    const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, ...(record.criteriaOnly ? { classified: true } : {}),
       ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, now);
     record.threadResolution = { ...outcome, refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
