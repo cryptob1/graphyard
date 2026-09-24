@@ -328,6 +328,12 @@ export interface FlowDataset {
    * dataset assembled by hand), a kind is covered as far as the shared scan (`covered`) reached.
    */
   kindCovered?: Partial<Record<FlowKind, string>>;
+  /**
+   * The last fact the shared scan returned when its bound was exhausted. Facts after it in
+   * (observed_at, id) order were read only by the per-kind reads, so figures that also need the
+   * kinds those reads skip (candidate episodes and their phases) stop here (`readByScan`).
+   */
+  scanEnd?: { observedAt: string; id: number };
   /** What the production watch holds at Deploy (`productionHold`); absent reads as no observation. */
   production?: ProductionHold;
   /**
@@ -403,6 +409,17 @@ export function stepEntries(carryIn: readonly FlowFact[], facts: readonly FlowFa
  */
 export const separateKinds: FlowKind[] = ['delivered', 'merged', 'gates.changed'];
 /** Up to when the facts of `kind` in the window were all read: its own read, else the shared scan's reach. */
+/**
+ * Whether the shared scan read `fact`, rather than only the per-kind read past its cutoff. An
+ * episode's phases pair a gate or merge fact with review and evidence facts only the shared scan
+ * reads, so they use this: a gate change read past the cutoff never stands in for evidence nobody read.
+ */
+export function readByScan(dataset: Pick<FlowDataset, 'scanEnd'>): (fact: FlowFact) => boolean {
+  const end = dataset.scanEnd;
+  if (!end) return () => true;
+  const at = time(end.observedAt)!;
+  return fact => { const t = time(fact.observedAt)!; return t < at || (t === at && (fact.id ?? 0) <= end.id); };
+}
 export function coveredUntil(dataset: { to?: string; covered?: CoveredWindow; kindCovered?: Partial<Record<FlowKind, string>> }, kind: FlowKind): string | undefined {
   return dataset.kindCovered?.[kind] ?? (dataset.covered?.truncated ? dataset.covered.toCovered : dataset.to);
 }
@@ -506,7 +523,8 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     ? (await store.pool.query(`SELECT * FROM flow_facts WHERE kind='merged' AND details->>'mergeSha'=ANY($1) ORDER BY observed_at,id LIMIT $2`, [mergeShas, flowLimits.deploymentMerges + 1])).rows : [];
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
+  const scanEnd = truncated && lastFact ? { observedAt: lastFact.observedAt, id: lastFact.id! } : undefined;
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
 }
 
 export type WaitCategory = 'delivered' | 'backlog' | 'blocked' | 'dependency' | 'implementation' | 'review' | 'evidence' | 'merge-blocked' | 'merge-ready';
@@ -659,6 +677,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const latest = new Map(dataset.latest.map(fact => [`${fact.workId}:${fact.kind}`, fact]));
   const carry = new Map(dataset.carryIn.map(fact => [`${fact.workId}:${fact.kind}`, fact]));
   const itemFacts = (id: string, kind: FlowKind) => (byWork.get(id) ?? []).filter(fact => fact.kind === kind);
+  const scanRead = readByScan(dataset);
 
   const scope = dataset.included.filter(item => {
     if (!latest.has(`${item.id}:work.created`)) { exclude('no-durable-history', item.key); return false; }
@@ -809,7 +828,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       const startedAt = time(candidate.recordedAt)!;
       const endsAt = index + 1 < ordered.length ? time(ordered[index + 1].recordedAt)! : Infinity;
       const sha = String(candidate.details.sha ?? '');
-      const facts = (byWork.get(item.id) ?? []).filter(fact => { const at = time(fact.recordedAt)!; return at >= startedAt && at < endsAt; });
+      const facts = (byWork.get(item.id) ?? []).filter(fact => { const at = time(fact.recordedAt)!; return at >= startedAt && at < endsAt && scanRead(fact); });
       const matches = (fact: FlowFact) => !fact.details.sha || fact.details.sha === sha;
       const first = (kind: FlowKind, predicate: (fact: FlowFact) => boolean) => facts.filter(fact => fact.kind === kind && matches(fact) && predicate(fact)).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
       const reviewStart = [first('review.requested', () => true), first('review.submitted', () => true)].filter(Boolean).sort((a, b) => time(a!.observedAt)! - time(b!.observedAt)!)[0];
@@ -1259,6 +1278,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
   const currentStage = (item: Work) => latest.get(`${item.id}:stage.changed`)?.details.to ?? 'backlog';
   const scoped = dataset.included.filter(item => latest.has(`${item.id}:work.created`) && (!report.filters.stage || currentStage(item) === report.filters.stage));
   const scopedIds = new Set(scoped.map(item => item.id));
+  const scanRead = readByScan(dataset);
   const row = (workKey: string, bucket: string | null, observedAt: string | null, valueMs: number | null, pr: number | null, commit: string | null, detail: string) =>
     rows.push({ workKey, metric, bucket, observedAt, valueMs, pullRequest: pr, commit, detail });
   if (metric === 'bottleneck') {
@@ -1314,7 +1334,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
         const candidate = candidates[index], startedAt = time(candidate.recordedAt)!;
         const endsAt = candidates[index + 1] ? time(candidates[index + 1].recordedAt)! : Infinity;
         const sha = String(candidate.details.sha ?? '');
-        const facts = dataset.facts.filter(fact => fact.workId === item.id && time(fact.recordedAt)! >= startedAt && time(fact.recordedAt)! < endsAt && (!fact.details.sha || fact.details.sha === sha));
+        const facts = dataset.facts.filter(fact => fact.workId === item.id && time(fact.recordedAt)! >= startedAt && time(fact.recordedAt)! < endsAt && (!fact.details.sha || fact.details.sha === sha) && scanRead(fact));
         const first = (kind: FlowKind, predicate: (fact: FlowFact) => boolean = () => true) => facts.filter(fact => fact.kind === kind && predicate(fact)).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
         const reviewStart = [first('review.requested'), first('review.submitted')].filter((fact): fact is FlowFact => !!fact).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
         const reviewComplete = [first('review.submitted', fact => fact.details.reviewState === 'APPROVED'), first('review.completed', fact => fact.details.approved === true)].filter((fact): fact is FlowFact => !!fact).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];

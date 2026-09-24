@@ -976,6 +976,37 @@ test('unit:flow-calendar-buckets — daily buckets are UTC calendar days ending 
   assert.equal(early.throughput[0].delivered, 1);
 });
 
+test('facts read past the shared scan cutoff count landings and step moves but never complete a candidate episode\'s phases', () => {
+  const to = '2026-09-24T22:55:00.000Z';
+  const fact = (kind: string, observedAt: string, id: number, details: Record<string, unknown> = {}) => ({ ...calendarFact(kind, observedAt, id), details });
+  const scanned = [
+    fact('candidate.observed', '2026-09-22T10:00:00.000Z', 2, { sha: 'e'.repeat(40), pr: 902, prCreatedAt: '2026-09-22T09:00:00.000Z' }),
+    fact('review.submitted', '2026-09-22T11:00:00.000Z', 3, { reviewState: 'APPROVED' }),
+    fact('merge.authorized', '2026-09-22T11:30:00.000Z', 4),
+  ];
+  // Read only by the per-kind reads: the acceptance-clearing gate change, the merge and the delivery.
+  const separate = [
+    fact('gates.changed', '2026-09-23T10:00:00.000Z', 5, { stage: 'merge', unmet: ['merge'], hasCandidate: true, released: true }),
+    fact('merged', '2026-09-23T12:00:00.000Z', 6, { mergeSha: 'e'.repeat(40) }),
+    fact('delivered', '2026-09-23T12:00:00.000Z', 7, { mergeSha: 'e'.repeat(40) }),
+  ];
+  const facts = [...scanned, ...separate];
+  const covered = coveredWindow(new Date(Date.parse(to) - 7 * day).toISOString(), to, scanned.at(-1)!.observedAt, 50_000, flowLimits.scan);
+  const truncated = calendarDataset(to, facts, { truncated: true, covered, kindCovered: { delivered: to, merged: to, 'gates.changed': to }, scanEnd: { observedAt: scanned.at(-1)!.observedAt, id: 4 } });
+  const report = computeFlow(truncated, { days: 7 });
+  const phase = (id: string) => report.phases.find(entry => entry.phase === id)!.n;
+  assert.equal(phase('review-complete-to-evidence-complete'), 0, 'a gate change read past the cutoff never stands in for evidence the scan did not read');
+  assert.equal(phase('merge-authorized-to-merged'), 0, 'a merge read past the cutoff never completes an episode the scan stopped reading');
+  assert.deepEqual(flowDrilldown(truncated, report, { metric: 'phase' }).rows.map(row => row.bucket), ['pr-created-to-review-start', 'review-start-to-review-complete'],
+    'the drill-down keeps only the phases the scan read');
+  assert.equal(report.throughput.find(bucket => bucket.bucket === '2026-09-23T00:00:00.000Z')!.delivered, 1, 'the delivery still lands');
+  assert.deepEqual(stepMoves(truncated, calendarItem).map(move => move.to), ['merge'], 'and the step move still counts');
+  // The same facts all read by the shared scan do complete those phases.
+  const whole = computeFlow(calendarDataset(to, facts), { days: 7 });
+  assert.equal(whole.phases.find(entry => entry.phase === 'review-complete-to-evidence-complete')!.n, 1);
+  assert.equal(whole.phases.find(entry => entry.phase === 'merge-authorized-to-merged')!.n, 1);
+});
+
 test('unit:flow-truncation-visible — a truncated or stale report shows its coverage statement in place of the figures, and no zero bar is drawn for a day it never read', () => {
   const to = '2026-09-24T22:55:00.000Z', from = new Date(Date.parse(to) - 7 * day).toISOString();
   const reached = '2026-09-20T09:00:00.000Z';
