@@ -1,7 +1,7 @@
-<!-- page: Build integrations | 8 | replay of retained artifacts with explicit coverage, scoped reuse of the newest compatible attempt, and execution cost analytics. -->
+<!-- page: Build integrations | 8 | scoped evidence reuse, replay, and execution analytics. -->
 # Evidence replay, scoped reuse and execution analytics
 
-Replay re-runs the verifier over retained artifacts; reuse lets the newest compatible pass stand for a new head under an operator policy; analytics report attempt cost and time. None relaxes what a live attempt proves. "Newest attempt" means the highest dispatch `sequence` (`validation_attempts.seq`), never result arrival order.
+Reuse lets the newest compatible pass stand for a new head under an operator policy; replay re-runs the verifier over retained artifacts. "Newest" means the highest dispatch `sequence`, never arrival order.
 
 ## Reuse policy
 
@@ -60,8 +60,8 @@ graphyard validation replay REQUEST_UUID ATTEMPT_UUID
 graphyard validation replays
 ```
 
-`POST /api/validation/replay` (operator or audit reader) verifies each retained artifact's digest and re-runs the pinned [report adapter](report-adapters.md). Coverage: `inventory` and `behavior` are `covered` only when the files were retained and parsed; `artifactIntegrity` when every digest matched; `bundleIdentity`, `targetAttribution`, `settlement` and `deploymentHealth` are always `not-covered`. `outcome` is `consistent`, `inconsistent`, `uncompared` or `unmeasured`. A replay `authorizes` nothing: `liveVerification` is always `not-established`. Expired artifacts are not read, and records are redacted of credential-shaped strings.
+`POST /api/validation/replay` re-verifies retained artifacts' digests and re-runs the pinned [report adapter](report-adapters.md). `inventory` and `behavior` are `covered` only when the files were retained and parsed; target, bundle, settlement and deployment health are always `not-covered`. A replay `authorizes` nothing, and `liveVerification` is always `not-established`.
 
 ## Execution analytics
 
-`graphyard validation analytics` (`GET /api/validation/analytics`) groups attempts by proof, environment and runner, reporting outcomes, observed timings (queue, ACK, execution, collection), runner-reported duration and CPU, and cost as **observed**, **estimated** or **unavailable** — never zero when nobody metered it. Collectors may attach `measurements: {durationMs, cpuSeconds, cost: {amount, currency, basis, source}}` to a result. The reuse and replay ledgers are summarised too. Groups are never ranked.
+`graphyard validation analytics` groups attempts by proof, environment and runner: outcomes, observed timings, and cost as **observed**, **estimated** or **unavailable** (never zero). Collectors may attach `measurements: {durationMs, cpuSeconds, cost}` to a result.

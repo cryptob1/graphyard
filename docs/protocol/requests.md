@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 2 | idempotency keys, replay semantics, and the error contract. -->
+<!-- page: Agent protocol | 2 | idempotency keys and error codes. -->
 # Requests and retries
 
 Every mutation requires `Idempotency-Key`, at most 200 characters. Generate a UUID once and reuse it only when retrying the identical request after a timeout. A successful replay returns the original result without repeating the command. Different input under the same key returns `409`.

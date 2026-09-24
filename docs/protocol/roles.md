@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 1 | bearer authentication and what each credential role may do. -->
+<!-- page: Agent protocol | 1 | what each credential role may do. -->
 # Roles and credentials
 
 Every endpoint except `/healthz` requires `Authorization: Bearer TOKEN`; use HTTPS remotely. *Operator* means the human operator's `admin` credential; *operator agent* the scoped role ([glossary](../glossary.md)).

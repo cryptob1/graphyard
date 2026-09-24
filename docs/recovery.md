@@ -1,13 +1,11 @@
-<!-- page: Build integrations | 7 | runner capacity, artifact retention and migration, and fenced rollback as an observed workflow. -->
+<!-- page: Build integrations | 7 | runner diagnostics, artifact storage, and fenced rollback. -->
 # Runner capacity, artifact operations and delivery recovery
 
-A reservation opens only on verified settlement, and a lost heartbeat releases nothing. A rollback is complete only when the target is observed running and [verifies](delivery.md#verification).
-
-Agent-account exhaustion is handled by the master loop, not by hand: see [exhaustion in the middle of a session](master-agent-sessions.md#exhaustion-in-the-middle-of-a-session).
+A lost heartbeat releases nothing, and a rollback completes only when the target [verifies](delivery.md#verification). Agent-account exhaustion: [master guide](master-agent-sessions.md#exhaustion-in-the-middle-of-a-session).
 
 ## Runner capacity and request diagnostics
 
-`graphyard validation capacity` (`GET /api/validation/capacity`) reports each runner's last poll, queue and limit, every reserved resource and its holder, artifact usage, and one condition per live request:
+`graphyard validation capacity` reports runners, reserved resources, artifact usage, and one condition per live request:
 
 | Condition | Next step |
 | --- | --- |

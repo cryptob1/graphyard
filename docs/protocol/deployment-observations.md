@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 10 | recording deployment-provider observations that feed flow analytics without moving a gate. -->
+<!-- page: Agent protocol | 10 | deployment-provider observations for flow analytics. -->
 # Deployment observations
 
 `POST /api/deployments` (`producer` or `admin`) records one provider observation:

@@ -1,15 +1,11 @@
-<!-- page: Agent protocol | 6 | how a coordinator proves a dead supervisor and settles its quarantine. -->
+<!-- page: Agent protocol | 6 | settling a dead supervisor's quarantine. -->
 # Automatic containment settlement
 
-A supervisor that dies without settling leaves a quarantine only an operator attestation or this proof can clear.
+`POST /api/work/UUID/autosettle` (`coordinator` or `admin`) clears the quarantine of a supervisor that died without settling. It carries the epoch, settlement hash, a reason and a host verification record, and is refused unless:
 
-`POST /api/work/UUID/autosettle` (`coordinator` or `admin`) carries the quarantine's epoch and settlement hash, a reason, and a host verification record. The server refuses unless:
+- the quarantine matches and no newer lease supersedes it;
+- lease and launch authority have been expired for at least 120 seconds;
+- the verification names the registered host and path, is under 120 seconds old, and its clock agrees within five seconds;
+- Linux `/proc` and systemd inspection found no `watch` supervisor for the assignment, no process in the workspace, and no `graphyard-watch-*.scope` member not attributable to another live assignment, with no unverifiable signal.
 
-- the quarantine exists at exactly that epoch and hash, and no other epoch's lease supersedes it;
-- the lease and launch authority have each been expired for at least 120 seconds;
-- the verification names the registered host and path, was observed within 120 seconds, and its clock agrees within five seconds;
-- it reports Linux `/proc` and systemd scope inspection with no surviving process, no scope holding the workspace's processes, and no unverifiable signal.
-
-The host reads `/proc` for the `watch KEY EPOCH` supervisor and for processes whose cwd is in the workspace, then lists `graphyard-watch-*.scope` units. A scope member fences settlement unless its ancestry leads to a supervisor for a *different* assignment. Unreadable command lines, an unreachable user manager or a non-Linux host are unverifiable and refuse.
-
-Settlement clears only the quarantine; lease, gates, candidate, evidence and delivery are untouched, and the verification is appended to the ledger. A supervisor run by another user or host needs the operator attestation.
+Only the quarantine is cleared; everything else is untouched and the verification is ledgered. A supervisor run by another user or host needs the operator attestation.

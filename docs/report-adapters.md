@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 5 | what each supported report format proves, observes and refuses. -->
+<!-- page: Build integrations | 5 | supported report formats and what they prove. -->
 # Report adapters
 
 A report adapter turns an attempt's offline inventory and execution report into a verdict. `graphyard runner adapters` prints each shipped contract: what it proves, what was independently observed, which frameworks its fixtures cover, and how failures classify.

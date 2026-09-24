@@ -1,24 +1,19 @@
-<!-- page: Agent protocol | 15 | reading release manifests, a work item's attribution history, and the attribution analytics; the ledger has no write endpoint. -->
+<!-- page: Agent protocol | 15 | attribution reads and ledger. -->
 # Attribution reads and the attribution ledger
 
-The [attribution guide](../attribution.md) explains the concepts. Every endpoint here is a read; the ledger is written only by validation and observation ingest.
+Concepts: [attribution guide](../attribution.md). Every endpoint is a read; only validation and observation ingest write the ledger.
 
 | Method and path | Result |
 | --- | --- |
-| `GET /api/attribution/manifest/RELEASE_ID/REVISION` | The release manifest: `hash`, `digestHash`, `environment`, `services: [{service, digest, sourceSha}]`, `source` |
-| `GET /api/attribution/work/UUID` | `{workId, workKey, authorized, records}`, at most 200 rows (a worker reads only its own item) |
-| `GET /api/analytics/attribution?window=30` | `metrics`, `coverage`, `exclusions`, `unavailable`, `blockedNow`, `definitions` (not for operator agents) |
-| `GET /api/analytics/attribution/drilldown?window=30&metric=ID[&key=K]` | Up to 200 underlying rows |
+| `GET /api/attribution/manifest/RELEASE_ID/REVISION` | Release manifest with `hash`, `digestHash`, `services`, `source` |
+| `GET /api/attribution/work/UUID` | An item's ledger rows (at most 200) |
+| `GET /api/analytics/attribution?window=30` | Metrics, coverage, exclusions, definitions |
+| `GET /api/analytics/attribution/drilldown?window=30&metric=ID[&key=K]` | Up to 200 rows |
 
-`window` is 7, 30 or 90; `asOf` is an ISO instant. Request, attempt, evidence and build identifiers need `admin`, `coordinator` or `producer`; others see counts and `requires audit role`.
-
-## Ledger records
-
-`attribution_records` is append-only (trigger-protected), one row per cause (`dedupe`). Kinds: `target-checked`, `target-mismatch`, `paid-run-avoided`, `superseded`, `rescheduled`, `reanchor-blocked`, `signature-regenerated`, `target-changed`, `attribution-undermined`, `unsupported-claim-refused`, `evidence-bound`. `attribution_reanchors` holds one row per superseded request.
+Identifiers beyond the work key need `admin`, `coordinator` or `producer`. `attribution_records` kinds: `target-checked`, `target-mismatch`, `paid-run-avoided`, `superseded`, `rescheduled`, `reanchor-blocked`, `signature-regenerated`, `target-changed`, `attribution-undermined`, `unsupported-claim-refused`, `evidence-bound`.
 
 ## Refusals
 
 - `POST /api/validation/request` returns 409 when observers already report another manifest.
-- `POST /api/validation/result` returns 400 when the body carries `sha`, `sourceSha`, `baseSha`, `commit` or `commitSha` at the top level or under `target`.
-- A pass with `target.measurement: unknown`, or whose window an observer contradicted, fails as evidence.
-- A shared (`immutable: false`) environment grants only against a measured match.
+- `POST /api/validation/result` returns 400 for any `sha`, `sourceSha`, `baseSha`, `commit` or `commitSha` field at the top level or under `target`.
+- A pass on an `unknown` measurement, or contradicted by an observer, fails as evidence.

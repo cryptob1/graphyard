@@ -1,7 +1,7 @@
-<!-- page: Build integrations | 6 | release builds, approvals, and observed production delivery. -->
+<!-- page: Build integrations | 6 | releases, approvals, and observed production delivery. -->
 # Releases and observed production delivery
 
-Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured running. A merge, a provider's "deployed", and observed runtime identity are separate records. No provider adapter ships; an observer is a process you run with its own `producer` credential. Where runtime identity cannot be measured, the environment shows unknown. Rollback is in [recovery](recovery.md#rollback).
+Graphyard records which release each environment should run and verifies it only from what service-scoped observers measured running. An observer is a process you run with its own `producer` credential; unmeasurable identity shows as unknown. Rollback: [recovery](recovery.md#rollback).
 
 ## Records and who may change them
 
@@ -125,13 +125,7 @@ The observer submits what it measured through `POST /api/delivery/observe`:
 }
 ```
 
-- `validFrom`/`validTo` is the interval the instances are known to have run these bytes.
-- `complete: false` cannot verify.
-- Only `measurement` `provider` or `host-attestation` counts; `self-report` and `unknown` never verify.
-- A stale generation, superseded lease or out-of-scope service is kept as non-authoritative history.
-- A repeated `snapshotId` returns the original receipt.
-
-`POST /api/delivery/notify` records a provider webhook as a hint only.
+Only complete listings with `measurement` `provider` or `host-attestation` can verify. A stale generation or superseded lease is kept as non-authoritative history; a repeated `snapshotId` returns the original receipt. `POST /api/delivery/notify` records a webhook as a hint only.
 
 ## Verification
 

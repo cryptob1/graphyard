@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 4 | creating work and every `POST /api/work/UUID/COMMAND` mutation. -->
+<!-- page: Agent protocol | 4 | creating work and every work mutation. -->
 # Work commands
 
 Create with `POST /api/work` using [examples/work.json](../../examples/work.json). `title` and `criteria` are required; each criterion has a unique `AC-N` id, text and at least one proof, and may carry `bootstrap` ([bootstrap mode](bootstrap-mode.md)). Optional: `dependencies` (UUIDs), `exclusiveResources`, `plannedFiles` (enforced by the [regression guard](regression-guard.md#submit-time-regression-guard)), and `producerProofs`, the `manual:` proofs a launched producer may run ([automatic dispatch](github-webhook.md#automatic-dispatch-at-submit)).

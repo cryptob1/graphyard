@@ -8,18 +8,18 @@ The protocol is documented one topic per page. This page is generated in full fr
 
 ## Agent protocol
 
-1. [Roles and credentials](protocol/roles.md) — bearer authentication and what each credential role may do.
-2. [Requests and retries](protocol/requests.md) — idempotency keys, replay semantics, and the error contract.
-3. [Read endpoints](protocol/read-endpoints.md) — status, work snapshots, events, delegation, delivery, and proof authority reads.
-4. [Work commands](protocol/work-commands.md) — creating work and every `POST /api/work/UUID/COMMAND` mutation.
-5. [Leases and supervision](protocol/leases.md) — lease renewal, `watch` supervision, foreground containment, and rework.
-6. [Automatic containment settlement](protocol/containment-settlement.md) — how a coordinator proves a dead supervisor and settles its quarantine.
-7. [Workspaces](protocol/workspaces.md) — worktree registration, branch and path uniqueness, and the launch fence.
-8. [Submit-time regression guard](protocol/regression-guard.md) — how submit classifies every changed file against `plannedFiles` and refuses out-of-scope regressions.
-9. [Evidence and proof authority](protocol/evidence.md) — evidence submission, proof authority grants, and the post-deployment smoke proof.
-10. [Deployment observations](protocol/deployment-observations.md) — recording deployment-provider observations that feed flow analytics without moving a gate.
-11. [Bootstrap mode for a change that introduces its own proof harness](protocol/bootstrap-mode.md) — deferring a proof onto the contract the change introduces, and the obligation it leaves.
-12. [GitHub webhook and review providers](protocol/github-webhook.md) — webhook verification, review-provider changes, re-review, and automatic dispatch.
-13. [Attribution reads and the attribution ledger](protocol/attribution.md) — reading release manifests, a work item's attribution history, and the attribution analytics; the ledger has no write endpoint.
-14. [Merge-queue bindings and carry](protocol/merge-queue-binding.md) — how a candidate is bound to its base, when the merge queue carries a review or proof across a Graphyard-authored tip, and what the record and ledger say about it.
-15. [Pipeline timeline](protocol/pipeline-speed.md) — the per-item pipeline timeline the engine keeps, and how execution, wait, rework rounds and submit→merge are derived from it.
+1. [Roles and credentials](protocol/roles.md) — what each credential role may do.
+2. [Requests and retries](protocol/requests.md) — idempotency keys and error codes.
+3. [Read endpoints](protocol/read-endpoints.md) — status, snapshots, events, analytics and delivery reads.
+4. [Work commands](protocol/work-commands.md) — creating work and every work mutation.
+5. [Leases and supervision](protocol/leases.md) — leases, `watch`, containment, rework.
+6. [Automatic containment settlement](protocol/containment-settlement.md) — settling a dead supervisor's quarantine.
+7. [Workspaces](protocol/workspaces.md) — worktree registration and uniqueness.
+8. [Submit-time regression guard](protocol/regression-guard.md) — submit refuses out-of-scope regressions.
+9. [Evidence and proof authority](protocol/evidence.md) — evidence, proof grants, revocation, smoke proof.
+10. [Deployment observations](protocol/deployment-observations.md) — deployment-provider observations for flow analytics.
+11. [Bootstrap mode for a change that introduces its own proof harness](protocol/bootstrap-mode.md) — deferring a proof onto the contract a change introduces.
+12. [GitHub webhook and review providers](protocol/github-webhook.md) — webhook, review providers, and automatic dispatch.
+13. [Attribution reads and the attribution ledger](protocol/attribution.md) — attribution reads and ledger.
+14. [Merge-queue bindings and carry](protocol/merge-queue-binding.md) — base binding and merge-queue carry.
+15. [Pipeline timeline](protocol/pipeline-speed.md) — the per-item pipeline timeline.

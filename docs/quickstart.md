@@ -1,4 +1,4 @@
-<!-- page: Start here | 4 | install locally with `--provider compose` for evaluation. -->
+<!-- page: Start here | 4 | evaluate locally with `--provider compose`. -->
 # Local quickstart
 
 Evaluate Graphyard on one machine. For a real deployment follow [install](install.md) with `--provider railway`, `hetzner` or `docker-host`, then [repository onboarding](onboarding.md).

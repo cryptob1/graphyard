@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 11 | deferring a proof onto the contract the change introduces, and the obligation it leaves. -->
+<!-- page: Agent protocol | 11 | deferring a proof onto the contract a change introduces. -->
 # Bootstrap mode for a change that introduces its own proof harness
 
 A change that creates its own proof harness cannot be proven by it. The human operator, or an operator agent holding `policy:bootstrap`, may declare that criterion in bootstrap mode: the proof is deferred for this candidate and never dropped.

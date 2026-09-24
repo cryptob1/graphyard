@@ -1,4 +1,4 @@
-<!-- page: Build integrations | 2 | versioned E2E scenarios pinned to environments. -->
+<!-- page: Build integrations | 2 | versioned E2E scenarios. -->
 # E2E test-case registry
 
 A test-case definition says what should be tested; evidence says what a trusted runner observed. Executable tests live in Git; artifacts live in CI or object storage, linked by URL.

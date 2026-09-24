@@ -8,50 +8,49 @@ This page is generated in full from each page's `<!-- page: Section | order | su
 ## Start here
 
 1. [Install Graphyard](install.md) — the one command, the agent-executable runbook behind it, and the App-permission migration an upgrade can require.
-2. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model in five minutes, with diagrams.
-3. [Glossary](glossary.md) — human operator, agent session, principal, lease, reviewer, proof producer, control plane, runtime: one definition each, plus the diagram legend.
+2. [How Graphyard works](how-graphyard-works.md) — the lifecycle and authority model, with diagrams.
+3. [Glossary](glossary.md) — one definition per term, who decides, diagram legend.
 4. [Onboard a repository](onboarding.md) — the human prompts, more machines, the master, and the first PR.
-5. [Local quickstart](quickstart.md) — install locally with `--provider compose` for evaluation.
+5. [Local quickstart](quickstart.md) — evaluate locally with `--provider compose`.
 
 ## Operate Graphyard
 
 - [Deployment](deployment.md) — provider reference behind the installer: versioned images, the variables table, a manual fallback for Railway, Docker Compose and the Helm chart, backups, upgrades, and restores.
 - [GitHub enforcement](github.md) — App permissions, branch protection, CI producers, and Codex review.
 - [Reading the dashboard](dashboard.md) — the dashboard page by page: what each number, sentence and marker means, and where everything else moved.
-- [Herdr integration](herdr.md) — worker installation and multi-machine use.
+- [Herdr integration](herdr.md) — worker setup and multiple machines.
 - [Master-agent operating mode](master-agent.md) — routing, recovery, and guarded merges.
 - [Master-agent reference](master-agent-reference.md) — master commands, executors, GitHub administration, conflict avoidance, and recovery.
 - [Master-agent sessions](master-agent-sessions.md) — master install, worker, reviewer and producer profiles, provider accounts, and how sessions launch.
 - [Slice-lead delegation](delegation.md) — bounded product, infrastructure, and docs/experience coordination.
-- [Operations and recovery](operations.md) — daily checklist, incident decision tree, and recovery recipes in three minutes.
+- [Operations and recovery](operations.md) — daily checklist, incident tree, recovery recipes.
 - [Operations reference](operations-reference.md) — every procedure in full, credentials, proof authority, drift, and scale limits.
 - [Coordinating independent agents](coordination.md) — dependencies, requirement revisions, overlap, and shared resources.
-- [Scoped operator-agent automation](operator-automation.md) — least-privilege operator agents with server-enforced scope.
-- [Shipping pulse](shipping-pulse.md) — repository delivery flow: throughput, intent-to-merge, and deployment lag without rankings.
-- [Flow analytics](flow-analytics.md) — delivery bottlenecks, phase durations, and their data lineage.
-- [Interventions as product feedback](interventions.md) — every operator intervention as product feedback: what counts, the rate per delivery, how a pattern becomes work, and how to record judgement about delivered work.
+- [Scoped operator-agent automation](operator-automation.md) — operator agents and two-party decisions.
+- [Shipping pulse](shipping-pulse.md) — repository throughput and time to production.
+- [Flow analytics](flow-analytics.md) — where delivery waits, and for how long.
+- [Interventions as product feedback](interventions.md) — interventions as product feedback.
 
 ## Build integrations
 
 - [Agent protocol and HTTP API](protocol.md) — roles, requests, work commands, leases, workspaces, evidence, and the webhook, one topic per page.
-- [E2E test-case registry](test-cases.md) — versioned E2E scenarios pinned to environments.
-- [Validation candidates and runner protocol](validation.md) — candidates, dispatch, attempts, and trusted result collection.
+- [E2E test-case registry](test-cases.md) — versioned E2E scenarios.
+- [Validation candidates and runner protocol](validation.md) — candidates, dispatch, attempts, and trusted results.
 - [The packaged Playwright runner and collector](runner-setup.md) — the packaged Playwright runner, host attestor, and collector.
-- [Report adapters](report-adapters.md) — what each supported report format proves, observes and refuses.
-- [Releases and observed production delivery](delivery.md) — release builds, approvals, and observed production delivery.
-- [Candidate-to-deployment attribution](attribution.md) — release manifests, exact-target validation, safe re-anchoring, and attribution analytics.
-- [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner capacity, artifact retention and migration, and fenced rollback as an observed workflow.
-- [Evidence replay, scoped reuse and execution analytics](evidence-reuse.md) — replay of retained artifacts with explicit coverage, scoped reuse of the newest compatible attempt, and execution cost analytics.
+- [Report adapters](report-adapters.md) — supported report formats and what they prove.
+- [Releases and observed production delivery](delivery.md) — releases, approvals, and observed production delivery.
+- [Candidate-to-deployment attribution](attribution.md) — manifests, exact targets, re-anchoring, metrics.
+- [Runner capacity, artifact operations and delivery recovery](recovery.md) — runner diagnostics, artifact storage, and fenced rollback.
+- [Evidence replay, scoped reuse and execution analytics](evidence-reuse.md) — scoped evidence reuse, replay, and execution analytics.
 
 ## Understand or contribute
 
 - [Architecture and correctness model](architecture.md) — the correctness model behind ownership, evidence, and gates.
-- [Development and dogfooding](development.md) — repository layout, where new features go, and validating a change.
+- [Development and dogfooding](development.md) — where new features go and how to validate.
 - [Turnkey E2E execution and verified delivery](turnkey-delivery-roadmap.md) — planned work, clearly separated from shipped behavior.
-- [Graphyard visual identity](visual-identity.md) — the marks, palette, and voice the dashboard and docs share.
 
 ## Maintainer and historical records
 
-- [Graphyard repository bootstrap](first-pr.md) — repository-specific bootstrap procedure for Graphyard maintainers.
+- [Graphyard repository bootstrap](first-pr.md) — bootstrap for Graphyard's own repository.
 
 Historical records explain past decisions. They are not current setup instructions.

@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 3 | status, work snapshots, events, delegation, delivery, and proof authority reads. -->
+<!-- page: Agent protocol | 3 | status, snapshots, events, analytics and delivery reads. -->
 # Read endpoints
 
 | Method and path | Result |

@@ -1,7 +1,7 @@
-<!-- page: Agent protocol | 16 | the per-item pipeline timeline the engine keeps, and how execution, wait, rework rounds and submit→merge are derived from it. -->
+<!-- page: Agent protocol | 16 | the per-item pipeline timeline. -->
 # Pipeline timeline
 
-Every work document carries `pipeline`, appended by lifecycle commands. It is a report; nothing in it moves a gate.
+Every work document carries `pipeline`, appended by lifecycle commands; it never moves a gate.
 
 ```json
 {
@@ -11,23 +11,6 @@ Every work document carries `pipeline`, appended by lifecycle commands. It is a 
 }
 ```
 
-- `attempts` — one per epoch; ended by `submitted`, `released`, `expired` (at the lease deadline) or `reworked`.
-- `submittedAt` — first submit; the submit→merge clock does not restart on resubmission.
-- `reworkRounds` — `rework` of an already-submitted item.
-- `interventions` — `blocked` reports with a reason, and `requirements` revisions after a claim.
+An attempt ends `submitted`, `released`, `expired` or `reworked`. `submittedAt` is the first submit and is not reset by rework. Older items are backfilled from the ledger (`pipeline.backfilled`; progress in `/api/status` → `pipelineBackfill`).
 
-Items older than the timeline are backfilled from the ledger by a bounded catch-up behind `GET /api/work-snapshot` (`src/pipeline-backfill.ts`: 20,000 rows over 25 items per run, resumable, recorded as `pipeline.backfilled` with a `backfill` marker). `/api/status` reports its progress as `pipelineBackfill`.
-
-## Derived figures
-
-`graphyard master status` reports per row under `speed`:
-
-| Field | Meaning |
-| --- | --- |
-| `executionMs` | Lease time summed over attempts |
-| `waitMs` | First claim to merge (or now) minus `executionMs` |
-| `submitToMergeMs` | First submission to the merge on the repository clock |
-| `sinceSubmitMs` | First submission to now, while in flight |
-| `routine` | At most one rework round and no intervention |
-
-`coverage` is `measured`, `awaiting-backfill`, `events-pruned` or `no-submission`. The top-level `speed` is the [periodic measurement](../master-agent-reference.md#pipeline-speed): p50/p90 submit→merge, rework distribution and coverage, naming every unmeasured delivery.
+`graphyard master status` derives per row under `speed`: `executionMs` (lease time), `waitMs`, `submitToMergeMs`, `sinceSubmitMs`, and `routine` (at most one rework, no intervention), with `coverage` `measured`, `awaiting-backfill`, `events-pruned` or `no-submission`. The top-level `speed` is the [periodic measurement](../master-agent-reference.md#pipeline-speed).
