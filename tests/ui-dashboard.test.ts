@@ -11,7 +11,7 @@ import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../bro
 import { flowApi, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
 import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../web/pr-steps.js';
-import { releaseView } from '../web/release.js';
+import { noRelease, releaseView } from '../web/release.js';
 import ShippedPage from '../web/pages/shipped.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
 import { jargon } from '../web/plain-status.js';
@@ -655,6 +655,24 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   // Only a policy that asks for the post-deployment check keeps a merge at Deploy, while that check is outstanding.
   const smoke = { ...real[0], policy: { ...real[0].policy, deploySmoke: true } } as Work;
   assert.equal(groupOf(smoke, NOW), 'moving'); assert.equal(prSteps(smoke, NOW).current, 'deploy');
+  // A Deploy stay that ended before the window opened is not in the window: no carried move, no exit.
+  const before = { facts: [], carryIn: [{ workId: real[0].id, kind: 'gates.changed', observedAt: new Date(NOW - 30 * hour).toISOString(), details: { stage: 'done' } }], from: new Date(NOW - 24 * hour).toISOString(), to: new Date(NOW).toISOString() } as any;
+  const early = { ...real[0], delivery: { ...real[0].delivery!, mergedAt: new Date(NOW - 28 * hour).toISOString() } } as Work;
+  assert.deepEqual(stepMoves(before, early), [], 'a delivery before the window is no move in it');
+  assert.deepEqual(stepMoves({ ...before, from: new Date(NOW - 29 * hour).toISOString() }, early).map(move => `${move.from}>${move.to}`), ['null>deploy', 'deploy>null']);
+  // Held at Deploy by the production watch, the step clock runs and goes overdue; it settles only once the item leaves the flow.
+  const stale = { ...real[0], delivery: { ...real[0].delivery!, mergedAt: new Date(NOW - 48 * hour).toISOString() } } as Work;
+  const failing = { ...noRelease, failed: new Set([stale.key]) }, pending = { ...noRelease, unserved: new Set([stale.key]) };
+  for (const release of [failing, pending]) { assert.equal(prSteps(stale, NOW, release).current, 'deploy'); assert.equal(stepHeld(stale, NOW, [], release).overdue, true, 'a pending Deploy goes overdue'); }
+  assert.equal(stepHeld({ ...stale, policy: smoke.policy } as Work, NOW, []).overdue, true, 'an outstanding smoke check keeps the clock running');
+  assert.equal(stepHeld(stale, NOW, []).overdue, false, 'work that left the flow is never overdue');
+  // A production incident blocks at Deploy and says so, on the row and the item page — never "Shipped".
+  assert.equal(groupOf(stale, NOW, undefined, undefined, failing), 'blocked');
+  const row = markup(createElement(WorkCard, { item: stale, now: NOW, onOpen: noop, release: failing }));
+  assert.match(row, /Production has not deployed it\./); assert.doesNotMatch(row, /Shipped/);
+  const incident = { observedAt: new Date(NOW).toISOString(), serving: 'abc', incidents: [{ key: stale.key }], pending: [] };
+  const detail = firstScreen(markup(createElement(WorkDetails, { ...dashboard({ work: [stale], status: { ...boardStatus(), production: incident } as any }), item: stale })));
+  assert.match(detail, /Production has not deployed it\./); assert.doesNotMatch(detail, /Shipped in/);
 });
 
 test('unit:ui-insights-real-items — Insights builds its flow and 24-hour replay from real-shaped items (no observation, no reviews, no candidate) without failing, through the same code path the page reads', async () => {

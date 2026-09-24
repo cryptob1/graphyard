@@ -82,6 +82,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // The why, in plain words and without the pull request, which the header links once.
   const why = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}: ${item.humanRequest.reason}`
     : group === 'moving' ? `${steps.label}.`
+      // Merged work blocked at Deploy says what the release lacks, not that it shipped.
+      : group === 'blocked' && steps.current === 'deploy' ? `${steps.detail.replace(/^./, c => c.toUpperCase())}.`
       // Waiting work is described by what it waits for, never by who last held it.
       : group === 'up-next' || group === 'backlog' ? (actor.who === 'Nobody yet' ? actor.does : group === 'backlog' ? 'Not released for work yet.' : item.reworkRequested ? 'Sent back for changes; waiting for a builder.' : 'Released for work; waiting for a builder.')
         : withoutPr(plain.sentence).replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());

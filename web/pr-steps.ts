@@ -182,8 +182,9 @@ export function stepSince(work: Work, now: number, moves?: readonly StepTransiti
 
 /**
  * How long the item has held its current step, and whether that is past the one threshold
- * (web/duration.ts). Merged work has arrived, as in `statusHeld`: it is never overdue.
+ * (web/duration.ts). Only work that has left the flow (no current step, `leftFlowAt`) has arrived
+ * and is never overdue; merged work still held at Deploy keeps a running clock.
  */
 export function stepHeld(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): StatusDuration {
-  return statusDuration(stepSince(work, now, moves, release), now, work.stage === 'done');
+  return statusDuration(stepSince(work, now, moves, release), now, prSteps(work, now, release).current === null);
 }

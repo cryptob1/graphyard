@@ -31,7 +31,8 @@ export default function WorkCard({ item, repository, now, onOpen, group: given, 
   const pr = item.candidate && <CandidatePr repository={repository} candidate={item.candidate} workKey={item.key}/>;
   const why = group === 'needs-you' ? actor.does
     : stall ? `Nothing is happening: ${stall.missing} — stuck at “${phaseLabel[phaseOf(item, now)]}” for ${formatDuration((now - Date.parse(stall.heldSince)) / 60000)} with nothing to do next`
-      : group === 'blocked' ? unprefixed(status.blocking ?? status.sentence)
+      // Merged work held at Deploy is blocked by the release, never "Shipped": say what the release lacks.
+      : group === 'blocked' ? (steps?.current === 'deploy' ? unprefixed(`${steps.detail}.`) : unprefixed(status.blocking ?? status.sentence))
         : group === 'backlog' || (group === 'up-next' && actor.who === 'Nobody yet') ? actor.does : null;
   const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : null;
   return <div className={`work-row group-${group} tone-${status.tone}${timed && held.overdue ? ' overdue' : ''}`} data-row={item.key} data-group={group} onClick={() => onOpen(item.id)}>

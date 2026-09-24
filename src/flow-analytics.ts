@@ -1051,12 +1051,14 @@ export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | nu
  * One item's moves between the seven steps, oldest first: the gate fact carried in from before the
  * window says where it started (`carried`, not a move inside the window), each recorded gate fact
  * that puts it at a different step is a move, and its delivery (`deliveredAt`) takes it from
- * Deploy out of the flow. Nothing after the report's cutoff (`dataset.to`) is a move. The replay
- * and the per-step dwell both read these.
+ * Deploy out of the flow. Nothing after the report's cutoff (`dataset.to`) is a move, and work that
+ * left the flow before the window opened (`dataset.from`) has no moves in it at all: its finished
+ * Deploy stay belongs to an earlier window. The replay and the per-step dwell both read these.
  */
-export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { to?: string }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
+export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { from?: string; to?: string }, item: Work, productionEnvironment = defaultProductionEnvironment): StepMove[] {
   const moves: StepMove[] = [];
   const cutoff = dataset.to !== undefined && time(dataset.to) !== null ? time(dataset.to)! : Infinity;
+  const start = dataset.from !== undefined && time(dataset.from) !== null ? time(dataset.from)! : -Infinity;
   const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
   let at: FlowStep | null = carried ? gateFactStep(carried.details) : null;
   if (carried && at) moves.push({ at: carried.observedAt, from: null, to: at, pr: carried.details.pr ?? null, carried: true });
@@ -1069,8 +1071,11 @@ export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { to
   // Recorded as delivered before the gate fact that said so (a merge-time `deliveredAt`), it
   // leaves Deploy at that fact, never before it; a delivery after the cutoff is not in the report.
   const left = deliveredAt(item, productionEnvironment);
-  if (at === 'deploy' && left && time(left) !== null && time(left)! <= cutoff)
-    moves.push({ at: moves.length && time(left)! < time(moves.at(-1)!.at)! ? moves.at(-1)!.at : left, from: 'deploy', to: null, pr: item.candidate?.pr ?? null, carried: false });
+  if (at === 'deploy' && left && time(left) !== null && time(left)! <= cutoff) {
+    const exit = moves.length && time(left)! < time(moves.at(-1)!.at)! ? moves.at(-1)!.at : left;
+    if (time(exit)! < start) return [];
+    moves.push({ at: exit, from: 'deploy', to: null, pr: item.candidate?.pr ?? null, carried: false });
+  }
   return moves;
 }
 export const drilldownCatalog = drilldownMetrics;
