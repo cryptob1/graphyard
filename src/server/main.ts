@@ -13,6 +13,7 @@ import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider } from '../production-watch.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
+import { startDirectMerge } from '../direct-merge.js';
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
 export async function main() {
@@ -62,6 +63,7 @@ export async function main() {
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
+  mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
   mark('validation.expireArtifacts'); await validation.expireArtifacts();
   mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
   let running = false;
