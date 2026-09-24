@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
+import { redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
@@ -826,7 +826,7 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     if (stall) add('escalation', item, `${item.key} holds its ${stall.gate ?? 'unevaluated'} gate with no action, no dependency and no recorded human need: ${stall.refusal ?? stall.detail}`);
     try { assertDispatchable(item, work, new Date(now).toISOString()); add('dispatch', item, `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
-    if (request && !request.decision && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
+    if (request && (!request.decision || redecidableScopeRefusal(item)) && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
       add('scope', item, `${item.key}: ${request.requestedBy} is waiting for a decision on ${request.paths.join(', ')}`);
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed') add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
     if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
@@ -1589,10 +1589,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const settled = new Map<string, Work>();
   for (const item of open) {
     const request = item.scopeRequest;
-    if (!effects.decideScope || !request || request.decision) continue;
+    // A refusal is reconsidered only when the rules as they stand now would approve it — once per
+    // policy revision of the item, backing off on failure — so a standing refusal never churns.
+    const redecide = !!request?.decision && redecidableScopeRefusal(item);
+    if (!effects.decideScope || !request || (request.decision && !redecide)) continue;
     // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) continue;
-    const key = scopeKey(item, request);
+    const key = redecide ? `${scopeKey(item, request)}:redecide:${item.policyRevision}` : scopeKey(item, request);
     const previous = state.actions[key];
     if (!readyToRetry(previous, state.cycle)) continue;
     const attempts = (previous?.attempts ?? 0) + 1;

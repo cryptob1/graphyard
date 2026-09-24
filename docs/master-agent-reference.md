@@ -35,7 +35,7 @@ Write two or three acceptance criteria per item; split a fourth into a dependent
 
 ## Scope requests
 
-A worker that needs a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON` and keeps its lease. The control plane approves documentation and files the criteria name as an additive widening, and escalates anything else; the master applies a refused request with `master scope`.
+A worker that needs a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON` and keeps its lease. The control plane approves documentation and files the criteria name as an additive widening — and, for an item that plans the whole `docs/` tree, single files under `web/` and `browser-tests/` that render or test those pages — and escalates anything else; the master applies a refused request with `master scope`. The loop decides a refused request again, once per policy revision, when the current rules would approve it, which clears the refusal blocker.
 
 ## Human-only waits
 
