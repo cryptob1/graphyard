@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertDispatchable, assessContainment, buildMasterStatus, containmentHold } from '../src/master.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { assertDispatchable, assessContainment, buildMasterStatus, containmentHold, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { probeSupervisorAbsence } from '../src/containment-probe.js';
+import { containmentSettlementRefusals, countHeldChildren, isInteractiveShell, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
 
 const observedAt = '2030-01-01T12:00:00.000Z';
@@ -91,4 +97,136 @@ test('unit:containment-hold-wording a lapsed or superseded owner still holds dis
   const superseded = { ...lapsed, lease: { owner: 'worker-a', epoch: 2, expiresAt: at(90_000) } } as Work;
   assert.equal(containmentHold(superseded, Date.parse(observedAt)), 'Dispatch blocked by unverified worker containment from epoch 1');
   assert.equal(containmentHold(item(), Date.parse(observedAt)), null);
+});
+
+/**
+ * GY-189: after `watch` exits, the launch pane's own interactive shell stays in the worktree.
+ * It is matched by its working directory alone, so it used to hold the fence forever.
+ */
+const scope = { unit: 'graphyard-watch-3995651-575387af-2c89-4469-b3cd-b0b89ab52d42.scope', pid: 3995651 };
+const shellPid = 4242;
+/** A quarantine whose lease and launch lapsed ten minutes ago, recorded with its launch scope. */
+function stranded(overrides: Partial<Work> = {}) {
+  const lapsed = launched(null, at(-600_000));
+  return { ...lapsed, containmentQuarantine: { ...lapsed.containmentQuarantine!, scope }, ...overrides } as Work;
+}
+/** What the host probe reports for the pane shell, with the recorded scope in the given state. */
+function paneShellProbe(options: { activeState?: string; children?: number; command?: string; inScope?: boolean } = {}): ContainmentVerification {
+  const { activeState = 'not-found', children = 0, command = '/usr/bin/bash', inScope = false } = options;
+  return { ...clean, host: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 },
+    processes: [{ pid: shellPid, evidence: 'workspace' }],
+    scopes: inScope ? [{ unit: scope.unit, activeState, processes: [shellPid], attributed: [] }] : [],
+    held: [{ pid: shellPid, command, cwd: workspace.path, unit: inScope ? scope.unit : null, children }],
+    recordedScope: { ...scope, activeState } } as ContainmentVerification;
+}
+const refusals = (work: Work, verification: ContainmentVerification) => containmentSettlementRefusals(work, verification, { now: Date.parse(observedAt) });
+
+async function loop(work: Work, overrides: Partial<DaemonEffects> = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-pane-shell-'));
+  const credentialFile = join(directory, 'coordinator.token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const profile = { name: 'opencode-1', principal: 'worker-a', agentName: 'graphyard-opencode-1', mode: 'launch', kind: 'claude', credentialFile: join(directory, 'worker.token'), agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: '/srv/graphyard/bin/graphyard.mjs',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'coordinator-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile] });
+  const state = emptyDaemonState(config), closed: string[] = [], settled: ContainmentAssessment[] = [];
+  const effects: DaemonEffects = {
+    agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
+    snapshot: async () => ({ work: [work], now: observedAt }),
+    closeSession: pane => { closed.push(pane); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    settleContainment: async (_item, assessment) => { settled.push(assessment); },
+    ...overrides,
+  };
+  try { await runCycle(config, state, effects, () => Date.parse(observedAt)); }
+  finally { await rm(directory, { recursive: true, force: true }); }
+  return { closed, settled, state };
+}
+const probedBy = (verification: ContainmentVerification): DaemonEffects['containment'] => (items, observed) =>
+  assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: { min: 0, max: 1 }, localNow: new Date(observed.now), probe: () => verification } as any);
+
+test('unit:idle-pane-shell-not-a-worker the pane\'s childless interactive shell does not hold the fence once the recorded scope is not found, and the loop settles within one cycle', async () => {
+  const work = stranded();
+  assert.deepEqual(refusals(work, paneShellProbe()), [], 'an idle pane shell beside a not-found scope is no worker');
+  assert.deepEqual(refusals(work, paneShellProbe({ activeState: 'inactive' })), [], 'an inactive (ended) scope is ended too');
+  for (const command of ['/usr/bin/bash', '-bash', 'bash -i', '/bin/zsh -l', 'fish']) assert.equal(isInteractiveShell(command), true, command);
+  for (const command of ['bash -c sleep 100', 'bash -lc watch', '/usr/bin/bash script.sh', 'node server.js', 'claude', 'bash --rcfile x']) assert.equal(isInteractiveShell(command), false, command);
+
+  const { settled, state } = await loop(work, { containment: probedBy(paneShellProbe()) });
+  assert.equal(settled.length, 1, 'the loop settles the quarantine in the same cycle it verified it');
+  assert.equal(settled[0].settleable, true);
+  assert.deepEqual(settled[0].refusals, []);
+  assert.equal(state.actions[`settle:${work.id}:1`]?.state, 'done');
+});
+
+test('unit:idle-pane-shell-not-a-worker the loop counts each held process\'s live children beside the host probe, and an idle pane shell it reports settles', async () => {
+  const table: Record<number, { argv: string[]; cwd: string; ppid: number }> = {
+    [shellPid]: { argv: ['/usr/bin/bash'], cwd: workspace.path, ppid: 900 },
+    4300: { argv: ['/usr/bin/bash'], cwd: workspace.path, ppid: 900 },
+    4301: { argv: ['sleep', '100'], cwd: '/tmp', ppid: 4300 },
+  };
+  const present = (pid: number) => { const entry = table[pid]; if (!entry) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return entry; };
+  const probed = await probeSupervisorAbsence({ key: 'GY-74', epoch: 1, workspacePath: workspace.path, scope }, {
+    platform: 'linux', uid: 1000, resolvePath: value => value, listProcesses: () => Object.keys(table),
+    readCommand: pid => present(pid).argv.join('\0'), processOwner: () => 1000, readCwd: pid => present(pid).cwd, readParent: pid => present(pid).ppid, readCgroup: () => '',
+    run: (_command, args) => args.includes('show') ? 'LoadState=not-found\nActiveState=inactive\n' : args.includes('show-environment') ? 'LANG=C\n' : '',
+  });
+  const table$ = { listProcesses: () => Object.keys(table), readParent: (pid: number) => present(pid).ppid };
+  const report = countHeldChildren(probed, table$);
+  assert.deepEqual(report.held.map(entry => [entry.pid, entry.children]), [[shellPid, 0], [4300, 1]]);
+  // A parent that cannot be read leaves every count out: nothing is proven idle.
+  const unread = countHeldChildren(probed, { ...table$, readParent: pid => { if (pid === 4301) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return present(pid).ppid; } });
+  assert.deepEqual(unread.held.map(entry => entry.children), [undefined, undefined]);
+  assert.equal(report.recordedScope?.activeState, 'not-found');
+  const verification = { ...report, host: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 } } as ContainmentVerification;
+  assert.deepEqual(refusals(stranded(), verification), [`Process 4300 of the contained worker is still present on coordinator-host (matched by assigned workspace); pid 4300 cmdline "/usr/bin/bash" cwd ${workspace.path}`],
+    'the idle shell is excused; the shell running sleep still holds the fence');
+});
+
+test('unit:idle-pane-shell-not-a-worker a shell with a child process, a live scope, or no child count still refuses settlement', async () => {
+  const work = stranded();
+  const still = /Process 4242 of the contained worker is still present on coordinator-host \(matched by assigned workspace\); pid 4242 cmdline "/;
+  assert.match(refusals(work, paneShellProbe({ children: 1 })).join('\n'), still, 'a shell running something may be running the worker');
+  assert.match(refusals(work, paneShellProbe({ activeState: 'active' })).join('\n'), still, 'a live scope means the supervisor is still there');
+  assert.match(refusals(work, paneShellProbe({ activeState: 'active', inScope: true })).join('\n'), /Containment scope .* is active and still holds 1 process/);
+  const uncounted = paneShellProbe();
+  delete uncounted.held[0].children;
+  assert.match(refusals(work, uncounted).join('\n'), still, 'a probe that did not count children proves nothing about idleness');
+  assert.match(refusals(work, paneShellProbe({ command: 'bash -c sleep 100' })).join('\n'), still, 'a shell running a command is not idle');
+  const unscoped = { ...work, containmentQuarantine: { ...work.containmentQuarantine!, scope: undefined } } as Work;
+  assert.match(refusals(unscoped, { ...paneShellProbe(), recordedScope: null }).join('\n'), still, 'without a recorded scope nothing proves the supervisor ended');
+
+  const { settled, state } = await loop(work, { containment: probedBy(paneShellProbe({ children: 1 })) });
+  assert.deepEqual(settled, [], 'the loop does not settle while the shell has a child');
+  assert.match(state.actions[`escalation:containment:${work.id}:1`]?.detail ?? '', still);
+});
+
+const session = (pane: string) => ({ id: 'worker-a:1', kind: 'implementation', principal: 'worker-a', epoch: null, runtime: 'claude', host: 'coordinator-host', workspace: 'w1V', tab: null, pane,
+  agentName: null, role: null, head: null, attach: `herdr pane attach ${pane}`, transcript: null, subject: 'GY-74: Item', startedAt: at(-3_600_000), updatedAt: at(-3_600_000), endedAt: null, state: 'running', outcome: null });
+
+test('unit:ended-worker-pane-closed the loop closes the Herdr pane of a worker whose supervisor scope has ended, once', async () => {
+  const work = stranded({ sessions: [session('w1V:p2PP')] } as Partial<Work>);
+  const ended = await loop(work, { containment: probedBy(paneShellProbe()) });
+  assert.deepEqual(ended.closed, ['w1V:p2PP'], 'the pane of the ended worker is closed by the session cleanup');
+  const action = ended.state.actions[`close:ended-scope:${work.id}:1:w1V:p2PP`];
+  assert.equal(action?.state, 'done');
+  assert.match(action!.detail, /Closed pane w1V:p2PP of GY-74 epoch 1: its supervisor scope graphyard-watch-3995651-.*\.scope is not-found/);
+
+  // A pane Herdr already closed settles the same record, and says so.
+  const gone = await loop(work, { containment: probedBy(paneShellProbe({ activeState: 'failed' })), closeSession: () => { throw new Error('herdr: pane_not_found w1V:p2PP'); } });
+  assert.match(gone.state.actions[`close:ended-scope:${work.id}:1:w1V:p2PP`]?.detail ?? '', /^Pane was already gone w1V:p2PP/);
+});
+
+test('unit:ended-worker-pane-closed a pane whose supervisor scope is still live is left alone', async () => {
+  const work = stranded({ sessions: [session('w1V:p2PP')] } as Partial<Work>);
+  for (const activeState of ['active', 'activating', 'deactivating', 'unqueried']) {
+    const live = await loop(work, { containment: probedBy(paneShellProbe({ activeState })) });
+    assert.deepEqual(live.closed, [], `a ${activeState} scope keeps its pane`);
+  }
+  // A verification of some other scope says nothing about this pane's supervisor.
+  const other = await loop(work, { containment: probedBy({ ...paneShellProbe(), recordedScope: { unit: 'graphyard-watch-1-other.scope', pid: 1, activeState: 'not-found' } }) });
+  assert.deepEqual(other.closed, []);
+  // A live worker is never probed, so its pane is never closed.
+  const renewing = await loop({ ...work, lease: { owner: 'worker-a', epoch: 1, expiresAt: at(90_000) } } as Work, { containment: probedBy(paneShellProbe()) });
+  assert.deepEqual(renewing.closed, []);
 });

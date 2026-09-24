@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { ContainmentScope, Work, Workspace } from './model.js';
@@ -174,7 +175,9 @@ export const containmentVerificationSchema = z.object({
    * directory (null when unreadable) and the scope it was found in, so the master can verify
    * each one before stopping anything.
    */
-  held: z.array(z.object({ pid: z.number().int().positive(), command: z.string().max(500), cwd: z.string().max(1000).nullable(), unit: z.string().max(200).nullable() }).strict()).max(400).default([]),
+  held: z.array(z.object({ pid: z.number().int().positive(), command: z.string().max(500), cwd: z.string().max(1000).nullable(), unit: z.string().max(200).nullable(),
+    /** How many live processes name this one as their parent; absent from a probe before GY-189. */
+    children: z.number().int().min(0).optional() }).strict()).max(400).default([]),
   /** The scope the quarantine recorded at launch and how systemd reports it now. */
   recordedScope: z.object({ unit: z.string().min(1).max(200), pid: z.number().int().positive(), activeState: z.string().min(1).max(40) }).strict().nullable().default(null),
   /** Privileged host processes outside every containment scope that withheld inspection. */
@@ -190,6 +193,60 @@ export const containmentAttestation = (key: string) =>
 export function heldDetail(verification: Pick<ContainmentVerification, 'held'>, pid: number) {
   const found = verification.held.find(entry => entry.pid === pid);
   return found ? `; pid ${pid} cmdline "${found.command}" cwd ${found.cwd ?? '<unreadable>'}` : '';
+}
+/** How systemd reports a scope whose supervisor and every process it held have ended. */
+export const endedScopeStates = ['not-found', 'inactive', 'failed', 'dead'];
+const interactiveShells = ['bash', 'sh', 'zsh', 'fish', 'dash', 'ksh'];
+/**
+ * An interactive shell by its command line: a shell binary (a login shell's `-bash` too) given
+ * only option flags, none of them `-c`, so it runs no command or script of its own.
+ */
+export function isInteractiveShell(command: string) {
+  const [binary, ...args] = command.trim().split(/\s+/);
+  const name = (binary ?? '').split('/').pop()!.replace(/^-/, '');
+  return interactiveShells.includes(name) && args.every(arg => /^-/.test(arg) && !/^-[A-Za-z]*c/.test(arg) && arg !== '--');
+}
+export interface ProcessTableDeps { listProcesses?: () => string[]; readParent?: (pid: number) => number }
+/**
+ * Counts, on the probing host, the live children of every process a verification reports holding
+ * the fence, so settlement can tell an idle pane shell from a shell still running something. The
+ * whole process table must be read: a parent that could not be read leaves every count out, which
+ * settlement reads as 'not proven idle'. Parentage is world-readable, as the probe's ancestry is.
+ */
+export function countHeldChildren<T extends { held: { pid: number }[] }>(verification: T, deps: ProcessTableDeps = {}): Omit<T, 'held'> & { held: (T['held'][number] & { children?: number })[] } {
+  if (!verification.held.length) return verification;
+  const listProcesses = deps.listProcesses ?? (() => readdirSync('/proc'));
+  // The parent is the second field after the command name, which may itself hold spaces or ')'.
+  const readParent = deps.readParent ?? ((pid: number) => {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'), parent = Number(stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[1]);
+    if (!stat.includes(') ') || !Number.isSafeInteger(parent)) throw new Error(`Process ${pid} reported an unreadable status line`);
+    return parent;
+  });
+  const parents: number[] = [];
+  try {
+    for (const pid of listProcesses().filter(name => /^\d+$/.test(name)).map(Number)) {
+      try { parents.push(readParent(pid)); }
+      catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as { code?: string }).code ?? '')) return verification; }
+    }
+  } catch { return verification; }
+  return { ...verification, held: verification.held.map(entry => ({ ...entry, children: parents.filter(parent => parent === entry.pid).length })) };
+}
+/**
+ * The launch pane's own shell, left in the worktree after `watch` exited (GY-189): a process
+ * matched only by its working directory, outside every containment scope, that is an
+ * interactive shell with no child processes, while systemd reports the recorded supervisor
+ * scope ended. The worker ran inside that scope and the pane's shell never did, so with the
+ * scope gone and nothing running under the shell there is no worker left for it to be.
+ * A shell with a child, a shell a live scope holds, a probe that did not count children, or a
+ * quarantine without a recorded scope still holds the fence.
+ */
+function paneShell(quarantine: NonNullable<Work['containmentQuarantine']>, verification: ContainmentVerification, process: ContainmentVerification['processes'][number]) {
+  if (process.evidence !== 'workspace' || !quarantine.scope) return false;
+  const recorded = verification.recordedScope;
+  if (recorded?.unit !== quarantine.scope.unit || recorded.pid !== quarantine.scope.pid || !endedScopeStates.includes(recorded.activeState)) return false;
+  const found = verification.held.find(entry => entry.pid === process.pid);
+  return !!found && found.unit === null && found.children === 0 && isInteractiveShell(found.command)
+    && !verification.scopes.some(scope => scope.processes.includes(process.pid) || scope.attributed.includes(process.pid));
 }
 /**
  * Pure refusal evaluation, shared by the verifying coordinator and the control plane.
@@ -239,8 +296,10 @@ export function containmentSettlementRefusals(
   if (quarantine.scope && (verification.recordedScope?.unit !== quarantine.scope.unit || verification.recordedScope?.pid !== quarantine.scope.pid))
     refusals.push(`Host verification did not inspect recorded containment scope ${quarantine.scope.unit} (supervisor pid ${quarantine.scope.pid}) of epoch ${quarantine.epoch}`);
   for (const failure of verification.unverifiable) refusals.push(`Host verification was incomplete: ${failure}`);
-  for (const process of verification.processes)
+  for (const process of verification.processes) {
+    if (paneShell(quarantine, verification, process)) continue;
     refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})${heldDetail(verification, process.pid)}`);
+  }
   for (const scope of verification.scopes.filter(entry => entry.processes.length))
     refusals.push(`Containment scope ${scope.unit}${quarantine.scope?.unit === scope.unit ? ` (the scope epoch ${quarantine.epoch} was launched in)` : ''} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment${scope.processes.map(pid => heldDetail(verification, pid)).join('')}`);
   return refusals;

@@ -13,6 +13,7 @@ import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scope
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
+import { countHeldChildren, endedScopeStates } from './quarantine.js';
 import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
 export { threadResolutionGraceMs, threadsAwaitReview } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
@@ -1902,6 +1903,28 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
   const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
+  // A worker whose supervisor scope has ended leaves its launch pane behind, the pane's own
+  // shell still sitting in the worktree (GY-189). Nothing runs there any more, so the pane is
+  // closed, once, as the session's cleanup; a pane whose scope is still live is left alone.
+  for (const item of open) {
+    const assessment = assessments[item.id], quarantine = item.containmentQuarantine;
+    const recorded = assessment?.verification?.recordedScope;
+    if (!quarantine?.scope || !recorded || recorded.unit !== quarantine.scope.unit || recorded.pid !== quarantine.scope.pid || !endedScopeStates.includes(recorded.activeState)) continue;
+    const epoch = quarantine.epoch;
+    const session = (item.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.principal === quarantine.owner && (entry.epoch === epoch || entry.id === `${quarantine.owner}:${epoch}`) && entry.pane);
+    if (!session) continue;
+    const key = `close:ended-scope:${item.id}:${epoch}:${session.pane}`, previous = state.actions[key];
+    if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) continue;
+    const attempts = (previous?.attempts ?? 0) + 1, why = `its supervisor scope ${recorded.unit} is ${recorded.activeState}`;
+    await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'started', detail: `Closing pane ${session.pane} of ${item.key} epoch ${epoch}: ${why}`, attempts, cycle: state.cycle }, now(), effects.persist);
+    try {
+      let gone = false;
+      try { await effects.closeSession(session.pane!); } catch (error) { if (!paneAlreadyGone(error)) throw error; gone = true; }
+      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'done', detail: `${gone ? 'Pane was already gone' : 'Closed pane'} ${session.pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`, attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'failed', detail: `Could not close pane ${session.pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) {
     const epoch = item.containmentQuarantine!.epoch;
     const assessment = assessments[item.id];
@@ -3051,7 +3074,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
-    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),
+    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => countHeldChildren(await probeSupervisorAbsence(target, { run })) }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
