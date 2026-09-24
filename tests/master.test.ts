@@ -769,6 +769,7 @@ test('integration:landing-follower-merges — the broker lands a queued follower
       calls.push(args);
       if (args[1] === 'view') return JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefOid: staleCached, baseRefName: 'main', state: 'OPEN', isDraft: false });
       if (args[1] === 'repos/owner/project/git/ref/heads/main') return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: head } });
+      if (args[1]?.includes('/check-runs')) return JSON.stringify({ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success' }] });
       if (args[1]?.startsWith('repos/owner/project/commits/')) { const sha = args[1].split('/commits/')[1]; assert.ok(sha in trees, `unexpected commit read ${sha}`); return JSON.stringify({ sha, commit: { tree: { sha: trees[sha] } } }); }
       if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
       return args[1] === '--method' ? JSON.stringify({ merged: true, sha: 'c'.repeat(40) }) : JSON.stringify(validProtection);
@@ -788,7 +789,7 @@ test('integration:landing-follower-merges — the broker lands a queued follower
   // The exact validated base still lands with no tree read at all.
   const exact = github(predictedBase, {}); const exactStore = broker(candidate, execution);
   assert.match((await mergeWork(config, candidate, exactStore.snapshot, exactStore.acquire, async () => ({}), verify, exact.run, execution.owner, exactStore.commit)).result, /merge requested/);
-  assert.equal(exact.calls.some(args => args[1]?.includes('/commits/')), false);
+  assert.equal(exact.calls.some(args => args[1]?.includes('/commits/') && !args[1].includes('/check-runs')), false);
   // A base whose tree differs refuses before any authority is acquired, naming both commits and trees.
   const outside = '4'.repeat(40), outsideTree = '5'.repeat(40);
   const diverged = github(outside, { [outside]: outsideTree }); const divergedStore = broker(candidate, execution); let acquired = false;
