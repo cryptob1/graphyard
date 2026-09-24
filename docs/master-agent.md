@@ -150,7 +150,7 @@ With `master init --no-auto-merge`, `master merge` refuses a candidate without a
 
 ### Unresolved review threads
 
-With required conversation resolution, each unresolved thread fails the merge gate (`reviewThreads` on the row). An unresolved review thread is a finding to fix: route it like a `CHANGES_REQUESTED` verdict, with `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.
+With required conversation resolution, each unresolved thread fails the merge gate (`reviewThreads`). An unresolved review thread is a finding to fix: the head's reviewer resolves those fixed there; route others with `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.
 
 ## Merge queue
 

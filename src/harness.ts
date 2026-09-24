@@ -81,6 +81,9 @@ export function harnessDecision(plan: Pick<HarnessPlan, 'allow' | 'deny'>, comma
   return parts.length && allowed.every(Boolean) ? { decision: 'allow', rule: allowed[0]! } : { decision: 'ask', rule: null };
 }
 
+/** The one GraphQL write a session may make: resolving a review thread (the master's audit, the reviewer's verdict). */
+export const resolveThreadScript = (root: string) => resolve(root, 'scripts/resolve-thread.mjs');
+
 // The master's own loop, and nothing else. A harness allowlist is a prompt policy, not an
 // authority boundary: branch protection and Graphyard's required check remain the enforcement.
 export function masterHarnessPlan(input: { harness: string; root: string; cliPath: string; repository: string; baseBranch: string; credentialHome: string }): HarnessPlan {
@@ -110,7 +113,7 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     { rule: `Bash(gh api --method PATCH ${protection}/*)`, why: 'Reconcile one protection subresource (required reviews, required status checks) with the open review policies. A subresource PATCH cannot remove protection itself, and the App-bound check is re-verified before every guarded merge; the classifier otherwise refuses it as a CI bypass.' },
     { rule: 'Bash(gh api user/installations*)', why: 'Read the control-plane App\'s installation and the permissions it grants, before and after an installation acceptance. Installation writes have no API path the master may take directly; master browser installation-accept is the only one.' },
     { rule: 'Bash(gh api apps/*)', why: 'Read the permissions a public App record requests, to verify an App permission update.' },
-    { rule: `Bash(node ${resolve(input.root, 'scripts/resolve-thread.mjs')}:*)`, why: 'Resolve a review thread the master has audited. The wrapper sends only resolveReviewThread, so it cannot merge or change protection.' },
+    { rule: `Bash(node ${resolveThreadScript(input.root)}:*)`, why: 'Resolve a review thread the master has audited. The wrapper sends only resolveReviewThread, so it cannot merge or change protection.' },
     { rule: 'Bash(jq:*)', why: 'Filter the JSON that the commands above print, without leaving the session.' },
     { rule: 'Read(./.graphyard/master-actions/**)', why: 'Read the recorded steps, screenshots, and audit ledger of browser administration flows.' },
     { rule: 'Write(./.graphyard/profiles/**)', why: 'Write the worker and reviewer profile files the master installs with master worker add and master reviewer add.' },
