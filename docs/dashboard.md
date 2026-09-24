@@ -12,7 +12,7 @@
 
 ## Workers
 
-**Work → Workers** is a tab of the Work section, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-reference.md#running-executors-under-supervision), the record a launcher writes on the item; the data comes from polled work items, not from Herdr.
+**Work → Workers** is a tab of the Work section, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), the record a launcher writes on the item; the data comes from polled work items, not from Herdr.
 
 A handle recorded running whose `updatedAt` is older than **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *recorded running, not seen since <updatedAt>*, never as live; GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
 

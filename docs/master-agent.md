@@ -9,7 +9,7 @@ The master acts without asking. Only three decisions are human-only: goals and p
 
 ## Operate
 
-Keep cycling: status, dispatch ready work, shepherd review and proof collection, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is live-verified against the exact deployed release.
+Keep cycling: status, dispatch ready work, shepherd review and proof collection, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is live-verified against the exact deployed release or awaits delivery behind a deployment blocker recorded as a follow-up.
 
 1. `master status` at startup and after every material event.
 2. `master dispatch GY-N PROFILE` in `schedule.order`.
@@ -51,7 +51,7 @@ When a candidate passes the build gate, `autoDispatch` records one producer requ
 
 **Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: once expired and unreported by Herdr, it settles as `expired`. One still pending is counted in `dispatch.sessionReconcile.stuck`; close its pane.
 
-The master never launches reviews or producers by hand; `master status` shows what is requested, what is running and since when.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after fixing a refused launch; `master status` shows what is requested, what is running and since when.
 
 ### Proofs must exercise their criterion
 

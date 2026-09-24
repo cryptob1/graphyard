@@ -54,7 +54,7 @@ node bin/graphyard.mjs db backup ./graphyard.json   # with DATABASE_URL set
 node bin/graphyard.mjs db verify FILE
 ```
 
-Store backups like the database. **Upgrade:** back up, deploy, confirm `/healthz` names the new commit, then any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only to an image with the same schema generation. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
+**Upgrade:** back up, deploy, confirm `/healthz` names the new commit, then any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only to an image with the same schema generation. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
 
 ## Manual fallback
 

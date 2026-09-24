@@ -5,9 +5,13 @@
 
 Add a worker with `master worker add FILE` from a template ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); it points to a mode-0600 token file outside every worktree.
 
-Reviewers are added with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json) templates); `master review GY-N [PROFILE]` launches one by hand.
+Reviewers are added with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json) templates); the loop launches each review; `master review GY-N [PROFILE]` only recovers a refused automatic launch or an attempt that settled unsatisfied.
 
 `master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply on the next tick; `setup.attention` reports setup that would stop every launch.
+
+### Session handles
+
+Every launched session records a handle on its item (runtime, host, pane, transcript, attach command), listed under `sessions` in `master status`.
 
 ### Approval modes
 

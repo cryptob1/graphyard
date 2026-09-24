@@ -3,7 +3,7 @@
 
 ## Master commands
 
-`graphyard help` lists every command. These need judgement:
+`graphyard help` lists every command; these need judgement:
 
 | Command | Purpose |
 | --- | --- |
@@ -53,7 +53,7 @@ A harness command classifier would refuse routine administration, so `master har
 
 The control plane names one typed action per item (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Stateless executors claim rows under their own credential; `escalate` and `request-rework` are judgements, listed under `actions.needsHuman` for the master.
 
-Three consecutive failures with an unchanged reason mark a row stalled rather than retrying: the signal for a fleet that reads as idle and is not. Such a row once showed in no count and no list; now it shows in `actions.stalled` and on the item's own card, and rechecks every minute, so backoff never outlives its cause.
+Three consecutive failures with an unchanged reason mark a row stalled rather than retrying: the signal for a fleet that reads as idle and is not. Once in no count and no list, it now shows in `actions.stalled` and on the item's own card, and rechecks every minute, so backoff never outlives its cause.
 
 ### Running executors under supervision
 

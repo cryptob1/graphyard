@@ -83,7 +83,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-For worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. So when adding workers, add a review slot and `G` producer slots per two. Watch `longestWaitMs`.
+For worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -106,7 +106,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 `graphyard doctor --profile through-merge` names every missing piece. Create a small real item and `master dispatch GY-1 PROFILE`; the worker opens a PR and runs `complete GY-1 EPOCH PR_NUMBER`, and review and proofs start automatically. When `Graphyard / merge` appears, require it in branch protection, then `master merge GY-1`.
 
-Before adding workers, let one lease expire, reclaim with another identity, and confirm the old epoch can no longer heartbeat or submit.
+Before adding workers, let one lease expire and confirm a reclaim fences the old epoch.
 
 ## What stays manual
 

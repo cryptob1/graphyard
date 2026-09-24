@@ -26,8 +26,6 @@ Node 24; a checkout of `OWNER/REPO`; `export GRAPHYARD_CLI=/abs/path/graphyard/b
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host` and `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
-A missing CLI is not a reason to stop: install it and rerun.
-
 ## Step 1 — print the plan
 
 ```sh

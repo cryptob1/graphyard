@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 2 | the App, protection, the merge queue, CI proofs. -->
 # GitHub enforcement
 
-A dedicated GitHub App, created by the installer, observes the repository and publishes **`Graphyard / merge`** on the exact PR head.
+The installer-created GitHub App observes the repository and publishes **`Graphyard / merge`** on the exact PR head.
 
 ## App permissions
 
@@ -16,7 +16,7 @@ Every permission is declared once in `src/github-permissions.ts`. The control-pl
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 
-Contents: write exists only for the [merge queue](#merge-queue)'s merge commits. A reviewer App is never granted Contents: write, Checks, or Administration, and worker identities are not Apps at all. A reviewer App holds:
+A reviewer App is never granted Contents: write, Checks, or Administration, and worker identities are not Apps at all. A reviewer App holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ Granted permissions are compared with the declaration every five minutes and aft
 
 ## The reviewer App
 
-The control-plane App never reviews what it gates, so review uses a separate reviewer App created by `graphyard master reviewer setup` (Pull requests write, reads otherwise); binding refuses an installation that can write code. Each review session gets a token valid for at most one hour, and an approval by `SLUG[bot]` on the exact head satisfies both GitHub and Graphyard.
+The control-plane App never reviews what it gates, so review uses a separate reviewer App created by `graphyard master reviewer setup` (Pull requests write, reads otherwise); binding refuses an installation that can write code. Each review session gets a token valid for one hour; an approval by `SLUG[bot]` on the exact head satisfies both GitHub and Graphyard.
 
 ## Require the check
 
@@ -39,7 +39,7 @@ The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval o
 
 ## Merge queue
 
-A candidate enters when its own gates pass; nobody can reorder or bypass entries. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back.
+A candidate enters when its own gates pass; nobody reorders or bypasses entries. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back.
 
 ### Bindings and carry
 
