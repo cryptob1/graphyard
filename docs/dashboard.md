@@ -11,9 +11,9 @@ Each open item is in one group (`web/groups.ts`): **Needs you** (only you may de
 
 ## Workers
 
-**Workers** is its own sidebar entry, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), the record a launcher writes on the item, read from polled work items, not from Herdr.
+**Workers** is its own sidebar entry, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), the record a launcher writes on the item, not from Herdr.
 
-A handle recorded running whose `updatedAt` is older than **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *not seen for <time since updatedAt>*, never as running, and is not counted among the open sessions; GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
+A running handle whose last observation (`observedAt`, else `updatedAt`) is older than **15 minutes** by default, `sessionStaleThresholdMs` in `web/workers-view.ts`, reads *not seen for <time since updatedAt>*, never as running, and is not counted among the open sessions; GY-113's [liveness reconciliation](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
 
 Each running row offers two commands:
 
