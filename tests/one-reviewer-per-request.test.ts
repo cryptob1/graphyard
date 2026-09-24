@@ -76,7 +76,8 @@ test('unit:one-reviewer-per-request — the cycle step and the dispatcher launch
     // wired to the second one, as the incident's two sessions ran two runtimes.
     const loaded = await loadMasterConfig(master.root);
     const config = { ...loaded, run: { ...loaded.run, reviewerProfile: 'claude-reviewer' } };
-    const item = work();
+    // A review is requested only once the head's mechanical proofs pass (GY-115): prove it first.
+    const item = work({ evidence: [{ id: 'evidence-1', proof: 'unit:x', sha: H, baseSha: B, policyRevision: 3, producer: 'ci-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: new Date().toISOString() }] } as Partial<Work>);
     reconcileAutoDispatch(item, [item], new Date());
     const request = item.autoDispatch!.review!;
     const agents: HerdrAgent[] = [];
@@ -158,13 +159,16 @@ test('unit:one-reviewer-per-request — the cycle step and the dispatcher launch
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker' };
+const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:x'] };
+/** The mechanical proof passing on the observed head: a review is requested only after it (GY-115). */
+const proven = (item: Work) => engine.execute(producer, 'evidence', item.id, { proof: 'unit:x', sha: item.candidate!.sha, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/a.ts'] }, randomUUID());
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_ONE_REVIEWER_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 81);
   database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'gy124-pg-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, implementer];
+  engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, implementer, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
@@ -175,7 +179,7 @@ test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUES
   item = await engine.execute(implementer, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());
   item = await engine.execute(implementer, 'submit', item.id, { epoch: 1, pr: 119 }, randomUUID());
   const observed = (reviews: Observation['reviews']): Observation => ({ ...observation({ sha: H, baseSha: B }, { reviews }), candidate: { sha: H, baseSha: B, pr: 119, branch: item.workspaces[0].branch, author: 'implementer' } });
-  item = await engine.observe(item.id, item.revision, observed([]));
+  item = await proven(await engine.observe(item.id, item.revision, observed([])));
   const request = item.autoDispatch!.review!;
   assert.equal(request.state, 'requested');
 
@@ -236,7 +240,7 @@ test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUES
   human = await engine.execute(implementer, 'workspace', human.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${human.id}`, branch: `graphyard/${human.key.toLowerCase()}-1` }, randomUUID());
   human = await engine.execute(implementer, 'submit', human.id, { epoch: 1, pr: 120 }, randomUUID());
   const byHuman = (reviews: Observation['reviews']): Observation => ({ ...observation({ sha: H, baseSha: B }, { reviews }), candidate: { sha: H, baseSha: B, pr: 120, branch: human.workspaces[0].branch, author: 'implementer' } });
-  human = await engine.observe(human.id, human.revision, byHuman([]));
+  human = await proven(await engine.observe(human.id, human.revision, byHuman([])));
   assert.equal(human.autoDispatch!.review!.state, 'requested');
   human = await engine.observe(human.id, human.revision, byHuman([{ id: 601, reviewer: 'maintainer', sha: H, state: 'APPROVED', submittedAt: '2026-09-22T09:00:00Z' }]));
   assert.ok(human.gates.find(gate => gate.name === 'review')!.passed);
