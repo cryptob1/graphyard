@@ -1907,8 +1907,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // shell still sitting in the worktree (GY-189). Nothing runs there any more, so the pane is
   // closed, once, as the session's cleanup; a pane whose scope is still live is left alone.
   // Until that close is done the fence stays up: the settlement below may have excused that very
-  // shell, so an item whose close failed is retried on a later cycle rather than settled.
-  const closing = new Set<string>();
+  // shell, so an item whose close failed is retried on a later cycle rather than settled. A pane
+  // closed this cycle is probed again once it is gone, since the shell may have started something
+  // after the first probe counted its children; only that later probe can lower the fence.
+  const closing = new Set<string>(), closed: Work[] = [];
   for (const item of open) {
     const assessment = assessments[item.id], quarantine = item.containmentQuarantine;
     const recorded = assessment?.verification?.recordedScope;
@@ -1924,9 +1926,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       let gone = false;
       try { await effects.closeSession(pane); } catch (error) { if (!paneAlreadyGone(error)) throw error; gone = true; }
       performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'done', detail: `${gone ? 'Pane was already gone' : 'Closed pane'} ${pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`, attempts, cycle: state.cycle }, now(), effects.persist));
+      closed.push(item);
     } catch (error) {
       closing.add(item.id);
       performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'failed', detail: `Could not close pane ${pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}; the containment quarantine stays until it is closed`, attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
+  if (closed.length) {
+    let fresh: Record<string, ContainmentAssessment> = {};
+    try { fresh = await effects.containment!(closed, { now: snapshot.now, clockOffset }); } catch { /* reprobed next cycle */ }
+    // A shell still exiting after its pane closed, or a probe that failed, is left to the next
+    // cycle's probe, which settles or escalates it; the pre-close assessment is never used.
+    for (const item of closed) {
+      if (fresh[item.id]?.settleable) assessments[item.id] = fresh[item.id];
+      else closing.add(item.id);
     }
   }
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) {

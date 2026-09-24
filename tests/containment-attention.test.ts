@@ -247,6 +247,35 @@ test('unit:ended-worker-pane-closed a close that fails keeps the fence up, and a
   assert.equal(retried.state.actions[`settle:${work.id}:1`]?.state, 'done');
 });
 
+test('unit:ended-worker-pane-closed settlement after a close comes only from a probe taken once the pane is gone', async () => {
+  const work = stranded(), key = `close:ended-scope:${work.id}:1:w1V:p2PP`;
+  // The shell started a background job after the first probe counted its children, and the job survives the pane close.
+  const probes: string[][] = [];
+  let paneOpen = true;
+  const sequenced: DaemonEffects['containment'] = (items, observed) => {
+    probes.push(items.map(item => item.key));
+    return probedBy(paneOpen ? paneShellProbe() : paneShellProbe({ children: 1, paneShell: null }))!(items, observed);
+  };
+  const first = await loop(work, { containment: sequenced, closeSession: pane => { assert.equal(pane, 'w1V:p2PP'); paneOpen = false; } });
+  assert.deepEqual(probes, [['GY-74'], ['GY-74']], 'the closed pane\'s item is probed again after the close');
+  assert.equal(first.state.actions[key]?.state, 'done');
+  assert.deepEqual(first.settled, [], 'the pre-close assessment that excused the shell never lowers the fence');
+  assert.equal(first.state.actions[`settle:${work.id}:1`], undefined);
+  assert.equal(first.state.actions[`escalation:containment:${work.id}:1`], undefined, 'the next cycle\'s probe, not the re-probe, decides whether to escalate');
+
+  // The next cycle probes again; the survivor still holds the fence and is escalated, not settled.
+  const next = await loop(work, { containment: sequenced, closeSession: () => { throw new Error('closed twice'); } }, first.state);
+  assert.deepEqual(next.settled, []);
+  assert.match(next.state.actions[`escalation:containment:${work.id}:1`]?.detail ?? '', /Process 4242 of the contained worker is still present/);
+
+  // A re-probe that finds nothing left settles in the same cycle, from that fresh assessment.
+  let reprobed = 0;
+  const clean = await loop(work, { containment: (items, observed) => { reprobed += 1; return probedBy(paneShellProbe())!(items, observed); } });
+  assert.equal(reprobed, 2);
+  assert.equal(clean.settled.length, 1);
+  assert.equal(clean.state.actions[`settle:${work.id}:1`]?.state, 'done');
+});
+
 test('unit:ended-worker-pane-closed a pane whose supervisor scope is still live is left alone', async () => {
   const work = stranded();
   for (const activeState of ['active', 'activating', 'deactivating', 'unqueried']) {
