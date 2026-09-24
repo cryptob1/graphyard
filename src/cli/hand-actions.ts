@@ -20,7 +20,8 @@ import { dispatchFailureLimit } from '../auto-dispatch.js';
  * Two hand actions stay open on a system-driven item because the loop itself sends the master to
  * them: `master review` for a review request the loop has stopped relaunching (its session settled
  * unanswered, its sessions or launch refusals are exhausted), and `master decide attest` for a
- * `manual:` proof no producer session runs, which only an attestation can satisfy.
+ * `manual:` proof no producer session runs, or whose producer request the loop has likewise stopped
+ * relaunching, which then only an attestation can satisfy.
  * The executor's own dispatch goes through its handler (src/executor.ts), never this path.
  */
 
@@ -32,7 +33,7 @@ export const loopOwned: Record<HandAction, { command: string; step: string }> = 
   dispatch: { command: 'master dispatch', step: "the loop's dispatch step: master run's dispatcher claims the item's dispatch action and launches a worker" },
   merge: { command: 'master merge', step: "the loop's merge step: master run performs the guarded merge of the authorized candidate" },
   review: { command: 'master review', step: "the loop's dispatch step: master run launches the bound reviewer on every submitted head; master review is open only as the recovery of a review request the loop has stopped relaunching" },
-  evidence: { command: 'master decide attest', step: "the loop's dispatch step: master run launches an independent proof producer on the exact head; only a manual proof no producer runs is attested" },
+  evidence: { command: 'master decide attest', step: "the loop's dispatch step: master run launches an independent proof producer on the exact head; only a manual proof no producer runs, or whose producer request the loop stopped relaunching, is attested" },
   'merge-decision': { command: 'master decide merge', step: "the loop's decisions step: master run requests the merge decision when automatic merging is off" },
 };
 
@@ -42,14 +43,16 @@ export const loopOwnedDecisions: Partial<Record<string, HandAction>> = { attest:
 /**
  * The hand action a `master decide` would be, or null when it is not one the loop owns. An
  * attestation of a `manual:` proof no producer session runs is the only way that proof is ever
- * satisfied, so it is left to the two-party decision; an attestation that names no proof, or a
- * proof a producer runs, is the loop's.
+ * satisfied, so it is left to the two-party decision; so is one of a proof whose producer request
+ * the loop has stopped relaunching (`producerRecovery`). An attestation that names no proof, or a
+ * proof a producer still runs, is the loop's.
  */
-export function handDecision(work: Pick<Work, 'producerProofs'>, action: string | undefined, input: unknown): HandAction | null {
+export function handDecision(work: Work, action: string | undefined, input: unknown, loop: LoopSessions = { sessions: [], failures: {}, now: Date.now() }): HandAction | null {
   const owned = action ? loopOwnedDecisions[action] ?? null : null;
   if (owned !== 'evidence') return owned;
   const proof = (input as { proof?: unknown } | null)?.proof;
-  return typeof proof === 'string' && proof.startsWith('manual:') && !automatableProof(work, proof) ? null : owned;
+  if (typeof proof !== 'string' || !proof.startsWith('manual:')) return owned;
+  return !automatableProof(work, proof) || producerRecovery(work, proof, loop) ? null : owned;
 }
 /** The JSON a `master decide` names, inline or as `@FILE`; unreadable input is no input. */
 export async function decisionPayload(argument: string | undefined): Promise<unknown> {
@@ -57,23 +60,44 @@ export async function decisionPayload(argument: string | undefined): Promise<unk
   try { return JSON.parse(argument.startsWith('@') ? await readFile(argument.slice(1), 'utf8') : argument); } catch { return null; }
 }
 
-/** One reviewer session as the loop's ledger records it, and one launch the loop's cursor saw refused. */
-type ReviewSession = Parameters<typeof sessionRetry>[0][number];
+/** One session as the loop's reviewer or producer ledger records it, and the launches of each request the loop's cursor saw refused. */
+type LoopSession = Parameters<typeof sessionRetry>[0][number];
+type ReviewSession = LoopSession;
+export interface LoopSessions { sessions: LoopSession[]; failures: Record<string, { attempts: number }>; now: number }
+
+/**
+ * Why the loop has stopped relaunching a live request, or null while it still launches it: its
+ * last session settled without satisfying it, its sessions are exhausted, or its launch was
+ * refused `dispatchFailureLimit` times. These are the states in which the loop's dispatch step
+ * says no further automatic attempt follows.
+ */
+function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number): string | null {
+  const retry = sessionRetry(sessions, request.id, now);
+  if (retry.settled && retry.last && retry.last.state !== 'pending') return `${label} request ${request.id}'s session attempt ${retry.attempts} ${retry.last.state} without satisfying it`;
+  if (retry.exhausted) return `${label} request ${request.id} exhausted its ${retry.attempts} automatic sessions`;
+  if (failure && failure.attempts >= dispatchFailureLimit) return `the loop's launch of ${label} request ${request.id} was refused ${failure.attempts} time(s)`;
+  return null;
+}
+
 /**
  * Why a hand review launch is the recovery the loop sends the master to, or null when the loop
- * still launches the item's review itself. It is the recovery exactly when the candidate holds a
- * live review request and the loop has stopped relaunching it: its last session settled without
- * satisfying it, its sessions are exhausted, or its launch was refused `dispatchFailureLimit`
- * times. These are the states whose recovery text names `master review`.
+ * still launches the item's review itself: the candidate holds a live review request the loop has
+ * stopped relaunching. These are the states whose recovery text names `master review`.
  */
 export function reviewRecovery(work: Work, sessions: ReviewSession[], failure: { attempts: number } | undefined, now: number): string | null {
   const request = liveReviewRequest(work);
-  if (!request) return null;
-  const retry = sessionRetry(sessions, request.id, now);
-  if (retry.settled && retry.last && retry.last.state !== 'pending') return `review request ${request.id}'s session attempt ${retry.attempts} ${retry.last.state} without satisfying it`;
-  if (retry.exhausted) return `review request ${request.id} exhausted its ${retry.attempts} automatic sessions`;
-  if (failure && failure.attempts >= dispatchFailureLimit) return `the loop's launch of review request ${request.id} was refused ${failure.attempts} time(s)`;
-  return null;
+  return request ? stoppedRequest('review', request, sessions, failure, now) : null;
+}
+
+/**
+ * Why a hand attestation of a produced `manual:` proof is the only way left to satisfy it, or null
+ * while the loop still launches a producer for it: the live producer request for the proof has no
+ * further automatic attempt, and nothing launches a producer by hand, so without the two-party
+ * attestation the candidate could never satisfy the proof.
+ */
+export function producerRecovery(work: Pick<Work, 'autoDispatch'>, proof: string, loop: LoopSessions): string | null {
+  const request = work.autoDispatch?.producers.find(entry => entry.state === 'requested' && entry.proofs?.includes(proof));
+  return request ? stoppedRequest('producer', request, loop.sessions, loop.failures[request.id], loop.now) : null;
 }
 
 export const systemDriven = (work: Pick<Work, 'systemDriven'>) => work.systemDriven === true;

@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
@@ -12,7 +13,7 @@ import { actionClaimMs, actionId, type ActionRow } from '../src/model/actions.js
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import { masterConfigSchema } from '../src/master.js';
-import { dispatchRaceRefusal, handDecision, loopOwned, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
+import { dispatchRaceRefusal, handDecision, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
 
 // GY-175: the master-side rules the loop depends on are enforced by the master CLI itself, not
@@ -81,10 +82,12 @@ async function masterHarness(state: { work: Work[]; releasedAt?: string | null }
     await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true });
   };
-  /** Records a launch of the item's review request the loop's cursor saw refused `attempts` times. */
-  const refusedLaunches = (requestId: string, attempts: number) => writeFile(join(credentials, 'coordinator.dispatch.json'), JSON.stringify({ version: 1, url, repository: 'owner/project',
-    failures: { [requestId]: { kind: 'review', work: 'GY-7', sha: headSha, attempts, reason: 'reviewer profile refused the launch', at: iso(-60_000), nextAt: iso(60_000) } } }), { mode: 0o600 });
-  return { run, refusal, reads, close, refusedLaunches };
+  /** Records a launch of the item's review (or producer) request the loop's cursor saw refused `attempts` times. */
+  const refusedLaunches = (requestId: string, attempts: number, kind: 'review' | 'producer' = 'review') => writeFile(join(credentials, 'coordinator.dispatch.json'), JSON.stringify({ version: 1, url, repository: 'owner/project',
+    failures: { [requestId]: { kind, work: 'GY-7', sha: headSha, attempts, reason: `${kind} profile refused the launch`, at: iso(-60_000), nextAt: iso(60_000) } } }), { mode: 0o600 });
+  /** Writes the loop's producer ledger with these sessions. */
+  const producerSessions = (records: object[]) => writeFile(join(root, '.graphyard/producers.json'), JSON.stringify({ version: 1, producers: records }), { mode: 0o600 });
+  return { run, refusal, reads, close, refusedLaunches, producerSessions };
 }
 
 const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40), reviewRequestId = 'c'.repeat(32);
@@ -95,6 +98,15 @@ function underReview(overrides: Partial<Work> = {}): Work {
     autoDispatch: { review: { id: reviewRequestId, kind: 'review', pr: 12, sha: headSha, baseSha, policyRevision: 1, provider: 'github', state: 'requested', reason: 'independent approval is required', requestedAt: iso(-600_000) }, producers: [], history: [] } as any, ...overrides });
 }
 const session = (state: string, at: number) => ({ requestId: reviewRequestId, state, requestedAt: iso(at), closedAt: iso(at + 60_000), resolution: `${state} session` });
+const producerRequestId = 'd'.repeat(32);
+/** A system-driven item whose submitted head holds a live producer request for `manual:produced-review`. */
+function underProof(): Work {
+  return underReview({ producerProofs: ['manual:produced-review'], autoDispatch: { review: null, history: [],
+    producers: [{ id: producerRequestId, kind: 'producer', group: 'manual', proofs: ['manual:produced-review'], pr: 12, sha: headSha, baseSha, policyRevision: 1, state: 'requested', reason: 'unproven', requestedAt: iso(-7_200_000) }] } as any });
+}
+/** One producer ledger record for the live producer request, as the loop writes it. */
+const producerSession = (state: string, at: number, attempt = 1) => ({ id: randomUUID(), requestId: producerRequestId, attempt, key: 'GY-7', pr: 12, sha: headSha, baseSha, policyRevision: 1, group: 'manual', proofs: ['manual:produced-review'],
+  profile: 'producer', principal: 'producer-principal', agentName: 'produce-1', pane: null, requestedAt: iso(at), expiresAt: iso(at + 3_600_000), state, outcome: {}, closedAt: iso(at + 60_000), resolution: `${state} session`, acknowledgedAt: iso(at + 1_000) });
 
 // ---- AC-1: no hand dispatch while the executor's dispatch is pending, claimed or just released ----
 
@@ -230,5 +242,33 @@ test('unit:system-driven-items master review stays open only as the recovery of 
     assert.match(await master.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/);
     await master.refusedLaunches(reviewRequestId, dispatchFailureLimit);
     assert.doesNotMatch(await master.refusal(['review', 'GY-7']), /is system-driven/, 'the recovery the loop names reaches the launch');
+  } finally { await master.close(); }
+});
+
+test('unit:system-driven-items master decide attest reopens for a produced manual proof once the loop stops relaunching its producer request', async () => {
+  const now = Date.now(), attest = { proof: 'manual:produced-review' };
+  const loop = (sessions: object[], failures: Record<string, { attempts: number }> = {}) => ({ sessions: sessions as any, failures, now });
+  // The loop still launches it: nothing launched yet, a session running, a failed session awaiting its retry, launch refusals under the limit.
+  assert.equal(handDecision(underProof(), 'attest', attest, loop([])), 'evidence');
+  assert.equal(handDecision(underProof(), 'attest', attest, loop([{ ...producerSession('pending', -60_000), closedAt: undefined }])), 'evidence');
+  assert.equal(handDecision(underProof(), 'attest', attest, loop([producerSession('failed', -120_000)])), 'evidence');
+  assert.equal(handDecision(underProof(), 'attest', attest, loop([], { [producerRequestId]: { attempts: dispatchFailureLimit - 1 } })), 'evidence');
+  assert.equal(producerRecovery(underProof(), 'manual:other', loop([producerSession('completed', -120_000)])), null, 'no live request for that proof: nothing to recover');
+  // The loop stopped: a settled session, exhausted sessions, exhausted launch refusals. Nothing launches a producer by hand, so only the attestation is left.
+  assert.match(producerRecovery(underProof(), 'manual:produced-review', loop([producerSession('completed', -120_000)]))!, /producer request d+'s session attempt 1 completed without satisfying it/);
+  assert.match(producerRecovery(underProof(), 'manual:produced-review', loop([1, 2, 3, 4].map(n => producerSession('failed', -n * 3_600_000, 5 - n))))!, /exhausted its 4 automatic sessions/);
+  assert.match(producerRecovery(underProof(), 'manual:produced-review', loop([], { [producerRequestId]: { attempts: dispatchFailureLimit } }))!, /refused 12 time\(s\)/);
+  assert.equal(handDecision(underProof(), 'attest', attest, loop([producerSession('completed', -120_000)])), null);
+  assert.equal(handDecision(underProof(), 'attest', { proof: 'unit:guard' }, loop([producerSession('completed', -120_000)])), 'evidence', 'only a manual proof is ever attested');
+  const master = await masterHarness({ work: [underProof()] });
+  try {
+    const decide = ['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'reviewed', 'by', 'hand'];
+    assert.match(await master.refusal(decide), /GY-7 is system-driven: master decide attest is a hand action the loop owns/);
+    await master.producerSessions([1, 2, 3, 4].map(n => producerSession('failed', -n * 3_600_000, 5 - n)));
+    // Past the guard the command asks for the two-party decision, which this checkout has no operator-agent identity for.
+    assert.match(await master.refusal(decide), /No master operator-agent identity is provisioned/, 'an exhausted producer request leaves the attestation to the two-party decision');
+    await master.producerSessions([]);
+    await master.refusedLaunches(producerRequestId, dispatchFailureLimit, 'producer');
+    assert.match(await master.refusal(decide), /No master operator-agent identity is provisioned/, 'so does a producer launch the loop gave up on');
   } finally { await master.close(); }
 });

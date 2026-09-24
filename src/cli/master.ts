@@ -8,6 +8,7 @@ import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
 import { readReviewLedger, reviewCommand } from '../reviewer.js';
+import { readProducerLedger } from '../producer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -116,8 +117,9 @@ export const masterCommands = defineCommands([
       if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
       // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175).
       if (id === 'decide' && ['attest', 'merge'].includes(args[1])) {
-        const work = (await masterApi('work-snapshot')).work.find((item: any) => item.id === args[0] || item.key === args[0]);
-        const owned = work ? handDecision(work, args[1], await decisionPayload(args[2])) : null; if (owned) assertHandAction(work, owned);
+        const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+        const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now: Date.parse(snapshot.now) };
+        const owned = work ? handDecision(work, args[1], await decisionPayload(args[2]), loop) : null; if (owned) assertHandAction(work, owned);
       }
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
         { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
