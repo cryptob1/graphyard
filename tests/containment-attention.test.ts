@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertDispatchable, assessContainment, buildMasterStatus, containmentHold, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { containmentSettlementRefusals, countHeldChildren, isInteractiveShell, paneShellReport, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
@@ -127,14 +127,14 @@ function paneShellProbe(options: { activeState?: string; children?: number; comm
 const herdrProcessInfo = (shell: number, foreground: number, paneId = pane) => ({ type: 'pane_process_info', process_info: { pane_id: paneId, shell_pid: shell, foreground_process_group_id: foreground, foreground_processes: [] } });
 const refusals = (work: Work, verification: ContainmentVerification) => containmentSettlementRefusals(work, verification, { now: Date.parse(observedAt) });
 
-async function loop(work: Work, overrides: Partial<DaemonEffects> = {}) {
+async function loop(work: Work, overrides: Partial<DaemonEffects> = {}, carried?: DaemonState) {
   const directory = await mkdtemp(join(tmpdir(), 'graphyard-pane-shell-'));
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const profile = { name: 'opencode-1', principal: 'worker-a', agentName: 'graphyard-opencode-1', mode: 'launch', kind: 'claude', credentialFile: join(directory, 'worker.token'), agentArgs: [], environment: {} } as unknown as WorkerProfile;
   const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: '/srv/graphyard/bin/graphyard.mjs',
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'coordinator-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile] });
-  const state = emptyDaemonState(config), closed: string[] = [], settled: ContainmentAssessment[] = [];
+  const state = carried ?? emptyDaemonState(config), closed: string[] = [], settled: ContainmentAssessment[] = [];
   const effects: DaemonEffects = {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [work], now: observedAt }),
@@ -228,6 +228,23 @@ test('unit:ended-worker-pane-closed the loop closes the Herdr pane of a worker w
   // A pane Herdr already closed settles the same record, and says so.
   const gone = await loop(work, { containment: probedBy(paneShellProbe({ activeState: 'failed' })), closeSession: () => { throw new Error('herdr: pane_not_found w1V:p2PP'); } });
   assert.match(gone.state.actions[`close:ended-scope:${work.id}:1:w1V:p2PP`]?.detail ?? '', /^Pane was already gone w1V:p2PP/);
+});
+
+test('unit:ended-worker-pane-closed a close that fails keeps the fence up, and a later cycle retries it before settling', async () => {
+  const work = stranded(), key = `close:ended-scope:${work.id}:1:w1V:p2PP`;
+  const failed = await loop(work, { containment: probedBy(paneShellProbe()), closeSession: () => { throw new Error('herdr: server unavailable'); } });
+  assert.equal(failed.state.actions[key]?.state, 'failed');
+  assert.match(failed.state.actions[key]!.detail, /Could not close pane w1V:p2PP of GY-74 epoch 1 .*herdr: server unavailable; the containment quarantine stays until it is closed/);
+  assert.deepEqual(failed.settled, [], 'the excused shell\'s pane is still open, so the quarantine is not settled');
+  assert.equal(failed.state.actions[`settle:${work.id}:1`], undefined);
+
+  // The quarantine is still there on the next cycle, so the close is retried; once it is done the fence comes down.
+  const retried = await loop(work, { containment: probedBy(paneShellProbe()) }, failed.state);
+  assert.deepEqual(retried.closed, ['w1V:p2PP']);
+  assert.equal(retried.state.actions[key]?.state, 'done');
+  assert.equal(retried.state.actions[key]?.attempts, 2);
+  assert.equal(retried.settled.length, 1);
+  assert.equal(retried.state.actions[`settle:${work.id}:1`]?.state, 'done');
 });
 
 test('unit:ended-worker-pane-closed a pane whose supervisor scope is still live is left alone', async () => {

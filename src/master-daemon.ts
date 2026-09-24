@@ -1906,6 +1906,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   // A worker whose supervisor scope has ended leaves its launch pane behind, the pane's own
   // shell still sitting in the worktree (GY-189). Nothing runs there any more, so the pane is
   // closed, once, as the session's cleanup; a pane whose scope is still live is left alone.
+  // Until that close is done the fence stays up: the settlement below may have excused that very
+  // shell, so an item whose close failed is retried on a later cycle rather than settled.
+  const closing = new Set<string>();
   for (const item of open) {
     const assessment = assessments[item.id], quarantine = item.containmentQuarantine;
     const recorded = assessment?.verification?.recordedScope;
@@ -1913,7 +1916,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const epoch = quarantine.epoch, pane = recordedPane(item);
     if (!pane) continue;
     const key = `close:ended-scope:${item.id}:${epoch}:${pane}`, previous = state.actions[key];
-    if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) continue;
+    if (previous?.state === 'done') continue;
+    if (!readyToRetry(previous, state.cycle)) { closing.add(item.id); continue; }
     const attempts = (previous?.attempts ?? 0) + 1, why = `its supervisor scope ${recorded.unit} is ${recorded.activeState}`;
     await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'started', detail: `Closing pane ${pane} of ${item.key} epoch ${epoch}: ${why}`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
@@ -1921,7 +1925,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       try { await effects.closeSession(pane); } catch (error) { if (!paneAlreadyGone(error)) throw error; gone = true; }
       performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'done', detail: `${gone ? 'Pane was already gone' : 'Closed pane'} ${pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`, attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'failed', detail: `Could not close pane ${pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      closing.add(item.id);
+      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: 'failed', detail: `Could not close pane ${pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}; the containment quarantine stays until it is closed`, attempts, cycle: state.cycle }, now(), effects.persist));
     }
   }
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) {
@@ -1935,7 +1940,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
       continue;
     }
-    if (!effects.settleContainment) continue;
+    if (!effects.settleContainment || closing.has(item.id)) continue;
     const previous = state.actions[key];
     if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) continue;
     // A supervisor verified gone with the lease lapsed is a worker killed outright — the whole
