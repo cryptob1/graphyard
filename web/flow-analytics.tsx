@@ -82,6 +82,20 @@ export function wellFormedFlowReport(body: any): boolean {
     && Object.values(body.definitions).every(definition => fits(definition, { ...leaves('label', 'formula'), sources: ['leaf'] }));
 }
 
+/**
+ * Whether a body read from /api/analytics/flow/drilldown can be drawn: every column a string and
+ * every row an object whose cells are text, a number, a boolean or null, with a numeric total. The
+ * drawer and the handed-in-to-merged figure read each row by column, so a null row or an object
+ * cell would break Insights instead of reading as malformed records.
+ */
+export function wellFormedDrilldown(body: any): boolean {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.columns) || !Array.isArray(body.rows)) return false;
+  if (!body.columns.every((column: unknown) => typeof column === 'string') || new Set(body.columns).size !== body.columns.length) return false;
+  if (typeof body.total !== 'number' || !Number.isFinite(body.total) || (body.truncated !== undefined && typeof body.truncated !== 'boolean')) return false;
+  return body.rows.every((row: unknown) => !!row && typeof row === 'object' && !Array.isArray(row)
+    && body.columns.every((column: string) => (row as any)[column] === undefined || fits((row as any)[column], 'leaf')));
+}
+
 export const toMerged = ['pr-created-to-review-start', 'review-start-to-review-complete', 'review-complete-to-evidence-complete', 'evidence-complete-to-merge-authorized', 'merge-authorized-to-merged'];
 /**
  * Handed in to merged, per merged commit, from the phase drill-down rows: the sum of the five
@@ -111,10 +125,10 @@ export function submitToMerge(rows: { workKey: string; bucket: string; valueMs: 
  */
 export async function mergeTime(request: (path: string) => Promise<any>, query: string) {
   const combined = await request(`analytics/flow/drilldown?${query}&metric=phase`).catch(() => null);
-  if (!combined?.rows) return null;
+  if (!wellFormedDrilldown(combined)) return null;
   if (!combined.truncated) return submitToMerge(combined.rows);
   const perPhase = await Promise.all(toMerged.map(phase => request(`analytics/flow/drilldown?${query}&metric=phase&key=${phase}`).catch(() => null)));
-  if (perPhase.some(page => !page?.rows)) return null;
+  if (!perPhase.every(wellFormedDrilldown)) return null;
   return submitToMerge(perPhase.flatMap(page => page.rows), perPhase.some(page => page.truncated));
 }
 
@@ -188,7 +202,7 @@ export default function FlowAnalytics({ request, token, canAudit, initial, folde
     let active = true;
     void request(`analytics/flow/drilldown?${query}&metric=${drill.metric}${drill.key ? `&key=${encodeURIComponent(drill.key)}` : ''}`)
       .then(value => {
-        if (!value || !Array.isArray(value.columns) || !Array.isArray(value.rows)) throw new Error('The drill-down records are malformed');
+        if (!wellFormedDrilldown(value)) throw new Error('The drill-down records are malformed');
         if (active) setRows(value);
       })
       .catch(e => { if (active) setDrillError((e as Error).message); });

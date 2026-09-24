@@ -23,7 +23,7 @@ import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
 import { ShippingPulseView, wellFormedPulse } from '../web/shipping-pulse.js';
-import { wellFormedFlowReport } from '../web/flow-analytics.js';
+import { mergeTime, wellFormedDrilldown, wellFormedFlowReport } from '../web/flow-analytics.js';
 import InsightsFlow, { Headline, InsightsDetails, ReplayLane, readFlow } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
 import Sidebar from '../web/components/sidebar.js';
@@ -1180,6 +1180,15 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
     ['definitions', { leadTime: { label: 'Lead time', formula: 'x' } }], ['privacy', { statement: { text: 'an object is no text' } }], ['availableTypes', 'feature']] as const) {
     assert.equal(wellFormedFlowReport({ ...flowWhole, [field]: broken }), false, `refused: ${field} ${JSON.stringify(broken)?.slice(0, 80)}`);
   }
+  // The drill-down drawer and the handed-in-to-merged figure read each row by column, so a drill-down body is accepted only whole too.
+  const flowRead = flowApi(board());
+  for (const metric of ['bottleneck', 'phase', 'steps']) assert.equal(wellFormedDrilldown(flowRead(`analytics/flow/drilldown?window=30&metric=${metric}`)), true, `the served ${metric} drill-down is whole`);
+  const drillWhole = flowRead('analytics/flow/drilldown?window=30&metric=phase') as Record<string, any>;
+  for (const broken of [{ columns: ['workKey'], rows: [null] }, { rows: [[]] }, { rows: [{ workKey: { key: 'GY-1' } }] }, { columns: [1] }, { columns: ['workKey', 'workKey'] }, { total: '3' }, { total: undefined }, { truncated: 'no' }, { rows: undefined }]) {
+    assert.equal(wellFormedDrilldown({ ...drillWhole, ...broken }), false, `refused drill-down: ${JSON.stringify(broken)}`);
+  }
+  assert.equal(wellFormedDrilldown(null), false);
+  assert.equal(await mergeTime(async () => ({ columns: ['workKey'], rows: [null], total: 1, truncated: false }), 'window=30'), null, 'a malformed phase drill-down leaves the merge figure unread instead of throwing');
   // The former tabs are gone from the registry; Validation and Releases moved under Shipped.
   for (const id of ['pulse', 'flow']) assert.ok(!views.some(view => view.id === id), id);
   for (const id of ['validation', 'releases']) assert.equal(views.find(view => view.id === id)!.section, 'shipped', id);
