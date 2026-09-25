@@ -39,15 +39,15 @@ The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, approval of the 
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed to the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. GitHub's refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
+A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; on that merge the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow runs on every push to a `graphyard/*` PR branch, with workflow and secrets from the default branch: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips get the same run. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow runs on every push to a `graphyard/*` PR branch, with workflow and secrets from the default branch: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips get the same run; dependencies are cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
