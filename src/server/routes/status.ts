@@ -103,7 +103,10 @@ export const statusRoutes = defineRoutes('status', [
       // seconds — and a ledger reconstruction in front of those reads would sit in the path of
       // every claim, so a fleet that polls harder would pay reconstruction latency to act.
       if (view === 'full') await catchUpPipelineTimelines(services.engine.store);
-      const snapshot = await services.engine.store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work);
+      // The coordination view reads the work index (GY-203): whole documents only for the items
+      // it needs, so the poll stays small as the board's history grows.
+      const store = services.engine.store;
+      const snapshot = view === 'coordination' ? await store.coordinationSnapshot() : await store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work);
       const scoped = { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       return view === 'coordination' ? coordinationSnapshot(scoped) : scoped;
     },

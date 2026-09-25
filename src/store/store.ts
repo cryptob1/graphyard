@@ -8,8 +8,25 @@ import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 
 export * from './snapshot-delta.js';
 
-/** The advisory lock every coordination transaction takes (Store.transaction). */
-const coordinationLock = 71490321;
+/**
+ * The advisory locks the store takes, one per concern and never shared (GY-203). Coordination
+ * transactions (Store.transaction) serialize on the first; a migrating release serializes with
+ * other migrating releases on the second; a logical backup or restore serializes with other
+ * backups and restores on the third. A migration or a backup never waits behind a coordination
+ * transaction's lock, and no coordination transaction ever waits behind theirs. (71490322 is the
+ * flow projection's, flow-analytics.ts.)
+ */
+export const coordinationLock = 71490321;
+export const migrationLock = 71490323;
+export const backupLock = 71490324;
+/** Take the backup lock for the rest of `db`'s transaction: `graphyard db backup` and `db restore` hold it. */
+export async function takeBackupLock(db: Pick<pg.PoolClient, 'query'>) { await db.query('SELECT pg_advisory_xact_lock($1)', [backupLock]); }
+/**
+ * How long after its last write a delivered item stays whole in the coordination snapshot: long
+ * enough for the loop to sample its clocks and verify its deployment from the document; after it,
+ * the index row's summary (the document without its history) stands in for it.
+ */
+export const coordinationSettledMs = 24 * 3600_000;
 /** How long a migrating release may wait for locks in total: well inside Railway's 120-second health check. */
 export const migrationLockTimeoutMs = 30_000;
 /** The migration's statements ahead of the first table's DDL: the shared trigger function. */
@@ -42,10 +59,12 @@ export class Store {
    * A release whose generation and migration are already recorded starts without any
    * coordination or table lock: it reads graphyard_schema and its comment (the digest of the
    * migration that last ran) and skips the DDL, so a new container never queues behind a busy
-   * live replica. Only a release that must migrate takes the coordination lock, and every
+   * live replica. Only a release that must migrate takes the migration lock — its own, never
+   * the coordination lock, so a migration does not queue behind a busy replica's coordination
+   * transactions and two migrating releases still serialize — and every
    * lock wait of the migration shares one `lockTimeoutMs` deadline: each step's lock_timeout
    * is the time left, and a watchdog cancels any lock wait still running at the deadline, so
-   * waits on the coordination lock, across tables, and between the statements of one table's
+   * waits on the migration lock, across tables, and between the statements of one table's
    * DDL never add up past it. The watchdog's connection is reserved before the migration begins,
    * and a migration that cannot reserve it, or loses it past the deadline, fails at once.
    * Startup then fails naming the lock, well inside the platform's
@@ -71,7 +90,7 @@ export class Store {
     const lose = (error: Error) => { lost ??= error; };
     guard.on('error', lose);
     guard.on('end', () => lose(new Error('Connection terminated')));
-    let waitingOn = `the coordination advisory lock pg_advisory_xact_lock(${coordinationLock})`;
+    let waitingOn = `the migration advisory lock pg_advisory_xact_lock(${migrationLock})`;
     // A watchdog that cannot run past the deadline aborts the migration: without it, lock waits
     // inside one step could restart lock_timeout without end.
     let abort!: (error: Error) => void, aborted: Error | undefined;
@@ -103,7 +122,7 @@ export class Store {
       const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
       poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
       await db.query('BEGIN');
-      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [migrationLock]);
       await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
       for (const table of tables) await step(`a lock on table ${table.name} (or an object its migration touches)`, table.ddl);
       const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
@@ -156,6 +175,22 @@ export class Store {
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
+  }
+  /**
+   * The coordination snapshot the master loop, the dispatcher and every executor poll, read from
+   * the work index (GY-203) in one statement: the whole document of every item still in flight,
+   * or delivered within `settledMs`, and for every other item its index row's summary — the
+   * document without the history that makes up most of a delivered item's bytes. `summarized`
+   * counts the stand-ins, each marked `summarized: true`.
+   */
+  async coordinationSnapshot(settledMs = coordinationSettledMs): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[]; summarized: number }> {
+    const row = (await this.pool.query(`WITH listed AS (
+        SELECT i.number, i.summary, CASE WHEN i.stage IS DISTINCT FROM 'done' OR i.updated_at IS NULL OR i.updated_at > statement_timestamp() - ($1::text||' milliseconds')::interval
+          THEN (SELECT w.document FROM work_items w WHERE w.id = i.id) END AS document
+        FROM work_index i)
+      SELECT COALESCE(jsonb_agg(COALESCE(document, summary) ORDER BY number), '[]'::jsonb) AS work, count(*) FILTER (WHERE document IS NULL) AS summarized, statement_timestamp() AS observed_at,
+        (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs FROM listed`, [String(Math.max(0, Math.floor(settledMs)))])).rows[0];
+    return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs, summarized: Number(row.summarized) };
   }
   async events(id?: string) {
     // A delta row reads as the full row it stands for (snapshot-delta.ts).
