@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { ejectionReason, nextQueueSequence, predictQueue, queueOrder, queuePlacement, queueRef, type QueueEntry } from '../src/merge-queue.js';
 import { decideCarry } from '../src/model/carry.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
+import { buildMasterStatus, unauthorizedMergeViolation } from '../src/master.js';
 
 const ciAppIds = [15368];
 const commit = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -337,4 +338,17 @@ test('unit:no-ejection-on-unvalidated-conflict — an entry that conflicts with 
   assert.equal(evaluated.queueEjection ?? null, null);
   assert.deepEqual(evaluated.queueHistory ?? [], [], 'nothing was ejected');
   assert.equal(evaluated.gates.find(gate => gate.name === 'merge')!.reasons.some(reason => reason.includes('GY-A')), false);
+});
+
+test('an entry passed over shares its chain position with the entry behind it, and a merged entry\'s waiters are the entries behind it by sequence', () => {
+  const a = fellBack(published(enqueue(work('GY-A'), 1)));
+  const m = published(enqueue(work('GY-M', { candidate: { sha: commit('GYMhead'), baseSha: commit('main'), pr: 2, branch: 'graphyard/GY-M', author: 'agent' } }), 2));
+  m.observation = observation(m, { merged: true, mergeSha: commit('mergedM'), prState: 'closed' });
+  m.violations = [unauthorizedMergeViolation];
+  const c = enqueue(work('GY-C', { candidate: { sha: commit('GYChead'), baseSha: commit('main'), pr: 3, branch: 'graphyard/GY-C', author: 'agent' } }), 3);
+  const placements = predictQueue([a, m, c], now.getTime());
+  assert.deepEqual(placements.map(entry => [entry.key, entry.position, entry.sequence]), [['GY-A', 0, 1], ['GY-M', 0, 2], ['GY-C', 1, 3]], 'A is passed over, so M heads the chain beside it');
+  const row = buildMasterStatus({ work: [a, m, c], now: now.toISOString() }, [], []).work.find(entry => entry.key === 'GY-M')!;
+  assert.deepEqual(row.merged?.queue, { sequence: 2, position: 1, size: 2, unpublishable: true, behind: ['GY-C'] }, 'neither M itself nor the passed-over A waits behind M');
+  assert.match(row.attention!, /GY-C wait behind it/);
 });

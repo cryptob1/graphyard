@@ -281,6 +281,16 @@ export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseR
   return refresh?.head === candidate.sha && refresh.policyRevision === work.policyRevision && refresh.restoredApproval?.sha === candidate.sha ? refresh.restoredApproval : null;
 }
 export interface QueuePlacement {
+  /**
+   * `position` is the entry's place in the chain of validated entries it is predicted on, not its
+   * index in the queue (GY-196): an entry that fell out of validation is predicted on the same
+   * chain as the validated entry behind it, so both can hold the same position, and position 0 is
+   * the chain's head only for a validated entry. An entry that fell back out of validation at the
+   * merge stage (rework, violation) at position 0 is observed at the head cadence (github.ts) and
+   * no more: it cannot merge, and the validated head beside it lands first. `sequence` alone
+   * orders the physical queue: select the entries behind one by a greater sequence, never by
+   * slicing the placements at `position`.
+   */
   id: string; key: string; position: number; size: number; sequence: number; enqueuedAt: string; waitMs: number;
   predecessors: string[]; predictedBase: string | null; tip: string | null;
   /** Entries ahead by sequence that are not validated (see `validatedQueueEntry`): passed over, never predicted on (GY-196). */
