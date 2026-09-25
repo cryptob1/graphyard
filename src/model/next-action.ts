@@ -292,13 +292,10 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
     if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${detail}`, resyncInputs(work), binding, failing.name, refusal);
     // Waiting a turn in the merge queue is nobody's action: the predecessor's merge is the one
-    // that moves this item, exactly as an unfinished dependency is that item's dispatch.
+    // that moves this item, or re-queues one it was ejected behind (GY-321), as a dependency's dispatch does.
     if (kind === 'merge' && failing.reasons.every(entry => queueSequencingReason(entry))) {
-      const ahead = refusal.match(/^Merge queue position \d+ of \d+: (\S+) is ahead$/);
-      if (ahead) return waits({ kind: 'queue', on: ahead[1], detail: `${key} waits behind ${ahead[1]} in the merge queue: ${refusal}` }, failing.name, refusal);
-      // An entry ejected for a conflict with its predecessors alone waits for them, not for a sync (GY-321).
-      const predecessors = predecessorWaitReason(refusal);
-      if (predecessors) return waits({ kind: 'queue', on: predecessors.join(', '), detail: `${key} waits for ${predecessors.join(', ')} to land or leave the merge queue: ${refusal}` }, failing.name, refusal);
+      const ahead = refusal.match(/^Merge queue position \d+ of \d+: (\S+) is ahead$/), predecessors = predecessorWaitReason(refusal)?.join(', '), on = ahead?.[1] ?? predecessors, detail = ahead ? `${key} waits behind ${on} in the merge queue: ${refusal}` : `${key} waits for ${on} to land or leave the merge queue: ${refusal}`;
+      if (on) return waits({ kind: 'queue', on, detail }, failing.name, refusal);
     }
     if (kind === 'merge') return make('merge', `${key} is queued to merge: ${refusal}`,
       { kind: 'merge', pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null }, binding, failing.name, refusal);
