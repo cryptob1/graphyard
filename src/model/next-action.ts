@@ -1,6 +1,7 @@
 import { queueSequencingReason } from '../merge-queue.js';
 import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
 import { mechanicalProof } from './mechanical-proofs.js';
+import { producerLaunchStop } from './action-progress.js';
 import { standingEscalations } from './escalation.js';
 import { deliveryState } from './delivery.js';
 import { openAgentRequests } from './agent-requests.js';
@@ -82,19 +83,32 @@ const dispatchInputs = (work: Work): NextActionInputs => ({ kind: 'dispatch', ta
  *   still unproven on it, so the step is a new head (or the operator, for a manual proof).
  * - `wait` — a group is left to prove but no request is open for it: the reconciler opens one on
  *   the next reading, or no request may stand for the head yet. Nobody's action, never a dispatch.
+ * - `stopped` — every group left to prove holds a request whose launch an executor was refused for
+ *   good (`producerLaunchStop`): no executor launches it again, so the step is the attestation.
  * - null — every proof left is one no producer session may run.
  */
-type ProofStep = { step: 'dispatch'; inputs: NextActionInputs } | { step: 'failed'; decision: ProducerGroupDecision } | { step: 'wait'; detail: string };
+type ProofStep = { step: 'dispatch'; inputs: NextActionInputs } | { step: 'failed'; decision: ProducerGroupDecision } | { step: 'wait'; detail: string } | { step: 'stopped'; detail: string };
 function proofStep(work: Work, all: Work[], now: Date): ProofStep | null {
   if (!work.candidate) return null;
   const candidate = work.candidate;
   const decisions = producerGroupDecisions(work, all, now);
   const failed = decisions.find(decision => decision.state === 'failed');
   if (failed) return { step: 'failed', decision: failed };
+  let stopped: string | null = null;
   for (const decision of decisions.filter(entry => entry.state === 'request')) {
     const request = openProducerRequest(work, decision.group);
-    if (request) return { step: 'dispatch', inputs: { kind: 'dispatch', target: 'proof', group: decision.group, proofs: decision.unproven, requestId: request.id, pr: candidate.pr, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision } };
+    if (!request) continue;
+    // A request an executor's launcher has refused for good is never offered again, to any
+    // executor on any host (`producerLaunchStop`); its proofs are left to the attestation.
+    const stop = producerLaunchStop(work, request.id);
+    if (stop) {
+      const remedy = decision.unproven.every(proof => proof.startsWith('manual:')) ? `only a two-party attestation (master decide ${work.key} attest) satisfies them now` : 'a new head or the operator answers them now';
+      stopped ??= `${decision.group} proofs ${decision.unproven.join(', ')} on ${short(candidate.sha)} get no further producer launch from any executor — ${stop.reason}; ${remedy}`;
+      continue;
+    }
+    return { step: 'dispatch', inputs: { kind: 'dispatch', target: 'proof', group: decision.group, proofs: decision.unproven, requestId: request.id, pr: candidate.pr, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision } };
   }
+  if (stopped) return { step: 'stopped', detail: stopped };
   const pending = decisions.find(decision => decision.state === 'request' || decision.state === 'ineligible');
   if (!pending) return null;
   return { step: 'wait', detail: pending.state === 'ineligible' ? `${pending.group} proofs ${pending.unproven.join(', ')} wait: ${pending.reason}`
@@ -244,6 +258,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
           return make('escalate', `${key} failed a proof no producer session may re-run on this head: ${detail}`,
             { kind: 'escalate', trigger: 'operator-proof', detail }, binding, failing.name, refusal);
         }
+        if (proof.step === 'stopped') return make('escalate', `${key}: ${proof.detail}`,
+          { kind: 'escalate', trigger: 'operator-proof', detail: proof.detail }, binding, failing.name, refusal);
         if (proof.step === 'wait') return waits({ kind: 'session', on: 'graphyard', detail: `${key}: ${proof.detail}` }, failing.name, refusal);
         const inputs = proof.inputs;
         return make('dispatch', `${key} needs ${inputs.kind === 'dispatch' && inputs.target === 'proof' ? inputs.proofs.join(', ') : refusal} on ${short(work.candidate?.sha)}`, inputs, binding, failing.name, refusal);
