@@ -1,5 +1,5 @@
-import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -8,6 +8,7 @@ import { assertRepository, buildProposal, canonicalJson, collectScanInput, disco
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { autonomyContract } from './autonomy.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
+import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -551,4 +552,198 @@ export async function executorSupervisionStatus(root: string, run: SystemctlRunn
     : declaration.count ? `every declared slot is active here (${units.map(entry => entry.unit).join(', ')}); node scripts/graphyard-executor.mjs --install --count ${declaration.count + 1} adds one`
     : 'node scripts/graphyard-executor.mjs --install --count 1 declares the first slot';
   return { declaration, error, supervised: manager.available, reason: manager.reason, units, start };
+}
+
+/**
+ * A managed worktree must build against dependencies installed from its own lockfile. The worker
+ * launcher shares the coordinator checkout's install when the lockfiles match byte for byte
+ * (master.ts shareDependencies) and otherwise used to leave the worktree resolving that install by
+ * the runtime's upward lookup — the wrong versions, discovered only as a failing test run. What an
+ * install actually holds is npm's hidden lockfile, `node_modules/.package-lock.json`: every
+ * installed package with its version and integrity. The install answers for a checkout when every
+ * package it holds is the one the checkout's lockfile names and every package the lockfile requires
+ * is installed: an optional package too when its os, cpu and libc admit this host (esbuild's binary,
+ * @embedded-postgres/*), since an omit=optional install or a discarded optional build leaves the
+ * tree unable to run; only an optional package for another platform, or an optional peer, may be absent.
+ */
+export function installMatchesLockfile(lockfile: LockfileInventory, installed: { packages?: Record<string, any> } | null, host: InstallHost = currentInstallHost()): true | string {
+  if (!installed?.packages) return 'the install records no hidden lockfile (node_modules/.package-lock.json)';
+  const wanted = lockfilePackages(lockfile), held = installed.packages;
+  for (const [name, entry] of Object.entries(held)) {
+    const want = wanted[name];
+    if (!want) return `${name} is installed but package-lock.json no longer names it`;
+    // A v1 record of a git, file, link or tarball dependency keeps its source in `version`; npm's hidden
+    // lockfile records the package's own version instead, so only its integrity identifies it.
+    if (!want[legacySource] && want.version !== entry.version) return `${name} is installed at ${entry.version ?? 'no version'}, package-lock.json names ${want.version ?? 'no version'}`;
+    if (want.integrity && entry.integrity && want.integrity !== entry.integrity) return `${name} is installed from a different tarball than package-lock.json names`;
+    // Nor does a v1 record's source always carry an integrity (a git dependency never does): the
+    // source it names must be the one the install recorded, or the install is not this lockfile's.
+    if (want[legacySource]) {
+      if (!legacySourceMatches(want, entry)) return `${name} is installed from ${entry.resolved ?? 'no recorded source'}, package-lock.json names ${want.version}`;
+      continue;
+    }
+    // A git, file or link dependency carries its identity in `resolved` or `link`, usually with no integrity.
+    if (Boolean(want.link) !== Boolean(entry.link)) return `${name} is installed ${entry.link ? 'as a link' : 'as a package'}, package-lock.json names ${want.link ? 'a link' : 'a package'}`;
+    if ((!want.integrity || !entry.integrity) && (want.resolved ?? null) !== (entry.resolved ?? null)) return `${name} is installed from ${entry.resolved ?? 'no recorded source'}, package-lock.json names ${want.resolved ?? 'no recorded source'}`;
+  }
+  for (const [name, entry] of Object.entries(wanted)) {
+    if (!name || held[name]) continue;
+    if (!entry.optional && !entry.devOptional) return `${name} is named by package-lock.json but not installed`;
+    if (!entry.peer && !entry[platformUnrecorded] && platformAdmits(entry, host)) return `${name} is an optional package for this platform (${host.os} ${host.cpu}${host.libc ? ` ${host.libc}` : ''}) named by package-lock.json but not installed`;
+  }
+  return true;
+}
+
+export interface LockfileInventory { lockfileVersion?: number; packages?: Record<string, any>; dependencies?: Record<string, any> }
+/** Marks a v1 record whose `version` is its source, not a version; and a v1 record, whose platform is unrecorded. */
+const legacySource = Symbol('legacySource'), platformUnrecorded = Symbol('platformUnrecorded');
+/**
+ * The lockfile's packages keyed by install path, as npm's hidden lockfile keys them. A lockfileVersion 1
+ * file has no `packages`, only the nested `dependencies` tree, which is unfolded into the same
+ * `node_modules/<name>[/node_modules/<name>]` paths. v1 records carry no os/cpu/libc, so an optional one
+ * is never required here (it may be for another platform).
+ */
+function lockfilePackages(lockfile: LockfileInventory): Record<string, any> {
+  if (lockfile.packages || !lockfile.dependencies) return lockfile.packages ?? {};
+  const packages: Record<string, any> = {};
+  const unfold = (dependencies: Record<string, any>, prefix: string) => {
+    for (const [name, entry] of Object.entries(dependencies ?? {})) {
+      const path = `${prefix}node_modules/${name}`;
+      const plain = typeof entry.version === 'string' && /^\d+\.\d+\.\d+/.test(entry.version);
+      packages[path] = { version: entry.version, resolved: entry.resolved, integrity: entry.integrity, optional: entry.optional, dev: entry.dev, [platformUnrecorded]: true, ...(plain ? {} : { [legacySource]: true }) };
+      if (entry.dependencies) unfold(entry.dependencies, `${path}/`);
+    }
+  };
+  unfold(lockfile.dependencies, '');
+  return packages;
+}
+
+/**
+ * Whether a v1 git, file, link or tarball record names the source the install recorded. npm writes
+ * a git source in several spellings (git+ssh://git@host/owner/repo.git#sha, git+https://…, github:
+ * owner/repo#sha), so a git source is its repository path and commit; any other is its location
+ * without a `file:` prefix. A source that cannot be matched is a mismatch: npm ci reinstalls it.
+ */
+function legacySourceMatches(want: { version?: string; resolved?: string }, entry: { resolved?: string; link?: boolean }) {
+  const installed = sourceIdentity(entry.resolved);
+  return installed !== null && [want.version, want.resolved].some(source => sourceIdentity(source) === installed);
+}
+function sourceIdentity(source: string | undefined): string | null {
+  if (!source) return null;
+  const git = source.match(/^(?:git\+[a-z+]+:\/\/(?:[^@/]+@)?[^/:]+[/:]|git:\/\/[^/]+\/|git@[^:]+:|github:|)([^#:/@]+\/[^#:/]+?)(?:\.git)?#([0-9a-f]{7,40})$/i);
+  if (git && /^(git|github:)/i.test(source)) return `git:${git[1].toLowerCase()}#${git[2].toLowerCase()}`;
+  return source.replace(/^file:/, '');
+}
+
+export interface InstallHost { os: string; cpu: string; libc: string | null }
+function currentInstallHost(): InstallHost {
+  const header = process.platform === 'linux' ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header : undefined;
+  return { os: process.platform, cpu: process.arch, libc: process.platform === 'linux' ? (header?.glibcVersionRuntime ? 'glibc' : 'musl') : null };
+}
+/** npm's rule for a package's os/cpu/libc lists: a `!value` excludes, and any plain value makes the list an allowlist. */
+function platformAdmits(entry: { os?: string[]; cpu?: string[]; libc?: string[] }, host: InstallHost) {
+  const admits = (list: string[] | undefined, value: string | null) => {
+    if (!list?.length) return true;
+    if (value === null) return false;
+    if (list.includes(`!${value}`)) return false;
+    const allowed = list.filter(item => !item.startsWith('!'));
+    return !allowed.length || allowed.includes(value);
+  };
+  return admits(entry.os, host.os) && admits(entry.cpu, host.cpu) && (!entry.libc?.length || admits(entry.libc, host.libc));
+}
+
+/** The dependency tree the runtime resolves from `worktree`: its own, the install its mirror links to, or the nearest one above it. */
+async function resolvedInstall(worktree: string): Promise<string | null> {
+  const own = resolve(worktree, 'node_modules');
+  if (await lstat(own).catch(() => null)) {
+    const mirrored = (await readFile(resolve(own, '.graphyard-shared'), 'utf8').catch(() => '')).trim();
+    return mirrored || own;
+  }
+  for (let directory = dirname(worktree), parent = dirname(directory); ; directory = parent, parent = dirname(directory)) {
+    const candidate = resolve(directory, 'node_modules');
+    if ((await lstat(candidate).catch(() => null))?.isDirectory()) return candidate;
+    if (parent === directory) return null;
+  }
+}
+
+function parseJson(text: string): any {
+  try { return JSON.parse(text); } catch (error) { return error instanceof Error ? error : new Error(String(error)); }
+}
+
+export type DependencyInstaller = (cwd: string, signal?: AbortSignal) => Promise<void>;
+/** `npm ci` in the worktree, the full tree (npmCiArgs), its output on stderr so a caller's JSON on stdout stays whole. */
+export const npmCi: DependencyInstaller = (cwd, signal) => new Promise((done, fail) => {
+  // Contained (containedInstall): the lifecycle scripts it runs cannot open a credential file.
+  // An aborted signal stops bubblewrap (SIGTERM), which takes npm with it, and rejects with the abort.
+  const { command, args } = containedInstall(cwd);
+  const child = spawn(command, args, { cwd, env: npmCiEnvironment(), stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
+  child.once('error', fail);
+  child.once('close', code => code === 0 ? done() : fail(new Error(`npm ci exited with ${code}`)));
+});
+export interface WorktreeDependencyReport { state: 'current' | 'installed' | 'failed' | 'none'; install: string | null; reason: string }
+
+/**
+ * Make `worktree` resolve dependencies installed from its own package-lock.json: nothing is done
+ * when the install it resolves already matches, and `install` (npm ci) runs in the worktree when it
+ * does not — a changed lockfile, or no install at all. A failed install is reported, never thrown:
+ * the worktree still exists for the session, which sees the reason. An install stopped through
+ * `signal` is thrown instead, with the signal's reason: the caller no longer holds the right to it.
+ */
+export async function ensureWorktreeDependencies(worktree: string, install: DependencyInstaller = npmCi, signal?: AbortSignal): Promise<WorktreeDependencyReport> {
+  const text = await readFile(resolve(worktree, 'package-lock.json'), 'utf8').catch(() => null);
+  if (text === null) return { state: 'none', install: null, reason: 'The checkout has no package-lock.json; nothing is installed for it' };
+  const lockfile = parseJson(text);
+  if (lockfile instanceof Error) return { state: 'failed', install: null, reason: `The checkout's package-lock.json cannot be parsed (${lockfile.message}); nothing was installed for it` };
+  const current = await resolvedInstall(worktree);
+  const matches = !current ? `no node_modules is reachable from ${worktree}` : await installMatches(lockfile, current);
+  if (matches === true) return { state: 'current', install: current, reason: `${current} was installed from this package-lock.json` };
+  const own = resolve(worktree, 'node_modules');
+  signal?.throwIfAborted();
+  try { await install(worktree, signal); }
+  catch (error) { if (signal?.aborted) throw signal.reason; return { state: 'failed', install: current, reason: `package-lock.json differs from the install (${matches}), and installing it failed: ${error instanceof Error ? error.message : String(error)}` }; }
+  // npm can exit 0 having installed nothing or less (a dry-run or omit config from an .npmrc): the
+  // install is reported only once its own hidden lockfile matches the checkout's.
+  const after = await installMatches(lockfile, own);
+  if (after !== true) return { state: 'failed', install: own, reason: `package-lock.json differs from the install (${matches}), and npm ci exited 0 without installing it: ${after}` };
+  return { state: 'installed', install: own, reason: `package-lock.json differs from the install it resolved (${matches}); installed its own` };
+}
+
+async function installMatches(lockfile: LockfileInventory, install: string): Promise<true | string> {
+  // A hidden lockfile an interrupted install left truncated is a mismatched install: npm ci replaces it.
+  const installed = parseJson(await readFile(resolve(install, '.package-lock.json'), 'utf8').catch(() => 'null'));
+  if (installed instanceof Error) return `the install's hidden lockfile (${resolve(install, '.package-lock.json')}) is unreadable: ${installed.message}`;
+  const matches = installMatchesLockfile(lockfile, installed);
+  return matches === true ? installFoldersExist(installed, install) : matches;
+}
+
+/**
+ * npm counts a hidden lockfile as the install only while every package folder it names exists: a
+ * deleted or half-removed `node_modules/<pkg>` under an intact `.package-lock.json` is a broken
+ * install. Paths are relative to the directory holding node_modules (the mirror's target for a
+ * shared install); a link entry, or a folder reached through a symlink, must resolve.
+ */
+async function installFoldersExist(installed: { packages?: Record<string, any> }, install: string): Promise<true | string> {
+  const root = dirname(install);
+  const names = Object.keys(installed.packages ?? {}).filter(Boolean);
+  const missing = await Promise.all(names.map(async name => (await stat(resolve(root, name)).catch(() => null))?.isDirectory() ? null : name));
+  const first = missing.find(name => name !== null);
+  if (first) return `${first} is recorded in the install's hidden lockfile but its folder ${resolve(root, first)} is missing`;
+  return binLinksExist(installed, root);
+}
+
+/**
+ * An install made with bin-links=false holds every package folder but no node_modules/.bin, so
+ * tsc and tsx never run from it. Each executable a package declares is linked in the .bin of the
+ * node_modules that holds the package (npm's layout, a nested one for a nested package); the link
+ * must resolve. On Windows npm writes a .cmd shim beside it, which counts.
+ */
+async function binLinksExist(installed: { packages?: Record<string, any> }, root: string): Promise<true | string> {
+  const links = Object.entries(installed.packages ?? {}).flatMap(([path, entry]) => {
+    const at = path.lastIndexOf('node_modules/');
+    if (at < 0 || entry?.link || !entry?.bin || typeof entry.bin !== 'object') return [];
+    return Object.keys(entry.bin).map(name => ({ path, link: resolve(root, path.slice(0, at), 'node_modules', '.bin', name) }));
+  });
+  const absent = await Promise.all(links.map(async entry => (await stat(entry.link).catch(() => null)) || (await stat(`${entry.link}.cmd`).catch(() => null)) ? null : entry));
+  const first = absent.find(entry => entry !== null);
+  return first ? `${first.path} declares the executable ${first.link}, which the install never linked (an install made with bin-links=false)` : true;
 }
