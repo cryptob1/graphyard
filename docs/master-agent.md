@@ -69,8 +69,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` (skipping system-driven items) merges only under a current authorization for the exact head, base and policy, never using an administrative merge bypass. Protocol skew refuses: `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
-
-GitHub executes the merge; Graphyard only gates it ([how](github.md#github-executes-the-merge)). The merge step — `master run` when automatic merging is on or an approved merge decision stands, or `master merge` — re-checks the item and records the request that GitHub merge that exact head; the control plane's App then publishes `Graphyard / merge` success on it and enqueues the pull request in GitHub's merge queue, and dequeues it with a failing check if authorization is withdrawn. The step never calls GitHub's merge endpoint and holds no merge execution, window or clock wait. Its outcome is `waiting` until the merged observation records the delivery; `master status` shows each queued item's GitHub queue state (`queue[].github`).
+`master merge GY-N|--all` (skipping system-driven items) asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy, never an administrative bypass. Protocol skew refuses: `server runs <sha>, CLI expects <sha>: deploy main first`.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

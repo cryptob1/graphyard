@@ -17,7 +17,7 @@ A criterion states an outcome and its proofs:
 
 ## Dispatch optimistically, smallest scope first
 
-`plannedFiles` (paths, or directory prefixes ending in `/`) is the change-scope contract, not a lock: the merge queue and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and lists candidates `git merge-tree` cannot merge. Smallest planned scope dispatches first; a root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
+`plannedFiles` (paths, or directory prefixes ending in `/`) is the change-scope contract, not a lock: the merge queue and `sync` rework integrate overlapping items, and [GitHub merges](github.md#merge-queue). `master status` records `overlap.concurrent` and lists candidates `git merge-tree` cannot merge. Smallest planned scope dispatches first; a root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
 ## Review gate: verdicts, not threads
 
@@ -34,10 +34,6 @@ The gate is the reviewer's approval of the exact head plus required CI. Threads 
 ### Generated files never conflict
 
 `docs/README.md` and `docs/protocol.md` are generated in full ([development](development.md)), and the managed `AGENTS.md` blocks are rendered by `init`; `sync` regenerates them after merging. The regression guard classifies paths in `GRAPHYARD_GENERATED_FILES` (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.
-
-## GitHub merges, Graphyard gates
-
-Graphyard never merges a pull request itself. Once every gate passes for a head and the master's merge step asks, the control-plane App publishes `Graphyard / merge` success on that exact head and enqueues it in GitHub's merge queue; a new head, a failing gate or a policy change fails the check and dequeues it. GitHub performs the merge, and the item is Done from the merged observation ([details](github.md#github-executes-the-merge)).
 
 ## Ship in under thirty minutes
 
