@@ -1,0 +1,6 @@
+{
+  "documentation": {
+    "paths": ["docs/", "README.md", "AGENTS.md"],
+    "changelog": null
+  }
+}
