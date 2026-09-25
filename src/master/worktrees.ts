@@ -1,6 +1,6 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
 import { createHash } from 'node:crypto';
-import { statfs, readdir, lstat, rm, mkdir, symlink, writeFile, readFile } from 'node:fs/promises';
+import { statfs, readdir, lstat, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -152,6 +152,8 @@ export interface WorktreeReclaimReport {
   freeBefore: number | null; freeAfter: number | null; freedBytes: number; errors: string[];
   /** What the same pass took back under the managed worktree root, when the loop ran it. */
   checkouts?: CheckoutReclaimReport;
+  /** The assignment worktrees the same pass removed outright (GY-360), when the loop ran it. */
+  trees?: WorktreeRemovalReport;
 }
 /**
  * Give the host back the dependency trees of finished assignments. The reclaimer removes nothing
@@ -159,9 +161,9 @@ export interface WorktreeReclaimReport {
  * pushed or not — and Graphyard's registered workspace records are never written, so the disk is
  * freed without any assignment losing history the control plane still refers to.
  */
-export async function reclaimWorktrees(root: string, work: Work[], options: { idleMs: number; now?: number; apply?: boolean }): Promise<WorktreeReclaimReport> {
+export async function reclaimWorktrees(root: string, work: Work[], options: { idleMs: number; now?: number; apply?: boolean; entries?: WorktreeEntry[] }): Promise<WorktreeReclaimReport> {
   const now = options.now ?? Date.now(), apply = options.apply !== false, base = worktreesDirectory(root);
-  const plan = planWorktreeReclaim(await inventoryWorktrees(root, now), work, { now, idleMs: options.idleMs });
+  const plan = planWorktreeReclaim(options.entries ?? await inventoryWorktrees(root, now), work, { now, idleMs: options.idleMs });
   const freeBefore = await freeBytes(base);
   const removed: string[] = [], errors: string[] = [];
   for (const candidate of plan.filter(entry => entry.disposable)) {
@@ -176,6 +178,142 @@ export async function reclaimWorktrees(root: string, work: Work[], options: { id
   return { root, at: new Date(now).toISOString(), applied: apply, scanned: plan.length, idleMs: options.idleMs, removed,
     kept: plan.filter(entry => !entry.disposable).map(entry => ({ path: entry.path, disposition: entry.disposition, detail: entry.detail })),
     freeBefore, freeAfter, freedBytes: freeBefore === null || freeAfter === null ? 0 : Math.max(0, freeAfter - freeBefore), errors };
+}
+
+/*
+ * GY-360: removing the finished worktrees themselves. Taking back a worktree's dependency trees
+ * frees disk, but the checkout stays registered with Git, and every Git operation in the
+ * repository, like every `master status`, then pays for each one ever created. A worktree whose
+ * item is delivered or closed, or whose attempt, review or producer session ended at least the
+ * idle bound ago, is removed with `git worktree remove` — never forced — and the registry pruned.
+ * The branch it had checked out is a ref of the repository and survives the removal.
+ */
+export const defaultWorktreeRemovalLimit = 50;
+export const worktreeInventoryFile = (root: string) => resolve(root, '.graphyard/worktree-inventory.json');
+export const worktreeReclaimAuditFile = (root: string) => resolve(root, '.graphyard/worktree-reclaim.jsonl');
+/** A tree the removal pass found dirty or holding unpushed commits, kept until its working tree changes again. */
+export interface HeldWorktree { path: string; activityAt: number; reason: string }
+/** The inventory the reclaim step last took, so `master status` never walks every tree itself. */
+export interface WorktreeInventoryCache { at: string; entries: WorktreeEntry[]; held: HeldWorktree[] }
+export interface WorktreeRemoval { path: string; key: string | null; reason: string; head: string | null }
+export interface WorktreeRemovalReport {
+  at: string; limit: number; removed: WorktreeRemoval[];
+  /** Reclaimable trees that were kept: dirty, holding unpushed commits, or refused by Git. */
+  kept: { path: string; key: string | null; reason: string }[];
+  /** Reclaimable trees this pass left for a later one because of the per-cycle bound. */
+  backlog: number;
+  errors: string[];
+  /** The inventory after the pass, the one written to the cache. */
+  entries: WorktreeEntry[];
+}
+
+export async function readWorktreeInventoryCache(root: string): Promise<WorktreeInventoryCache | null> {
+  try {
+    const parsed = JSON.parse(await readFile(worktreeInventoryFile(root), 'utf8')) as Partial<WorktreeInventoryCache>;
+    return typeof parsed.at === 'string' && Array.isArray(parsed.entries) ? { at: parsed.at, entries: parsed.entries, held: Array.isArray(parsed.held) ? parsed.held : [] } : null;
+  } catch { return null; }
+}
+export async function writeWorktreeInventoryCache(root: string, cache: WorktreeInventoryCache) {
+  const file = worktreeInventoryFile(root), temporary = `${file}.${process.pid}.tmp`;
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(temporary, JSON.stringify(cache));
+  await rename(temporary, file);
+}
+/**
+ * The worktree inventory as `master status` reads it: the cache the loop's reclaim step keeps,
+ * one file read, whatever the number of trees. Only a host whose loop has never reclaimed walks
+ * the directory, once, and leaves the cache behind for the next call. No Git command runs here.
+ */
+export async function statusWorktreeInventory(root: string, now = Date.now()): Promise<{ entries: WorktreeEntry[]; at: string; cached: boolean }> {
+  const cache = await readWorktreeInventoryCache(root);
+  if (cache) return { entries: cache.entries, at: cache.at, cached: true };
+  const entries = await inventoryWorktrees(root, now), at = new Date(now).toISOString();
+  await writeWorktreeInventoryCache(root, { at, entries, held: [] }).catch(() => {});
+  return { entries, at, cached: false };
+}
+
+/** The attempt epoch a session handle works under: its own, or the one its `principal:epoch` id names. */
+function sessionEpoch(handle: { id: string; epoch: number | null }) {
+  if (handle.epoch !== null) return handle.epoch;
+  const match = /:(\d+)$/.exec(handle.id);
+  return match ? Number(match[1]) : null;
+}
+/**
+ * Why a tree may be removed, or null when it may not. A delivered or closed item's tree goes; any
+ * other tree only once its attempt, review or producer session has ended and the tree has been
+ * untouched for the idle bound. A live lease or a live session on the tree keeps it, whatever else holds.
+ */
+export function worktreeRemovalReason(candidate: WorktreeReclaimCandidate, work: Work[], livePaths: ReadonlySet<string>, idleMs: number): string | null {
+  if (candidate.disposition === 'live' || livePaths.has(candidate.path)) return null;
+  const owner = candidate.key ? work.find(item => item.key === candidate.key) : undefined;
+  const liveSession = owner?.sessions?.some(handle => handle.state === 'running' && (sessionEpoch(handle) ?? candidate.epoch) === candidate.epoch);
+  if (liveSession) return null;
+  if (owner?.stage === 'done') return owner.closure ? `${owner.key} is closed` : `${owner.key} is delivered`;
+  if (candidate.idleMs < idleMs) return null;
+  return candidate.disposition === 'superseded' ? `${candidate.detail}, and the tree has been untouched for ${Math.floor(candidate.idleMs / 60_000)} minutes` : candidate.detail;
+}
+
+/**
+ * Remove up to `limit` reclaimable worktrees, oldest first. Each is checked before it goes: a tree
+ * with uncommitted changes, or whose HEAD holds commits no remote ref and no base branch has, is
+ * reported and kept, and not looked at again until its working tree changes. Git itself refuses a
+ * dirty tree without --force, which is never passed. Every removal is appended to the audit log
+ * with its path, item, reason and head; `git worktree prune` then drops what the registry still
+ * lists for directories that are gone.
+ */
+export async function removeReclaimableWorktrees(root: string, work: Work[], options: { idleMs: number; run: ChildRun; baseBranch?: string; now?: number; limit?: number; livePaths?: Iterable<string>; entries?: WorktreeEntry[] }): Promise<WorktreeRemovalReport> {
+  const now = options.now ?? Date.now(), limit = options.limit ?? defaultWorktreeRemovalLimit, at = new Date(now).toISOString();
+  const livePaths = new Set([...(options.livePaths ?? [])].map(path => resolve(path)));
+  const entries = options.entries ?? await inventoryWorktrees(root, now);
+  const previous = (await readWorktreeInventoryCache(root))?.held ?? [];
+  const plan = planWorktreeReclaim(entries, work, { now, idleMs: options.idleMs });
+  const byPath = new Map(entries.map(entry => [entry.path, entry]));
+  const reclaimable = plan.map(candidate => ({ candidate, reason: worktreeRemovalReason(candidate, work, livePaths, options.idleMs) }))
+    .filter((entry): entry is { candidate: WorktreeReclaimCandidate; reason: string } => entry.reason !== null)
+    .sort((a, b) => b.candidate.idleMs - a.candidate.idleMs);
+  const removed: WorktreeRemoval[] = [], kept: WorktreeRemovalReport['kept'] = [], errors: string[] = [], held: HeldWorktree[] = [];
+  const gone = new Set<string>();
+  const git = (path: string, args: string[]) => Promise.resolve(options.run('git', ['-C', path, ...args]));
+  let examined = 0, backlog = 0;
+  for (const { candidate, reason } of reclaimable) {
+    const activityAt = byPath.get(candidate.path)!.activityAt;
+    const before = previous.find(entry => entry.path === candidate.path && entry.activityAt === activityAt);
+    if (before) { held.push(before); kept.push({ path: candidate.path, key: candidate.key, reason: before.reason }); continue; }
+    if (examined >= limit) { backlog += 1; continue; }
+    examined += 1;
+    const keep = (why: string) => { held.push({ path: candidate.path, activityAt, reason: why }); kept.push({ path: candidate.path, key: candidate.key, reason: why }); };
+    try {
+      // A shared install linked into the tree is untracked to Git (an ignore rule `node_modules/`
+      // matches directories only) but is no work of the attempt's: it is unlinked before removal.
+      const dirty = String(await git(candidate.path, ['status', '--porcelain', '--untracked-files=normal'])).split('\n')
+        .filter(line => line.trim() && !(line.startsWith('?? ') && (dependencyDirectories as readonly string[]).includes(line.slice(3).replace(/\/$/, ''))));
+      if (dirty.length) { keep(`Uncommitted changes: ${dirty.length} path(s) differ from HEAD`); continue; }
+      const head = String(await git(candidate.path, ['rev-parse', 'HEAD'])).trim() || null;
+      const pushed = head !== null && [candidate.key && work.find(item => item.key === candidate.key)?.candidate?.sha].includes(head);
+      if (!pushed) {
+        const unpushed = String(await git(candidate.path, ['rev-list', '-n', '1', 'HEAD', '--not', '--remotes', ...(options.baseBranch ? [`refs/heads/${options.baseBranch}`] : [])])).trim();
+        if (unpushed) { keep(`Unpushed commits: ${unpushed} is on no remote ref${options.baseBranch ? ` and not on ${options.baseBranch}` : ''}`); continue; }
+      }
+      for (const dependency of byPath.get(candidate.path)!.dependencies.filter(entry => entry.kind === 'link')) {
+        assertDisposable(worktreesDirectory(root), dependency.path);
+        await unlink(dependency.path);
+      }
+      await Promise.resolve(options.run('git', ['-C', root, 'worktree', 'remove', candidate.path]));
+      const removal = { path: candidate.path, key: candidate.key, reason, head };
+      removed.push(removal); gone.add(candidate.path);
+      await appendFile(worktreeReclaimAuditFile(root), `${JSON.stringify({ at, action: 'worktree-remove', ...removal })}\n`)
+        .catch(error => errors.push(`${candidate.path}: removed, but the audit entry could not be written: ${failureText(error)}`));
+    } catch (error) {
+      kept.push({ path: candidate.path, key: candidate.key, reason: `Git refused: ${failureText(error).slice(0, 300)}` });
+      errors.push(`${candidate.path}: ${writeFailure(error, 'Removing a finished worktree').message.slice(0, 400)}`);
+    }
+  }
+  if (removed.length) {
+    try { await Promise.resolve(options.run('git', ['-C', root, 'worktree', 'prune'])); }
+    catch (error) { errors.push(`git worktree prune: ${failureText(error).slice(0, 400)}`); }
+  }
+  const remaining = entries.filter(entry => !gone.has(entry.path));
+  return { at, limit, removed, kept, backlog, errors, entries: remaining };
 }
 
 export interface DiskPressure { path: string; freeBytes: number | null; thresholdBytes: number; low: boolean; reclaimable: number; worktrees: number; unavailable: string | null }
