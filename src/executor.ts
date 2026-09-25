@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { access } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import type { Work } from './model.js';
 import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -6,11 +8,14 @@ import { actionJudgment, type NextActionKind } from './model/next-action.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { independentProducerProfiles } from './producer.js';
-import { profileHealth, type DaemonState, type DeploymentObservation } from './master-daemon.js';
+import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
 import type { HerdrAgent, MasterConfig, MergeExecutor, ProducerProfile, WorkerProfile } from './master.js';
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
+import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
+import { loopUnitName } from './supervisor.js';
+import { executorUnitDirectory } from './repository-setup.js';
 
 /**
  * What a stateless executor actually does when it claims a row.
@@ -272,6 +277,93 @@ export function releaseGuardedEffects(effects: ExecutorEffects, guard: ReleaseGu
       finally { await guard.settled?.(action, result, reason); }
     },
   };
+}
+
+/**
+ * Exactly one component merges (GY-245). The master loop runs the guarded merge on every cycle —
+ * routinely with automatic merging on, and for an approved decision with it off — and an executor
+ * holding `merge` attempts the same candidate. Each claim writes the item, so the two defeat each
+ * other's revision check and the merge is refused as "changed before GitHub verification" on every
+ * try while every gate passes. Where a loop runs, the executors therefore never claim `merge`:
+ * they are installed without it, and one that still has it refuses the row while the loop lives.
+ */
+export interface LoopMerger {
+  /** The loop is cycling now (its cursor holds a live lock), not merely installed. */
+  live: boolean;
+  /** The loop's systemd unit is installed on this host. */
+  unit: string | null;
+  host: string | null;
+  pid: number | null;
+  autoMerge: boolean;
+  /** The loop as a sentence subject, naming what was observed. */
+  name: string;
+}
+
+/**
+ * The master loop that merges on this installation, or null when there is none. A loop is there
+ * when its unit is installed (`master init` installs it) or its cursor holds a live lock (a loop
+ * run by hand). No master.json means no loop could run here at all.
+ */
+export async function detectLoopMerger(root: string, options: { config?: MasterConfig; unitDirectory?: string; now?: number } = {}): Promise<LoopMerger | null> {
+  let config = options.config ?? null;
+  if (!config) { try { config = await loadMasterConfig(root); } catch { return null; } }
+  const unitPath = resolve(options.unitDirectory ?? executorUnitDirectory(), loopUnitName);
+  const installed = await access(unitPath).then(() => true, () => false);
+  let lock: DaemonState['lock'] = null, live = false;
+  try {
+    const state = await readDaemonState(root, config);
+    live = daemonSummary(state, options.now ?? Date.now(), config.run.intervalSeconds * 1000, config.hostId).running;
+    lock = live ? state.lock : null;
+  } catch { /* an unreadable cursor is no evidence of a running loop */ }
+  if (!installed && !live) return null;
+  const name = `the master loop (${[installed ? loopUnitName : null, lock ? `pid ${lock.pid} on ${lock.host}` : null].filter(Boolean).join(', ')}${config.autoMerge ? ', automatic merging on' : ', merging approved decisions'})`;
+  return { live, unit: installed ? loopUnitName : null, host: lock?.host ?? null, pid: lock?.pid ?? null, autoMerge: config.autoMerge, name };
+}
+
+/** Why an executor declines a merge row the loop runs. */
+export const loopMergeRefusal = (loop: Pick<LoopMerger, 'name'>) =>
+  `${loop.name} merges on this installation, so this executor refuses merge rows: two mergers defeat each other's revision check (GY-245); remove merge from the executors' kinds with node scripts/graphyard-executor.mjs --install`;
+
+/**
+ * The same effects, refusing `merge` at the claim while a live loop merges. The refusal is made
+ * before the claim, never after it: a claim writes the item, and that write is what makes the
+ * loop's merge fail its revision check. Said once each time the loop appears.
+ */
+export function loopMergeGuardedEffects<E extends ExecutorEffects>(effects: E, loop: () => Promise<LoopMerger | null>, log: (line: string) => void = () => {}): E {
+  let refusing: string | null = null;
+  return {
+    ...effects,
+    claim: async request => {
+      if (!request.kinds.includes('merge')) return effects.claim(request);
+      const merger = await loop().catch(() => null);
+      if (!merger?.live) { refusing = null; return effects.claim(request); }
+      const refusal = loopMergeRefusal(merger);
+      if (refusal !== refusing) { refusing = refusal; log(`[graphyard-executor] ${request.executor}: ${refusal}`); }
+      const kinds = request.kinds.filter(kind => kind !== 'merge');
+      return kinds.length ? effects.claim({ ...request, kinds }) : { action: null, open: 0 };
+    },
+  };
+}
+
+/**
+ * Which component merges on this installation, as `master status` names it, and an attention item
+ * when both the loop and the executors are configured to. `executors` merge when this host
+ * declares a slot serving `merge` (a null kind list serves every kind) or a live executor anywhere
+ * serves it.
+ */
+export function installationMerger(input: { loop: { configured: boolean; running: boolean; autoMerge: boolean }; declaration: { count: number; kinds: NextActionKind[] | null } | null; served: NextActionKind[] }) {
+  const loop = input.loop.configured || input.loop.running;
+  const declared = !!input.declaration && input.declaration.count > 0 && (input.declaration.kinds === null || input.declaration.kinds.includes('merge'));
+  const executors = declared || input.served.includes('merge');
+  const merger: 'loop' | 'executors' | 'both' | 'none' = loop && executors ? 'both' : loop ? 'loop' : executors ? 'executors' : 'none';
+  const detail = merger === 'both' ? 'the master loop and the executors both run the guarded merge'
+    : merger === 'loop' ? `the master loop runs the guarded merge${input.loop.autoMerge ? '' : ' for approved decisions'}; the executors do not`
+    : merger === 'executors' ? 'the executors run the guarded merge; no master loop is configured on this host'
+    : 'nothing runs the guarded merge: no master loop is configured and no executor serves merge';
+  const attention: AttentionItem[] = merger === 'both' ? [{ subject: 'installation',
+    text: `Two components merge: the master loop${input.loop.running ? ' is running' : ' is installed'} and the executors serve merge${declared ? ` (this host declares ${input.declaration!.kinds ? input.declaration!.kinds.join(', ') : 'every kind'})` : ' (a live executor serves it)'}. Each one's claim writes the item and defeats the other's revision check, so merges are refused while every gate passes`,
+    ...agentOwner('master', 'node scripts/graphyard-executor.mjs --install (writes the executor kinds without merge while the loop merges), then systemctl --user restart graphyard-executor@*.service') }] : [];
+  return { merger, detail, attention };
 }
 
 export { message as executorFailureMessage };
