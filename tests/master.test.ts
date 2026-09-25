@@ -439,7 +439,11 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, checks: [] } }, config, candidate), /protection changed/);
   assert.throws(() => assertMergeProtection({ ...validProtection, required_status_checks: { ...validProtection.required_status_checks, strict: true } }, config, candidate), /requires branches to be up to date/);
   assert.throws(() => assertMergeCandidate(work({ gates: [{ name: 'acceptance', passed: false, reasons: ['Human approval required'] }] })), /does not have/);
-  let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, (_command, args) => args[1] === 'view' ? JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false }) : baseRef(candidate.candidate!.baseSha)), /changed after/);
+  // The double check compares the merge binding, not the document revision (GY-192): a moved head
+  // between the reads is refused as a race, while a revision-only bump reaches the gate checks.
+  const unchanged = (_command: string, args: string[]) => args[1] === 'view' ? JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'main', state: 'OPEN', isDraft: false }) : baseRef(candidate.candidate!.baseSha);
+  let reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? { ...candidate, revision: 10, candidate: { ...candidate.candidate!, sha: 'd'.repeat(40) } } : candidate], now: new Date().toISOString() }), acquire, cancel, verify, unchanged), /changed after GitHub verification \(sha.*\); retry/);
+  reads = 0; await assert.rejects(mergeWork(config, candidate, async () => ({ work: [reads++ ? work({ revision: 10 }) : candidate], now: new Date().toISOString() }), acquire, cancel, verify, unchanged), /does not have a current all-gates-passing merge authorization/);
   const releaseStore = broker(candidate, execution);
   await assert.rejects(mergeWork(config, candidate, releaseStore.snapshot, releaseStore.acquire, cancel, verify, () => JSON.stringify({ headRefOid: candidate.candidate!.sha, baseRefName: 'release', state: 'OPEN', isDraft: false })), /changed on GitHub/);
   const stale = work({ observation: { at: '2000-01-01T00:00:00Z' } as any });
