@@ -2257,7 +2257,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // An adopted session keeps the account its launch chose: that is the account it spends.
     const adopted = listed ? await effects.approverLaunch?.(name).catch(() => null) ?? null : null;
     // A session the watch still holds past its close attempts is ended before the watch forgets it.
-    if (watch.session && !listed) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} replaced`);
+    // While the registry cannot be told, its id stays on the watch and no replacement is launched:
+    // at a role concurrency of 1 the live slot would refuse it, and the id is the only way to end it.
+    if (watch.session && !listed && !await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} replaced`))
+      throw new Error(`registry session ${watch.session} of the replaced approver could not be ended, so no replacement is launched while it holds the role's slot; ending it is tried again next cycle`);
     Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}${adopted?.account ? ` on ${adopted.account}` : ''}, already judging it`;

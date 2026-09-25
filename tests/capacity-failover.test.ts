@@ -17,11 +17,12 @@ import { Store } from '../src/store.js';
 import { answerHumanCommand, humanRequestsCommand, parkCommand } from '../src/cli/session-commands.js';
 import type { CliContext } from '../src/cli/context.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
-import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, handlerSettleMs, launchAppearanceMs, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
+import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, handlerSettleMs, launchAppearanceMs, maxApproverCloses, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, readApproverLaunch, readEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
+import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
 import { describeCapacity, detectExhaustion, parseResetTime } from '../src/model/capacity.js';
+import type { EscalationContext } from '../src/model/escalation-context.js';
 import { answerCommand, humanRequestBlocker, openHumanRequests } from '../src/model/human-request.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import HumanRequestsPage from '../web/pages/human-requests.js';
@@ -919,6 +920,61 @@ test('an approver that ends without judging has its registry session ended befor
   assert.deepEqual([...registry.live], ['registry-slot-2'], 'the replacement holds the slot');
   const watch = Object.values(state.approvals)[0];
   assert.deepEqual([watch.session, watch.launches], ['registry-slot-2', 2], JSON.stringify(relaunch.actions));
+});
+
+test('a replaced approver whose registry session cannot be ended keeps that session and launches no replacement until the end succeeds', async () => {
+  const registry = approverSlot();
+  let refuse = true;
+  const endRegistrySession = registry.effects.endRegistrySession!;
+  const { config, herdr, clock, work, decisions, cycle } = await approverLoop('registry-end-fails', ['env-a', 'env-b'], () => ({
+    ...registry.effects,
+    endRegistrySession: async (session, reason) => { if (refuse) throw new Error('the registry answered 503'); await endRegistrySession(session, reason); },
+  }));
+  registry.slot.herdr = herdr;
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  herdr.agents.find(agent => agent.name === approverSessionName(work, decisions[0].id))!.agent_status = 'idle';
+  // Every close attempt fails, past the close bound, so supervision goes on to replace the session.
+  for (let index = 0; index <= maxApproverCloses; index++) { clock.skewMs += 61_000; await cycle(state); }
+  const watch = Object.values(state.approvals)[0];
+  assert.ok(watch.closeAttempts >= maxApproverCloses, JSON.stringify(watch));
+  assert.equal(watch.session, 'registry-slot-1', 'the only id of the still-live registry session is kept');
+  assert.equal(watch.launches, 1, 'no replacement is launched or counted while the slot is held');
+  assert.deepEqual([...registry.live], ['registry-slot-1']);
+  assert.ok(kinds(state, 'decision').some(action => action.state === 'failed' && /registry session registry-slot-1 of the replaced approver could not be ended/.test(action.detail)), JSON.stringify(state.actions));
+
+  // Once the registry answers, the kept session is ended and the replacement takes the slot.
+  refuse = false;
+  clock.skewMs += 61_000;
+  await cycle(state);
+  assert.deepEqual(registry.ended, ['registry-slot-1']);
+  assert.deepEqual([...registry.live], ['registry-slot-2']);
+  assert.deepEqual([watch.session, watch.launches], ['registry-slot-2', 2]);
+});
+
+test('an escalation handler launched with every account already spent is kept as a waiting record due at the first reset, so the loop launches it without a retry', async () => {
+  await fresh();
+  const root = await localRoot('escalation-spent-at-start'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-esc-start-'));
+  const operatorToken = join(home, 'master-operator.token');
+  await writeFile(operatorToken, `master-operator-${'m'.repeat(32)}\n`, { mode: 0o600 });
+  const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(home, 'coordinator.token') }), operatorAgent: { id: 'master-operator', credentialFile: operatorToken } } as MasterConfig;
+  const at = Date.now(), resetsAt = new Date(at + 3 * 86_400_000).toISOString();
+  // Another role saw the escalation handler's login spent: it is held for every role until its reset.
+  await recordObservedExhaustion(config, profileAccount(escalationProfile), { at: new Date(at).toISOString(), resetsAt, reason: "You've hit your weekly limit", role: 'worker', profile: 'builder', work: 'GY-9' }, at);
+  const context = { key: 'GY-7', escalation: { trigger: 'lease-loss' }, fingerprint: 'f'.repeat(64) } as unknown as EscalationContext;
+  const herdrCalls: string[][] = [];
+  const run = (async (_command: string, args: string[]) => { herdrCalls.push(args); return '{}'; }) as unknown as ChildRun;
+  await assert.rejects(launchEscalationHandler(root, config, context, 'claude', [], run), (error: Error & { capacityExhausted?: boolean }) => {
+    assert.equal(error.capacityExhausted, true, 'the caller still sees a capacity wait');
+    assert.match(error.message, new RegExp(`the escalation waits and the loop launches it again at ${resetsAt.replace(/[.]/g, '\\.')}`));
+    return true;
+  });
+  assert.deepEqual(herdrCalls, [], 'no tab is opened on a spent account');
+  const [waiting, ...rest] = await readEscalationSessions(root);
+  assert.deepEqual(rest, []);
+  assert.deepEqual([waiting.work, waiting.trigger, waiting.kind, waiting.pane, waiting.session], ['GY-7', 'lease-loss', 'claude', null, null]);
+  assert.equal(waiting.waiting?.retryAt, resetsAt, 'due at the first held account\'s reset');
+  assert.match(waiting.waiting!.reason, /exhausted its quota mid-session/);
 });
 
 test('an exhausted escalation handler\'s record survives a failed relaunch, which a later cycle retries; with no account left the wait reaches the item through the runtime-login hold', async () => {

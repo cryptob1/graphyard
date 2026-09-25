@@ -4000,6 +4000,8 @@ export const escalationSessionSchema = z.object({
 }).strict();
 export type EscalationSession = z.infer<typeof escalationSessionSchema>;
 export const retainedEscalationSessions = 50, escalationSessionMs = 86_400_000;
+/** With no reset known for a spent account, a waiting handler is tried again this soon (the loop's capacity recheck). */
+const escalationCapacityRecheckMs = 60_000;
 const escalationSessionsPath = async (root: string) => resolve(await localDirectory(root), 'escalations', 'sessions.json');
 export async function readEscalationSessions(root: string): Promise<EscalationSession[]> {
   try { return z.array(escalationSessionSchema).parse(JSON.parse(await readFile(await escalationSessionsPath(root), 'utf8'))); } catch { return []; }
@@ -4039,8 +4041,21 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
   // A capacity role like any other (GY-182): the registry's escalation-handler role chooses the
   // account when it defines one, and a login a session saw spent is not launched on before it resets.
-  const selected = await selectFleetSession(config, 'escalation-handler', { name, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: context.key }));
-  if (!selected) await selectAccount(config, 'escalation-handler', { name: escalationProfile }, { work: context.key });
+  let selected: Awaited<ReturnType<typeof selectFleetSession>>;
+  try {
+    selected = await selectFleetSession(config, 'escalation-handler', { name, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: context.key }));
+    if (!selected) await selectAccount(config, 'escalation-handler', { name: escalationProfile }, { work: context.key });
+  } catch (error) {
+    if (!(error instanceof NoHealthyAccountError) || !error.capacityExhausted) throw error;
+    // Every account is already spent before this handler starts — another role may have held a
+    // shared one. The escalation is kept as a waiting record, so the loop reports the capacity
+    // wait and launches it again once the first held account resets, with no one retrying it.
+    const at = Date.now(), held = await observedExhaustions(config, at);
+    const retryAt = capacityRetryAt(error.skipped.map(skip => ({ resetsAt: held[skip.environment]?.until ?? null }))) ?? new Date(at + escalationCapacityRecheckMs).toISOString();
+    await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: null, work: context.key, trigger: context.escalation.trigger, kind, account: null, runtime: null, launchedAt: new Date(at).toISOString(), session: null,
+      waiting: { since: new Date(at).toISOString(), retryAt, reason: error.message.slice(0, 500) } });
+    throw new NoHealthyAccountError(`${error.message}; the escalation waits and the loop launches it again at ${retryAt}`, error.skipped);
+  }
   const runtime = selected?.account.kind ?? kind;
   const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);

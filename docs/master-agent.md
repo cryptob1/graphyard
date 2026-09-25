@@ -32,8 +32,8 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
 - **Vanished**: absent from the runtime's listing for the whole grace.
 - **Ended**: in a runtime terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; delivered items
-  too. Implementation sessions are left to the lease.
+- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+  way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
 A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
@@ -51,7 +51,7 @@ When a candidate passes the build gate, `autoDispatch` records one producer requ
 
 **Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: once expired and unreported by Herdr, it settles as `expired`. One still pending is counted in `dispatch.sessionReconcile.stuck`; close its pane.
 
-**Spent quota fails over in every role**, approvers and escalation handlers too: the account is skipped until reset; work relaunches elsewhere or waits as one `capacity` line.
+**Spent quota fails over in every role**, approvers included: the account is skipped until reset; work relaunches elsewhere or waits as one `capacity` line.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after fixing a refused launch.
 
