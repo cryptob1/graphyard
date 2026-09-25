@@ -19,6 +19,7 @@ import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
 import { actorlessAttention } from './actorless-submissions.js';
+import { livenessStatus } from './liveness-report.js';
 import { ledgerRefusalAttention } from '../master-status.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { githubBudgetAttention } from './github-budget-attention.js';
@@ -121,6 +122,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const stalledItems = stalledItemAttention(snapshot);
   // A submitted item with no review, producer or rework request and no named wait (GY-191).
   const actorless = actorlessAttention(snapshot, cycling?.approvals);
+  const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // An action no live executor can claim is not queued behind other work (GY-105); it is named
   // with its wait and the unit to start, ahead of everything that waits on it.
   const executors = await executorFleet(root, masterApi, snapshot);
@@ -183,13 +185,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length, needsHuman: owed.rows.length, humanOnly: humanOnly.length,
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
-      actionless: actionless.length, actorless: actorless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
+      actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, attentionItems: attributeAttention(attributed.attentionItems, resources.readings), resources: resources.report,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
     actionless: { bound: stallBoundMs, items: actionless },
+    liveness,
     interventions: interventions.summary,
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
