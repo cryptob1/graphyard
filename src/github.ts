@@ -1393,8 +1393,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   /**
    * Hand an authorized head to GitHub: into the merge queue; where the base branch has none,
    * auto-merge, or an immediate merge when GitHub already reports the pull request mergeable —
-   * CLEAN, UNSTABLE or HAS_HOOKS (it refuses auto-merge on such a pull request, and Graphyard enqueues only once its own required
-   * check has passed, so a clean pull request is the usual case). `expectedHeadOid` binds every
+   * CLEAN, UNSTABLE or HAS_HOOKS (it refuses auto-merge on such a pull request, and Graphyard
+   * enqueues only once its own required check has passed, so a mergeable pull request is the usual
+   * case). `expectedHeadOid` binds every
    * request to exactly that head, so a push in between is refused by GitHub rather than merged, and
    * GitHub still enforces branch protection and every required check. These are the only ways
    * Graphyard ever asks GitHub to merge.
