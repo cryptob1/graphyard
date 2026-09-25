@@ -855,8 +855,10 @@ export interface GitHubMergeQueueState {
   pullRequestId: string;
   /** The head GitHub holds for the pull request right now. */
   head: string;
-  /** Whether the base branch has a merge queue; without one Graphyard enables auto-merge instead. */
+  /** Whether the base branch has a merge queue; without one Graphyard enables auto-merge, or merges a pull request GitHub reports mergeable now, head-bound. */
   queue: boolean;
+  /** GitHub's MergeStateStatus for the pull request (CLEAN, BLOCKED, …); CLEAN or HAS_HOOKS without a queue is merged at once, head-bound. */
+  mergeStateStatus?: string | null;
   mode: GitHubMergeMode;
   /** GitHub's MergeQueueEntryState (QUEUED, AWAITING_CHECKS, MERGEABLE, UNMERGEABLE, LOCKED), or null. */
   entryState: string | null;
@@ -864,6 +866,8 @@ export interface GitHubMergeQueueState {
   /** The merge group commit GitHub builds for the entry; the required check must pass on it too. */
   groupHead: string | null;
   at: string;
+  /** GitHub's latest refusal of the control plane's enqueue or dequeue for this head, recorded as `merge.enqueue.refused`; cleared once a request succeeds. */
+  refused?: { reason: string; head: string; mode: GitHubMergeMode; at: string } | null;
 }
 declare module './model/work.js' { interface Observation { githubQueue?: GitHubMergeQueueState | null } }
 
@@ -894,6 +898,8 @@ export type MergeQueueAction =
  * read of GitHub. Enqueue only an authorized, requested candidate whose head GitHub still holds;
  * dequeue anything GitHub holds for merging that is not exactly that. Everything else holds.
  */
+/** Whether GitHub merges the pull request at once (CLEAN, HAS_HOOKS) and so refuses to enable auto-merge on it ("Pull request is in clean status"). */
+export const mergeableNow = (state: Pick<GitHubMergeQueueState, 'mergeStateStatus'>) => state.mergeStateStatus === 'CLEAN' || state.mergeStateStatus === 'HAS_HOOKS';
 export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null): MergeQueueAction {
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;
@@ -903,7 +909,7 @@ export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, reque
         : null;
   if (withdrawn) return held ? { kind: 'dequeue', reason: withdrawn } : { kind: 'hold', reason: withdrawn };
   if (held) return { kind: 'hold', reason: `${work.key} is ${state.mode === 'queued' ? `in GitHub's merge queue${state.entryState ? ` (${state.entryState.toLowerCase()}${state.position !== null ? `, position ${state.position}` : ''})` : ''}` : 'set to auto-merge'} at ${sha!.slice(0, 12)}; GitHub performs the merge` };
-  return { kind: 'enqueue', reason: `${work.key}: every gate passes for ${sha!.slice(0, 12)} and the merge was requested; ${state.queue ? 'adding it to GitHub\'s merge queue' : 'enabling auto-merge (the base branch has no merge queue)'}` };
+  return { kind: 'enqueue', reason: `${work.key}: every gate passes for ${sha!.slice(0, 12)} and the merge was requested; ${state.queue ? 'adding it to GitHub\'s merge queue' : mergeableNow(state) ? 'merging it now, bound to that head (GitHub reports it mergeable and the base branch has no merge queue)' : 'enabling auto-merge (the base branch has no merge queue)'}` };
 }
 /** The line `master status` shows for an item's place in GitHub's merge queue, from its observation. */
 export function describeGitHubQueue(work: Pick<Work, 'observation'>): string | null {
