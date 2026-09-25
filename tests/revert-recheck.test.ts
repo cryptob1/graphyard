@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -489,7 +489,7 @@ test('manual:gy-84-content-restored — every file GY-93\'s merge took from GY-8
   // The thirteen files f581236c carried and 034d7be lacked, each with content only GY-84 gave it.
   const restored: Record<string, RegExp> = {
     'tests/unattended-cycle.test.ts': /integration:unattended-full-cycle[\s\S]*integration:mergeable-dwell-budget[\s\S]*integration:no-actionable-silence[\s\S]*integration:dispatch-latency-budget[\s\S]*integration:loop-liveness/,
-    'src/master-daemon.ts': /'decision', 'scope', 'settle'/,
+    'src/daemon/state.ts': /'decision', 'scope', 'settle'/,
     'docs/master-agent.md': /graphyard-master\.service/,
     'examples/master/graphyard-master.service': /WatchdogSec=/,
     'src/agent-review.ts': /verdict: 'changes-requested', verdictId: verdict\.id, requestId: trigger\.id/,
@@ -501,7 +501,9 @@ test('manual:gy-84-content-restored — every file GY-93\'s merge took from GY-8
   assert.equal(Object.keys(restored).length, 13);
   for (const [path, marker] of Object.entries(restored)) assert.match(read(path), marker, `${path} holds GY-84's content`);
   assert.ok(read('tests/unattended-cycle.test.ts').split('\n').length > 1000, 'the proof file is whole');
-  assert.ok(read('src/master-daemon.ts').split('\n').length > 1700, 'the master-daemon implementation is whole, not the loop it replaced');
+  // src/master-daemon.ts re-exports the modules under src/daemon/ (GY-177); the implementation is theirs.
+  const daemonLines = readdirSync(join(root, 'src/daemon')).filter(name => name.endsWith('.ts')).reduce((total, name) => total + read(`src/daemon/${name}`).split('\n').length, 0);
+  assert.ok(daemonLines > 1700, 'the master-daemon implementation is whole, not the loop it replaced');
   const daemon = await import('../src/master-daemon.js');
   for (const name of ['runCycle', 'emptyDaemonState', 'daemonActionKinds']) assert.ok(name in daemon, `src/master-daemon.ts exports ${name}`);
   assert.ok((daemon.daemonActionKinds as readonly string[]).includes('decision'), 'the loop requests routine decisions itself');
