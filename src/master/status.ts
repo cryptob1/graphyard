@@ -129,13 +129,13 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
   const placements = predictQueue(snapshot.work, now);
-  // Each queued item's place in GitHub's own merge queue, as the control plane last read it (GY-258):
-  // GitHub performs the merge, so this is where a queued item waits once every gate passes.
-  const githubQueueRow = (work: Work) => work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {};
   // The queue in batches (GY-330): each entry's batch, its members, and the combined tip under test.
   const reportedCiApps = (controlPlane as { ciAppIds?: unknown } | undefined)?.ciAppIds;
   const batches = describeMergeBatches(snapshot.work, placements, mergeQueue.batchSize, Array.isArray(reportedCiApps) ? reportedCiApps.filter((id): id is number => typeof id === 'number') : null);
-  const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement), batches.get(placement.key) ?? null), ...githubQueueRow(work) }; });
+  // Each queued item's batch (GY-330) and its place in GitHub's own merge queue, as the control plane
+  // last read it (GY-258): GitHub performs the merge, so this is where a queued item waits once every gate passes.
+  const githubQueueRow = (work: Work) => ({ batch: batches.get(work.key) ?? null, ...(work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {}) });
+  const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement)), ...githubQueueRow(work) }; });
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
     const placement = placements.find(entry => entry.id === work.id) ?? null;
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
@@ -421,10 +421,10 @@ export function latencyPercentiles(values: number[]) {
  * required proof bind the published tip exactly, were carried across a Graphyard-authored tip or a
  * tree-identical base advance, or must be produced afresh — and the recorded reason for each.
  */
-function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null, batch: MergeBatchView | null = null) {
+function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null) {
   return { key: placement.key, position: placement.position + 1, size: placement.size, predictedBase: placement.predictedBase,
     predictedTip: placement.tip, validated: placement.current, waitMs: placement.waitMs, waitMinutes: Math.floor(placement.waitMs / 60_000),
-    enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, skipped: placement.skipped ?? [], passedOver: placement.passedOver ?? null, reasons: placement.reasons, binding, batch };
+    enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, skipped: placement.skipped ?? [], passedOver: placement.passedOver ?? null, reasons: placement.reasons, binding };
 }
 /**
  * A queued item's place inside the Merge step (GY-330): `batch` while it is validated in a batch
