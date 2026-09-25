@@ -11,7 +11,7 @@ import { inPlannedScope } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { alreadyMergeableRefusal, baseRefreshNeeded, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -1283,7 +1283,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const rebound = tipCarried && (placement.position > 0 || await this.contains(placement.predictedBase!, pr.head.sha)) ? tipCarried : null;
     // The re-bound record keeps its carry (see keptTipCarry) and names the entries now ahead of it.
     if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), predecessors: placement.predecessors,
-      carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() } };
+      carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() }, trigger: 'queue-head' };
     const reviewedHead = await this.ownReviewedHead(work, pr.head.sha);
     await beforeWrite();
     // The branch is moved by a forced ref update after the head was read above, not compared and
@@ -1302,7 +1302,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // an earlier tip with no commit produced: the carry is then decided on the files that changed
     // between the replaced tip's bound base and the predicted base, listed here from GitHub.
     const baseChanges = merged || tip === work.candidate!.sha ? undefined : await this.changedFiles(work.candidate!.baseSha, placement.predictedBase!);
-    return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead,
+    return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead, trigger: 'queue-head',
       ...(baseChanges !== undefined ? { baseChanges } : {}) };
   }
   /**
@@ -1322,7 +1322,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const own = restore.own ?? await this.ownReviewedHead(work, pr.head.sha);
     const record = (fields: Partial<BaseRefresh>, outcome: BranchRestore['outcome'], own: string | null): BaseRefresh => ({
       from: { sha: own ?? candidate!.sha, baseSha: candidate!.baseSha }, base: branch.tip, baseTree: branch.tree, policyRevision: work.policyRevision, at,
-      head: own ?? candidate!.sha, conflict: null, merge: null, carry: null, ...fields, restore: { ...restore, own, performedAt: at, outcome } });
+      head: own ?? candidate!.sha, conflict: null, merge: null, carry: null, trigger: restore.cause === 'repair' ? 'repair' : 'ejection restore', ...fields, restore: { ...restore, own, performedAt: at, outcome } });
     // A head that is not a tip of this item's own has the foreign commits under something a worker
     // pushed, or under nothing the record can name: nothing is moved, and the item says so.
     if (own === pr.head.sha) return record({}, 'unrepairable', null);
@@ -1343,13 +1343,12 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   /**
    * Brings one in-flight candidate onto a base branch that moved under it, without a rework round.
    *
-   * Graphyard merges the new base into the candidate's own pull-request branch — the same
-   * conflict-free provider merge the merge queue uses for a speculative tip — so the head, the
-   * required checks, the review and every proof end up bound to one commit that already contains
-   * the tip. What the merge produced is recorded from GitHub's own account of it, never from the
-   * fact that a merge was asked for, and the binding carry is decided from that (see
-   * model/carry.ts). A conflict writes nothing: the refusal names it and the candidate goes back
-   * to the worker, exactly as a stale candidate always did.
+   * Only a candidate GitHub reports conflicting is refreshed (GY-292), and GitHub's reading is
+   * confirmed first by a test merge on a scratch branch (GY-375). A clean test merge writes
+   * nothing to the candidate's branch and is returned as a stale reading (`stale`), which the
+   * engine records in place of a refresh: the candidate keeps its head, review and proofs. A
+   * confirmed conflict writes nothing either: the refusal names it, trigger `conflict confirmed`,
+   * and the candidate goes back to the worker, exactly as a stale candidate always did.
    */
   async refreshCandidateBase(work: Work, beforeWrite: () => Promise<void> = async () => {}): Promise<BaseRefresh> {
     const candidate = work.candidate;
@@ -1361,18 +1360,38 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     requireCurrent(branch.tip === work.observation!.baseTip, `Base branch ${this.config.base} moved before the base refresh; retry`);
     const from = { sha: candidate!.sha, baseSha: candidate!.baseSha };
     const record = (fields: Partial<BaseRefresh>): BaseRefresh => ({ from, base: branch.tip, baseTree: branch.tree,
-      policyRevision: work.policyRevision, at: new Date().toISOString(), head: null, conflict: null, merge: null, carry: null, ...fields });
+      policyRevision: work.policyRevision, at: new Date().toISOString(), head: null, conflict: null, merge: null, carry: null, trigger: 'conflict confirmed', ...fields });
     await beforeWrite();
-    let merged: string | null;
-    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard base refresh for ${work.key} onto ${this.config.base}`); }
-    catch (error) {
+    // GitHub's `mergeable: false` is not trusted on its own (GY-375): it is recomputed lazily after
+    // the base moves and read clean candidates as conflicting, and every refresh they were given
+    // dropped their review and proofs. The conflict is confirmed first by a test merge that never
+    // touches the candidate's branch; only one that really conflicts goes back to the worker.
+    const conflict = await this.testMerge(work.key, candidate!.sha, branch.tip);
+    if (!conflict) return record({ head: candidate!.sha, trigger: undefined, stale: { head: candidate!.sha, base: branch.tip, policyRevision: work.policyRevision, at: new Date().toISOString(),
+      reading: `GitHub reported ${candidate!.sha.slice(0, 12)} conflicting with base branch tip ${branch.tip.slice(0, 12)}, but a test merge of the two is clean; the reading is stale and nothing was refreshed` } });
+    // The confirmed conflict is the refresh's whole outcome: the provider merge onto the branch
+    // would be refused the same way, and nothing is written to it.
+    return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });
+  }
+  /**
+   * Whether `head` merges cleanly onto `base`, without writing to any branch a person or a check
+   * reads (GY-375): the merge is tried on a scratch branch created at `head` for this one check and
+   * deleted afterwards. Returns the conflict, or null when the merge is clean. GitHub has no
+   * read-only merge check; `[skip ci]` keeps the scratch merge commit from starting a workflow.
+   */
+  async testMerge(key: string, head: string, base: string): Promise<string | null> {
+    const branch = mergeCheckBranch(key);
+    await this.publishRef(`refs/heads/${branch}`, head);
+    try {
+      await this.mergeBranch(branch, base, `Graphyard merge check for ${key} [skip ci]`);
+      return null;
+    } catch (error) {
       if (!(error instanceof SpeculativeConflict)) throw error;
-      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });
+      return error.message;
+    } finally {
+      // A scratch branch left behind by a failed delete is overwritten by the next check.
+      await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(() => {});
     }
-    // GitHub reports the branch already up to date as no merge at all. Nothing was republished, so
-    // nothing is carried: the candidate rebinds to the live head on the next observation.
-    if (!merged) return record({ head: candidate!.sha });
-    return record({ head: merged, merge: await this.describeMerge(candidate!.sha, merged, candidate!.baseSha, branch.tip) });
   }
   /**
    * The pull request's place in GitHub's merge queue (GY-258): whether the base branch has a queue,
