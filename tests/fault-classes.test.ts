@@ -145,6 +145,8 @@ test('unit:fault-classes — master status and the dashboard group open problems
   const open = work.filter(entry => entry.stage !== 'done');
   open[0].scopeRequest = { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'graphyard-claude-1', at: new Date(NOW).toISOString() } as Work['scopeRequest'];
   open[1].scopeRequest = { epoch: 1, paths: ['docs/y.md'], reason: 'docs', requestedBy: 'graphyard-claude-2', at: new Date(NOW).toISOString() } as Work['scopeRequest'];
+  open[0].lease = { owner: 'graphyard-claude-1', epoch: 1, expiresAt: new Date(NOW + hour).toISOString() };
+  open[1].lease = { owner: 'graphyard-claude-2', epoch: 1, expiresAt: new Date(NOW + hour).toISOString() };
   const expected = groupFaults(open.flatMap(entry => workFaults(entry, NOW)));
   const noop = () => {};
   const render = (work: Work[], status: object = boardStatus('admin')) => renderToStaticMarkup(createElement(OverviewPage, {
@@ -237,7 +239,7 @@ test('unit:recurring-class-item — a class past the threshold files one item as
   assert.deepEqual(summary.faults.classes.find(entry => entry.faultClass === 'stalled-gate')?.items, ['GY-101'], 'master status names the item standing for the class');
 
   // Another class is judged on its own: two scope faults file nothing, a third files its own item.
-  const scope = (key: string) => item(key, { scopeRequest: { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'w', at: iso(0) } } as Partial<Work>);
+  const scope = (key: string) => item(key, { scopeRequest: { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'w', at: iso(0) }, lease: { owner: 'w', epoch: 1, expiresAt: iso(2 * hour) } } as Partial<Work>);
   backlog = [...backlog, scope('GY-8'), scope('GY-9')];
   now = clock + 30 * 60_000;
   await runCycle(config(), state, effects, () => now);
@@ -375,7 +377,7 @@ test('unit:recurring-class-item — a typed wait is one fault, not also a generi
     humanRequest: { id: 'h1', kind: 'money-or-accounts', reason: 'the deploy needs a paid plan', needed: 'a paid Railway plan', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) } } as Partial<Work>);
   assert.deepEqual(workFaults(parked, clock).map(fault => fault.kind), ['human-request'], 'the park is one human-decision fault');
   const refused = item('GY-12', { blocker: `${scopeRefusalBlocker}: docs/ is outside the implied scope`,
-    scopeRequest: { paths: ['docs/'], reason: 'docs', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) } } as Partial<Work>);
+    scopeRequest: { paths: ['docs/'], reason: 'docs', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) }, lease: { owner: 'graphyard-worker-1', epoch: 1, expiresAt: iso(hour) } } as Partial<Work>);
   assert.deepEqual(workFaults(refused, clock).map(fault => fault.kind), ['scope-request'], 'the refused scope request is one scope fault');
   // A blocker that is not a typed wait's restatement still counts.
   assert.deepEqual(workFaults(item('GY-13', { blocker: 'npm test fails on a missing fixture', scopeRequest: parked.scopeRequest } as Partial<Work>), clock).map(fault => fault.kind), ['blocker']);
@@ -730,4 +732,41 @@ test('unit:recurring-class-item — a filing interrupted by a restart is retried
   storeAction(again, 'fault:stalled-gate', { kind: 'fault', work: null, principal: null, state: 'started', detail: 'Filing', attempts: 1, epoch: null, cycle: 0, at: iso(0) });
   const standing = item('GY-51', { stage: 'backlog', origin: { faultClass: { class: 'stalled-gate', threshold: 3, windowHours: 24, count: 3, instances: [], detectedAt: iso(0) } } } as Partial<Work>);
   assert.deepEqual(reconcilePendingActions(again, [blocked('GY-1'), standing], clock).map(entry => [entry.state, entry.work]), [['done', 'GY-51']]);
+});
+
+test('unit:recurring-class-item — a scope request from an attempt that no longer holds the lease is no standing fault', () => {
+  const request = { paths: ['docs/'], reason: 'docs', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) };
+  const faults = (lease: Work['lease']) => workFaults(item('GY-14', { scopeRequest: request, lease } as Partial<Work>), clock).map(fault => fault.kind);
+  assert.deepEqual(faults({ owner: 'graphyard-worker-1', epoch: 1, expiresAt: iso(hour) }), ['scope-request'], 'the live attempt\'s request stands');
+  assert.deepEqual(faults({ owner: 'graphyard-worker-1', epoch: 1, expiresAt: iso(-1) }), [], 'an expired lease leaves the request moot');
+  assert.deepEqual(faults({ owner: 'graphyard-worker-2', epoch: 2, expiresAt: iso(hour) }), [], 'a later attempt\'s lease does not revive it');
+  assert.deepEqual(faults(null), [], 'nor does no lease at all');
+  // Three expired attempts' requests file no scope item.
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  const moot = ['GY-31', 'GY-32', 'GY-33'].map(key => item(key, { scopeRequest: request, lease: null } as Partial<Work>));
+  trackFaults(record, cycleFaults(emptyDaemonState(config()), moot, clock), iso(0));
+  assert.deepEqual(recurringClasses(record.instances, [], policy, clock).filter(entry => entry.file), []);
+});
+
+test('unit:recurring-class-item — a guarded merge the gate refused is no fault, so refusals file nothing', async () => {
+  const filed: unknown[] = [];
+  const candidates = ['GY-41', 'GY-42', 'GY-43'].map((key, index) => item(key, { stage: 'merge', epoch: 1, candidate: { sha: String(index + 1).repeat(40), branch: `graphyard/${key}`, pr: 40 + index } } as unknown as Partial<Work>));
+  let refusal = 'the review gate has not passed';
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: candidates.map(entry => ({ ...entry })), now: new Date(now).toISOString() }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    merge: async () => { throw new Error(refusal); },
+    faultClassPolicy: policy, persist: async () => {}, fileFaultClass: async (input: unknown) => { filed.push(input); return item('GY-199'); },
+  } as unknown as DaemonEffects;
+  let now = clock;
+  const state = emptyDaemonState(config());
+  for (let round = 0; round < 4; round++) { now = clock + round * 10 * 60_000; await runCycle(config(), state, effects, () => now); }
+  const merges = Object.values(state.actions).filter(action => action.kind === 'merge');
+  assert.equal(merges.length, 3, `each candidate's merge was tried: ${JSON.stringify(state.actions)}`);
+  assert.ok(merges.every(action => action.state === 'failed' && action.faultClass === undefined), 'a refusal stays retryable and carries no class');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'merge'), [], 'no refusal opens a merge instance');
+  assert.deepEqual(filed, [], 'three refusals file no structural item');
+  // A merge whose outcome is unknown is still the merge fault it was.
+  storeAction(state, 'merge:work-GY-44:1', { kind: 'merge', work: 'GY-44', principal: null, state: 'indeterminate', detail: 'Resumed: interrupted', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'merge').map(entry => entry.subject), ['GY-44']);
 });

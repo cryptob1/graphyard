@@ -150,7 +150,7 @@ export interface FaultObservation extends Classified { subject: string; text: st
 const observe = (kind: FaultKind, subject: string, text: string): FaultObservation => ({ ...classified(kind), subject, text: text.slice(0, 500) });
 /**
  * The faults an open item's own record shows: its standing escalations, a lapsed containment
- * fence, a human-only park, an open scope request, a proof nobody may produce, a spent provider
+ * fence, a human-only park, a live attempt's open scope request, a proof nobody may produce, a spent provider
  * account, its out-of-scope violations and its blocker. The dashboard and the loop read the same.
  */
 export function workFaults(work: Work, now: number): FaultObservation[] {
@@ -160,7 +160,7 @@ export function workFaults(work: Work, now: number): FaultObservation[] {
   for (const escalation of escalations) found.push(observe(escalationFaultKind(escalation.trigger), work.key, `${escalation.trigger} escalation: ${escalation.reason}`));
   if (work.containmentQuarantine && !(work.lease && Date.parse(work.lease.expiresAt) > now)) found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
   if (work.humanRequest && !work.humanRequest.answer) found.push(observe('human-request', work.key, `${work.key} is parked on a human-only decision: ${work.humanRequest.needed}`));
-  if (work.scopeRequest) found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
+  if (work.scopeRequest && work.lease?.epoch === work.scopeRequest.epoch && Date.parse(work.lease.expiresAt) > now) /* an expired attempt's request is moot (owed-report's rule) */ found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
   if (work.proofGaps?.length) found.push(observe('proof-gap', work.key, `No principal is authorized to produce ${work.proofGaps.join(', ')}`));
   if (standingCapacity(work).length) found.push(observe('role-capacity', work.key, `${work.key} waits on a provider account out of quota`));
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));

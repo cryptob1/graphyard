@@ -1589,13 +1589,15 @@ export interface DaemonEffects {
  * Every write of an action goes through here (GY-173): a failed or indeterminate action carries
  * the class of its fault kind, anything else carries none, and the outcome is noted against the
  * fault record — a failure opening one instance per run of failures, a success ending the run.
+ * A null fault kind is an outcome that is no fault (a guarded merge the gate refused): it is
+ * stored for retry like any failure but carries no class and is never noted as an instance.
  */
-export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind = daemonActionFaultKind(action.kind)): DaemonAction {
+export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind | null = daemonActionFaultKind(action.kind)): DaemonAction {
   const { faultClass: _, ...rest } = action;
-  const failed = rest.state === 'failed' || rest.state === 'indeterminate';
-  const fault = classified(faultKind);
-  const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed ? { faultClass: fault.faultClass } : {}) });
-  noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
+  const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
+  const fault = faultKind === null ? null : classified(faultKind);
+  const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
+  if (fault) noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
   state.actions[key] = entry;
   return entry;
 }
@@ -1604,8 +1606,8 @@ export function storeAction(state: DaemonState, key: string, action: Omit<Daemon
  * Put an action on the cursor. The detail is bounded (in storeAction) before the schema sees it, so a caller
  * that quotes a long error or path list cannot fail every cycle with an over-long string (GY-179).
  */
-async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist']) {
-  const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() });
+async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist'], faultKind?: FaultKind | null) {
+  const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() }, faultKind);
   await persist(state);
   return entry;
 }
@@ -2697,8 +2699,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       const result = await effects.merge(item);
       performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${(result as { result?: string })?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      // A refusal is the gate working, not a daemon fault: record it and keep cycling.
-      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      // A refusal is the gate working, not a daemon fault: record it (no fault kind, so it is no
+      // recurrence instance and files no structural item) and keep cycling.
+      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist, null));
     }
   });
 
