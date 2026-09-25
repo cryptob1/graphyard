@@ -6,6 +6,7 @@ import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionJudgment, type NextActionKind } from './model/next-action.js';
 import type { SessionHandleInput } from './model/sessions.js';
+import { registeredLaunch } from './model/session-state.js';
 import { independentProducerProfiles } from './producer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
@@ -83,9 +84,11 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     if (!agents) throw new Error('Herdr session inventory is unavailable; a launch needs it to keep one session per profile');
     return agents;
   };
-  const record = (work: Work, handle: SessionHandleInput) =>
-    // The launch landed; a handle that could not be written is not a failed action.
-    effects.recordSession?.(work, handle).catch(() => {});
+  // Every launch below registers its session before the runtime starts and writes the coordinates
+  // the launcher returns once it has (GY-172 AC-2): the session report then observes and closes it
+  // like any other. A registration the control plane refuses refuses the launch.
+  const record = (work: Work) => effects.recordSession ? (handle: SessionHandleInput) => effects.recordSession!(work, handle) : undefined;
+  const attachTo = (pane: string) => `herdr pane attach ${pane}${config().herdrWorkspace ? ` --workspace ${config().herdrWorkspace}` : ''}`;
 
   const launchProof = async (action: ActionRow, work: Work, observedAt: string) => {
     if (action.inputs.kind !== 'dispatch' || action.inputs.target !== 'proof') throw new Error('unreachable');
@@ -99,8 +102,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const credentials = await effects.producerCredentials(independent);
     const usable = independent.filter(profile => credentials[profile.name]?.available !== false && !agents.some(agent => agent.name === profile.agentName));
     if (!usable.length) throw new Error(`every independent producer profile is busy or unavailable (${independent.map(profile => `${profile.name}: ${credentials[profile.name]?.available === false ? credentials[profile.name].reason : 'busy'}`).join('; ')})`);
-    const launched = await effects.launchProducer(work, request, usable[0], agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ producers: [usable[0]] }, agents)); });
-    await record(work, launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, launched, usable[0].kind, config().herdrWorkspace, usable[0].principal));
+    await registeredLaunch(record(work), launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, undefined, usable[0].kind, config().herdrWorkspace, usable[0].principal),
+      () => effects.launchProducer(work, request, usable[0], agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ producers: [usable[0]] }, agents)); }), launched => launched, attachTo);
     return `launched producer ${usable[0].name} for ${proofs.join(', ')} on ${request.sha.slice(0, 12)}`;
   };
 
@@ -110,17 +113,15 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const health = profileHealth(workers, await effects.workerCredentials(workers), agents, statelessProfiles, Date.parse(observedAt) || Date.now());
     const choice = health.find(entry => entry.healthy);
     if (!choice) throw new Error(`no worker profile can take ${work.key}: ${health.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`);
-    const launched = await effects.dispatchWorker(work, choice.profile, agents, { work: all, now: observedAt });
     const workspace = config().herdrWorkspace;
-    await record(work, {
+    await registeredLaunch(record(work), {
       // The worker session's own handle: it fills in the tab and transcript only it has, so the
       // launcher names it as the principal the handle belongs to.
       id: `${choice.profile.principal}:${work.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal,
       runtime: choice.profile.kind ?? choice.profile.mode, host: config().hostId,
       ...(workspace ? { workspace } : {}),
-      ...(launched?.pane ? { pane: launched.pane, attach: `herdr pane attach ${launched.pane}${workspace ? ` --workspace ${workspace}` : ''}` } : {}),
       subject: `${work.key}: ${work.title}`.slice(0, 300), state: 'running',
-    });
+    }, () => effects.dispatchWorker(work, choice.profile, agents, { work: all, now: observedAt }), launched => launched, attachTo);
     return `dispatched ${work.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`;
   };
 
@@ -143,8 +144,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       assertNameAvailable('reviewer', profile, agents);
       if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
       // A launch refused by a resource at its bound — the review ledger's cap — records that resource.
-      const launched = await effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); });
-      await record(work, launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, launched, profile.kind, config().herdrWorkspace));
+      await registeredLaunch(record(work), launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, undefined, profile.kind, config().herdrWorkspace),
+        () => effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); }), launched => launched, attachTo);
       return `launched reviewer ${profile.name} on ${request.sha.slice(0, 12)}`;
     },
     'approve-scope': async action => {
