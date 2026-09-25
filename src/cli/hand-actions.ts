@@ -1,4 +1,4 @@
-import { actionClaimMs, claimable, claimLive, settling, waitingToRetry, type ActionRow } from '../model/actions.js';
+import { actionClaimMs, actionStall, claimable, claimLive, settling, waitingToRetry, type ActionRow } from '../model/actions.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import type { Work } from '../model/work.js';
@@ -82,7 +82,8 @@ export interface LoopSessions {
  * Why the loop has stopped relaunching a live request, or null while it still launches it: its
  * last session settled without satisfying it, its sessions are exhausted, or its launch was
  * refused `dispatchFailureLimit` times. These are the states in which the loop's dispatch step
- * says no further automatic attempt follows.
+ * says no further automatic attempt follows. Whatever the local ledgers say, a durable action row
+ * an executor still runs for the request (`rowRunning`) means the loop has not stopped.
  *
  * A session closed `completed` on the verdict it posted has answered the request even while the
  * snapshot still carries it: the control plane has not ingested that GitHub review yet. A second
@@ -90,7 +91,8 @@ export interface LoopSessions {
  * together with the first, so the request is stopped only once that verdict is dismissed — and
  * a dismissal reopens the record as `failed`, which the loop relaunches itself.
  */
-function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number): string | null {
+function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number, rows: ActionRow[] = []): string | null {
+  if (rows.some(row => rowRunning(row, new Date(now)))) return null;
   const retry = sessionRetry(sessions, request.id, now);
   const answered = sessions.filter(session => session.requestId === request.id).at(-1);
   if (answered?.state === 'completed' && answered.verdict && answered.verdict.state !== 'DISMISSED') return null;
@@ -101,13 +103,35 @@ function stoppedRequest(label: string, request: { id: string }, sessions: LoopSe
 }
 
 /**
+ * Whether the loop's executor still runs this durable action row: claimed, claimable, settling,
+ * about to be reopened, or waiting out an ordinary failure backoff. The local ledgers only see the
+ * sessions this host launched; an executor on any host launches from the row, so a recovery is
+ * granted only once the row itself says no executor is launching it. The one open row that does
+ * not is a stalled one (`actionStall`): its last attempts were each refused for one unchanged
+ * reason by whichever executors claimed it — the durable record of a launch the loop cannot make,
+ * which it would otherwise recheck forever and so leave nothing to recover. A stalled row that is
+ * claimed or claimable is still being attempted, and blocks the recovery like any other.
+ */
+function rowRunning(row: ActionRow, now: Date): boolean {
+  if (row.state !== 'pending' || claimLive(row, now) || !waitingToRetry(row, now)) return true;
+  return !actionStall(row);
+}
+
+/** The open review launch rows: the executor's `request-review` handler launches for the item's live review request whatever request its row names. */
+const reviewRows = (work: Pick<Work, 'actionQueue'>) => (work.actionQueue?.actions ?? []).filter(row => row.kind === 'request-review');
+/** The open producer launch rows for a request: bound to it by id, or — before the request had one — by its proof group, as the executor's `dispatch` handler resolves it. */
+const producerRows = (work: Pick<Work, 'actionQueue'>, request: { id: string; group?: string }) => (work.actionQueue?.actions ?? []).filter(row =>
+  row.kind === 'dispatch' && row.inputs.kind === 'dispatch' && row.inputs.target === 'proof'
+  && (row.inputs.requestId === request.id || (row.inputs.requestId === null && row.inputs.group === request.group)));
+
+/**
  * Why a hand review launch is the recovery the loop sends the master to, or null when the loop
  * still launches the item's review itself: the candidate holds a live review request the loop has
  * stopped relaunching. These are the states whose recovery text names `master review`.
  */
 export function reviewRecovery(work: Work, sessions: ReviewSession[], failure: { attempts: number } | undefined, now: number): string | null {
   const request = liveReviewRequest(work);
-  return request ? stoppedRequest('review', request, sessions, failure, now) : null;
+  return request ? stoppedRequest('review', request, sessions, failure, now, reviewRows(work)) : null;
 }
 
 /**
@@ -116,9 +140,9 @@ export function reviewRecovery(work: Work, sessions: ReviewSession[], failure: {
  * further automatic attempt, and nothing launches a producer by hand, so without the two-party
  * attestation the candidate could never satisfy the proof.
  */
-export function producerRecovery(work: Pick<Work, 'autoDispatch'>, proof: string, loop: LoopSessions): string | null {
+export function producerRecovery(work: Pick<Work, 'autoDispatch' | 'actionQueue'>, proof: string, loop: LoopSessions): string | null {
   const request = work.autoDispatch?.producers.find(entry => entry.state === 'requested' && entry.proofs?.includes(proof));
-  return request ? stoppedRequest('producer', request, loop.sessions, loop.failures[request.id], loop.now) : null;
+  return request ? stoppedRequest('producer', request, loop.sessions, loop.failures[request.id], loop.now, producerRows(work, request)) : null;
 }
 
 export const systemDriven = (work: Pick<Work, 'systemDriven'>) => work.systemDriven === true;
@@ -146,12 +170,16 @@ const implementationDispatch = (row: ActionRow) => row.kind === 'dispatch' && ro
 export const handDispatchFenceMs = actionClaimMs;
 /**
  * The headroom a hand launch keeps before the row's backoff ends. Its lease claim is one child
- * `graphyard claim` process whose HTTP request may run for the CLI's whole request timeout
- * (`AbortSignal.timeout(30_000)`, src/cli/context.ts), plus the process's startup; a claim begun
- * inside this margin could still be in flight when the executor may claim the row.
+ * `graphyard claim` process that makes two HTTP requests in a row, each bounded by the CLI's
+ * request timeout (`AbortSignal.timeout(30_000)`, src/cli/context.ts): `main()` first reads `work`
+ * to resolve the key, then the claim mutation itself. Both may run their whole timeout, plus the
+ * process's startup; a claim begun inside this margin could still be in flight when the executor
+ * may claim the row.
  */
 export const handDispatchClaimTimeoutMs = 30_000;
-export const handDispatchClaimMarginMs = handDispatchClaimTimeoutMs + 15_000;
+export const handDispatchClaimRequests = 2;
+export const handDispatchClaimStartupMs = 15_000;
+export const handDispatchClaimMarginMs = handDispatchClaimRequests * handDispatchClaimTimeoutMs + handDispatchClaimStartupMs;
 
 /** When the item's backed-off implementation dispatch row is offered to the executor again, or null when it is not in a backoff. */
 export function dispatchRetryAt(work: Pick<Work, 'actionQueue'>, now: Date): number | null {

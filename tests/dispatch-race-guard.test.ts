@@ -109,6 +109,24 @@ function underProof(): Work {
 const producerSession = (state: string, at: number, attempt = 1) => ({ id: randomUUID(), requestId: producerRequestId, attempt, key: 'GY-7', pr: 12, sha: headSha, baseSha, policyRevision: 1, group: 'manual', proofs: ['manual:produced-review'],
   profile: 'producer', principal: 'producer-principal', agentName: 'produce-1', pane: null, requestedAt: iso(at), expiresAt: iso(at + 3_600_000), state, outcome: {}, closedAt: iso(at + 60_000), resolution: `${state} session`, acknowledgedAt: iso(at + 1_000) });
 
+/** The executor's durable launch rows for the live review and producer requests. */
+const reviewRow = (overrides: Partial<ActionRow> = {}): ActionRow => dispatchRow({ id: actionId('request-review', workId, 'review'), kind: 'request-review', binding: 'review', gate: 'review',
+  inputs: { kind: 'request-review', provider: 'github', requestId: reviewRequestId, pr: 12, sha: headSha, baseSha, policyRevision: 1 } as any, ...overrides });
+const producerRow = (overrides: Partial<ActionRow> = {}): ActionRow => dispatchRow({ id: actionId('dispatch', workId, 'acceptance'), binding: 'acceptance', gate: 'acceptance',
+  inputs: { kind: 'dispatch', target: 'proof', group: 'manual', proofs: ['manual:produced-review'], requestId: producerRequestId, pr: 12, sha: headSha, baseSha, policyRevision: 1 } as any, ...overrides });
+/** Every state in which an executor still runs a row. */
+const launchRows = (make: (overrides?: Partial<ActionRow>) => ActionRow) => ({
+  pending: make(), claimed: make(claimed()), 'backing-off': make({ attempts: 1, retryAt: iso(600_000) }),
+  settling: make({ state: 'done', resolvedAt: iso(-30_000), result: 'launched' } as any), reopening: make({ state: 'done', resolvedAt: iso(-3_600_000), result: 'launched' } as any),
+  'stalled but claimable': stalledRow(make, iso(-1_000)), 'stalled but claimed': stalledRow(make, iso(60_000), claimed()),
+});
+/** A row whose last attempts were each refused for one unchanged reason, rechecking at `retryAt`. */
+const stalledRow = (make: (overrides?: Partial<ActionRow>) => ActionRow, retryAt = iso(60_000), overrides: Partial<ActionRow> = {}) => {
+  const refused = (n: number) => [{ at: iso(-n * 60_000), event: 'claimed', requester: 'graphyard', executor: `executor-${n}`, result: null, reason: 'claimed' },
+    { at: iso(-n * 60_000 + 1_000), event: 'failed', requester: 'graphyard', executor: `executor-${n}`, result: null, reason: 'no further automatic attempt' }];
+  return make({ attempts: 3, retryAt, history: [...make().history, ...[3, 2, 1].flatMap(refused)] as any, ...overrides });
+};
+
 // ---- AC-1: no hand dispatch while the executor's dispatch is pending, claimed or just released ----
 
 test('unit:dispatch-race-guard the refusal names the pending dispatch action while it is claimable, claimed or settling, and inside the dispatch interval after release', () => {
@@ -251,6 +269,12 @@ test('unit:system-driven-items master review stays open only as the recovery of 
   assert.match(reviewRecovery(underReview(), [verdict('DISMISSED')], undefined, now)!, /completed without satisfying it/, 'a dismissed verdict answers nothing');
   assert.match(reviewRecovery(underReview(), [1, 2, 3, 4].map(n => session('failed', -n * 3_600_000)), undefined, now)!, /exhausted its 4 automatic sessions/);
   assert.match(reviewRecovery(underReview(), [], { attempts: dispatchFailureLimit }, now)!, /refused 12 time\(s\)/);
+  // The durable row is the executor's, on any host: while it is pending, claimed, backing off, settling or about to reopen, the loop still launches the request whatever this host's ledgers say.
+  const stopped = [session('completed', -120_000)];
+  for (const [label, row] of Object.entries(launchRows(reviewRow)))
+    assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), stopped, undefined, now), null, `a ${label} request-review row`);
+  // A row stalled on one unchanged refusal is the record of a launch no executor can make: the recovery is the master's again.
+  assert.match(reviewRecovery(underReview({ actionQueue: { actions: [stalledRow(reviewRow)], history: [] } }), stopped, undefined, now)!, /completed without satisfying it/);
   const master = await masterHarness({ work: [underReview()] });
   try {
     assert.match(await master.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/);
@@ -277,6 +301,13 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
   assert.match(producerRecovery(underProof(), 'manual:produced-review', loop([], { [producerRequestId]: { attempts: dispatchFailureLimit } }))!, /refused 12 time\(s\)/);
   assert.equal(handDecision(underProof(), 'attest', attest, loop([producerSession('completed', -120_000)])), null);
   assert.equal(handDecision(underProof(), 'attest', { proof: 'unit:guard' }, loop([producerSession('completed', -120_000)])), 'evidence', 'only a manual proof is ever attested');
+  // The executor launches producers from the durable dispatch row bound to the request; while it runs, the attestation stays the loop's.
+  const stopped = loop([producerSession('completed', -120_000)]);
+  for (const [label, row] of Object.entries(launchRows(producerRow)))
+    assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [row], history: [] } }, 'attest', attest, stopped), 'evidence', `a ${label} producer dispatch row`);
+  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [producerRow({ inputs: { ...producerRow().inputs, requestId: null } as any })], history: [] } }, 'attest', attest, stopped), 'evidence', 'a row naming the request only by its group');
+  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [producerRow({ inputs: { ...producerRow().inputs, requestId: 'e'.repeat(32), group: 'unit' } as any })], history: [] } }, 'attest', attest, stopped), null, "another request's row does not hold this one");
+  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [stalledRow(producerRow)], history: [] } }, 'attest', attest, stopped), null, 'a stalled row launches nothing');
   const master = await masterHarness({ work: [underProof()] });
   try {
     const decide = ['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'reviewed', 'by', 'hand'];
@@ -297,8 +328,8 @@ test('unit:dispatch-race-guard a hand launch through a long backoff claims nothi
   const { claimBy } = await assertHandDispatch(backedOff, now, 10, async () => [], requestedAt);
   // The deadline is the row's retryAt carried onto this host's clock from before the snapshot was read, less the claim's headroom.
   assert.equal(claimBy, requestedAt + (retryAt - Date.parse(now)) - handDispatchClaimMarginMs);
-  // The headroom outlasts the lease claim itself: one CLI request bounded by its 30s timeout, plus the child's startup; and the fence outlasts the headroom.
-  assert.ok(handDispatchClaimMarginMs > handDispatchClaimTimeoutMs && handDispatchClaimTimeoutMs >= 30_000 && handDispatchFenceMs > handDispatchClaimMarginMs);
+  // The headroom outlasts the lease claim itself: the claim child's two CLI requests (the work read, then the claim), each bounded by its 30s timeout, plus its startup; and the fence outlasts the headroom.
+  assert.ok(handDispatchClaimMarginMs > 2 * handDispatchClaimTimeoutMs && handDispatchClaimTimeoutMs >= 30_000 && handDispatchFenceMs > handDispatchClaimMarginMs);
   // Time spent reading after the snapshot is counted against the backoff: 61s gone brings its end inside the fence, and the hand dispatch is refused.
   await assert.rejects(assertHandDispatch(backedOff, now, 10, async () => [], Date.now() - 61_000), /is in a failure backoff that ends at .*master dispatch is refused/);
   assert.deepEqual(await assertHandDispatch(item({ systemDriven: false }), now, 10, async () => []), {}, 'no backoff, no deadline');
