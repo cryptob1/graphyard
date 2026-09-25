@@ -164,6 +164,6 @@ export function reviewConflictAttention(work: Pick<Work, 'key' | 'reviewConflict
       return `${describe(verdict)} from ${record ? `session ${record.agentName} (${record.profile}, record ${record.id.slice(0, 8)})` : 'a session the reviewer ledger has no record of'}`;
     };
     return [{ subject: item.key, text: `Review of ${item.key} head ${short(conflict.sha)} (PR #${conflict.pr}) is conflicted: ${conflict.reviewer} posted ${conflict.verdicts.map(session).join(' and ')}${conflict.requestId ? ` for request ${conflict.requestId}` : ''}. Neither verdict is acted on — no rework, no approval, no carry — until a fresh review of the head resolves it`,
-      next: `Nothing to run by hand: the control plane requests a fresh review of ${short(conflict.sha)} and the loop launches it; if none is running, graphyard master review ${item.key}` }];
+      next: `Nothing to run by hand: the control plane requests a fresh review of ${short(conflict.sha)} and the loop launches it; once the loop stops relaunching it (its session settled unanswered or its attempts are spent), graphyard master review ${item.key}` }];
   });
 }
