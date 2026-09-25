@@ -34,7 +34,7 @@ export function asksNothing(value: string) {
 // that never asks can still only act inside its own assigned worktree and its own credentials.
 export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
   claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], trust: trustClaudeFolder, prompts: 'tool-approval prompts on first use of each command class, and the folder-trust dialog in a folder it has not been trusted in',
-    tradeoff: 'Claude Code stops classifying commands for this session and trusts its working directory without asking wherever that loads none of the repository's own Claude settings; everything the agent proposes runs without asking.' },
+    tradeoff: 'Claude Code stops classifying commands for this session and trusts its working directory without asking wherever that loads none of the repository\'s own Claude settings; everything the agent proposes runs without asking.' },
   codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, config: { flags: ['-c', '--config'], pins: { approval_policy: 'never' } }, prompts: 'directory-trust and per-command approval prompts',
     tradeoff: 'Codex never asks for approval; only its workspace-write sandbox still limits what a command can touch.' },
   cursor: { args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
