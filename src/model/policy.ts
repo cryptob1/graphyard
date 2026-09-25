@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { deploySmokeProof, proofSchema } from './proof.js';
+import { postMergeProofRefusal } from './post-merge-proofs.js';
 import { distinct, reviewProviders, reviewerProfileSchema } from './review.js';
 
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
@@ -13,7 +14,9 @@ export const bootstrapDeclarationSchema = z.object({
 }).strict();
 export type BootstrapDeclaration = z.infer<typeof bootstrapDeclarationSchema>;
 export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1).max(2000), proofs: z.array(proofSchema).min(1).max(20), bootstrap: bootstrapDeclarationSchema.optional() }).strict()
-  .refine(criterion => !criterion.proofs.includes(deploySmokeProof), `${deploySmokeProof} runs after delivery; require it with policy.deploySmoke instead of an acceptance criterion`);
+  .refine(criterion => !criterion.proofs.includes(deploySmokeProof), `${deploySmokeProof} runs after delivery; require it with policy.deploySmoke instead of an acceptance criterion`)
+  // Any other proof that can only pass after merge is refused the same way (GY-188).
+  .superRefine((criterion, context) => { const refusal = postMergeProofRefusal(criterion); if (refusal) context.addIssue({ code: 'custom', message: refusal, path: ['proofs'] }); });
 /** Stored declaration. The audit fields are stamped by the control plane, never by the client. */
 export interface BootstrapMode extends BootstrapDeclaration { declaredBy: string; declaredAt: string; policyRevision: number }
 export interface Criterion { id: string; text: string; proofs: string[]; bootstrap?: BootstrapMode }
