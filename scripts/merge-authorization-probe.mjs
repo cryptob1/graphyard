@@ -6,7 +6,7 @@
 // Unlike the claim-safety contract, this scenario needs an observed GitHub candidate, and
 // Graphyard deliberately exposes no client-controlled route that invents one. The probe
 // therefore uses a separately authenticated harness endpoint at exactly those two points —
-// supplying an observation and a final verification snapshot — and drives every authorization
+// supplying an observation and a speculative tip — and drives every authorization
 // decision under test through the candidate's own HTTP API.
 import { randomUUID } from 'node:crypto';
 
@@ -68,36 +68,38 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
     work = await observeWork(work, observe(), speculation(work, head, base));
     record('authorized-candidate', { stage: work.stage, gatesPassed: work.gates.every(gate => gate.passed), authorized: !!work.mergeAuthorization });
 
-    const acquireInput = { expectedRevision: work.revision, sha: head, baseSha: base, policyRevision: work.policyRevision };
+    // GitHub executes merges (GY-258): the merge step's one route records a request that GitHub
+    // merge exactly this candidate. No execution, verification or provider commit is issued.
+    const requestInput = { enqueue: true, expectedRevision: work.revision, sha: head, baseSha: base, policyRevision: work.policyRevision };
     const withdrawal = { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, reason: 'Probe withdrew the reported run' };
     for (const who of [null, 'probe-worker', 'probe-producer', 'probe-other-producer'])
-      record('broker-identity', { actor: who, ...refusal(await call(`work/${work.id}/merge-acquire`, who, acquireInput)) });
+      record('broker-identity', { actor: who, ...refusal(await call(`work/${work.id}/merge-acquire`, who, requestInput)) });
     // The allowlisted producer is excluded here on purpose: it is the one identity that may
-    // withdraw this proof, and it does so below while an execution is active.
+    // withdraw this proof, and it does so below after the merge was requested.
     for (const who of [null, 'probe-worker', 'probe-other-producer', 'probe-coordinator'])
       record('revocation-identity', { actor: who, ...refusal(await call(`work/${work.id}/revoke`, who, withdrawal)) });
     record('revocation-scope', refusal(await call(`work/${work.id}/revoke`, 'probe-producer', { ...withdrawal, sha: 'd'.repeat(40) })));
 
-    const acquireKey = randomUUID();
-    const granted = (await call(`work/${work.id}/merge-acquire`, 'probe-coordinator', acquireInput, acquireKey)).body;
-    record('execution-granted', { owner: granted.execution?.owner ?? null, sha: granted.execution?.sha ?? null, authorizationRevision: granted.execution?.authorizationRevision ?? null });
-    record('frozen-during-execution', refusal(await call(`work/${work.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } })));
+    const requested = (await call(`work/${work.id}/merge-acquire`, 'probe-coordinator', requestInput)).body;
+    record('merge-requested', { requestedBy: requested.enqueue?.requestedBy ?? null, sha: requested.enqueue?.sha ?? null, execution: requested.execution ?? null });
+    const unfrozen = await call(`work/${work.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } });
+    record('not-frozen-by-request', { status: unfrozen.status });
 
     const revoked = (await call(`work/${work.id}/revoke`, 'probe-producer', withdrawal)).body;
     record('revoked', {
-      stage: revoked.stage, execution: revoked.mergeExecution, authorization: revoked.mergeAuthorization,
+      stage: revoked.stage, execution: revoked.mergeExecution ?? null, authorization: revoked.mergeAuthorization,
       queue: revoked.queue ?? null, ejection: revoked.queueEjection ? { sha: revoked.queueEjection.sha, reason: revoked.queueEjection.reason } : null,
       acceptanceReasons: revoked.gates?.find(gate => gate.name === 'acceptance')?.reasons ?? [],
       revocations: (revoked.evidence ?? []).filter(item => item.revocation).map(item => ({ proof: item.proof, actor: item.revocation.actor, reason: item.revocation.reason })),
       retainedEvidence: (revoked.evidence ?? []).length,
     });
 
-    record('verify-after-revocation', refusal(await call(`work/${work.id}/merge-verify`, 'probe-coordinator', { executionId: granted.execution.id })));
-    record('acquire-replay-after-revocation', refusal(await call(`work/${work.id}/merge-acquire`, 'probe-coordinator', acquireInput, acquireKey)));
-    record('cancel-after-revocation', refusal(await call(`work/${work.id}/merge-cancel`, 'probe-coordinator', { executionId: granted.execution.id, reason: 'Probe late cancel' })));
-
     const current = (await call('work', 'probe-operator')).body.find(item => item.id === work.id);
-    const retryInput = { expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision };
+    const retryInput = { enqueue: true, expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision };
+    record('request-after-revocation', refusal(await call(`work/${work.id}/merge-acquire`, 'probe-coordinator', retryInput)));
+    record('execution-request-refused', refusal(await call(`work/${work.id}/merge-acquire`, 'probe-coordinator', { expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision })));
+    for (const route of ['merge-verify', 'merge-commit', 'merge-cancel'])
+      record('removed-execution-route', { route, status: (await call(`work/${work.id}/${route}`, 'probe-coordinator', { executionId: randomUUID(), reason: 'Probe' })).status });
     const concurrent = await Promise.all(Array.from({ length: 8 }, (_, index) =>
       call(`work/${work.id}/merge-acquire`, index % 2 ? 'probe-coordinator' : 'probe-other-coordinator', retryInput)));
     record('concurrent-attempts', { attempts: concurrent.map(result => refusal(result)) });
@@ -107,10 +109,10 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
     const merged = await observeWork(settled, observe({ merged: true, mergeSha: 'c'.repeat(40), mergedAt: new Date(Date.now() + 5000).toISOString() }));
     record('merge-after-revocation', { stage: merged.stage, violations: merged.violations, delivery: merged.delivery ?? null });
 
-    // Exercise the exact final race on a fresh candidate. The row lock gives one operation
-    // a total order: withdrawal cancels before provider commit, or commit wins and the later
-    // withdrawal refuses instead of falsely reporting a revoked candidate.
-    let raced = (await call('work', 'probe-operator', { title: 'Merge commit race probe', criteria: [{ id: 'AC-1', text: 'Revocation serializes with provider commit', proofs: [proof] }] })).body;
+    // Race the merge request against the withdrawal on a fresh candidate. The row lock gives the
+    // two a total order; withdrawal is never refused for a merge GitHub holds, and a merge GitHub
+    // lands after it is a violation whichever side won.
+    let raced = (await call('work', 'probe-operator', { title: 'Merge request race probe', criteria: [{ id: 'AC-1', text: 'Revocation serializes with the merge request', proofs: [proof] }] })).body;
     await call(`work/${raced.id}/ready`, 'probe-operator', {});
     raced = (await call(`work/${raced.id}/claim`, 'probe-worker', {})).body;
     const racedBranch = `graphyard/probe-${raced.id}`;
@@ -120,19 +122,19 @@ export async function probeMergeAuthorization({ url, controlUrl, controlToken, p
     raced = await observeWork(raced, snapshot);
     raced = (await call(`work/${raced.id}/evidence`, 'probe-producer', { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, result: 'pass', executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } })).body;
     raced = await observeWork(raced, snapshot, speculation(raced, head, base));
-    const racedAcquire = (await call(`work/${raced.id}/merge-acquire`, 'probe-coordinator', { expectedRevision: raced.revision, sha: head, baseSha: base, policyRevision: raced.policyRevision })).body;
-    await call(`work/${raced.id}/merge-verify`, 'probe-coordinator', { executionId: racedAcquire.execution.id });
-    const racedWithdrawal = { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, reason: 'Probe raced final provider commit' };
-    const [commitResult, revokeResult] = await Promise.all([
-      call(`work/${raced.id}/merge-commit`, 'probe-coordinator', { executionId: racedAcquire.execution.id }),
+    const racedWithdrawal = { proof, sha: head, baseSha: base, policyRevision: raced.policyRevision, reason: 'Probe raced the merge request' };
+    const [requestResult, revokeResult] = await Promise.all([
+      call(`work/${raced.id}/merge-acquire`, 'probe-coordinator', { enqueue: true, expectedRevision: raced.revision, sha: head, baseSha: base, policyRevision: raced.policyRevision }),
       call(`work/${raced.id}/revoke`, 'probe-producer', racedWithdrawal),
     ]);
     const racedCurrent = (await call('work', 'probe-operator')).body.find(item => item.id === raced.id);
+    const racedMerge = await observeWork(racedCurrent, { ...snapshot, merged: true, mergeSha: 'e'.repeat(40), mergedAt: new Date(Date.now() + 5000).toISOString(), at: new Date().toISOString() });
     record('provider-commit-race', {
-      commit: commitResult.status === 200 ? { status: 200 } : refusal(commitResult),
+      request: requestResult.status === 200 ? { status: 200 } : refusal(requestResult),
       revoke: revokeResult.status === 200 ? { status: 200 } : refusal(revokeResult),
       revokedEvidence: racedCurrent.evidence.filter(item => item.revocation).length,
-      committingAt: racedCurrent.mergeExecution?.committingAt ?? null,
+      execution: racedCurrent.mergeExecution ?? null,
+      mergedStage: racedMerge.stage, mergedViolations: racedMerge.violations,
     });
     return transcript;
   } finally { /* candidate lifecycle is owned by the outer controller */ }

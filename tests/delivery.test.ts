@@ -73,9 +73,7 @@ async function delivered(mergeSha = 'e'.repeat(40)) {
   const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
   w = await engine.observe(w.id, (await reload(w)).revision, observation());
-  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, id());
-  await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(), prState: 'open', draft: false }, id());
-  const committed = await engine.commitMerge(coordinator, w.id, { executionId: granted.execution.id }, id());
+  const committed = await engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision }, id());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   w = await engine.observe(w.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha });
   assert.equal(w.stage, 'done'); assert.equal(w.delivery?.mergeSha, mergeSha);

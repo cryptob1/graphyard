@@ -239,9 +239,9 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
     // new implementation, so only the operator rework lifecycle clears it.
     if (data.action === 'approve-plan' && data.supersedes && standingRejection) releaseLeadHold(work);
     await save(db, work, actor.id, `lead.${data.action}`, now, { ruleId: data.ruleId, reason: data.reason, ...(data.trigger ? { trigger: data.trigger } : {}), ...(data.supersedes ? { supersedes: data.supersedes } : {}) });
-    // A ruling that fenced an in-flight merge execution must reach reconciliation
-    // rather than wait for the execution's own expiry.
-    if (work.mergeExecution?.fenced) await wakeJob(db, work.id);
+    // A ruling withdraws the merge authorization; the observation that follows fails the
+    // check and dequeues the pull request (GY-258) rather than waiting for its next reading.
+    if (work.submission) await wakeJob(db, work.id);
     return { ruling, work };
   });
 }
