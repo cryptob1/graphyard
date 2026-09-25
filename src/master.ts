@@ -2995,7 +2995,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // or out of quota claims nothing, and the refusal names every account it skipped and why.
     selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });
     // The Git directories the worker writes are granted once its worktree exists (launchWorker).
-    const launch = accountLaunch(profile, selected.account);
+    // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
+    const chosen = selected;
+    const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
     launched = launch;
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
@@ -3897,8 +3899,14 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
   const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
-  if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
-  const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
+  // A launch refused for its runtime gives the chosen session back at once (GY-184).
+  const plan = () => {
+    if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
+    return accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
+  };
+  let launch: ReturnType<typeof accountLaunch>;
+  try { launch = plan(); }
+  catch (error) { await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
   const cli = `node ${config.cliPath}`;
   let delivery: RequestDelivery | undefined;
   const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
