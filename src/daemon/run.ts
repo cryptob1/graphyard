@@ -8,6 +8,7 @@ import { latencyBudget, silenceReport } from './metrics.js';
 import { boundedPersist, cycleCost, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { runCycle } from './cycle.js';
+import { describeTimings } from '../master/timings.js';
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
 export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
@@ -137,8 +138,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         if (recovered) await effects.persist(state);
         cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs, childWaitMs: result.metrics.childWaitMs ?? 0 });
         for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
-        // Both halves of every cycle: what it could act on, and what it did about it.
-        log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms (${result.metrics.childWaitMs ?? 0}ms waiting on child processes); ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
+        // Both halves of every cycle: what it could act on, and what it did about it — and where its
+        // time went: its three slowest steps and its slowest external call (GY-377).
+        log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms (${result.metrics.childWaitMs ?? 0}ms waiting on child processes); ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}${result.metrics.timings ? `; ${describeTimings(result.metrics.timings)}` : ''}`);
         // The configured interval is the idle cadence; while anything is actionable the loop comes
         // back inside the responsive window so ready work cannot sit out a long interval.
         wait = cycleDelay(interval(), result.silence);

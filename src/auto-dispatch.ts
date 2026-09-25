@@ -4,6 +4,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { childRunner, type ChildRun } from './child-runner.js';
+import { Timings, timedCall, timedRun, serverCallName, describeTimings, timingsSchema, withTimings, type TimingReport } from './master/timings.js';
 import type { Work } from './model.js';
 import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEntry } from './model/session-state.js';
 import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
@@ -109,7 +110,9 @@ export const dispatchCursorSchema = z.object({
   lastTick: z.object({ at: z.string(), launched: z.number().int().min(0), refused: z.number().int().min(0), waiting: z.number().int().min(0), settled: z.number().int().min(0),
     /** Session records this tick closed against the runtime, and the closures it could not write back. */
     closed: z.number().int().min(0).default(0), closeFailures: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
-    reasons: z.array(z.string().max(cursorTextLimit)).max(20).default([]) }).strict().nullable().default(null),
+    reasons: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
+    /** Where the tick's time went (GY-377): its steps and its slowest external calls. Absent on older ticks. */
+    timings: timingsSchema.optional() }).strict().nullable().default(null),
   /**
    * A role none of whose accounts can launch (GY-89): why, and when its accounts are read again.
    * That is capacity, not a refusal, so it never counts toward a request's failure limit — a
@@ -526,7 +529,9 @@ export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused:
   /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
   sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
   /** Review threads this tick resolved on an approval's word, and the ones it named but could not resolve. */
-  threads?: string[] }
+  threads?: string[];
+  /** Where the tick's time went: every step it ran and its slowest external calls (GY-377). */
+  timings?: TimingReport }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math.max(0, attempts - 1), dispatchRetryMaxMs);
@@ -569,14 +574,23 @@ async function launchWithFailover<P extends { name: string }>(profiles: P[], lau
  * the tick moves on, so a kill between two launches leaves nothing to repeat.
  */
 export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs, botReadTimeoutMs = botReviewReadTimeoutMs): Promise<DispatchTick> {
-  const snapshot = await boundedRead(effects.snapshot, readTimeoutMs);
+  // Every step of the tick is timed, and its external calls are recorded against it rather than
+  // against the cycle running beside it in the same process (GY-377).
+  const timings = new Timings(now);
+  const tick = await withTimings(timings, () => dispatchTick(config, cursor, effects, now, readTimeoutMs, botReadTimeoutMs, timings));
+  tick.timings = timings.report();
+  return tick;
+}
+
+async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, botReadTimeoutMs: number, timings: Timings): Promise<DispatchTick> {
+  const snapshot = await timings.step('snapshot', () => boundedRead(effects.snapshot, readTimeoutMs));
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
-  const herdr = await effects.agents();
-  const { reviews, threads } = await effects.reconcileReviews(snapshot.work, herdr);
+  const herdr = await timings.step('herdr', () => effects.agents());
+  const { reviews, threads } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
   if (threads?.length) tick.threads = threads;
-  const { producers } = await effects.reconcileProducers(snapshot.work, herdr);
+  const { producers } = await timings.step('reconcile producers', () => effects.reconcileProducers(snapshot.work, herdr));
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
   // is made before anything launches, because the slot check below reads it.
@@ -593,28 +607,30 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // A tick that could not read the runtime reported nothing, so it leaves them as they were.
   if (herdr) cursor.sessionMisses = Object.fromEntries(Object.entries(report.missing).slice(0, sessionMissLimit));
   const byId = new Map(snapshot.work.map(item => [item.id, item]));
-  tick.sessions = { observed: report.entries.length, written: 0, failures: [] };
-  for (const entry of report.entries.filter(entry => !entry.closed && entry.changed)) {
-    const item = byId.get(entry.workId);
-    // A delivered item takes the observation too (engine.ts): a session that outlives the delivery
-    // is still one every reader shows, so its record is kept as fresh as any other.
-    if (!item || !effects.recordSession) continue;
-    // The observation is the record every reader shows; one that could not be written is
-    // retried by the next tick's report, which finds the stored record still behind.
-    try { await effects.recordSession(item, reportedHandle(entry)); tick.sessions.written++; }
-    catch (error) { tick.sessions.failures.push({ work: entry.key, id: entry.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
-  }
-  for (const closure of closures) {
-    // A closure that cannot be written back still stands as a judgment — the session is over
-    // whichever way the record went — so the slot is freed either way and the tick says what failed.
-    try { await effects.endSession?.(closure); tick.closed.push(closure); }
-    catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
-  }
+  const sessions = tick.sessions = { observed: report.entries.length, written: 0, failures: [] as { work: string; id: string; reason: string }[] };
+  await timings.step('sessions', async () => {
+    for (const entry of report.entries.filter(entry => !entry.closed && entry.changed)) {
+      const item = byId.get(entry.workId);
+      // A delivered item takes the observation too (engine.ts): a session that outlives the delivery
+      // is still one every reader shows, so its record is kept as fresh as any other.
+      if (!item || !effects.recordSession) continue;
+      // The observation is the record every reader shows; one that could not be written is
+      // retried by the next tick's report, which finds the stored record still behind.
+      try { await effects.recordSession(item, reportedHandle(entry)); sessions.written++; }
+      catch (error) { sessions.failures.push({ work: entry.key, id: entry.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
+    }
+    for (const closure of closures) {
+      // A closure that cannot be written back still stands as a judgment — the session is over
+      // whichever way the record went — so the slot is freed either way and the tick says what failed.
+      try { await effects.endSession?.(closure); tick.closed.push(closure); }
+      catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
+    }
+  });
   const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
   // each profile's sessions against its limit; the requests wait and the tick says so.
   const agents = herdr ?? [];
-  const credentials = await effects.credentials(config.producers);
+  const credentials = await timings.step('credentials', () => effects.credentials(config.producers));
   // The sessions this tick has started join the inventory at once, so two requests in one tick
   // never both take a profile's last slot. A launcher that does not report its session name is
   // counted under the name it would have chosen for the request.
@@ -843,44 +859,61 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // pass that fails still waits for these reviewers, so none is left launching into the next tick.
   const deferred = snapshot.work.filter(work => work.stage !== 'done' && botReads.has(work.autoDispatch?.review?.id ?? ''))
     .map(item => botReads.get(item.autoDispatch!.review!.id)!.then(() => inReviewTurn(item, item.autoDispatch!.review!)).then(() => null, (error: unknown) => ({ error })));
+  // Producer launches that could not take the same profile run at once (GY-377), so the pass is
+  // bounded by the profiles' capacity and not by the sum of every launch's duration. Requests that
+  // could take the same profile keep the pass's order: each waits for the earlier ones on any agent
+  // name it could launch under, failover included, and then reads its room as a serial pass would.
+  const producerLaunches: Promise<{ error: unknown } | null>[] = [];
+  const producerTurns = new Map<string, Promise<unknown>>();
+  const afterEarlier = (names: string[], launch: () => Promise<void>) => {
+    const earlier = [...new Set(names)].map(name => producerTurns.get(name)).filter(Boolean);
+    const turn = Promise.allSettled(earlier).then(launch);
+    for (const name of names) producerTurns.set(name, turn.catch(() => { /* the launch reports its own failure */ }));
+    return turn;
+  };
   let outcomes: ({ error: unknown } | null)[] = [];
-  try {
-    for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
-      const review = item.autoDispatch!.review;
-      if (review?.state === 'requested' && review.provider === 'github' && !botReads.has(review.id)) await inReviewTurn(item, review);
-      for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
-        // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
-        // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
-        const unexercised = unexercisedFindings(item, request.sha, request.proofs);
-        if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through a rework decision, and no producer is launched for it again`); continue; }
-        if (!session('producer', item, request, producers)) continue;
-        if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
-        if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
-        if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
-        // Independence is per item, never per process: a profile whose principal held an assignment
-        // on this item is skipped for this item however many slots it has, and the launcher selects
-        // among the rest up to each one's concurrency.
-        const independent = independentProducerProfiles(item, config.producers);
-        const available = independent.filter(profile => credentials[profile.name]?.available !== false);
-        const usable = () => preferFreshProfiles(available.filter(profile => room(profile, producers).free > 0), producers, request.id);
-        const busy = () => wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
-          : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
-          : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
-        if (!usable().length) { busy(); continue; }
-        try {
-          const launched = await launchInTurns(request, usable(), profile => room(profile, producers).free > 0, candidate => registeredLaunch(record(item),
-            launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal),
-            () => effects.launchProducer(item, request, candidate, inventory(), observedAt), result => coordinates(candidate, request, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
-          if (!launched) busy();
-          else {
-            delete cursor.failures[request.id]; delete cursor.capacity.producer;
-            tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
-          }
-        } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
-        await persist();
+  await timings.step('launches', async () => {
+    try {
+      for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
+        const review = item.autoDispatch!.review;
+        if (review?.state === 'requested' && review.provider === 'github' && !botReads.has(review.id)) await inReviewTurn(item, review);
+        for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
+          // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
+          // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
+          const unexercised = unexercisedFindings(item, request.sha, request.proofs);
+          if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through a rework decision, and no producer is launched for it again`); continue; }
+          if (!session('producer', item, request, producers)) continue;
+          if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
+          if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
+          if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
+          // Independence is per item, never per process: a profile whose principal held an assignment
+          // on this item is skipped for this item however many slots it has, and the launcher selects
+          // among the rest up to each one's concurrency.
+          const independent = independentProducerProfiles(item, config.producers);
+          const available = independent.filter(profile => credentials[profile.name]?.available !== false);
+          const usable = () => preferFreshProfiles(available.filter(profile => room(profile, producers).free > 0), producers, request.id);
+          const busy = () => wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
+            : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
+            : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
+          if (!available.some(profile => room(profile, producers).free > 0)) { busy(); continue; }
+          producerLaunches.push(afterEarlier(available.map(profile => profile.agentName), async () => {
+            if (!usable().length) { busy(); return; }
+            try {
+              const launched = await launchInTurns(request, usable(), profile => room(profile, producers).free > 0, candidate => registeredLaunch(record(item),
+                launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal),
+                () => effects.launchProducer(item, request, candidate, inventory(), observedAt), result => coordinates(candidate, request, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
+              if (!launched) busy();
+              else {
+                delete cursor.failures[request.id]; delete cursor.capacity.producer;
+                tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
+              }
+            } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
+            await persist();
+          }).then(() => null, (error: unknown) => ({ error })));
+        }
       }
-    }
-  } finally { outcomes = await Promise.all(deferred); }
+    } finally { outcomes = await Promise.all([...deferred, ...producerLaunches]); }
+  });
   for (const outcome of outcomes) if (outcome) throw outcome.error;
   // A failure for a request the control plane resolved is history the cursor need not keep.
   const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
@@ -889,7 +922,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
   cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
     closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
-    reasons: composed().map(([reason]) => reason) };
+    reasons: composed().map(([reason]) => reason), timings: timings.report() };
   await persist();
   return tick;
 }
@@ -943,6 +976,8 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       }
       const tick = await runDispatchTick(config, cursor, effects, now, tickReadTimeout(cursor.consecutiveFailures, interval, options.readTimeoutMs));
       ticks.push(tick);
+      // A tick that outgrew its interval says where its time went (GY-377): its slowest steps and call.
+      if (tick.timings && tick.timings.totalMs > interval) log(`[graphyard-dispatch] tick took ${tick.timings.totalMs}ms against its ${interval}ms interval; ${describeTimings(tick.timings)}`);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
       for (const event of tick.threads ?? []) log(`[graphyard-dispatch] ${event}`);
@@ -980,7 +1015,8 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
   // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
-  const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
+  // Its children and server calls are timed against the tick that made them (GY-377).
+  const run = timedRun(deps.run ?? childRunner({ timeoutMs: 90_000 }));
   const current = typeof config === 'function' ? config : () => config;
   const headReviewerReads = new Map<string, { at: number; logins: string[] }>(), headReviewerInFlight = new Map<string, Promise<string[]>>();
   const log = deps.log ?? (line => console.error(line));
@@ -992,15 +1028,16 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   // configuration the loop already runs on — the credential the dispatcher authenticates every
   // launch decision with — so a dispatcher records what it launched wherever it runs, rather than
   // only where a caller remembered to pass one. A caller with a mutation of its own passes it.
-  const mutate = deps.mutate ?? (async (path: string, body: unknown, requestId: string = randomUUID()) => {
+  const post = deps.mutate ?? (async (path: string, body: unknown, requestId: string = randomUUID()) => {
     const token = await readCredentialFile(current().credentialFile);
     const response = await fetch(`${current().url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const result = await response.json();
     if (!response.ok) throw new Error(typeof result?.error === 'string' ? result.error : JSON.stringify(result));
     return result;
   });
+  const mutate = (path: string, body: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => post(path, body, requestId));
   return {
-    snapshot: deps.snapshot,
+    snapshot: () => timedCall('server', 'GET work-snapshot', deps.snapshot),
     agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),

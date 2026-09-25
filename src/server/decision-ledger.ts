@@ -78,10 +78,20 @@ export async function decisionsByWork(db: { query: Db['query'] }, ids: readonly 
 
 export async function listDecisions(services: Services, actor: Principal, id: string) {
   demand(['admin', 'coordinator', 'operator-agent', 'reader'].includes(actor.role), 'Decision history is not available to this role', 403);
-  const work = (await services.engine.store.list()).find(item => item.id === id || item.key === id);
+  // The one item it answers for, by id or key (GY-377). Loading every document to find it made each
+  // read cost the whole graph, and the loop and master status read this for every open item.
+  const work = await findDecisionSubject(services.engine.store.pool, id);
   demand(work, 'Work item not found', 404);
   demand(actor.role !== 'operator-agent' || operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
   return { key: work!.key, decisions: await readDecisions(services.engine.store.pool, work!) };
+}
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** One work document by its id (the primary key) or its key, read alone. */
+export async function findDecisionSubject(db: { query: Db['query'] }, id: string): Promise<Work | undefined> {
+  const { rows } = uuidPattern.test(id) ? await db.query('SELECT document FROM work_items WHERE id=$1', [id])
+    : await db.query("SELECT document FROM work_items WHERE document->>'key'=$1", [id]);
+  return rows[0]?.document;
 }
 
 /** The pinned target a revision race moved away, with both sides; null when no pin was hit. */
