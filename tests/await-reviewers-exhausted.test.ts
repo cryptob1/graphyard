@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { botReviewerStates, dispatchSummary, emptyDispatchCursor, runDispatchTick, type BotActivity, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
+import { botReviewerStates, dispatchEffects, dispatchSummary, emptyDispatchCursor, runDispatchTick, type BotActivity, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 
 // GY-349: an automatic bot reviewer that has announced its quota is spent posts no review, so a
 // reviewer launch that waits for it loses the whole wait on every round. Each test is named for
@@ -106,6 +106,38 @@ test('unit:exhausted-bot-not-awaited — a launch does not wait for a bot whose 
     assert.equal(secondLog.length, 0, 'the bot reviewed after its notice: the launch waits for it again');
     assert.match(resumed.waiting[0].reason, /for chatgpt-codex-connector\[bot\]'s review of the head/);
     assert.equal(cursor.botReviewers[0].state, 'available');
+  });
+});
+
+test('unit:exhausted-bot-not-awaited — the production reader ends the exhaustion with a review on a pull request nobody is waiting on, and keeps a notice that aged out of the comment read', async () => {
+  const noticeAt = iso(-30 * 60_000), reviewedAt = iso(-5 * 60_000);
+  // The repository as `gh api` answers it: the bot's notice on #70, then its review of #71, which
+  // no review request is waiting on; #64 is the waiting pull request.
+  const repository = { comments: [[codex, noticeAt, notice]] as string[][], pulls: [['71', reviewedAt], ['64', iso(-10 * 60_000)], ['12', iso(-86_400_000)]], reviews: { 71: [[codex, reviewedAt]], 64: [], 12: [[codex, iso(-86_400_000)]] } as Record<number, string[][]> };
+  const calls: string[] = [];
+  const run = (command: string, args: string[]) => {
+    assert.equal(command, 'gh'); const path = args.find(arg => arg.startsWith('repos/'))!; calls.push(path);
+    if (path.startsWith('repos/owner/project/issues/comments')) return repository.comments.map(row => row.join('\t')).join('\n');
+    if (path.startsWith('repos/owner/project/pulls?')) return repository.pulls.map(row => row.join('\t')).join('\n');
+    const pr = Number(/pulls\/(\d+)\/reviews/.exec(path)![1]); return (repository.reviews[pr] ?? []).map(row => row.join('\t')).join('\n');
+  };
+  await withToken(async config => {
+    let clockNow = clock;
+    const read = dispatchEffects('/outside', () => config, { snapshot: async () => ({ work: [], now: at }), run, now: () => clockNow }).botActivity!;
+    const request = reviewRequested().autoDispatch!.review!;
+    assert.deepEqual(botReviewerStates([codex], await read([codex], [request], []), []), [{ login: codex, state: 'available', since: null }], 'a review on #71 after the notice ends the exhaustion');
+    assert.ok(calls.some(path => path.startsWith('repos/owner/project/pulls/71/reviews')), 'the pull request updated since the notice is read');
+    assert.ok(!calls.some(path => path.startsWith('repos/owner/project/pulls/12/reviews')), 'one untouched since the notice is not');
+
+    // Without that review the bot is exhausted since its notice.
+    repository.reviews[71] = []; clockNow += 61_000;
+    const exhausted = botReviewerStates([codex], await read([codex], [request], []), []);
+    assert.deepEqual(exhausted, [{ login: codex, state: 'exhausted', since: noticeAt }]);
+    // The notice ages out of the newest comments: the held judgment stands until a later review.
+    repository.comments = []; clockNow += 61_000;
+    assert.deepEqual(botReviewerStates([codex], await read([codex], [request], exhausted), exhausted), exhausted, 'an aged-out notice keeps the bot exhausted');
+    repository.reviews[71] = [[codex, reviewedAt]]; clockNow += 61_000;
+    assert.equal(botReviewerStates([codex], await read([codex], [request], exhausted), exhausted)[0].state, 'available', 'its next review on any head ends it');
   });
 });
 

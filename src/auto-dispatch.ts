@@ -285,16 +285,20 @@ export interface BotReviewerState { login: string; state: 'available' | 'exhaust
 /**
  * Whether each awaited bot reviewer can answer (GY-349). A bot whose latest activity is a
  * usage-limit notice is exhausted since the first notice after its last review, and stays so until
- * it next posts a review on any head: only a review shows its quota is back.
+ * it next posts a review on any head: only a review shows its quota is back. `held` is the last
+ * judgment: an exhausted bot whose notice has aged out of the read stays exhausted since it.
  */
-export function botReviewerStates(awaited: readonly string[], activity: readonly BotActivity[]): BotReviewerState[] {
+export function botReviewerStates(awaited: readonly string[], activity: readonly BotActivity[], held: readonly BotReviewerState[] = []): BotReviewerState[] {
   return awaited.map(login => {
     const mine = activity.filter(entry => entry.login.toLowerCase() === login.toLowerCase() && Number.isFinite(Date.parse(entry.at)));
     const reviewed = Math.max(-Infinity, ...mine.filter(entry => entry.kind === 'review').map(entry => Date.parse(entry.at)));
-    const notices = mine.filter(entry => entry.kind === 'comment' && botLimitNotice.test(entry.body ?? '') && Date.parse(entry.at) > reviewed).map(entry => Date.parse(entry.at));
+    const kept = held.filter(bot => bot.login.toLowerCase() === login.toLowerCase() && bot.state === 'exhausted' && bot.since).map(bot => Date.parse(bot.since!));
+    const notices = [...mine.filter(entry => entry.kind === 'comment' && botLimitNotice.test(entry.body ?? '')).map(entry => Date.parse(entry.at)), ...kept].filter(time => Number.isFinite(time) && time > reviewed);
     return notices.length ? { login, state: 'exhausted' as const, since: new Date(Math.min(...notices)).toISOString() } : { login, state: 'available' as const, since: null };
   });
 }
+/** How many of the most recently updated pull requests one bot-activity read looks in for a review since a limit notice. */
+export const botReviewPullLimit = 30;
 /** The status line for one awaited bot reviewer. */
 export const botReviewerLine = (bot: { login: string; state: string; since: string | null }) => bot.state === 'exhausted' ? `${bot.login}: exhausted since ${bot.since}` : `${bot.login}: available`;
 /**
@@ -324,7 +328,7 @@ export interface DispatchEffects {
    * once per tick while a launch would wait on them; a bot whose latest word is a usage-limit
    * notice is not waited for. A dispatcher wired without it waits on every awaited bot.
    */
-  botActivity?: (logins: string[], requests: DispatchRequest[]) => Promise<BotActivity[]>;
+  botActivity?: (logins: string[], requests: DispatchRequest[], held: BotReviewerState[]) => Promise<BotActivity[]>;
   /**
    * Records a launched reviewer or producer session's durable handle on the item. Without it a
    * launched session is visible only in this host's own ledger, which is the relaying the handle
@@ -794,9 +798,10 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       waiting.push(review);
     }
     if (waiting.length && effects.botActivity) {
-      const activity = Promise.race([effects.botActivity([...awaited], waiting).catch(() => null), deadline]);
+      const held = cursor.botReviewers.map(({ login, state, since }) => ({ login, state, since }));
+      const activity = Promise.race([effects.botActivity([...awaited], waiting, held).catch(() => null), deadline]);
       botStates = activity.then(entries => {
-        if (entries) cursor.botReviewers = botReviewerStates(awaited, entries).slice(0, 10).map(bot => ({ ...bot, checkedAt: new Date(now()).toISOString() }));
+        if (entries) cursor.botReviewers = botReviewerStates(awaited, entries, held).slice(0, 10).map(bot => ({ ...bot, checkedAt: new Date(now()).toISOString() }));
         return cursor.botReviewers;
       });
     }
@@ -1085,17 +1090,31 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
       return read;
     },
     // The awaited bots' latest words (GY-349): the repository's newest issue comments, where a bot
-    // posts its usage-limit notice, and the reviews on the pull requests waiting on it. One read a
-    // minute at most, shared while in flight; only the awaited logins' entries are kept.
-    botActivity: (logins, requests) => {
-      const at = (deps.now ?? Date.now)(), prs = [...new Set(requests.map(request => request.pr))].sort((a, b) => a - b), key = `${logins.join(',')}|${prs.join(',')}`;
+    // posts its usage-limit notice, and its reviews on any pull request since its latest notice, so
+    // a review on a head nobody is waiting on still ends the exhaustion. Those are read from the
+    // waiting pull requests and every pull request updated since that notice (a review updates
+    // it), at most `botReviewPullLimit` of the most recently updated. One read a minute at most,
+    // shared while in flight; only the awaited logins' entries are kept.
+    botActivity: (logins, requests, held = []) => {
+      const repository = current().repository, waiting = [...new Set(requests.map(request => request.pr))].sort((a, b) => a - b);
+      const at = (deps.now ?? Date.now)(), key = `${logins.join(',')}|${waiting.join(',')}|${held.map(bot => `${bot.login}:${bot.since}`).join(',')}`;
       if (botActivityRead && botActivityRead.key === key && at - botActivityRead.at < 60_000) return botActivityRead.activity;
       const wanted = new Set(logins.map(login => login.toLowerCase()));
-      const rows = (output: unknown) => String(output).split('\n').map(line => line.split('\t')).filter(([login, time]) => login && time && wanted.has(login.toLowerCase()));
+      const lines = (output: unknown) => String(output).split('\n').map(line => line.split('\t'));
+      const rows = (output: unknown) => lines(output).filter(([login, time]) => login && time && wanted.has(login.toLowerCase()));
       const activity = (async () => {
-        const comments = rows(await run('gh', ['api', `repos/${current().repository}/issues/comments?sort=created&direction=desc&per_page=100`, '--jq', '.[] | [.user.login, .created_at, ((.body // "") | .[0:300] | gsub("[\\t\\n\\r]"; " "))] | @tsv']))
+        const comments = rows(await run('gh', ['api', `repos/${repository}/issues/comments?sort=created&direction=desc&per_page=100`, '--jq', '.[] | [.user.login, .created_at, ((.body // "") | .[0:300] | gsub("[\\t\\n\\r]"; " "))] | @tsv']))
           .map(([login, time, body]): BotActivity => ({ login, kind: 'comment', at: time, body }));
-        const reviews = (await Promise.all(prs.map(pr => run('gh', ['api', '--paginate', `repos/${current().repository}/pulls/${pr}/reviews?per_page=100`, '--jq', '.[] | [.user.login, .submitted_at] | @tsv']))))
+        // Each bot's latest notice, or the one the last judgment still holds when it aged out of the
+        // comment read; the earliest of them bounds which pull requests' reviews can end one.
+        const latest = [...wanted].map(login => Math.max(-Infinity,
+          ...comments.filter(entry => entry.login.toLowerCase() === login && botLimitNotice.test(entry.body ?? '')).map(entry => Date.parse(entry.at)),
+          ...held.filter(bot => bot.login.toLowerCase() === login && bot.state === 'exhausted' && bot.since).map(bot => Date.parse(bot.since!)))).filter(Number.isFinite);
+        const cutoff = latest.length ? Math.min(...latest) : null;
+        const updated = cutoff === null ? [] : lines(await run('gh', ['api', `repos/${repository}/pulls?state=all&sort=updated&direction=desc&per_page=${botReviewPullLimit}`, '--jq', '.[] | [.number, .updated_at] | @tsv']))
+          .filter(([pr, time]) => pr && Date.parse(time) >= cutoff).map(([pr]) => Number(pr)).filter(Number.isSafeInteger);
+        const prs = [...new Set([...waiting, ...updated])];
+        const reviews = (await Promise.all(prs.map(pr => run('gh', ['api', '--paginate', `repos/${repository}/pulls/${pr}/reviews?per_page=100`, '--jq', '.[] | [.user.login, .submitted_at] | @tsv']))))
           .flatMap(output => rows(output).map(([login, time]): BotActivity => ({ login, kind: 'review', at: time })));
         return [...comments, ...reviews];
       })();
