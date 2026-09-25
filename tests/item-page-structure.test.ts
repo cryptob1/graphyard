@@ -14,6 +14,7 @@ import { eventHistoryLimits } from '../src/events-history.js';
 import type { Command } from '../src/engine.js';
 import { nextActor, groupWithin } from '../web/groups.js';
 import { prSteps } from '../web/pr-steps.js';
+import { describeHumanRequest } from '../src/model/human-request.js';
 
 // GY-171: the item page below its first screen. Each section answers one question, in plain words,
 // in a fixed order, and everything technical is one click down in a single collapsed section.
@@ -119,7 +120,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   // Activity: the latest few events in plain words; the full history on expand.
   const activity = html.slice(html.indexOf('aria-label="Activity"'), technical);
   assert.deepEqual([...activity.matchAll(/<li>([^<]+) <small>/g)].map(match => match[1]), ['Picked up by a builder', 'Released for work', 'Created']);
-  assert.match(activity, /<details class="full-history"><summary>Full history \(3\)<\/summary><section aria-label="Work history">/);
+  assert.match(activity, /<details class="full-history"><summary>History \(3 events; routine GitHub checks and heartbeats left out\)<\/summary><section aria-label="Work history">/);
   const many = Array.from({ length: 9 }, (_, i) => ({ seq: 9 - i, kind: 'github.observed', actor: 'github', created_at: at(-i * minute) }));
   assert.equal(page(item, work, { events: many }).match(/<li>Graphyard checked GitHub <small>/g)?.length, 3, 'only the latest few above the fold');
 
@@ -186,13 +187,14 @@ test('the Activity section reads the kinds the ledger records — command names 
   assert.equal(activityLabel('something.unheard.of'), 'Updated');
   // The page reads one page of /api/events and does not follow the cursor.
   assert.equal(historyPage, eventHistoryLimits.page);
-  assert.equal(historyLabel(3), 'Full history (3)');
-  assert.equal(historyLabel(historyPage), `Latest ${historyPage} events — older history is kept but not loaded here`);
+  // The page reads without routine=include, so no label ever calls the loaded rows the full history.
+  assert.equal(historyLabel(3), 'History (3 events; routine GitHub checks and heartbeats left out)');
+  assert.equal(historyLabel(historyPage), `Latest ${historyPage} events — older history and routine GitHub checks and heartbeats are not loaded here`);
   const all = board();
   const item = midReview(all.find(entry => entry.key === 'GY-15')!);
   const full = Array.from({ length: historyPage }, (_, i) => ({ seq: historyPage - i, kind: 'claim', actor: 'worker-3', created_at: at(-i * minute) }));
   const html = page(item, [...all, item], { events: full });
-  assert.match(html, /<summary>Latest 300 events — older history is kept but not loaded here<\/summary>/);
+  assert.match(html, /<summary>Latest 300 events — older history and routine GitHub checks and heartbeats are not loaded here<\/summary>/);
   assert.doesNotMatch(html, /Full history/);
 });
 
@@ -228,4 +230,21 @@ test('What is left names who clears each step from the refusal itself: exhausted
   assert.ok(held.lines.some(line => line.includes(blocker)), 'the blocker is shown as written');
   assert.equal(nextActor(blocked, groupWithin(blocked, blockedAll, NOW), NOW).who, 'Master agent');
   assert.match(page(blocked, blockedAll), /<h3>Build <small>· cleared by Master agent<\/small><\/h3>/);
+  // A parked human-only decision is also a ready-gate blocker, but it is yours: the panel agrees
+  // with "Who acts next" and the request card.
+  const request = { id: 'hr-1', kind: 'money-or-accounts' as const, needed: 'A Railway workspace for the staging proof', reason: 'The proof needs a paid workspace', requestedBy: 'graphyard-codex-1', at: at(-minute), epoch: 1, answer: null };
+  const parkedBlocker = describeHumanRequest(request);
+  const parked = { ...blocked, blocker: parkedBlocker, humanRequest: request, lease: null,
+    gates: [gate('ready', [parkedBlocker]), ...blocked.gates.filter(entry => entry.name !== 'ready')] } as unknown as Work;
+  const parkedAll = [...all, parked];
+  assert.deepEqual(whatIsLeft(parked, NOW).map(group => [group.label, group.who])[0], ['Build', 'You']);
+  assert.equal(nextActor(parked, groupWithin(parked, parkedAll, NOW), NOW).who, 'You');
+  assert.match(page(parked, parkedAll), /<h3>Build <small>· cleared by You<\/small><\/h3>/);
+  // An item not yet released from the backlog: only the master agent releases it, not the builder
+  // assignment the Build step would otherwise name.
+  const unreleased = { ...blocked, blocker: null, ready: false, lease: null,
+    gates: [gate('ready', ['Not released from backlog']), ...blocked.gates.filter(entry => entry.name !== 'ready')] } as unknown as Work;
+  const unreleasedAll = [...all, unreleased];
+  assert.deepEqual(whatIsLeft(unreleased, NOW).map(group => [group.label, group.who])[0], ['Build', 'Master agent']);
+  assert.equal(nextActor(unreleased, groupWithin(unreleased, unreleasedAll, NOW), NOW).who, 'Master agent');
 });

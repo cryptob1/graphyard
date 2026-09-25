@@ -1,4 +1,5 @@
 import { isClosed, type Gate, type Work } from '../src/model';
+import { parkedOnHuman } from '../src/model/human-request';
 import { fileConflicts } from '../src/coordination';
 import { plainReason } from './plain-status';
 import { prSteps, stepGate, stepIds, stepLabel, waitsOn, type StepId } from './pr-steps';
@@ -34,6 +35,19 @@ export function plainLines(gate: Gate): string[] {
 }
 
 /**
+ * Who clears a failing ready gate, read from its refusal rather than from the Build step it holds,
+ * the same way "Who acts next" reads it (web/groups.ts `nextActor`): a parked human-only decision
+ * is yours; a recorded blocker, or an item not yet released from the backlog, is the master
+ * agent's; unfinished dependencies are nobody's yet. Anything else leaves the step's own actor.
+ */
+export function readyOwner(work: Work, gate: Gate): string | undefined {
+  if (parkedOnHuman(work)) return 'You';
+  if ((work.blocker && gate.reasons.includes(work.blocker)) || gate.reasons.includes('Not released from backlog')) return 'Master agent';
+  if (gate.reasons.length && gate.reasons.every(reason => reason.startsWith('Dependency '))) return 'Nobody yet';
+  return undefined;
+}
+
+/**
  * Every unmet requirement, one plain line each, grouped by step. The current step comes first —
  * its lines are the refusal of that step's own gate (Test before Review, unlike the evaluation
  * order), or, before the hand-in, whatever holds the build — then every later step in the order a
@@ -49,17 +63,14 @@ export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRel
   const own = steps.current !== 'build' ? work.gates.find(gate => gate.name === stepGate[steps.current!] && !gate.passed) : undefined;
   const failing = own ?? unmet[0];
   const handedIn = steps.current !== 'build';
-  // A blocker recorded before the hand-in fails the ready gate, and the item is Blocked
-  // (web/groups.ts): only the master agent clears it, whatever the builder's step would say.
-  const blocked = failing?.name === 'ready' && !!work.blocker && failing.reasons.includes(work.blocker);
-  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: blocked ? 'Master agent' : steps.who, lines: failing ? plainLines(failing) : [], current: true }];
+  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: (failing?.name === 'ready' ? readyOwner(work, failing) : undefined) ?? steps.who, lines: failing ? plainLines(failing) : [], current: true }];
   for (const gate of unmet) {
     if (gate === failing) continue;
     const step = stepOfGate(gate.name, handedIn);
     if (!step) continue;
     const group = groups.find(entry => entry.step === step);
     if (group) { group.lines = [...new Set([...group.lines, ...plainLines(gate)])]; continue; }
-    groups.push({ step, label: stepLabel[step], who: waitsOn(step, gate, work, now, release).who, lines: plainLines(gate), current: false });
+    groups.push({ step, label: stepLabel[step], who: (gate.name === 'ready' ? readyOwner(work, gate) : undefined) ?? waitsOn(step, gate, work, now, release).who, lines: plainLines(gate), current: false });
   }
   const [current, ...later] = groups;
   return [current, ...later.sort((a, b) => stepIds.indexOf(a.step) - stepIds.indexOf(b.step))].filter(group => group.lines.length > 0);
@@ -107,9 +118,16 @@ export function activityLabel(kind: string): string {
  */
 export const historyPage = 300;
 
-/** The Activity section's expand label: the full history only when the read returned all of it. */
+/**
+ * The Activity section's expand label. The page reads without `routine=include`, so the routine
+ * rows (src/events-history.ts `routineEventKinds`: GitHub checks, heartbeats) are never among the
+ * rows loaded, and the label never calls the read complete: it says what was left out, and when
+ * the read fills the page, that older history was not loaded either.
+ */
 export function historyLabel(loaded: number): string {
-  return loaded < historyPage ? `Full history (${loaded})` : `Latest ${loaded} events — older history is kept but not loaded here`;
+  return loaded < historyPage
+    ? `History (${loaded} events; routine GitHub checks and heartbeats left out)`
+    : `Latest ${loaded} events — older history and routine GitHub checks and heartbeats are not loaded here`;
 }
 
 /**
