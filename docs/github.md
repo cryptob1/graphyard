@@ -39,7 +39,7 @@ The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval o
 
 ## Merge queue
 
-A candidate enters when its own gates pass; nobody reorders or bypasses entries. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back.
+A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over (never predicted on) until revalidated.
 
 ### Bindings and carry
 
@@ -47,7 +47,7 @@ Reviews and proofs bind one head, base and policy revision. When the base moves,
 
 ### Proofs in CI
 
-A protected workflow runs on every push to a `graphyard/*` PR branch via `pull_request_target`, so workflow and secrets come from the default branch: **plan** finds the item and its registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. A queue tip is committed onto the pull-request branch, so it gets the same run; dependencies are cached. Manual proofs stay producer sessions.
+A protected workflow runs on every push to a `graphyard/*` PR branch via `pull_request_target`, so workflow and secrets come from the default branch: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips get the same run; dependencies are cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
