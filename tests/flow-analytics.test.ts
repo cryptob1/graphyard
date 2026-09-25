@@ -263,19 +263,16 @@ async function deliver(work: Work, slice: string, mergeSha: string, overrides: P
   latest = await current();
   latest = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), prState: 'open', draft: false });
   assert.ok(latest.gates.every(gate => gate.passed), `the published tip clears the merge gate: ${JSON.stringify(latest.gates.find(gate => !gate.passed)?.reasons)}`);
-  const granted = await engine.acquireMerge(coordinator, work.id, { expectedRevision: latest.revision, sha: head, baseSha: base, policyRevision: latest.policyRevision }, randomUUID());
-  const verified = await engine.verifyMerge(coordinator, work.id, { executionId: granted.execution.id }, { ...observation(latest, slice, overrides), prState: 'open', draft: false }, randomUUID());
-  // The broker commits the verified execution before the provider call; only then does the
-  // merged observation complete the delivery.
-  await engine.commitMerge(coordinator, work.id, { executionId: granted.execution.id }, randomUUID());
-  const mergedAt = new Date(Math.ceil((Date.parse(verified.verifiedAt) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  // GitHub executes the merge (GY-258): the coordinator's request binds this head, and the merged
+  // observation that follows completes the delivery.
+  const requested = await engine.requestEnqueue(coordinator, work.id, { enqueue: true, expectedRevision: latest.revision, sha: head, baseSha: base, policyRevision: latest.policyRevision }, randomUUID());
+  const mergedAt = new Date(Math.ceil((Date.parse(requested.enqueue.at) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   latest = await current();
   const delivered = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), merged: true, mergeSha, mergedAt });
   assert.equal(delivered.stage, 'done');
-  // GY-60: a merge observed without a committed execution is recorded as a violation and never
-  // reaches `done`; pin the attribution so a dropped commitMerge fails here, not in the analytics.
-  assert.deepEqual(delivered.violations, [], 'the merged observation is attributed to the committed execution');
-  assert.equal(delivered.mergeExecution, null, 'delivery retires the committed execution');
+  // GY-60: a merge observed without a prior request is recorded as a violation and never
+  // reaches `done`; pin the attribution so a dropped request fails here, not in the analytics.
+  assert.deepEqual(delivered.violations, [], 'the merged observation is attributed to the merge request');
   await settle(mergedAt);
   return { delivered, mergedAt, mergeSha };
 }

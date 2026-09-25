@@ -307,12 +307,10 @@ async function job(work: Work, github: GitHub) {
 }
 const prove = async (work: Work) => engine.execute(producer, 'evidence', work.id, { proof: 'unit:landing', sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
 
-/** The guarded merge as the control plane performs it, through to the provider's landing and the item's own reconciliation. */
+/** The guarded merge as the control plane requests it, through to GitHub's landing and the item's own reconciliation. */
 async function landed(work: Work, pr: number, sha: string, github: GitHub, repo: Repository) {
   const current = await reload(work);
-  const granted = await engine.acquireMerge(coordinator, current.id, { expectedRevision: current.revision, sha, baseSha: current.candidate!.baseSha, policyRevision: 1 }, randomUUID());
-  await engine.verifyMerge(coordinator, current.id, { executionId: granted.execution.id }, { ...await github.verify(current, await store.list()), clockOffset: { min: 0, max: 0 } }, randomUUID());
-  await engine.commitMerge(coordinator, current.id, { executionId: granted.execution.id }, randomUUID());
+  await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, sha, baseSha: current.candidate!.baseSha, policyRevision: 1 }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   repo.land(pr, mergedAt);
   return job(current, github);
@@ -339,9 +337,7 @@ test('integration:revert-recheck-on-base-advance — two overlapping candidates 
   // The first lands through the guarded merge. Main now holds src/a.ts, and the second entry's
   // unchanged tip — never re-submitted, no new head — would delete it.
   const current = await reload(first);
-  const granted = await engine.acquireMerge(coordinator, current.id, { expectedRevision: current.revision, sha: a2, baseSha: current.candidate!.baseSha, policyRevision: 1 }, randomUUID());
-  await engine.verifyMerge(coordinator, current.id, { executionId: granted.execution.id }, { ...await github.verify(current, await store.list()), clockOffset: { min: 0, max: 0 } }, randomUUID());
-  await engine.commitMerge(coordinator, current.id, { executionId: granted.execution.id }, randomUUID());
+  await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, sha: a2, baseSha: current.candidate!.baseSha, policyRevision: 1 }, randomUUID());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   const main = repo.land(1, mergedAt);
   first = await job(first, github);
@@ -357,7 +353,7 @@ test('integration:revert-recheck-on-base-advance — two overlapping candidates 
   assert.equal(ejected.length, 1); assert.equal(ejected[0].payload.details.reason, second.queueEjection!.reason);
   assert.equal(second.stage, 'build'); assert.equal(second.mergeAuthorization, null);
   assert.match(second.gates.find(gate => gate.name === 'build')!.reasons.join('\n'), new RegExp(`Out-of-scope regression: src/a\\.ts: deleted; the base branch still holds it \\(shipped by ${first.key}\\)`));
-  await assert.rejects(engine.acquireMerge(coordinator, second.id, { expectedRevision: second.revision, sha: tip, baseSha: second.candidate!.baseSha, policyRevision: 1 }, randomUUID()), 'no merge execution is granted for it');
+  await assert.rejects(engine.requestEnqueue(coordinator, second.id, { enqueue: true, expectedRevision: second.revision, sha: tip, baseSha: second.candidate!.baseSha, policyRevision: 1 }, randomUUID()), /Merge authorization is no longer current/, 'no merge is requested for it');
   assert.deepEqual([repo.main, repo.tree(repo.main)['src/a.ts'], repo.tree(repo.main)['tests/a.test.ts']], [main, blob('a'), blob('a test')], 'the first item\'s files are still on the base branch');
   assert.equal((await job(second, github)).queue, null, 'the same head does not re-enter; a new candidate re-enters at the back');
 

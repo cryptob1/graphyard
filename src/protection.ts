@@ -21,7 +21,40 @@ export function requiredReviewProtection(work: Work[]) {
   return { protection, items };
 }
 
-export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[]) {
+// ---- GitHub's merge queue (GY-258) -------------------------------------------------------------
+// GitHub executes merges and Graphyard only gates them: the base branch carries a merge queue whose
+// merge groups must pass `Graphyard / merge`, bound to the control-plane App. Branch protection has
+// no merge-queue setting, so the queue is a repository ruleset on the base branch that Graphyard
+// writes by name and reads back through the branch's active rules.
+export const mergeQueueRulesetName = 'Graphyard merge queue';
+/** The ruleset Graphyard writes: a queue that builds and merges one entry at a time, and the App-bound required check. */
+export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: number }) {
+  return {
+    name: mergeQueueRulesetName, target: 'branch', enforcement: 'active',
+    conditions: { ref_name: { include: [`refs/heads/${config.baseBranch}`], exclude: [] } },
+    rules: [
+      // One entry at a time: each merge group is exactly one authorized head on the base it lands on.
+      { type: 'merge_queue', parameters: { check_response_timeout_minutes: 60, grouping_strategy: 'ALLGREEN', max_entries_to_build: 1, max_entries_to_merge: 1, merge_method: 'MERGE', min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 0 } },
+      { type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: CHECK_NAME, integration_id: config.githubAppId }] } },
+    ],
+  };
+}
+/**
+ * Whether the base branch's active rules (GET /rules/branches/BRANCH) carry a merge queue and
+ * require `Graphyard / merge` from the App; null when the rules could not be read.
+ */
+export function mergeQueueState(rules: unknown, githubAppId: number): { queue: boolean; requiredCheck: boolean } | null {
+  if (!Array.isArray(rules)) return null;
+  return {
+    queue: rules.some((rule: any) => rule?.type === 'merge_queue'),
+    requiredCheck: rules.some((rule: any) => rule?.type === 'required_status_checks' && Array.isArray(rule.parameters?.required_status_checks)
+      && rule.parameters.required_status_checks.some((check: any) => check?.context === CHECK_NAME && check?.integration_id === githubAppId)),
+  };
+}
+/** Where readProtection attaches the branch's active rules beside GitHub's protection document. */
+const branchRules = Symbol.for('graphyard.branchRules');
+
+export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules]) {
   const { protection, items } = requiredReviewProtection(work);
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
@@ -40,19 +73,34 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   // protection does not require conversation resolution. A branch that still does lets GitHub
   // refuse a merge every Graphyard gate passed, over a bot's thread the reviewer already judged.
   const conversationResolution = current?.required_conversation_resolution?.enabled === true;
+  const queue = mergeQueueState(rules, config.githubAppId);
   const changes = [
     ...(conversationResolution ? ['required_conversation_resolution true to false'] : []),
     ...(observed.requiredApprovals === protection.requiredApprovals ? [] : [`required_approving_review_count ${observed.requiredApprovals} to ${protection.requiredApprovals}`]),
     ...(observed.requireLastPushApproval === protection.requireLastPushApproval ? [] : [`require_last_push_approval ${observed.requireLastPushApproval} to ${protection.requireLastPushApproval}`]),
     ...(observed.dismissStaleReviews === protection.dismissStaleReviews ? [] : [`dismiss_stale_reviews ${observed.dismissStaleReviews} to ${protection.dismissStaleReviews}`]),
+    ...(queue && !queue.queue ? [`merge queue on ${config.baseBranch}: none to ruleset "${mergeQueueRulesetName}"`] : []),
+    ...(queue && !queue.requiredCheck ? [`merge queue required check ${CHECK_NAME}: missing to required from App ${config.githubAppId}`] : []),
   ];
   return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, changes, blockers,
+    // GitHub performs the merge through its queue (GY-258); null when the branch rules were not read.
+    mergeQueue: queue ? { ...queue, ruleset: mergeQueueRuleset(config) } : null,
     consistent: !changes.length && !blockers.length,
     refusal: blockers.length ? `Branch protection is missing settings Graphyard cannot reconcile for you: ${blockers.join('; ')}` : null };
 }
 
 export function readProtection(config: { repository: string; baseBranch: string }, run: ProtectionRun = protectionRun) {
-  return JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
+  const protection = JSON.parse(run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
+  // The merge queue lives in the branch's rules, not its protection; an unreadable answer leaves it unknown.
+  let rules: unknown = null;
+  try { rules = JSON.parse(run('gh', ['api', `repos/${config.repository}/rules/branches/${encodeURIComponent(config.baseBranch)}`])); } catch { rules = null; }
+  if (protection && typeof protection === 'object') Object.defineProperty(protection, branchRules, { value: rules, enumerable: false });
+  return protection;
+}
+/** Write Graphyard's merge-queue ruleset: replace the one it wrote before by name, or create it. */
+export function applyMergeQueue(config: { repository: string; baseBranch: string; githubAppId: number }, run: ProtectionRun = protectionRun) {
+  const existing = (JSON.parse(run('gh', ['api', `repos/${config.repository}/rulesets?includes_parents=false`])) as any[]).find(ruleset => ruleset?.name === mergeQueueRulesetName);
+  run('gh', ['api', '--method', existing ? 'PUT' : 'POST', existing ? `repos/${config.repository}/rulesets/${existing.id}` : `repos/${config.repository}/rulesets`, '--input', '-'], JSON.stringify(mergeQueueRuleset(config)));
 }
 
 const logins = (list: any[] | undefined, field: 'login' | 'slug') => (list ?? []).map((entry: any) => entry[field]);
@@ -86,16 +134,19 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   const plan = protectionPlan(current, config, work);
   if (plan.blockers.length) throw new Error(plan.refusal!);
   if (!plan.changes.length) return { ...plan, applied: false, result: 'branch protection already matches every open review policy' };
-  if (plan.current.requireConversationResolution) {
+  if (plan.mergeQueue && (!plan.mergeQueue.queue || !plan.mergeQueue.requiredCheck)) applyMergeQueue(config, run);
+  const reviewChanges = plan.current.requireConversationResolution || plan.current.requiredApprovals !== plan.desired.requiredApprovals
+    || plan.current.requireLastPushApproval !== plan.desired.requireLastPushApproval || plan.current.dismissStaleReviews !== plan.desired.dismissStaleReviews;
+  if (reviewChanges && plan.current.requireConversationResolution) {
     // Conversation resolution has no subresource: the whole protection is written back as observed,
     // with the review settings as desired and conversation resolution off.
     run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`, '--input', '-'], JSON.stringify(conversationPayload(current, plan.desired)));
-  } else {
+  } else if (reviewChanges) {
     // Only the review subresource changes; the App-bound check, the strict-off setting, and admin enforcement stay as observed.
     run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_pull_request_reviews`, '--input', '-'],
       JSON.stringify({ required_approving_review_count: plan.desired.requiredApprovals, require_last_push_approval: plan.desired.requireLastPushApproval, dismiss_stale_reviews: plan.desired.dismissStaleReviews }));
   }
   const verified = protectionPlan(readProtection(config, run), config, work);
   if (!verified.consistent) throw new Error(`GitHub did not report the reconciled protection; branch protection remains inconsistent with the open review policies: ${[...verified.changes, ...verified.blockers].join('; ')}`);
-  return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item` };
+  return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${CHECK_NAME}` : ''}` };
 }
