@@ -16,7 +16,7 @@ export async function herdrWorkspaceHealth(config: Pick<MasterConfig, 'herdrWork
   return { workspace: config.herdrWorkspace, exists, reason: exists ? null : `Herdr workspace ${config.herdrWorkspace} configured in .graphyard/master.json no longer exists (Herdr lists ${workspaces.map(entry => entry?.workspace_id).filter(Boolean).join(', ') || 'none'}); every launch into it will refuse. Set herdrWorkspace to a live workspace, or rerun master init --herdr-workspace ID` };
 }
 
-export type HerdrAgent = { name?: string; pane_id?: string; agent?: string; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
+export type HerdrAgent = { name?: string; pane_id?: string; agent?: string | null; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
 /**
 /**
  * Every Herdr call the coordinator makes. `run` is the asynchronous runner (child-runner.ts) —

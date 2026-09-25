@@ -6,6 +6,7 @@ import { type CapacityRole, capacitySignature, standingCapacity, describeCapacit
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
 import { assertDispatchable, type RoleCapacity, roleCapacity } from '../master.js';
+import { registeredLaunch } from '../model/session-state.js';
 import { message } from './state.js';
 import { dispatchKey } from './reconcile.js';
 import { clearProfileFailure, profileHealth, recordProfileFailure } from './sessions.js';
@@ -119,16 +120,16 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     taken.add(choice.profile.name);
     await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
-      const dispatched = await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined;
-      clearProfileFailure(state, choice.profile);
-      // The session is now running somewhere. Put the handle where every Graphyard reader looks,
-      // so watching this specific agent never means asking this loop to relay its pane id.
-      await effects.recordSession?.(item, {
+      // The session is registered before its runtime starts (GY-172), where every Graphyard reader
+      // looks, and its pane written once it has: watching this specific agent never means asking
+      // this loop to relay its pane id, and the session report observes it from its first tick.
+      const dispatched = await registeredLaunch(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
         id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal, runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
         ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-        ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
         subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-      }).catch(() => { /* the dispatch landed; a handle that could not be written is not a failed dispatch */ });
+      }, async () => await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined,
+      launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
+      clearProfileFailure(state, choice.profile);
       performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       recordProfileFailure(state, choice.profile, message(error), now());

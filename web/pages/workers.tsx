@@ -67,14 +67,16 @@ export const roleWords: Record<SessionRoleKind, string> = {
 };
 
 /**
- * A session's health in plain words. Only a session seen inside the threshold reads as active;
- * one recorded running but not seen since is stale, and one the runtime stopped reporting is ended
- * — neither is ever shown as running.
+ * A session's health in plain words, from the one session state (GY-172): only a session whose
+ * latest observation is working or idle, inside the threshold, reads as running — 'seen' is that
+ * observation — one recorded open but not seen since is stale, and one observed ended or lost is
+ * ended. Neither of the last two is ever shown as running.
  */
 export function health(row: WorkerRow, now: number): { tone: 'live' | 'stale' | 'ended'; text: string } {
   if (row.leftOn && row.stale) return { tone: 'ended', text: `Not seen for ${spent(now - Date.parse(row.stale.since))} · its item is ${row.leftOn}` };
   if (row.stale) return { tone: 'stale', text: `Not seen for ${spent(now - Date.parse(row.stale.since))}` };
-  if (row.state === 'running') return { tone: 'live', text: `Seen ${ago(row.updatedAt, now)}` };
+  if (row.state === 'running') return { tone: 'live', text: `Seen ${ago(row.seenAt, now)}${row.observed === 'idle' ? ' · at its prompt' : ''}` };
+  if (/exited to a shell/.test(row.outcome ?? '')) return { tone: 'ended', text: 'Ended · its agent exited' };
   if (row.reconciled === 'vanished') return { tone: 'ended', text: 'Ended · stopped responding' };
   if (row.reconciled === 'superseded') return { tone: 'ended', text: 'Ended · replaced by a newer session' };
   if (row.reconciled === 'ended') return { tone: 'ended', text: 'Ended · its runtime closed it' };

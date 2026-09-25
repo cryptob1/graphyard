@@ -22,7 +22,7 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
     const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
   };
   if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
-    { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision }));
+    { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision, mutate: masterMutation }));
   if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
   if (id === 'close') {
     // The master's own operator-agent identity when provisioned, else its coordinator credential.

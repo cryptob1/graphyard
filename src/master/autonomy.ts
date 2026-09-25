@@ -17,6 +17,10 @@ import { accountLaunch, agentLaunchPlan, setupAgentEnvironments } from './enviro
 import { type RequestDelivery, startAgentSession } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
 import { failureText } from './worktrees.js';
+import { herdrAttach } from './dispatch.js';
+import type { SessionHandleInput } from '../model/sessions.js';
+import { registeredLaunch } from '../model/session-state.js';
+import { liveReviewRequest } from '../model/dispatch.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
 type AutonomyFetch = typeof fetch;
@@ -173,7 +177,15 @@ export async function restartMasterLoop(root: string, config: MasterConfig, lock
 export const approverDistinguisher = 6;
 export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
   distinctSessionName(sessionNameLimit - sessionName('graphyard-approver', work.key).length - 1 >= approverDistinguisher ? ['graphyard-approver'] : ['gy-approver'], work.key, decision);
-export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}) {
+/**
+ * The session record a decision's approver registers (GY-172): keyed on the decision, so a
+ * relaunch for the same decision reopens it rather than adding a second, and bound to nothing the
+ * item moves past — the session report closes it once its pane is gone, and the loop records it
+ * ended when it closes the pane of a decision that settled.
+ */
+export const approverSessionId = (decision: string) => `approver:${decision}`;
+export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
+export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
@@ -203,7 +215,11 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment }));
+    // Registered with its pane before its runtime starts (GY-172 AC-2), so the session report
+    // observes this approver like every other session and closes it once it is gone.
+    ({ delivery } = await registeredLaunch(register, { id: approverSessionId(decision), kind: 'coordination', role: 'approver', principal: config.approver!.id, runtime: kind, host: config.hostId,
+      agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+      subject: `${work.key}: judge decision ${decision}`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment }), () => undefined));
   } catch (error) {
     if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
@@ -212,6 +228,28 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // The registry session is returned with the launch: the loop ends it once the decision is judged.
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, session: selected?.account.fleet.session ?? null,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped } : null };
+}
+
+/**
+ * `master review` registers the reviewer session before its runtime starts (GY-172 AC-2), keyed on
+ * the review request it answers, as the loop's own reviewer launches are; the pane and name the
+ * launcher returns are written over the registration once it has started. `launch` is the reviewer
+ * launcher itself, which still refuses an unknown item or profile with its own reason.
+ */
+export async function registeredReview<T>(config: MasterConfig, args: string[], snapshot: { work: Work[] }, mutate: (path: string, body: unknown) => Promise<unknown>, launch: () => Promise<T>) {
+  const work = snapshot.work.find(item => item.id === args[0] || item.key === args[0]);
+  const profile = args[1] ? config.reviewers.find(entry => entry.name === args[1]) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
+  if (!work?.candidate || !profile) return launch();
+  const request = liveReviewRequest(work), sha = work.candidate.sha, id = request?.id ?? `review:${sha}`;
+  // A reviewer another launch registered for this request is not this call's to close: the
+  // registration carries this attempt's token and the control plane refuses to register over, or
+  // close, a running handle another attempt holds — checked in its mutation, not against this
+  // snapshot, which a concurrent `master review` or the loop's own reviewer launch shares. A running
+  // handle with no token predates that rule and has nothing to hold it, so it is left alone here.
+  if (work.sessions?.some(handle => handle.id === id && handle.state === 'running' && handle.head === sha && !handle.launch)) return launch();
+  return registeredLaunch(handle => mutate(`work/${work.id}/session`, handle), { id, kind: 'review', role: 'review', head: sha, runtime: profile.kind, host: config.hostId,
+    ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), subject: `${work.key}: review ${sha.slice(0, 12)} (PR #${work.candidate.pr})`, state: 'running' },
+  launch, launched => launched as { pane?: string | null; agentName?: string | null }, pane => herdrAttach(pane, config.herdrWorkspace));
 }
 
 /**
@@ -230,7 +268,7 @@ export function verifiedContext(context: EscalationContext) {
  * --context`, so the ledger carries the reason, the precedent it relied on and what it saw; with
  * no precedent to cite it decides without `--precedent`, and the ledger records that (GY-138).
  */
-export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: ChildRun) {
+export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: ChildRun, register?: SessionRegistrar) {
   await agentToken(root, config, 'operatorAgent');
   const escalationRetry = `graphyard master escalation ${context.key} ${context.escalation.trigger} ${kind}`;
   const name = nameForLaunch(escalationRetry, () => distinctSessionName(['graphyard-escalation', 'graphyard-esc', 'gy-esc'], context.key, context.escalation.trigger));
@@ -247,7 +285,10 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment }));
+    // Registered first, like every launched session (GY-172 AC-2).
+    ({ delivery } = await registeredLaunch(register, { id: `escalation:${context.escalation.trigger}:${context.fingerprint.slice(0, 12)}`, kind: 'coordination', role: 'escalation', principal: config.operatorAgent!.id, runtime: kind, host: config.hostId,
+      agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment }), () => undefined));
   } catch (error) {
     if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
@@ -275,6 +316,10 @@ export interface AutonomyDependencies {
   readSecret: () => Promise<string>;
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   daemonLock: () => Promise<{ pid: number; host: string; heartbeatAt: string } | null>;
+  /** A coordinator-authenticated mutation, with which a session this command launches is registered before it starts (GY-172). */
+  mutate?: (path: string, body: unknown) => Promise<unknown>;
+  /** The runner a launched session's runtime calls go through; the asynchronous runner when omitted. */
+  runtime?: ChildRun;
   fetcher?: typeof fetch;
   /** Runs the roster applier; the default is the asynchronous runner with the applier's output passed through. */
   run?: (command: string, args: string[], options?: ChildRunOptions) => string | Buffer | Promise<string | Buffer>;
@@ -299,6 +344,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
   };
   const operator = () => agentToken(root, config, 'operatorAgent');
+  const registrar = (work: string): SessionRegistrar | undefined => deps.mutate ? handle => deps.mutate!(`work/${encodeURIComponent(work)}/session`, handle) : undefined;
   const snapshotItem = async (key: string | undefined) => {
     if (!key) throw new Error(`Use master ${id} GY-N …`);
     const snapshot = await deps.coordinator('work-snapshot'), found = snapshot.work.find((work: Work) => work.id === key || work.key === key);
@@ -372,7 +418,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     if (id === 'context') return context;
     const handler = rest.find(value => value !== trigger) ?? 'precedent';
     if (handler === 'precedent') return handleEscalation(context, followPrecedent, async request => call(await operator(), `work/${encodeURIComponent(context.key)}/decide`, request));
-    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), await deps.agents());
+    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), await deps.agents(), deps.runtime, registrar(context.key));
   }
   if (id === 'decisions') return deps.coordinator(`work/${encodeURIComponent((await item(args[0])).id)}/decisions`);
   if (id === 'approve') {
@@ -387,7 +433,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'approver') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
-    return launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents());
+    return launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents(), deps.runtime, {}, registrar(work.id));
   }
   if (id === 'principals') {
     const live = (await deps.coordinator('principals')).principals;

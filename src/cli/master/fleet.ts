@@ -1,8 +1,8 @@
 // Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, protection, browser, harness.
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
-import { readReviewLedger, reviewCommand } from '../../reviewer.js';
+import { listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
+import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../../protection.js';
 import { writeHarnessPermissions } from '../../harness.js';
@@ -34,6 +34,7 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'review') {
     const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
+    const reviewCommand: typeof launchReview = (...a) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
     return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
   }
   if (id === 'protection') {
