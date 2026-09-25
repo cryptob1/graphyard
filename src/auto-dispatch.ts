@@ -13,8 +13,9 @@ import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
-import { launchReview, reconcileReviews, type ReviewRecord } from './reviewer.js';
-import { independentProducerProfiles, launchProducer, reconcileProducers, sessionRetry, type ProducerRecord } from './producer.js';
+import { launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
+import { independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
+import { currentEvidence } from './model/evidence.js';
 
 /**
  * The launch side of automatic dispatch at submit. The control plane records what each exact
@@ -69,6 +70,16 @@ export const dispatchFailureSchema = z.object({
   attempts: z.number().int().min(1).max(1000), reason: z.string().max(cursorTextLimit), at: z.string(), nextAt: z.string(),
 }).strict();
 export type DispatchFailure = z.infer<typeof dispatchFailureSchema>;
+/**
+ * A request the loop has stopped attempting (GY-193): every automatic session it launched for the
+ * request ended without answering it. Kept until the request resolves, and raised as one attention
+ * item naming the request and every attempt.
+ */
+export const abandonedRequestSchema = z.object({
+  kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40), at: z.string(),
+  reason: z.string().max(cursorTextLimit), attempts: z.array(z.string().max(cursorTextLimit)).max(30),
+}).strict();
+export type AbandonedRequest = z.infer<typeof abandonedRequestSchema>;
 const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(capacityReasonLimit) }).strict();
 /**
  * A tick that failed, and — when it composed state it could not persist — the field that failed
@@ -88,6 +99,8 @@ export const dispatchCursorSchema = z.object({
   lastFailure: tickFailureSchema.nullable().default(null),
   /** Launches that refused, by request id, with the widening retry time; cleared by the launch that succeeds. */
   failures: z.record(z.string(), dispatchFailureSchema).default({}),
+  /** Requests whose automatic sessions all ended unanswered, up to the limit; cleared when the request resolves. */
+  abandoned: z.record(z.string(), abandonedRequestSchema).default({}),
   /**
    * Both halves of the last tick: what it could launch and what it did. A dispatcher that is
    * ticking but launching nothing looks identical to a stopped one from the tick count alone,
@@ -119,8 +132,51 @@ export const dispatchCursorSchema = z.object({
 }).strict();
 export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 
-/** A refused launch retries on a widening interval, never more often than this and never later than this. */
-export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatchFailureLimit = 12;
+/**
+ * A refused launch retries on a widening interval, never more often than this and never later than this.
+ * The failure limit also bounds how many sessions one request gets in all, however each ended (GY-193).
+ */
+export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatchFailureLimit = requestAttemptLimit;
+/**
+ * GY-193. A reviewer that judged the head but did not post is reminded once to post (reviewer.ts
+ * reconcileReviews) and relaunched when no verdict follows within this bound. A session that settled
+ * on a verdict the control plane has not read yet is given this long before the request, still
+ * standing, is attempted again: a second verdict on the same request is otherwise withheld with the first.
+ */
+export const reviewerReminderBoundMs = reviewVerdictReminderMs, verdictIngestGraceMs = 5 * 60_000;
+
+/**
+ * The producer's finding that a proof on this head does not exercise its criterion (GY-135): the
+ * pass also held with the change removed. Such evidence is the worker's to fix, so the request is
+ * never launched again for the head and the loop requests the rework instead (GY-193 AC-3).
+ */
+export function unexercisedFindings(work: Work, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): { proof: string; finding: string }[] {
+  if (!sha) return [];
+  const findings = new Map<string, string>();
+  for (const entry of work.evidence ?? []) {
+    if (!entry.unexercised || entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
+    findings.set(entry.proof, entry.unexercised);
+  }
+  // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
+  return [...findings].filter(([proof]) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass')).map(([proof, finding]) => ({ proof, finding }));
+}
+/** A session record as the dispatcher reads it from either ledger. */
+type DispatchedSession = { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string; profile?: string; attempt?: number; acknowledgedAt?: string; verdict?: { state: string } };
+const requestSessions = (records: DispatchedSession[], requestId: string) => records.filter(record => record.requestId === requestId);
+/** Every attempt a request had, as the attention item names them. */
+export const describeAttempts = (records: DispatchedSession[], requestId: string) => requestSessions(records, requestId).slice(-30)
+  .map((record, index) => bounded(`attempt ${record.attempt ?? index + 1}${record.profile ? ` on ${record.profile}` : ''}: ${record.state}${record.resolution ? ` — ${record.resolution}` : ''}`, 300));
+/**
+ * The profiles a relaunch tries, freshest first: a profile no attempt of this request ran on, then
+ * the ones earlier attempts ran on, and the profile of the session that just settled last. A
+ * relaunch on the account that just ended without an answer is the one least likely to answer.
+ */
+export function preferFreshProfiles<P extends { name: string }>(profiles: P[], records: DispatchedSession[], requestId: string): P[] {
+  const used = requestSessions(records, requestId).map(record => record.profile);
+  if (!used.length) return profiles;
+  const rank = (profile: P) => used.lastIndexOf(profile.name);
+  return profiles.map((profile, index) => ({ profile, index })).sort((a, b) => rank(a.profile) - rank(b.profile) || a.index - b.index).map(entry => entry.profile);
+}
 /** How long a role with no account left is not launched before its accounts are read again. */
 export const capacityRecheckMs = 60_000;
 /** How many missing session handles the cursor remembers between ticks; a file, not a database. */
@@ -637,21 +693,41 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     return `${profile.name}: ${account ?? `${profile.name}'s own account`} exited at launch on its provider's limit notice (${notice.reason}); held ${notice.resetsAt ? `until it resets ${notice.resetsAt}` : held && 'until' in held && held.until ? `until ${held.until}` : 'for its reset'}`;
   };
   const retryable = (request: DispatchRequest) => { const failure = cursor.failures[request.id]; return !failure || failure.attempts < dispatchFailureLimit && Date.parse(failure.nextAt) <= now(); };
-  // Whether the request already has its session, waits to relaunch one that failed or expired, or may launch now.
-  const session = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string }[]) => {
+  // A request whose automatic sessions all ended unanswered is left to the master, once, naming
+  // every attempt; the wait says no further attempt follows, and status raises the attention item.
+  const abandon = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[], why: string) => {
+    if (!cursor.abandoned[request.id]) cursor.abandoned[request.id] = { kind, work: item.key, sha: request.sha, at: new Date(now()).toISOString(), reason: bounded(why, dispatchFailureReasonLimit), attempts: describeAttempts(records, request.id) };
+    wait(kind, item, request, `${why}; no further automatic attempt, raised as attention for the master`);
+  };
+  // Whether the request already has its session, waits to relaunch one that ended, or may launch now.
+  const session = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
     const retry = sessionRetry(records, request.id, now());
+    const role = kind === 'review' ? 'reviewer' : 'producer';
     if (retry.settled) {
-      tick.skipped++;
-      // A session that settled while its request stands answered nothing the gates accept, and no
-      // attempt follows a settled session. The tick says so rather than passing over it in silence:
-      // a request nothing is running for and nothing refused is otherwise invisible until somebody
-      // notices the item has not moved.
-      if (retry.last && retry.last.state !== 'pending') wait(kind, item, request, `${kind === 'review' ? 'reviewer' : 'producer'} session attempt ${retry.attempts} ${retry.last.state} without satisfying the request: ${retry.last.resolution ?? 'no reason recorded'}; no automatic attempt follows a settled session${kind === 'review' ? `, force one with master review ${item.key}` : ''}`);
-      return false;
+      if (!retry.last || retry.last.state === 'pending') { tick.skipped++; return false; }
+      // A session that settled while its request still stands for the same head answered nothing
+      // the gates accept (GY-193): the next attempt launches on this tick, on another profile first,
+      // up to the dispatch failure limit. Only a verdict the control plane may not have read yet is
+      // waited on first, since a second verdict on one request is withheld together with the first.
+      const last = requestSessions(records, request.id).at(-1)!;
+      const settledAt = Date.parse(last.closedAt ?? last.requestedAt);
+      const settled = `${role} session attempt ${retry.attempts} ${last.state} without satisfying the request: ${last.resolution ?? 'no reason recorded'}`;
+      if (kind === 'review' && last.verdict && last.verdict.state !== 'DISMISSED' && now() - settledAt < verdictIngestGraceMs) {
+        tick.skipped++;
+        wait(kind, item, request, `${role} session attempt ${retry.attempts} posted ${last.verdict.state}; the control plane is given until ${new Date(settledAt + verdictIngestGraceMs).toISOString()} to read it before another attempt`);
+        return false;
+      }
+      if (retry.attempts >= dispatchFailureLimit) { tick.skipped++; abandon(kind, item, request, records, `${settled}, after ${retry.attempts} sessions`); return false; }
+      return true;
     }
     if (retry.launch) return true;
-    const last = `${kind === 'review' ? 'reviewer' : 'producer'} session attempt ${retry.attempts} ${retry.last!.state}: ${retry.last!.resolution ?? 'no reason recorded'}`;
-    wait(kind, item, request, retry.exhausted ? `${last}; no further automatic attempt after ${retry.attempts} sessions${kind === 'review' ? ', launch it with master review once the cause is fixed' : ''}` : `${last}; attempt ${retry.attempts + 1} of ${retry.limit} at ${retry.nextAt}`);
+    const last = `${role} session attempt ${retry.attempts} ${retry.last!.state}: ${retry.last!.resolution ?? 'no reason recorded'}`;
+    if (retry.exhausted) { abandon(kind, item, request, records, `${last}; ${retry.attempts} sessions failed or expired`); return false; }
+    // A reviewer that judged the head and was reminded to post, and still posted nothing within the
+    // bound, is relaunched now (GY-193 AC-2): the wait was the reminder's, already served.
+    const ended = requestSessions(records, request.id).at(-1);
+    if (kind === 'review' && ended?.acknowledgedAt && !ended.verdict && unpostedVerdict.test(ended.resolution ?? '')) return true;
+    wait(kind, item, request, `${last}; attempt ${retry.attempts + 1} of ${retry.limit} at ${retry.nextAt}`);
     return false;
   };
   // A reviewer launched before the repository's automatic bot reviewers have spoken approves a head
@@ -740,7 +816,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.
       const candidates = profile ? [profile, ...config.reviewers.filter(other => other.name !== profile.name)] : [];
-      const withRoom = () => candidates.filter(candidate => room(candidate, reviews).free > 0);
+      const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, review.id);
       const busy = () => wait('review', item, review, `every reviewer profile is busy: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
       if (!profile) wait('review', item, review, reason!);
       else if (!withRoom().length) busy();
@@ -773,6 +849,10 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       const review = item.autoDispatch!.review;
       if (review?.state === 'requested' && review.provider === 'github' && !botReads.has(review.id)) await inReviewTurn(item, review);
       for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
+        // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
+        // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
+        const unexercised = unexercisedFindings(item, request.sha, request.proofs);
+        if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through a rework decision, and no producer is launched for it again`); continue; }
         if (!session('producer', item, request, producers)) continue;
         if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
         if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
@@ -782,7 +862,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
         // among the rest up to each one's concurrency.
         const independent = independentProducerProfiles(item, config.producers);
         const available = independent.filter(profile => credentials[profile.name]?.available !== false);
-        const usable = () => available.filter(profile => room(profile, producers).free > 0);
+        const usable = () => preferFreshProfiles(available.filter(profile => room(profile, producers).free > 0), producers, request.id);
         const busy = () => wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
           : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
           : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
@@ -805,6 +885,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // A failure for a request the control plane resolved is history the cursor need not keep.
   const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
+  for (const id of Object.keys(cursor.abandoned)) if (!live.has(id)) delete cursor.abandoned[id];
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
   cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
     closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
@@ -972,6 +1053,8 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
       missing: Object.keys(cursor.sessionMisses).length, failures: cursor.lastTick?.closeFailures ?? [] },
     lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure, lastTick: cursor.lastTick ?? null,
     failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
+    // Requests the loop has stopped attempting because every session it launched ended unanswered.
+    abandoned: Object.entries(cursor.abandoned).map(([requestId, entry]) => ({ requestId, ...entry })),
     // A role with no account left, as one entry per role rather than a failure per request.
     capacity: Object.entries(cursor.capacity ?? {}).map(([kind, hold]) => ({ role: kind === 'review' ? 'reviewer' : 'producer', ...hold })),
     // Each agent account as the last launch check saw it, and the launches that skipped one and why.
@@ -991,7 +1074,19 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
  * raises the same. Addressed to the master, with what fixes each.
  */
 export const dispatchFailureAttentionThreshold = 3;
-export function dispatchFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
+export function dispatchFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string; abandoned?: (AbandonedRequest & { requestId: string })[] }): AttentionItem[] {
+  return [...tickFailureAttention(dispatch), ...(dispatch.abandoned ?? []).map(abandonedAttention)];
+}
+/**
+ * One attention item per request the loop has stopped attempting (GY-193): the request, the head,
+ * and every session it launched with how each ended, addressed to the master.
+ */
+export function abandonedAttention(entry: AbandonedRequest & { requestId: string }): AttentionItem {
+  const role = entry.kind === 'review' ? 'reviewer' : 'producer';
+  return { subject: entry.work, text: bounded(`${entry.work}'s ${role} request ${entry.requestId} on ${entry.sha.slice(0, 12)} still stands after ${entry.attempts.length} automatic session${entry.attempts.length === 1 ? '' : 's'}, none of which answered it, so the loop has stopped attempting it (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
+    ...agentOwner('master', entry.kind === 'review' ? `Fix what the attempts name, then graphyard master review ${entry.work}` : `Fix what the attempts name (a producer profile or its credential), or return the head to its worker with graphyard master decide ${entry.work} rework REASON`) };
+}
+function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
   if (dispatch.error) return [{ subject: 'dispatch', text: `The dispatch cursor cannot be read, so whether any reviewer or producer is being launched is unknown: ${dispatch.error}`,
     ...agentOwner('master', 'graphyard master restart re-reads the dispatch cursor beside the coordinator credential and repairs an over-long string in it; a cursor for another server or repository is removed by hand first') }];
   const failures = dispatch.consecutiveFailures ?? 0, failure = dispatch.lastFailure;

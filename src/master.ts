@@ -11,7 +11,7 @@ import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, ses
 export { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, sessionNameRule, suffixedSessionName } from './session-name.js';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { launchAuthorization, loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
-import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, dispatchOrder, dispatchOverlap, dispatchable, effectiveConcurrency, inFlight, resourceConflicts, scopeBreadth, type DispatchHold } from './coordination.js';
+import { broadScopeRefusals, concurrentOverlap, dispatchOrder, dispatchable, inFlight, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
@@ -28,7 +28,7 @@ import { containmentAttestation, containmentGraceMs, containmentSettlementRefusa
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
 import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, settingsWarning, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
-import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, unresolvedThreadRefusal, type QueuePlacement } from './merge-queue.js';
+import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, conversationProtectionRefusal, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention, missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
@@ -1981,7 +1981,7 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'hold-overdue' | 'contaminated' | 'merge-base-dismissed' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'contaminated' | 'merge-base-dismissed' | 'gate'): AttentionOwner {
   const key = work.key;
   if (cause === 'merge-base-dismissed') return agentOwner('master', missingBaseAncestry(work)
     ? `Nothing to run: the merge queue republishes ${key}'s tip onto the base branch tip and the merge broker refuses it until then; graphyard master status shows the new head`
@@ -2027,7 +2027,6 @@ export function workAttentionOwner(work: Work, cause: 'human-request' | 'contain
   // A system-driven item is never pushed by hand (GY-175): the owner text names the loop step, not a command the CLI refuses.
   const driven = work.systemDriven === true;
   if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, ${driven ? `the loop's dispatcher launches ${key} again` : `graphyard master dispatch ${key} PROFILE`}`);
-  if (cause === 'hold-overdue') return agentOwner('master', `Nothing to decide: the loop dispatches ${key} over the overlap on its next cycle with a free worker${driven ? '' : `; graphyard master dispatch ${key} PROFILE does it now`}`);
   if (cause === 'proof-gap') return agentOwner('master', `graphyard master decide ${key} grant '{"principal":"PRODUCER","patterns":["${(work.proofGaps ?? [])[0] ?? 'PROOF'}"]}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   const reviewNext = driven ? `the loop relaunches the review on its own; graphyard master review ${key} only once the loop has stopped relaunching its request` : `graphyard master review ${key}`;
   if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then ${reviewNext}`);
@@ -2548,10 +2547,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
       : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];
-    const held = scheduling.held.find(entry => entry.key === work.key) ?? null, overdueHold = scheduling.overdue.find(entry => entry.key === work.key) ?? null;
-    // An item in flight beside another it overlaps — dispatched over a hold, past the bound or by
-    // --allow-overlap — shows what it runs concurrently with, so the overlap stays recorded.
-    const concurrent = !held && !overdueHold && (active || work.submission) ? dispatchOverlap(work, snapshot.work, now) : [];
+    // Planned-file overlap holds nothing (dispatch is optimistic); an item beside another on the
+    // same files shows what it runs concurrently with, so the overlap stays on the record.
+    const concurrent = concurrentOverlap(work, snapshot.work, now);
     const conflictReport = candidateConflicts.report[work.key];
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
@@ -2610,9 +2608,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // used to be the commonest attention line on this list — one per open candidate, every
       // merge — and answering it cost a rework round for a change that was a clean fast-forward.
       : baseRefresh && !work.blocker ? [null, null]
-      // A hold past its bound is no longer holding: the loop offers the item over the overlap on its
-      // next cycle, so it is raised only while nothing has taken it, naming the chain it waited behind.
-      : overdueHold ? [`${work.key} has been held ${hours(overdueHold.hold.ageMs)} behind ${describeChain(overdueHold.hold.chain)}, past the ${hours(overdueHold.hold.boundMs)} bound; it is offered over the overlap and waits only for a free worker`, 'hold-overdue']
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
@@ -2632,7 +2627,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
       // an approval GitHub dismissed for a merge-base change that the control plane restored.
       contamination, restoredApproval: approvalRestored,
-      scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason, hold: held.hold, concurrent: [] } : overdueHold ? { held: false, ahead: overdueHold.ahead, reason: overdueHold.reason, hold: overdueHold.hold, concurrent: [] } : { held: false, ahead: [], reason: null, hold: null, concurrent }, conflicts,
+      scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now) };
   });
@@ -2658,14 +2653,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
-  // The fleet's effective concurrency beside its idle workers: how many items the overlap graph
-  // lets run at once, so eleven free workers and a concurrency of one is read as serialization,
-  // not as a shortage of anything.
-  const graph = effectiveConcurrency(snapshot.work, now);
+  // The fleet's concurrency beside its idle workers: every open item in flight or dispatchable may
+  // run at once — planned-file overlap holds nothing — so idle workers beside dispatchable items is
+  // a dispatch shortfall, not serialization.
+  const inFlightCount = snapshot.work.filter(work => inFlight(work, now)).length;
   const idle = workerSessions.filter(session => session.mode === 'launch' && session.credential.available && (session.state === 'offline' || session.state === 'idle') && !rows.some(row => row.owner === session.principal));
-  const fleet = { ...graph, inFlight: snapshot.work.filter(work => inFlight(work, now)).length, dispatchable: scheduling.order.length, held: scheduling.held.length, overdue: scheduling.overdue.length,
-    idleWorkers: idle.length, workers: workerSessions.filter(session => session.mode === 'launch').length, boundMs: scheduling.boundMs,
-    statement: `${graph.effective} item${graph.effective === 1 ? '' : 's'} could be in flight at once over ${graph.nodes} open item${graph.nodes === 1 ? '' : 's'} (${graph.edges} overlap${graph.edges === 1 ? '' : 's'}${graph.exact ? '' : ', greedy estimate'}); ${idle.length} of ${workerSessions.filter(session => session.mode === 'launch').length} launch profile${workerSessions.filter(session => session.mode === 'launch').length === 1 ? '' : 's'} idle; ${scheduling.held.length} held, ${scheduling.overdue.length} past the ${hours(scheduling.boundMs)} hold bound` };
+  const launchProfiles = workerSessions.filter(session => session.mode === 'launch').length;
+  const fleet = { effective: inFlightCount + scheduling.order.length, inFlight: inFlightCount, dispatchable: scheduling.order.length, idleWorkers: idle.length, workers: launchProfiles,
+    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; planned-file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle` };
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
   const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
@@ -2680,7 +2675,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: graph.effective, idleWorkers: idle.length, held: scheduling.held.length, holdsOverdue: scheduling.overdue.length,
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: fleet.effective, idleWorkers: idle.length,
       contaminatedBranches: rows.filter(row => row.contamination && row.contamination.source.length).length, restoredApprovals: rows.filter(row => row.restoredApproval).length,
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
       closed: snapshot.work.filter(isClosed).length },
@@ -2688,7 +2683,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
     // What waits on the human, longest first, with how to answer; the roles out of capacity; each
     // role's sessions against its concurrency limit with the longest wait for a slot; the
-    // fleet's effective concurrency — what the overlap graph lets run at once — beside its idle workers;
+    // fleet's concurrency — every open item in flight or dispatchable — beside its idle workers;
     // and the blockers whose remedy no launched session may run.
     humanRequests, capacity, concurrency, effectiveConcurrency: fleet, unrunnableRemedies: remedies,
     closed: closedHistory(snapshot.work),
@@ -2718,25 +2713,14 @@ export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work'])
 }
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
- * would be offered (smallest planned scope first within a priority), the ones held behind a
- * claimed or unmerged item whose changed files (or, before a candidate, planned files) they
- * overlap, with the age of each hold and the chain it waits behind, the holds past the bound —
- * offered over the overlap — and the broad scopes that will overlap nearly everything.
+ * would be offered (smallest planned scope first within a priority), and the broad scopes that
+ * make a weak change-scope contract. Nothing is held for planned-file overlap: dispatch is
+ * optimistic, and the merge queue and a sync round integrate whichever overlapping item lands second.
  */
-export function dispatchSchedule(work: Work[], now: number, boundMs = dispatchHoldBoundMs) {
+export function dispatchSchedule(work: Work[], now: number) {
   const ready = work.filter(item => dispatchable(item, now)).sort(dispatchOrder);
-  const holds = ready.flatMap(item => { const hold = dispatchHold(item, work, now, boundMs); return hold ? [{ key: item.key, ahead: hold.ahead, hold, reason: holdReason(hold) }] : []; });
-  const held = holds.filter(entry => !entry.hold.overdue), overdue = holds.filter(entry => entry.hold.overdue);
-  const heldKeys = new Set(held.map(entry => entry.key)), overdueKeys = new Set(overdue.map(entry => entry.key));
-  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles), held: heldKeys.has(item.key), overdue: overdueKeys.has(item.key) })), held, overdue,
-    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })), boundMs };
-}
-/** The one sentence a hold reads as, before and after the bound: who is ahead, on which files, since when, and what lifts it. */
-export function holdReason(hold: DispatchHold) {
-  const chain = hold.chain.length > hold.ahead.length ? `; the chain it waits behind: ${describeChain(hold.chain)}` : '';
-  return hold.overdue
-    ? `Held by planned-file overlap with ${describeOverlap(hold.ahead)} since ${hold.since} (${hours(hold.ageMs)}), past the ${hours(hold.boundMs)} bound${chain}; dispatched over the overlap: whichever lands second re-integrates the other`
-    : `Held by planned-file overlap with ${describeOverlap(hold.ahead)} since ${hold.since} (${hours(hold.ageMs)} of the ${hours(hold.boundMs)} bound)${chain}; dispatch with --allow-overlap to override, or the bound lifts it`;
+  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles) })),
+    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })) };
 }
 /** Fewest conflicts first: the order that forces the fewest re-integration rounds on the rest. */
 export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[]) {
@@ -3048,7 +3032,7 @@ type WorkerPreparer = (root: string, key: string, profileName: string, run?: Wor
  * always probed; a worktree an injected preparer supplies is probed only when a runner is given.
  */
 export interface DispatchOptions {
-  allowOverlap?: boolean; holdBoundMs?: number; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
   claimBy?: number;
 }
@@ -3057,8 +3041,8 @@ export function assertClaimDeadline(key: string, claimBy: number | undefined, no
   if (claimBy !== undefined && now >= claimBy)
     throw new Error(`${key}: the hand launch did not reach its lease claim before the item's backed-off dispatch action is offered to the executor again, so it claims nothing; the loop's dispatcher launches the item`);
 }
-export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
-export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
+export const describeOverlap = (overlap: ReturnType<typeof concurrentOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
+export function assertDispatchable(work: Work, allWork: Work[], observedAt: string) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
@@ -3071,14 +3055,12 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (work.submission && !work.reworkRequested) throw new Error('Dispatch requires operator-authorized rework for a submitted item');
   const conflicts = resourceConflicts(work, allWork, now);
   if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map(conflict => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
-  // Overlap is a soft exclusive resource: advisory, bounded in time, with an operator override.
-  const hold = dispatchHold(work, allWork, now, options.holdBoundMs);
-  if (hold && !hold.overdue && !options.allowOverlap) throw new Error(`Dispatch held by planned-file overlap with ${describeOverlap(hold.ahead)}; whichever lands second re-integrates the other. Held since ${hold.since} (${hours(hold.ageMs)} of the ${hours(hold.boundMs)} bound)${hold.chain.length > hold.ahead.length ? `; the chain it waits behind: ${describeChain(hold.chain)}` : ''}. Wait for it to merge, or pass --allow-overlap to dispatch anyway`);
-  return hold;
+  // Planned-file overlap holds nothing: dispatch is optimistic, and the merge queue and a sync
+  // round integrate whichever of two overlapping items lands second.
 }
 
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
-  assertDispatchable(work, allWork, observedAt, options);
+  assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
@@ -3116,15 +3098,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       }
     }
   }
-  const hold = dispatchHold(work, allWork, Date.parse(observedAt), options.holdBoundMs);
+  const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox,
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
-    // The overlap a dispatch went over is recorded with the dispatch: by operator override, or
-    // because the hold outlived its bound — the note says which, and the chain the item waited behind.
-    overlap: hold ? { allowed: true, ahead: hold.ahead, hold, note: `Dispatched over a planned-file overlap with ${describeOverlap(hold.ahead)}${hold.overdue ? ` after a hold of ${hours(hold.ageMs)}, past the ${hours(hold.boundMs)} bound${hold.chain.length > hold.ahead.length ? `, behind ${describeChain(hold.chain)}` : ''}` : ' by operator override'}; expect a sync → review → proof round for whichever lands second` } : null };
+    // Planned-file overlap is recorded with the dispatch, never held on: the item runs beside the
+    // in-flight items that touch the same files and whichever lands second is re-integrated.
+    overlap: concurrent.length ? { concurrent, note: `Dispatched beside ${describeOverlap(concurrent)}; the merge queue orders them and whichever lands second is re-integrated by base refresh, or sent back for a sync on a real conflict` } : null };
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
@@ -3298,9 +3280,10 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
     && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
     && work.mergeExecution!.policyRevision === work.policyRevision;
   if (activeMerge && !resumable) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization for this executor: merge execution ${work.mergeExecution!.id} is held by ${work.mergeExecution!.owner} until ${work.mergeExecution!.expiresAt}; this executor stands down without cancelling it`);
-  // Unresolved review threads on a branch that requires conversation resolution are a merge
-  // GitHub will refuse (GY-139): refused here, naming them, before any execution is issued.
-  const threads = activeMerge ? null : unresolvedThreadRefusal(work);
+  // Unresolved review threads never refuse a merge by themselves; a branch that still requires
+  // conversation resolution (protection drift) is a merge GitHub will refuse, so that is refused
+  // here, naming the threads, before any execution is issued.
+  const threads = activeMerge ? null : conversationProtectionRefusal(work);
   if (threads) throw new Error(`${work.key} was refused before any merge execution was issued: ${threads}`);
   // An unresolved escalation, a standing blocking lead ruling, and trusted
   // evidence whose producer has since implemented the item each refuse delivery
@@ -3487,9 +3470,80 @@ export function assertMergeCheckPublished(payload: any, key: string, sha: string
   if (latest?.status !== 'completed' || latest?.conclusion !== 'success')
     throw new Error(`${key} merge deferred: GitHub does not yet show ${CHECK_NAME} as passed on ${sha.slice(0, 12)} (${latest ? `${latest.status}${latest.conclusion ? `/${latest.conclusion}` : ''}` : 'not published'}); retry once it is`);
 }
+/** What mergeWork reports for a retained execution: pending until GitHub shows the merge (GY-195). */
+type RetainedMergeOutcome = { key: string; pr: number; sha: string; method: MasterConfig['mergeMethod']; result: string; pending?: boolean; merged?: boolean; mergeSha?: string; carriedApproval?: CarriedApprovalRepost };
+/**
+ * A committed execution whose provider outcome is unknown is one GitHub read away from an answer
+ * (GY-202). The pull request itself says whether it merged; waiting for the execution to expire
+ * only delayed the answer by up to two minutes and stranded the candidate if nobody asked again.
+ *
+ * - merged: the control plane is asked to observe it now, which records the delivery from
+ *   merge_commit_sha and closes the execution; no provider call is made.
+ * - open at the execution's head: the provider did not merge, as far as this one read can tell.
+ *   This executor cancels its own execution and fails the attempt; the guarded merge is retried
+ *   on the next cycle, never in this one: a read served by a lagging replica can say open for a pull request the
+ *   provider already merged, and a fresh execution acquired on it would be the one the merged
+ *   observation is bound to. A cycle later the pull request answers for itself.
+ * - anything else — an unreadable answer, a moved head, a closed pull request, or an execution
+ *   another executor instance holds — stays pending, and the control plane is asked to observe.
+ */
+async function settleRetainedMerge(config: MasterConfig, current: Work, authorization: ReturnType<typeof assertMergeCandidate>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: ChildRun, executionOwner?: string, refresh?: (work: Work) => Promise<unknown>): Promise<RetainedMergeOutcome> {
+  const execution = current.mergeExecution!;
+  const outcome = { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod };
+  // A refresh that fails is not a failed settlement — the observation job still runs on its own
+  // cadence — but what it failed with is part of what the pending outcome reports.
+  let refreshError: string | null = null;
+  const observe = async () => { try { await refresh?.(current); } catch (error) { refreshError = (error instanceof Error ? error.message : String(error)).slice(0, 200); } };
+  if (current.observation?.merged) return { ...outcome, merged: true, ...(current.observation.mergeSha ? { mergeSha: current.observation.mergeSha } : {}), result: 'GitHub shows the pull request merged under the retained execution; Graphyard delivers it from that observation without another provider call' };
+  const pending = (why: string) => ({ ...outcome, pending: true, result: `the provider outcome of merge execution ${execution.id} is unknown; ${why}; Graphyard retained it until ${execution.expiresAt} and asks GitHub again next cycle${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}` });
+  let pr: { merged?: unknown; merge_commit_sha?: unknown; state?: unknown; head?: { sha?: unknown } } | null = null;
+  try { pr = JSON.parse(await run('gh', ['api', `repos/${config.repository}/pulls/${authorization.pr}`])); }
+  catch (error) { return pending(`GitHub could not be read (${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'})`); }
+  if (pr?.merged === true && typeof pr.merge_commit_sha === 'string') {
+    await observe();
+    return { ...outcome, merged: true, mergeSha: pr.merge_commit_sha, result: `GitHub shows pull request #${authorization.pr} merged as ${pr.merge_commit_sha.slice(0, 12)} under the retained execution; the control plane observes it and records the delivery from that merge commit without another provider call` };
+  }
+  if (pr?.merged !== false || typeof pr.state !== 'string') return pending('GitHub did not say whether the pull request merged');
+  if (pr.state !== 'open' || pr.head?.sha !== execution.sha) { await observe(); return pending(`GitHub shows the pull request ${pr.state} at head ${String(pr.head?.sha ?? 'unknown').slice(0, 12)}, not open at ${execution.sha.slice(0, 12)}`); }
+  if (!executionOwner || execution.owner !== executionOwner) { await observe(); return pending(`GitHub shows the pull request open and unmerged, and the execution belongs to ${execution.owner}, which this executor never cancels`); }
+  await cancel(current, execution, `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)} after the provider call; the merge is retried next cycle`);
+  await observe();
+  // Thrown, not returned: nothing was merged by this attempt, so the executor's row and the loop's
+  // action record a failed attempt and retry it on their short backoff rather than settle it.
+  throw new Error(`${authorization.key}: GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)}, so merge execution ${execution.id} was cancelled; the guarded merge is retried next cycle, once a fresh reading can show a merge this one missed${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}`);
+}
+/**
+ * What a guarded merge is bound to: the candidate head, its base, the policy revision, the published
+ * queue tip and the all-gates authorization for exactly those. The whole-document revision is not
+ * part of it: observations, bookkeeping and dispatch records bump the revision constantly, and a
+ * merge refused for an unrelated write lost every race to its own background refreshes (GY-192).
+ * Anything that changes what would be merged changes this binding and still refuses.
+ */
+export function mergeBinding(work: Work) {
+  const speculation = work.queue?.speculation;
+  return JSON.stringify([work.candidate?.sha ?? null, work.candidate?.baseSha ?? null, work.candidate?.pr ?? null, work.policyRevision,
+    speculation?.tip ?? null, speculation?.base ?? null, speculation?.baseTree ?? null,
+    work.mergeAuthorization?.sha ?? null, work.mergeAuthorization?.baseSha ?? null, work.mergeAuthorization?.policyRevision ?? null]);
+}
+/**
+ * A refusal that only says the record moved between two reads of the same attempt: nothing about
+ * the candidate was judged, so it is retried at once on a fresh read rather than backed off.
+ */
+export function transientMergeRace(error: unknown) {
+  const text = error instanceof Error ? error.message : String(error);
+  return /(changed (before|after) GitHub verification|changed while GitHub was re-read before merging|Task changed before merge execution); retry\b/.test(text);
+}
 export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: ChildRun = defaultChildRun, executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>, refresh?: (work: Work) => Promise<unknown>) {
   let before = await freshSnapshot(); let current = before.work.find(item => item.id === work.id);
-  if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
+  // The attempt is bound to what it merges, not to the revision it was read at (GY-192).
+  if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed before GitHub verification; retry`);
+  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
+  // have called GitHub. That retained execution is a pending outcome, never a merge (GY-195), and
+  // it is settled by reading the pull request (GY-202): merged is delivered from the observation
+  // without another provider call; open at the same head cancels it, and the guarded merge runs
+  // again next cycle. A verified execution that never reached the commit resumes below; the
+  // provider was not attempted.
+  if (current.mergeExecution?.committingAt) return settleRetainedMerge(config, current, assertMergeCandidate(current, before.now, executionOwner), cancel, run, executionOwner, refresh);
   // The engine bounds a merge execution by the GitHub observation it was granted on (two minutes
   // from observation.at), and the provider call needs about 92 s of it. An attempt that starts
   // on an observation already ~20 s old runs out of window after committing (GY-159, 2026-09-24),
@@ -3502,13 +3556,9 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
       before = await freshSnapshot(); current = before.work.find(item => item.id === work.id);
       if (!current || current.observation?.at !== seen) break;
     }
-    if (!current || current.candidate?.sha !== work.candidate?.sha) throw new Error(`${work.key} changed while GitHub was re-read before merging; retry`);
+    if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed while GitHub was re-read before merging; retry`);
   }
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
-  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
-  // have called GitHub, so nothing is retried until observation reconciles the execution. A
-  // verified execution that never reached the commit resumes below; the provider was not attempted.
-  if (current.mergeExecution?.committingAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'the provider commit was already recorded; Graphyard retained the execution until GitHub reconciles the provider outcome and refuses a new attempt until then' };
   // The pull request answers for its own head, base branch name and state; the base tip is read
   // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
   const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
@@ -3525,8 +3575,12 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   const reposted = carried && repost ? await repost(current, carried) : null;
   const authorityBudgetStartedAt = performance.now();
   const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
-  if (!latest || latest.revision !== authorization.revision) throw new Error(`${work.key} changed after GitHub verification; retry`);
-  const latestAuthorization = assertMergeCandidate(latest, after.now, executionOwner);
+  // What GitHub was just verified against must still be what is merged; an unrelated write in
+  // between (an observation refresh, a dispatch record) is not a reason to refuse.
+  if (!latest || mergeBinding(latest) !== mergeBinding(current)) throw new Error(`${work.key} changed after GitHub verification; retry`);
+  let latestAuthorization: ReturnType<typeof assertMergeCandidate>;
+  try { latestAuthorization = assertMergeCandidate(latest, after.now, executionOwner); }
+  catch (error) { throw new Error(`${work.key} changed after GitHub verification and no longer qualifies: ${error instanceof Error ? error.message : String(error)}`); }
   const resumed = latest.mergeExecution && Date.parse(latest.mergeExecution.expiresAt) > Date.parse(after.now) && latest.mergeExecution.owner === executionOwner;
   // No execution is acquired that cannot cover the provider call: it would only expire, or be
   // retained as an unknown outcome, and block the next attempt until it lapses.
@@ -3535,7 +3589,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!(window >= mergeWindowFloorMs)) throw new Error(`${work.key} merge deferred: the GitHub observation leaves ${Number.isFinite(window) ? Math.round(window / 1000) : 0} s of merge window, under the ${mergeWindowFloorMs / 1000} s a provider call needs; retry on a fresh observation`);
   }
   const granted = resumed ? { execution: latest.mergeExecution } : await acquire(latest, latestAuthorization);
-  if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || !resumed && granted.execution.authorizationRevision !== authorization.revision) throw new Error(`${work.key} received an invalid merge execution authority`);
+  if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || !resumed && !(granted.execution.authorizationRevision >= latestAuthorization.revision)) throw new Error(`${work.key} received an invalid merge execution authority`);
   const remainingAtSnapshot = Date.parse(granted.execution.expiresAt) - Date.parse(after.now);
   let providerStarted = false; let cancelled = false;
   let verificationStarted = false; let verificationCompleted = false;
@@ -3663,7 +3717,7 @@ export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ wo
   // exactly the one the engine recorded.
   const instance = executor.instance;
   return (item: Work) => mergeWork(config, item, snapshot,
-    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, executor: instance }, stepKey(latest, 'acquire')),
+    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, ...(latest.queue?.speculation?.tip ? { queueTip: latest.queue.speculation.tip } : {}), executor: instance }, stepKey(latest, 'acquire')),
     (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason, executor: instance }, stepKey(latest, 'cancel', execution.id)),
     (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id, executor: instance }, stepKey(latest, 'verify', execution.id)), run, mergeExecutionOwner(executor),
     (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id, executor: instance }, stepKey(latest, 'commit', execution.id)),

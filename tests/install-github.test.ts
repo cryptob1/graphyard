@@ -103,7 +103,7 @@ test('applying protection to a stricter branch raises what Graphyard needs witho
     assert.equal(payload.required_pull_request_reviews.require_last_push_approval, true);
     assert.equal(payload.lock_branch, true, 'the installer unlocked a locked branch');
     assert.equal(payload.enforce_admins, true);
-    assert.equal(payload.required_conversation_resolution, true);
+    assert.equal(payload.required_conversation_resolution, false, 'the review gate is the verdict; threads block nothing');
     assert.match(summary.protection, /2 approving review/);
   } finally { await fixture.cleanup(); }
 });

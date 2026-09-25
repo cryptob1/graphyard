@@ -167,7 +167,9 @@ export function protectionPayload(inputs: ProtectionInputs, current: any | null)
     restrictions: current?.restrictions
       ? { users: (current.restrictions.users ?? []).map((user: any) => user.login), teams: (current.restrictions.teams ?? []).map((team: any) => team.slug), apps: (current.restrictions.apps ?? []).map((app: any) => app.slug) }
       : null,
-    required_conversation_resolution: true,
+    // The review gate is the configured reviewer's verdict on the exact head plus required CI;
+    // unresolved review threads are the reviewer's inputs, never a merge blocker.
+    required_conversation_resolution: false,
     allow_force_pushes: false,
     allow_deletions: false,
     required_linear_history: current?.required_linear_history?.enabled ?? false,
@@ -194,7 +196,7 @@ export function protectionSatisfied(inputs: ProtectionInputs, current: any | nul
     && inputs.requiredChecks.every(context => has(context, null))
     && (!inputs.graphyardAppId || has(CHECK_NAME, inputs.graphyardAppId))
     && !!current.enforce_admins?.enabled
-    && !!current.required_conversation_resolution?.enabled
+    && !current.required_conversation_resolution?.enabled
     && !current.allow_force_pushes?.enabled
     && !current.allow_deletions?.enabled
     // A repository that requires more reviewers than the policy asks for already satisfies it.
