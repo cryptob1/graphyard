@@ -29,7 +29,7 @@ The loop drives every item. Unless created `"systemDriven": false`, one refuses 
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10 seconds, 30 at most). A handle the runtime stops reporting closes at the second consecutive sweep
+manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
 that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
 
@@ -46,6 +46,10 @@ sessions only, and a name is busy only while a live session has it. A session pa
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
 that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
+
+## Research before build
+
+With `run.research` set (`model`, `timeoutMinutes` 15, `tokenBudget`), a feature (or `"research": true`) gets one read-only Pi session per requirements revision, briefing worker and reviewer: reusable code, prior art, risks, approach. Product questions go under Needs you with recommendation and deadline; build proceeds on it, a differing answer requests rework, failure never blocks.
 
 ## Automatic dispatch at submit
 

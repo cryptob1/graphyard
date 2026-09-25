@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
+import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, parkRule, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
+import type { Work } from '../../src/model/work';
 import { formatDuration } from '../duration';
 import { shortShas } from '../format';
 import type { Dashboard } from './dashboard';
@@ -22,12 +23,16 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
   // The rows the server derived from the rule table. A client whose status read has not landed
   // yet still sees every rule whose instances live on the work documents it already holds,
   // derived here from that same table.
-  const requests: HumanRequestRow[] = status?.humanOnly ?? openHumanOnly(work.map(item => ({ work: item })), now);
+  // The research brief's product questions (GY-259) are goals-and-priorities requests that hold
+  // nothing: each item is already building on the recommended answer, so they are listed beside
+  // the rule table's rows with that recommendation and the deadline, and answered the same way.
+  const requests: HumanRequestRow[] = [...(status?.humanOnly ?? openHumanOnly(work.map(item => ({ work: item })), now)), ...researchQuestionRows(work, now)]
+    .sort((a, b) => b.waitedMs - a.waitedMs);
   const answered = work.flatMap(item => (item.humanRequests ?? []).filter(request => request.answer).map(request => ({ item, request })))
     .sort((a, b) => b.request.answer!.at.localeCompare(a.request.answer!.at)).slice(0, 10);
   // Only the operator's own session may answer: the server refuses anything else with the very
   // words the rule carries, so a session it refuses is shown the refusal instead of the form.
-  const refusalFor = (row: HumanRequestRow) => humanOnlyRefusal(row.rule, status?.actor ?? {});
+  const refusalFor = (row: HumanRequestRow) => humanOnlyRefusal(row.rule === researchQuestionRule ? parkRule.kind : row.rule, status?.actor ?? {});
   const refused = requests.map(refusalFor).find(refusal => refusal);
   return <>
     <div className="page-heading"><h1>Needs you <span className="count" title="Open actions only you may take">{requests.length}</span></h1></div>
@@ -42,6 +47,28 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
       <span>{shortShas(request.answer!.text)}</span>
     </li>)}</ul></section>}
   </>;
+}
+
+/** The rule name a research question's row carries; it is answered under the park rule's refusal, as every goals-and-priorities request is. */
+export const researchQuestionRule = 'research-question';
+/**
+ * Every unanswered product question a research brief asked (src/research.ts), as a row of the
+ * Needs you list: the question, why it matters, the recommended answer the build already
+ * proceeds on, and the deadline. The answer is posted to `research-answer`; it never parks or
+ * releases the item, and one that differs from the recommendation returns a built head for rework.
+ */
+export function researchQuestionRows(work: readonly Pick<Work, 'id' | 'key' | 'title' | 'stage' | 'epoch' | 'researchBrief'>[], now: number): HumanRequestRow[] {
+  return work.filter(item => item.stage !== 'done').flatMap(item => (item.researchBrief?.questions ?? []).filter(question => !question.answer).map(question => ({
+    rule: researchQuestionRule, work: item.key, id: item.id, title: item.title,
+    request: { id: question.id, kind: question.kind, needed: question.question, requestedBy: 'the research step',
+      reason: `${question.why} Recommended: ${question.recommendation}. The build proceeds on this recommendation, provisionally; answer by ${question.deadline} to settle it before the head is built.`,
+      epoch: item.epoch, at: question.at },
+    waitedMs: Math.max(0, now - Date.parse(question.at)), decision: humanDecisionLabel[question.kind],
+    refusal: parkRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!,
+    answer: { cli: `POST /api/work/${item.key}/research-answer {"question":"${question.id}","answer":"…"}`, decline: 'Leave it unanswered: the recommendation stands',
+      dashboard: 'Work → Needs you → Answer', api: `POST /api/work/${item.key}/research-answer {"question":"${question.id}","answer":"…"}`,
+      post: { command: 'research-answer', body: { question: question.id }, field: 'answer', submit: `Answer for ${item.key}`, decline: null } },
+  })));
 }
 
 /**

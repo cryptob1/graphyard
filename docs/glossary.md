@@ -29,13 +29,13 @@ A *principal* is an authenticated identity, its *role* the authority class, its 
 
 ### 5. Worker lease and worktree
 
-A *lease* is time-limited ownership of one item by one worker at one *epoch*. The *assigned worktree* is the registered `(host, path)` checkout with a reserved branch.
+A *lease* is one worker's time-limited ownership of one item at one *epoch*. The *assigned worktree* is the registered `(host, path)` checkout with a reserved branch.
 
 **Canonical usage:** *lease*, *epoch*, *assigned worktree*.
 
 ### 6. Independent reviewer and proof producer
 
-A *reviewer* is a GitHub identity other than the author that approves the exact head; a *proof producer* is a `producer` principal granted exact proof names. Neither implements the item.
+A *reviewer* is a non-author GitHub identity approving the exact head; a *proof producer* is a `producer` principal granted exact proof names; neither implements it.
 
 **Canonical usage:** *reviewer*, *proof producer*.
 

@@ -38,7 +38,7 @@ Common options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`,
 
 ## Step 2 — approve the plan
 
-Show the plan and any `drift` to the human. **Verify** explicit approval; an agent never approves on the human's behalf.
+Show the human the plan and any `drift`. **Verify** their explicit approval; an agent never approves for them.
 
 ## Step 3 — apply
 
@@ -46,7 +46,7 @@ Show the plan and any `drift` to the human. **Verify** explicit approval; an age
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-It writes credentials, sets the [deployment variables](deployment.md#variables), deploys, runs the App flow and applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
+It writes credentials, sets [deployment variables](deployment.md#variables), deploys, runs the App flow, applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
 
 ## Step 4 — the GitHub App confirmation
 
@@ -60,7 +60,7 @@ The installer prints `Open http://127.0.0.1:4311 ...`; the human registers and i
 
 Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); after `Graphyard / merge` first appears, rerun `--apply` when `nextSteps` says so. **Verify** the check is required on the base branch.
 
-`--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differences appear in `drift`, and credentials are never rotated.
+`--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differences show in `drift`, credentials are never rotated.
 
 ## Upgrading an existing installation
 
@@ -87,7 +87,7 @@ Confirm `doctor` shows `appPermissions.missing` empty; `delegationLimits` drift 
 
 ## Agent execution contract
 
-Run the preconditions, `--plan`, wait for approval, `--apply`, then report the verification and `nextSteps`. Never read a token file or weaken a gate to finish.
+Run the preconditions and `--plan`, await approval, `--apply`, then report verification and `nextSteps`. Never read a token file or weaken a gate to finish.
 
 ## Manual fallback for unsupported platforms
 
