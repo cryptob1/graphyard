@@ -10,6 +10,7 @@ import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
+import { autonomyContract } from '../src/autonomy.js';
 import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { writeHarnessPermissions } from '../src/harness.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewerBindingHealth, reviewerRegistrationFile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, summarizeReviews, type ReviewRecord } from '../src/reviewer.js';
@@ -468,7 +469,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const cursorCalls: string[][] = [];
     await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), mint });
     const typedCursor = expandTypedCommand(cursorCalls[1][3]);
-    assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.match(typedCursor.args.at(-1)!, /^You are the independent Graphyard reviewer/, 'plus the request (GY-93)');
+    assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
   } finally { await cleanup(); }
 });
 
