@@ -256,11 +256,10 @@ async function main() {
   await shot('04-shipped');
   await page.getByRole('button', { name: /Insights/ }).click();
   await page.waitForLoadState('networkidle');
-  await page.getByRole('button', { name: 'Flow analytics' }).click();
-  await page.getByRole('heading', { name: 'Where work is waiting' }).waitFor();
-  await shot('05-flow-analytics');
+  await shot('05-insights');
   await page.getByText('Show details', { exact: true }).click();
-  await shot('06-flow-analytics-details');
+  await page.getByRole('heading', { name: 'Where work is waiting' }).waitFor();
+  await shot('06-flow-analytics');
   await page.getByRole('button', { name: /Settings/ }).click();
   await page.waitForLoadState('networkidle');
   await shot('07-settings');
