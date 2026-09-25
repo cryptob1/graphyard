@@ -45,7 +45,7 @@ export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
   work: z.string().nullable().default(null),
   principal: z.string().nullable().default(null),
-  state: z.enum(['started', 'done', 'failed', 'indeterminate']),
+  state: z.enum(['started', 'done', 'failed', 'indeterminate', 'waiting']),
   detail: z.string().max(actionDetailMax),
   attempts: z.number().int().min(0).max(1000).default(1),
   // The item's attempt epoch when the action started. A dispatch that lands always advances it,
@@ -651,6 +651,8 @@ export function profileHealth(profiles: WorkerProfile[], credentials: Record<str
 /** Retry a refused action on a widening cycle interval rather than on every pass. */
 export function readyToRetry(previous: DaemonAction | undefined, cycle: number, maxBackoffCycles = 30) {
   if (!previous) return true;
+  // A waiting action is an outcome still being reconciled (GY-195): it is asked again every cycle.
+  if (previous.state === 'waiting') return true;
   if (previous.state !== 'failed') return false;
   return cycle - previous.cycle >= Math.min(2 ** Math.max(0, previous.attempts - 1), maxBackoffCycles);
 }
@@ -2490,8 +2492,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     }
     await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
-      const result = await effects.merge(item);
-      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${(result as { result?: string })?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      const result = await effects.merge(item) as { result?: string; pending?: boolean } | undefined;
+      // A retained execution with an unknown provider outcome is pending, not merged (GY-195).
+      if (result?.pending) performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail: `Guarded merge pending for ${item.key}: ${result.result ?? 'the provider outcome is unknown'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      else performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${result?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       // A refusal is the gate working, not a daemon fault: record it and keep cycling.
       performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
