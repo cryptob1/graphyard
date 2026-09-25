@@ -11,7 +11,7 @@ import { inPlannedScope } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import { nextAction } from './model/next-action.js';
 export { CHECK_NAME };
-import { baseRefreshNeeded, dismissedVerdict, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
+import { baseRefreshNeeded, dismissedVerdict, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, pendingRestore, queuePlacement, queueRef, treeIdenticalPrediction, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -275,12 +275,14 @@ export function appJwt(appId: number, privateKey: string, now = Date.now()) {
 const mergeQueueQuery = `query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
   repository(owner: $owner, name: $name) {
     mergeQueue(branch: $branch) { id }
-    pullRequest(number: $number) { id headRefOid isInMergeQueue autoMergeRequest { enabledAt } mergeQueueEntry { state position headCommit { oid } } }
+    pullRequest(number: $number) { id headRefOid mergeStateStatus isInMergeQueue autoMergeRequest { enabledAt } mergeQueueEntry { state position headCommit { oid } } }
   }
 }`;
 const enqueueMutation = `mutation($id: ID!, $head: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head }) { mergeQueueEntry { id } } }`;
 const dequeueMutation = `mutation($id: ID!) { dequeuePullRequest(input: { id: $id }) { mergeQueueEntry { id } } }`;
 const autoMergeMutation = `mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method }) { pullRequest { id } } }`;
+/** An immediate merge bound to the exact head, for a pull request GitHub reports mergeable now (no queue); branch protection still applies. */
+const headBoundMergeMutation = `mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) { mergePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method }) { pullRequest { id } } }`;
 const disableAutoMergeMutation = `mutation($id: ID!) { disablePullRequestAutoMerge(input: { pullRequestId: $id }) { pullRequest { id } } }`;
 /** The merge method auto-merge uses where the base branch has no queue; a queue's own ruleset sets its method. */
 const autoMergeMethod = () => (['MERGE', 'SQUASH', 'REBASE'] as const).find(method => method === process.env.GITHUB_MERGE_METHOD?.toUpperCase()) ?? 'MERGE';
@@ -1377,19 +1379,30 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const pull = data?.repository?.pullRequest;
     demand(typeof pull?.id === 'string' && typeof pull?.headRefOid === 'string', `GitHub did not report the merge-queue state of pull request #${pr}`, 502);
     const entry = pull.mergeQueueEntry ?? null;
-    return { pullRequestId: pull.id, head: pull.headRefOid, queue: !!data.repository.mergeQueue?.id,
+    return { pullRequestId: pull.id, head: pull.headRefOid, queue: !!data.repository.mergeQueue?.id, mergeStateStatus: typeof pull.mergeStateStatus === 'string' ? pull.mergeStateStatus : null,
       mode: pull.isInMergeQueue || entry ? 'queued' : pull.autoMergeRequest ? 'auto-merge' : 'none',
       entryState: typeof entry?.state === 'string' ? entry.state : null, position: Number.isSafeInteger(entry?.position) ? entry.position : null,
       groupHead: typeof entry?.headCommit?.oid === 'string' ? entry.headCommit.oid : null, at: new Date().toISOString() };
   }
   /**
-   * Hand an authorized head to GitHub: into the merge queue, or auto-merge where the base branch has
-   * none. `expectedHeadOid` binds the request to exactly that head, so a push in between is refused
-   * by GitHub rather than merged. This is the only way Graphyard ever asks GitHub to merge.
+   * Hand an authorized head to GitHub: into the merge queue; where the base branch has none,
+   * auto-merge, or an immediate merge when GitHub already reports the pull request mergeable (it
+   * refuses auto-merge on a clean pull request, and Graphyard enqueues only once its own required
+   * check has passed, so a clean pull request is the usual case). `expectedHeadOid` binds every
+   * request to exactly that head, so a push in between is refused by GitHub rather than merged, and
+   * GitHub still enforces branch protection and every required check. These are the only ways
+   * Graphyard ever asks GitHub to merge.
    */
   async enqueuePullRequest(state: GitHubMergeQueueState, sha: string) {
-    if (state.queue) await this.graphql(enqueueMutation, { id: state.pullRequestId, head: sha });
-    else await this.graphql(autoMergeMutation, { id: state.pullRequestId, head: sha, method: autoMergeMethod() });
+    if (state.queue) return void await this.graphql(enqueueMutation, { id: state.pullRequestId, head: sha });
+    const variables = { id: state.pullRequestId, head: sha, method: autoMergeMethod() };
+    if (mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
+    try { await this.graphql(autoMergeMutation, variables); }
+    catch (error) {
+      // The pull request became mergeable between the read and the request: merge it, still head-bound.
+      if (!/clean status/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      await this.graphql(headBoundMergeMutation, variables);
+    }
   }
   /** Take a pull request out of GitHub's hands: out of the merge queue, or auto-merge disabled. */
   async dequeuePullRequest(state: GitHubMergeQueueState) {
@@ -1435,9 +1448,10 @@ export type MergeGateClient = Pick<GitHub, 'publish' | 'mergeQueueState' | 'enqu
 /**
  * Graphyard gates, GitHub merges. The `Graphyard / merge` check is published on the exact head
  * first — success only for a head every gate passes — and then GitHub's queue is brought in line:
- * an authorized head the coordinator asked to merge is enqueued (auto-merge where the base branch has
- * no queue), a withdrawn one dequeued, and a queued entry's merge group commit is given the same
- * verdict so the queue can land it. Graphyard never calls the merge endpoint itself.
+ * an authorized head the coordinator asked to merge is enqueued (where the base branch has no queue,
+ * auto-merge, or an immediate head-bound merge when GitHub reports it mergeable now), a withdrawn one
+ * dequeued, and a queued entry's merge group commit is given the same verdict so the queue can land
+ * it. Graphyard never merges past GitHub: branch protection and required checks decide every merge.
  */
 export async function gateMerge(github: MergeGateClient, work: Work, request: MergeEnqueueRequest | null, beforeWrite: () => Promise<void> = async () => {}): Promise<{ action: MergeQueueAction; state: GitHubMergeQueueState | null }> {
   demand(work.candidate, `${work.key} has no candidate to gate`);
