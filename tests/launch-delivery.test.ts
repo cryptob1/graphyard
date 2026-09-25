@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +14,7 @@ import { summarizeReviews } from '../src/reviewer.js';
 import { launchProducer, producerPrompt, readProducerLedger, summarizeProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { autonomyContract } from '../src/autonomy.js';
 
 // GY-121: a session launch types a short, constant-size command line that references the
 // request and role files in the session's own checkout; the start bound reads the pane and tells
@@ -153,26 +155,38 @@ test('unit:launch-command-bounded — the typed launch command line is short and
     assert.equal(longer.typed, typed);
     assert.equal(await readFile(started.files.request!, 'utf8'), request.repeat(40), 'a launch under the same name replaces the file');
 
-    // The other contracts reference the same file: OpenCode through --prompt, Codex and Cursor positionally; a runtime without a contract is pasted and has no request file.
-    for (const [kind, expected] of [['opencode', '--prompt "$(cat "$GY.request")"'], ['codex', '"$(cat "$GY.request")"'], ['cursor', '"$(cat "$GY.request")"']] as const) {
+    // The other contracts reference the same file: OpenCode through --prompt, Gemini and Qwen through --prompt-interactive, Copilot through --interactive, the rest positionally.
+    for (const [kind, expected] of [['opencode', '--prompt "$(cat "$GY.request")"'], ['codex', '"$(cat "$GY.request")"'], ['cursor', '"$(cat "$GY.request")"'], ['muse', '"$(cat "$GY.request")"'], ['pi', '"$(cat "$GY.request")"'],
+      ['gemini', '--prompt-interactive "$(cat "$GY.request")"'], ['qwen', '--prompt-interactive "$(cat "$GY.request")"'], ['copilot', '--interactive "$(cat "$GY.request")"']] as const) {
       const other = new FakePane(() => ({ agent: { agent: kind, agent_status: 'working' } }));
       const result = await startAgentSession(`${kind}-1`, kind, 'w1V:pR6', ['--flag'], request, other.run, { directory, ...other.bounds() });
       assert.ok(other.typed!.endsWith(` ${kind} --flag ${expected}`), `${kind}: ${other.typed}`); assert.equal(result.delivery, 'request'); assert.equal(result.files.role, null);
+      assert.ok(!other.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), `${kind}: nothing is pasted`);
     }
-    assert.equal(launchDelivery('muse'), 'paste'); assert.equal(launchDelivery(undefined), 'paste');
-    const pasted = new FakePane(() => ({ agent: { agent: 'muse', agent_status: 'idle' } }));
-    const paste = await startAgentSession('muse-1', 'muse', 'w1V:pR6', [], request, pasted.run, { directory, ...pasted.bounds(), attempts: 1 });
-    assert.equal(paste.delivery, 'paste'); assert.equal(pasted.typed, 'muse'); assert.deepEqual(paste.files, { stem: join(directory, '.graphyard/launch/muse-1'), role: null, request: null });
-    assert.ok(pasted.calls.some(call => call[0] === 'agent' && call[1] === 'prompt' && call[3] === request), 'a runtime without a contract is prompted after it starts, as before');
+    // A runtime with no way to take its request on the command line is refused before anything is typed (GY-184), never pasted into.
+    assert.equal(launchDelivery('aider'), 'paste'); assert.equal(launchDelivery(undefined), 'paste');
+    const refused = new FakePane(() => ({ agent: { agent: 'aider', agent_status: 'idle' } }));
+    await assert.rejects(startAgentSession('aider-1', 'aider', 'w1V:pR6', ['--yes-always'], request, refused.run, { directory, ...refused.bounds(), contract: { args: ['--yes-always'] } }), /refuses to launch the aider runtime: it has no way to take the session's first request on its command line/);
+    assert.deepEqual(refused.calls, []);
 
     // A supervised worker: the same references after `node CLI watch KEY EPOCH -- KIND`; still bounded with the longest runtime path seen in practice.
     const worker = launchCommand('claude', producerArgs, writeLaunchFiles(directory, 'claude-primary', { role, request }), ['/home/operator/.local/share/mise/installs/cursor-agent/2026.09.18-9a7762b/dist-package/node', '/home/operator/code/project/bin/graphyard.mjs', 'watch', 'GY-121', '1', '--']);
     assert.ok(Buffer.byteLength(worker) <= launchCommandLimit, `${Buffer.byteLength(worker)} bytes`);
     assert.match(worker, / watch GY-121 1 -- claude /);
     assert.equal(positionalOf(expandTypedCommand(worker).words.slice(expandTypedCommand(worker).words.indexOf('--') + 2)), request);
-    // A line that would exceed the bound is refused before anything is typed, naming its length.
-    const deep = join(directory, 'a'.repeat(300));
-    assert.throws(() => launchCommand('claude', producerArgs, { stem: join(deep, '.graphyard/launch/produce-a'), role: 'x', request: 'y' }), /the launch command line is \d+ bytes, over the 512-byte bound/);
+    // A line that would exceed the bound — long writable roots beside a long stem — moves the
+    // runtime's words into STEM.launch and the typed line sources it: still bounded, same words.
+    const deep = join(directory, 'a'.repeat(100), 'b'.repeat(100), 'c'.repeat(100));
+    const long = writeLaunchFiles(deep, 'produce-a', { role, request });
+    const sourced = launchCommand('claude', [...producerArgs, '--add-dir', deep], long);
+    assert.ok(Buffer.byteLength(sourced) <= launchCommandLimit, `${Buffer.byteLength(sourced)} bytes`);
+    assert.equal(sourced, `GY=${long.stem}; . "$GY.launch"`);
+    assert.equal(statSync(`${long.stem}.launch`).mode & 0o777, 0o600);
+    // The pane's own shell runs it: a stand-in `claude` prints the words it is started on.
+    const sourcedWords = execFileSync('bash', ['-c', `claude() { printf '%s\\0' "$@"; }; ${sourced}`], { encoding: 'utf8' }).split('\0').slice(0, -1);
+    assert.equal(positionalOf(sourcedWords), request); assert.ok(sourcedWords.includes(deep)); assert.equal(sourcedWords[sourcedWords.indexOf('--append-system-prompt-file') + 1], long.role);
+    // Only a stem too long for even that line is refused before anything is typed, naming its length.
+    assert.throws(() => launchCommand('claude', producerArgs, { stem: join(directory, 'a'.repeat(500), '.graphyard/launch/produce-a'), role: 'x', request: 'y' }), /the launch command line is \d+ bytes, over the 512-byte bound/);
     // Words are quoted only when the shell needs it; a quote inside is escaped the POSIX way.
     assert.equal(launchCommand('codex', ['--model', 'o3', '-c', 'writable_roots=["/tmp/a b"]', "it's"], { stem: '/s', role: null, request: null }), `codex --model o3 -c 'writable_roots=["/tmp/a b"]' 'it'\\''s'`);
 
