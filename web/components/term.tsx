@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { glossary, type GlossaryTerm } from '../glossary';
+import { shortShas } from '../format';
 
 /**
  * A technical word with its plain-English definition on hover and focus, from the shared glossary.
@@ -17,7 +18,8 @@ export default function Term({ term, children, focusable = true }: { term: Gloss
  * inside a sentence is hover-only: one keyboard stop per card is the card, not its prose.
  */
 export function Explained({ sentence }: { sentence: string }) {
-  return <>{sentence.split(/(PR #\d+|(?:unit|integration|e2e|manual):[A-Za-z0-9._/-]+)/).map((part, index) =>
+  // Commit SHAs in the sentence read as their first eight characters (GY-168).
+  return <>{shortShas(sentence).split(/(PR #\d+|(?:unit|integration|e2e|manual):[A-Za-z0-9._/-]+)/).map((part, index) =>
     /^PR #\d+$/.test(part) ? <Term key={index} term="pull request" focusable={false}>{part}</Term>
       : /^(unit|integration|e2e|manual):/.test(part) ? <Term key={index} term="proof" focusable={false}>{part}</Term>
         : part)}</>;

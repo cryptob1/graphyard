@@ -8,6 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
+import { wellFormedFlowReport } from '../web/flow-analytics.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
@@ -156,6 +157,8 @@ test('integration:flow-analytics-source-integrity', async () => {
   const served = await api(`/api/analytics/flow?window=30&slice=${slice}`, tokens.reader);
   assert.equal(served.status, 200);
   assert.equal(served.body.coverage.workItems, 1);
+  // The dashboard accepts the report the server serves: its shape check refuses only a malformed body.
+  assert.equal(wellFormedFlowReport(served.body), true);
 });
 
 test('integration:flow-analytics-core-metrics', async () => {
