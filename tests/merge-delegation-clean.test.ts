@@ -76,12 +76,39 @@ test('unit:clean-pr-merged-head-bound — no queue and a CLEAN pull request: mer
 });
 
 test('unit:blocked-pr-auto-merge — no queue and a pull request GitHub cannot merge yet: auto-merge is enabled, bound to the head, and nothing merges now', async () => {
-  for (const mergeStateStatus of ['BLOCKED', 'UNSTABLE', 'BEHIND', 'UNKNOWN', null]) {
+  for (const mergeStateStatus of ['BLOCKED', 'BEHIND', 'DIRTY', 'UNKNOWN', null]) {
     const item = work();
     const fake = fakeGitHub({ mergeStateStatus });
     assert.equal((await gateMerge(fake.github, item, requested(item))).action.kind, 'enqueue');
     assert.deepEqual(fake.named('enablePullRequestAutoMerge'), [{ id: pullRequestId, head, method: 'MERGE' }], `${mergeStateStatus}: auto-merge bound to the head`);
     assert.deepEqual(fake.named('mergePullRequest'), [], `${mergeStateStatus}: no immediate merge`);
+  }
+});
+
+test('unit:unstable-merges-directly — no queue and an UNSTABLE pull request (only optional checks cancelled or failing): merged at once, head-bound, never auto-merge; an "unstable status" refusal falls back to the head-bound merge; DIRTY and BLOCKED never merge now', async () => {
+  const item = work();
+  const fake = fakeGitHub({ mergeStateStatus: 'UNSTABLE' }), request = requested(item);
+  const gated = await gateMerge(fake.github, item, request);
+  assert.equal(gated.action.kind, 'enqueue', gated.action.reason);
+  assert.match(gated.action.reason, /merging it now, bound to that head/);
+  assert.deepEqual(fake.named('mergePullRequest'), [{ id: pullRequestId, head, method: 'MERGE' }], 'exactly one merge, bound to the authorized head');
+  assert.match(fake.queries('mergePullRequest')[0], /expectedHeadOid: \$head/);
+  assert.deepEqual(fake.named('enablePullRequestAutoMerge'), [], 'no auto-merge request on an UNSTABLE pull request');
+  assert.equal(gated.state?.requestedAt, request.at, 'the current request\'s time is kept on the state');
+
+  // GitHub turned the pull request UNSTABLE between the read and the auto-merge request.
+  for (const reason of ['Pull request is in unstable status', 'Pull request Pull request is in has_hooks status']) {
+    const racing = fakeGitHub({ mergeStateStatus: 'BLOCKED', autoMergeError: reason });
+    const fellBack = await gateMerge(racing.github, item, requested(item));
+    assert.equal(fellBack.action.kind, 'enqueue', `${reason}: ${fellBack.action.reason}`);
+    assert.equal(racing.named('enablePullRequestAutoMerge').length, 1);
+    assert.deepEqual(racing.named('mergePullRequest'), [{ id: pullRequestId, head, method: 'MERGE' }], `${reason}: the head-bound merge follows`);
+  }
+
+  for (const mergeStateStatus of ['DIRTY', 'BLOCKED']) {
+    const unmergeable = fakeGitHub({ mergeStateStatus, autoMergeError: 'Pull request is in dirty status' });
+    await gateMerge(unmergeable.github, item, requested(item));
+    assert.deepEqual(unmergeable.named('mergePullRequest'), [], `${mergeStateStatus}: never merged directly`);
   }
 });
 
