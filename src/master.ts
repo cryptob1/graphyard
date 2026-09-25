@@ -24,6 +24,7 @@ import type { Runner, RunRecord } from './runner/types.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { automatableProof } from './model/mechanical-proofs.js';
+import { documentationWorkerSection } from './model/documentation.js';
 import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
@@ -3178,12 +3179,14 @@ export function autonomousSession(outcome: string, blocker: string) {
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
-export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests'>>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null) {
+export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation'>>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null) {
   // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
+    // The standard documentation criterion the control plane stamped at create time (GY-215).
+    + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
     + destructivePromptGuidance
     + resumedAttempt(work)
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide), which ends your lease and parks the item for the human, then stop. `

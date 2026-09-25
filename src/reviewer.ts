@@ -11,6 +11,7 @@ import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
+import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
@@ -475,11 +476,17 @@ export function reviewRoundSection(sha: string, history?: ReviewHistory) {
 }
 
 /** `checkout` is the session directory a launch allocated under the managed worktree root, when it allocated one. */
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory) {
+/**
+ * `documentation` is the item's standard documentation criterion (GY-215) and the files the observed
+ * candidate changes: the criterion is judged beside the item's own, with the repository's paths.
+ */
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }) {
+  if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + reviewRoundSection(binding.sha, history)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
+    + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + (threads?.failure ? threadReadFailureSection(threads.failure) : threads?.unresolved.length ? threadSection(binding.sha, threads.unresolved, threads.total) : '')
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
@@ -627,7 +634,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         pane = created.pane; tabId = created.tab;
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
