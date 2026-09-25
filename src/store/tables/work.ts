@@ -18,6 +18,13 @@ export const events = defineTable({
 CREATE INDEX IF NOT EXISTS events_work ON events(work_id,seq);
 -- The ledger's recent growth by kind (eventStats) is a range read on insertion time.
 CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
+-- The production watch restores its containment answers before the server listens, on every
+-- restart (and every deploy restarts): newest record per item, and the newest pending set.
+-- Partial on kind, so each read touches only its own records instead of the window's events.
+CREATE INDEX IF NOT EXISTS events_deployment_contained ON events(work_id,seq DESC)
+  WHERE kind='delivery.deployment-contained' AND work_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,seq DESC)
+  WHERE kind='production.deployment-pending';
 ${eventWorkFunctions}
 ${appendOnly('events')}`,
 });
