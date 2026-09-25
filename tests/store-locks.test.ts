@@ -7,12 +7,13 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store, save, coordinationLock, migrationLock, backupLock, takeBackupLock, workIndexOmittedKeys } from '../src/store.js';
+import { Store, save, coordinationLock, migrationLock, backupLock, takeBackupLock, summarizeWork, workIndexSummary } from '../src/store.js';
 import { createBackup } from '../src/backup.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import { schemaVersion } from '../src/release.js';
+import { planWorktreeReclaim } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-203: migrations and backups take their own advisory locks, never the coordination lock, and
@@ -119,8 +120,7 @@ function expectedRow(id: string, work: any) {
   const time = (value: unknown) => { const at = typeof value === 'string' ? Date.parse(value) : Number.NaN; return Number.isFinite(at) ? at : null; };
   const observation = work.observation && typeof work.observation === 'object' ? work.observation : null;
   const due = [time(work.lease?.expiresAt), ...(work.actionQueue?.actions ?? []).map((action: any) => time(action.retryAt) ?? time(action.claim?.expiresAt) ?? time(action.requestedAt))].filter((at): at is number => at !== null);
-  const summary = { ...work, summarized: true };
-  for (const key of workIndexOmittedKeys) delete summary[key];
+  const summary = summarizeWork(work);
   return {
     id, key: work.key ?? null, stage: work.stage ?? null, priority: typeof work.priority === 'number' ? work.priority : null, owner: work.lease?.owner ?? null,
     epoch: work.epoch ?? null, revision: work.revision ?? null,
@@ -190,6 +190,7 @@ test('integration:index-matches-documents the work index stays equal to the docu
   } finally { await store.close(); }
 });
 
+const worktree = (index: number) => `/srv/graphyard/worktrees/GY-${index + 1}-2`;
 // A board item with the history a long-lived item carries: evidence for many heads, a scope
 // comparison, resolved requests and a long description. About 60 KB of JSON each.
 function boardItem(index: number, now: number): Work {
@@ -199,7 +200,7 @@ function boardItem(index: number, now: number): Work {
     id: randomUUID(), key: `GY-${index + 1}`, title: `Board item ${index + 1}`, type: 'feature', priority: index % 3, stage, revision: 40, epoch: 2, ready: true,
     description: 'The history a long-lived item accumulates. '.repeat(40), dependencies: [], plannedFiles: ['src/'], implementers: ['worker'], policy: { checks: ['test'], review: true }, policyRevision: 1,
     criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], createdAt: new Date(now - 30 * 86_400_000).toISOString(), updatedAt: new Date(updated).toISOString(), stageEnteredAt: new Date(updated).toISOString(),
-    lease: null, workspaces: [], submission: { epoch: 2, pr: index + 1 }, candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: index + 1 }, gates: [], violations: [], scenarioRequirements: [], blocker: null,
+    lease: null, workspaces: [{ host: 'host', path: worktree(index), branch: `graphyard/gy-${index + 1}-2`, epoch: 2, owner: 'worker' }], submission: { epoch: 2, pr: index + 1 }, candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: index + 1 }, gates: [], violations: [], scenarioRequirements: [], blocker: null,
     evidence: Array.from({ length: 60 }, (_, n) => ({ id: randomUUID(), proof: 'unit:works', sha: n.toString(16).padStart(40, 'c'), baseSha: 'b'.repeat(40), policyRevision: 1, producer: 'runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: new Date(now).toISOString(),
       scopeFiles: Array.from({ length: 10 }, (_, file) => `src/module-${file}/file-${index}.ts`) })),
     observation: { at: new Date(now).toISOString(), merged: stage === 'done', prState: stage === 'done' ? 'closed' : 'open', files: ['src/index.ts'], scopeFiles: Array.from({ length: 100 }, (_, file) => ({ path: `src/generated/${file}.ts`, sha: 'e'.repeat(40), status: 'unchanged' })) },
@@ -238,15 +239,28 @@ test('integration:index-matches-documents the coordination snapshot of a 200-ite
       assert.deepEqual(item.delivery, source.delivery); assert.deepEqual(item.policy, source.policy); assert.deepEqual(item.gates, source.gates);
       if (index < 160) {
         assert.equal(item.summarized, true);
-        // The view's own trimming leaves an empty evidence list on it; nothing else of the history is there.
-        assert.deepEqual(item.evidence, []);
-        for (const key of workIndexOmittedKeys.filter(key => key !== 'evidence')) assert.equal(key in item, false, `${item.key} carries ${key}`);
+        // A stand-in keeps every key its document has, with the type it holds, so a consumer that
+        // scans every item never meets a missing field; only the history in them is emptied.
+        for (const [key, value] of Object.entries(source)) {
+          if ((workIndexSummary.dropped as readonly string[]).includes(key)) { assert.equal(key in item, false, `${item.key} carries ${key}`); continue; }
+          assert.ok(key in item, `${item.key} lost ${key}`);
+          assert.equal(Array.isArray(item[key]), Array.isArray(value), `${item.key}.${key} changed type`); assert.equal(typeof item[key], typeof value, `${item.key}.${key} changed type`);
+        }
+        assert.deepEqual(item.criteria, source.criteria); assert.deepEqual(item.workspaces, source.workspaces); assert.deepEqual(item.submission, source.submission);
+        assert.deepEqual(item.evidence, []); assert.equal(item.description, '');
+        assert.deepEqual(item.observation.files, source.observation.files); assert.equal('scopeFiles' in item.observation, false);
         assert.ok(Buffer.byteLength(JSON.stringify(item)) < 2_048, `${item.key}'s stand-in is ${Buffer.byteLength(JSON.stringify(item))} bytes`);
       } else {
         assert.equal(item.summarized, undefined); assert.deepEqual(item.criteria, source.criteria); assert.equal(item.description, source.description);
         assert.deepEqual(item.observation.files, source.observation.files);
       }
     }
+    // The master loop hands this snapshot to the worktree reclaimer, which scans every item's
+    // workspaces: a settled delivery's worktree is still matched to its owner and classified.
+    const dependencies = [{ path: 'node_modules', kind: 'directory' as const }];
+    const plan = planWorktreeReclaim([0, 165, 199].map(index => ({ path: worktree(index), name: `GY-${index + 1}-2`, activityAt: now, dependencies })).concat({ path: '/srv/graphyard/worktrees/stray', name: 'stray', activityAt: now - 86_400_000, dependencies }), coordination.body.work, { now, idleMs: 3_600_000 });
+    assert.deepEqual(plan.map(entry => [entry.key, entry.disposition]), [['GY-1', 'delivered'], ['GY-166', 'delivered'], ['GY-200', 'recent'], [null, 'idle']]);
+    assert.equal(plan[0].branch, 'graphyard/gy-1-2'); assert.equal(plan[0].disposable, true);
     // The store's own read of the same snapshot: a shorter window leaves only the open items whole.
     const narrow = await store.coordinationSnapshot(3_600_000);
     const settled = (narrow.work as any[]).filter(item => item.stage === 'done' && Date.parse(item.updatedAt) < Date.now() - 3_600_000).length;

@@ -14,13 +14,59 @@ import { githubCacheTables } from './tables/github-cache.js';
 import { defineTable } from './tables.js';
 
 /**
- * Keys a work document carries that grow with its history: left out of the index row's
- * `summary`, the stand-in a settled delivered item has in the coordination snapshot.
+ * How the index row's `summary` — the stand-in a settled delivered item has in the coordination
+ * snapshot — bounds a work document. It keeps every key the document has and the type each key
+ * holds, because the master loop and the executors scan every item of the snapshot (a worktree's
+ * owner by `workspaces`, obligations by `criteria`) and must not meet a missing field; it empties
+ * the history a document accumulates instead:
+ *
+ * - `emptied`: replaced by the empty value of its type (the evidence of every head, the sessions
+ *   launched, the queue history, the description's prose);
+ * - `histories`: an object whose `history` list is emptied, its open state kept;
+ * - `observation`: kept without the per-file scope comparison, as the coordination view keeps it;
+ * - `dropped`: the pipeline timeline, which the coordination view drops from every item anyway.
+ *
+ * Everything else — criteria, workspaces, lease, candidate, submission, delivery, gates — is kept
+ * whole: it is the item's decision state and small.
  */
-export const workIndexOmittedKeys = ['description', 'criteria', 'evidence', 'observation', 'pipeline', 'autoDispatch', 'actionQueue', 'queueHistory', 'sessions', 'validation', 'workspaces', 'producerProofs', 'scenarioRequirements', 'mergeAuthorization', 'containmentQuarantine'] as const;
+export const workIndexSummary = {
+  emptied: { description: '', evidence: [], sessions: [], queueHistory: [] },
+  histories: ['autoDispatch', 'actionQueue'],
+  observationOmits: ['scopeFiles'],
+  dropped: ['pipeline'],
+} as const;
+/** The summary of one document, as the index trigger computes it in SQL. */
+export function summarizeWork(document: Record<string, unknown>): Record<string, unknown> {
+  const summary: Record<string, unknown> = { ...document };
+  for (const key of workIndexSummary.dropped) delete summary[key];
+  for (const [key, value] of Object.entries(workIndexSummary.emptied)) if (key in document) summary[key] = structuredClone(value);
+  for (const key of workIndexSummary.histories) {
+    const value = document[key];
+    if (value && typeof value === 'object' && !Array.isArray(value) && 'history' in value) summary[key] = { ...value, history: [] };
+  }
+  const observation = document.observation;
+  if (observation && typeof observation === 'object' && !Array.isArray(observation)) {
+    const kept: Record<string, unknown> = { ...observation };
+    for (const key of workIndexSummary.observationOmits) delete kept[key];
+    summary.observation = kept;
+  }
+  return { ...summary, summarized: true };
+}
 /** Bumped whenever the projection below changes, so the migration recomputes every row it wrote. */
-export const workIndexProjection = 1;
+export const workIndexProjection = 2;
 const sqlArray = (values: readonly string[]) => `ARRAY[${values.map(value => `'${value}'`).join(',')}]::text[]`;
+const sqlJson = (value: unknown) => `'${JSON.stringify(value).replace(/'/g, "''")}'::jsonb`;
+/** `summarizeWork` in SQL, over the document expression `d`. */
+function summarySql(d: string) {
+  const object = (key: string) => `jsonb_typeof(${d}->'${key}') = 'object'`;
+  return [
+    `(${d} - ${sqlArray(workIndexSummary.dropped)})`,
+    ...Object.entries(workIndexSummary.emptied).map(([key, value]) => `CASE WHEN ${d} ? '${key}' THEN jsonb_build_object('${key}', ${sqlJson(value)}) ELSE '{}'::jsonb END`),
+    ...workIndexSummary.histories.map(key => `CASE WHEN ${object(key)} AND ${d}->'${key}' ? 'history' THEN jsonb_build_object('${key}', jsonb_set(${d}->'${key}', '{history}', '[]'::jsonb)) ELSE '{}'::jsonb END`),
+    `CASE WHEN ${object('observation')} THEN jsonb_build_object('observation', (${d}->'observation') - ${sqlArray(workIndexSummary.observationOmits)}) ELSE '{}'::jsonb END`,
+    `'{"summarized":true}'::jsonb`,
+  ].join(`\n    || `);
+}
 
 /**
  * The work index (GY-203): one small row per work item, projected from its document by a
@@ -61,7 +107,7 @@ CREATE OR REPLACE FUNCTION graphyard_work_index_write(item uuid, ordinal bigint,
       (SELECT min(COALESCE(graphyard_timestamp(a->>'retryAt'), graphyard_timestamp(a->'claim'->>'expiresAt'), graphyard_timestamp(a->>'requestedAt')))
         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(d->'actionQueue'->'actions') = 'array' THEN d->'actionQueue'->'actions' ELSE '[]'::jsonb END) a)),
     graphyard_timestamp(d->>'updatedAt'),
-    (d - ${sqlArray(workIndexOmittedKeys)}) || '{"summarized":true}'::jsonb,
+    ${summarySql('d')},
     ${workIndexProjection}
   ON CONFLICT (id) DO UPDATE SET number=EXCLUDED.number, key=EXCLUDED.key, stage=EXCLUDED.stage, priority=EXCLUDED.priority,
     owner=EXCLUDED.owner, epoch=EXCLUDED.epoch, revision=EXCLUDED.revision, pr_state=EXCLUDED.pr_state, pr_open=EXCLUDED.pr_open,
