@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -9,11 +9,13 @@ import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { pathScopeContains, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, unplannedPaths, type ScopeRequestState } from './model/scope.js';
+import { pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, testFile, unplannedPaths, type ScopeRequestState } from './model/scope.js';
+import { mechanicalFailure, mechanicalVerdicts } from './model/mechanical-proofs.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
+import { annotatePaneShell, closablePane, endedScopeStates } from './quarantine.js';
+import { baseRefreshConflict, botThread, describeThread, openThreads, pendingBaseRefresh, queueSequencingReason, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
 export { threadResolutionGraceMs, threadsAwaitReview } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
@@ -24,10 +26,10 @@ import { humanNeededActions } from './model/next-action.js';
 import { runRecordSchema, type RunRecord } from './runner/types.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { followUpThreadIds, launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
-import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
-import { defaultAwaitReviewers } from './auto-dispatch.js';
-import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { basePaths, baseText, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
+import { defaultAwaitReviewers, unexercisedFindings } from './auto-dispatch.js';
+import { classifyRuntimePrompt, continueAfterDecline, deliverPrompt, inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity, type RuntimePrompt } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, herdrJson, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, transientMergeRace, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { capacityRefusal, reconcileFleetSessions } from './fleet.js';
@@ -47,7 +49,7 @@ export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
   work: z.string().nullable().default(null),
   principal: z.string().nullable().default(null),
-  state: z.enum(['started', 'done', 'failed', 'indeterminate']),
+  state: z.enum(['started', 'done', 'failed', 'indeterminate', 'waiting']),
   detail: z.string().max(actionDetailMax),
   attempts: z.number().int().min(0).max(1000).default(1),
   // The item's attempt epoch when the action started. A dispatch that lands always advances it,
@@ -690,11 +692,39 @@ export function profileHealth(profiles: WorkerProfile[], credentials: Record<str
   });
 }
 
+/** How many times one cycle re-reads and retries a guarded merge that lost a race to a concurrent write. */
+export const mergeRaceRetries = 3;
+/**
+ * A merge candidate whose only refusal is its place in the merge queue — another item is ahead,
+ * or its speculative tip is not published yet. It waits its turn; the guarded merge is not asked.
+ */
+export function waitingInMergeQueue(work: Work) {
+  const failing = work.gates.filter(gate => !gate.passed);
+  return !work.violations.length && failing.length > 0 && failing.every(gate => gate.name === 'merge' && gate.reasons.length > 0 && gate.reasons.every(queueSequencingReason));
+}
+
 /** Retry a refused action on a widening cycle interval rather than on every pass. */
 export function readyToRetry(previous: DaemonAction | undefined, cycle: number, maxBackoffCycles = 30) {
   if (!previous) return true;
+  // A waiting action is an outcome still being reconciled (GY-195): it is asked again every cycle.
+  if (previous.state === 'waiting') return true;
   if (previous.state !== 'failed') return false;
   return cycle - previous.cycle >= Math.min(2 ** Math.max(0, previous.attempts - 1), maxBackoffCycles);
+}
+
+/** The first and the longest pause between guarded merge attempts on an unchanged, all-gates-passing candidate (GY-202). */
+export const mergeRetryBaseMs = 15_000, mergeRetryCapMs = 60_000;
+/**
+ * Whether the guarded merge is asked again for this candidate. The action key binds the head, base
+ * and policy revision, so a moved head starts afresh. While that binding stands and every gate
+ * passes, a refusal is retried on a doubling pause capped at one minute, never on the cycle
+ * backoff that can stretch to thirty cycles: a mergeable candidate is retried until GitHub shows it
+ * merged or its head moves (GY-202). A candidate with a failing gate keeps the cycle backoff.
+ */
+export function mergeRetryDue(previous: DaemonAction | undefined, work: Work, cycle: number, now: number) {
+  if (readyToRetry(previous, cycle)) return true;
+  if (previous?.state !== 'failed' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
+  return now - Date.parse(previous.at) >= Math.min(mergeRetryBaseMs * 2 ** Math.max(0, previous.attempts - 1), mergeRetryCapMs);
 }
 
 export function recordProfileFailure(state: DaemonState, profile: WorkerProfile, reason: string, now: number) {
@@ -853,14 +883,26 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
   // requested changes, and the loop never asked again because both keyed on the head alone.
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
+  // A head GitHub reports conflicting with the base, or one the merge queue ejected because its
+  // speculative merge conflicts, is not waited on either (GY-191): nothing but a sync can move it,
+  // so the loop asks for that round at once, naming the base tip it conflicts with.
+  const sync = work.reworkRequested ? null : syncConflict(work);
+  if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
-  // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
-  // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a human.
-  // The review of the current head judges those threads first: its approval names the ones fixed and
-  // the loop resolves them, so a rework requested before it settles invalidated the review that
-  // would have cleared them, and the same open threads carried to the next head — without end.
-  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? blockingThreads(work) : [];
+  // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
+  // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
+  // which waits for one — must not hold this rework.
+  const proofs = proofRework(work);
+  if (proofs) return { action: 'rework', ...proofs };
+  // Unresolved review threads block no merge: the reviewer's verdict on the head is the review
+  // gate and the threads are its inputs. A thread still open once the review of the current head
+  // has settled — one it was not shown, or a policy with no review — is a finding the loop sends
+  // back for, early on. The review judges threads first: its approval names the ones fixed or
+  // overridden and the loop resolves them, so a rework requested before it settles would invalidate
+  // the review that clears them. After `botThreadReworkRounds` rework rounds a bot's thread is
+  // advisory: bot findings alone had kept items cycling round after round on the same head family.
+  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
   if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
     binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   // A lease-loss the control plane raised is operational: once the lost attempt can no longer act,
@@ -871,6 +913,76 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   if (lost) return { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
     reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
+  return null;
+}
+/**
+ * GY-193. The rework a head's own proofs call for, or null. A trusted proof that failed on the head
+ * (the build gate returns it to its worker before review) and evidence the producer recorded as not
+ * exercising its criterion (the proof also passed with the change removed) both leave a head no
+ * review will ever judge, so the rework is asked for now, whatever threads stand open on it: the
+ * rule that waits for a review to judge the threads first would wait for a review that never comes.
+ * The reason quotes each finding and names the open threads, so the worker takes both in one round.
+ */
+export function proofRework(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const failed = mechanicalVerdicts(work, [work], new Date()).filter(verdict => verdict.outcome === 'failed');
+  const unexercised = unexercisedFindings(work);
+  if (!failed.length && !unexercised.length) return null;
+  const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
+  const findings = [
+    ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalFailure(verdict, candidate.sha)).join('; ')}`] : []),
+    ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}"`).join('; ')}`] : []),
+  ];
+  const named = threads.slice(0, 5).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
+  const open = threads.length ? ` ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} also unresolved on the pull request (${named.join('; ')}${threads.length > named.length ? `; and ${threads.length - named.length} more` : ''}); address them in the same round.` : '';
+  return { reason: `${work.key}: ${findings.join('. ')}. No review judges a head whose proof did not pass, so the item returns to a worker now to fix what the proof found.${open}`,
+    binding: `${candidate.sha}:proof:${[...failed.map(verdict => verdict.proof), ...unexercised.map(entry => `unexercised:${entry.proof}`)].sort().join(',')}` };
+}
+
+/**
+ * GY-199. What grants each requested path without an approver, or the first refusal: a trusted
+ * review finding naming it (review-scope.ts findingScope), or — for a test file — the pinning rule
+ * (model/scope.ts pinningTestGround), read from the base branch's texts outside every transaction.
+ */
+export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>): Promise<{ grounds: { path: string; ground: string }[] } | { refusal: string }> {
+  const grounds: { path: string; ground: string }[] = [];
+  let planned: { path: string; text: string | null }[] | null = null;
+  for (const path of paths) {
+    const named = findingScope([path], findings, exists);
+    if ('grounds' in named) { grounds.push(...named.grounds); continue; }
+    if (read && testFile(path) && exists(path)) {
+      const text = await read(path);
+      planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
+      const ground = pinningTestGround(path, request.reason, text, planned);
+      if (ground) { grounds.push({ path, ground }); continue; }
+    }
+    return named;
+  }
+  return { grounds };
+}
+
+/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
+const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
+/**
+ * The conflict with the base that only a sync round can resolve, for exactly the current head, or
+ * null. Two observations say so. GitHub computed a merge conflict for the open pull request (its
+ * `mergeable` is false, not merely uncomputed); and the merge queue ejected this head because its
+ * speculative merge conflicts. An ejection whose base the control plane has not yet tried to
+ * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
+ * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
+ * The binding names the head and the base tip, so a base that moves on is a fresh ground.
+ */
+export function syncConflict(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
+  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  const tip = observation.baseTip ?? candidate.baseSha;
+  if (observation.conflicting && !work.queue)
+    return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
+  const ejection = work.queueEjection;
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !pendingBaseRefresh(work))
+    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
   return null;
 }
 /**
@@ -922,6 +1034,17 @@ export function setAsideFollowUpThreads<S extends { work: Work[] }>(snapshot: S,
     return { ...item, observation: { ...item.observation!, conversations: { ...conversations, unresolved: conversations.unresolved.filter(thread => !thread.id || !ids.has(thread.id)) } } };
   }) };
 }
+/** How many rework rounds an item takes before a bot's review thread stops being grounds for another. */
+export const botThreadReworkRounds = 2;
+/**
+ * The open threads on the current head the loop requests rework for: every one within the first
+ * `botThreadReworkRounds` rework rounds, and after that only a person's — a bot's thread is then
+ * advisory, and only the reviewer's own CHANGES_REQUESTED sends the item back.
+ */
+export function reworkThreads(work: Work): ReviewThread[] {
+  const threads = openThreads(work);
+  return (work.pipeline?.reworkRounds ?? 0) >= botThreadReworkRounds ? threads.filter(thread => !botThread(thread)) : threads;
+}
 /** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
 const reworkThreadsNamed = 5;
 /**
@@ -932,7 +1055,7 @@ const reworkThreadsNamed = 5;
 export function threadReworkSummary(sha: string, threads: ReviewThread[]): string {
   const named = threads.slice(0, reworkThreadsNamed).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
   const more = threads.length - named.length;
-  return `Branch protection requires conversation resolution and ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} unresolved on ${sha.slice(0, 12)}: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
+  return `${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} still open on ${sha.slice(0, 12)} after its review settled: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. Rework the candidate to address the findings, never dismiss them`;
 }
 /**
  * A decision reason within the control plane's bound. What the requester adds around the loop's own
@@ -1496,6 +1619,8 @@ export interface DaemonEffects {
   reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
   /** Which of the paths exist on the base branch, read from one fetch of it per decision. */
   basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
+  /** A file's text on the base branch as `basePaths` fetched it, or null when it has none: what the pinning-test rule reads (GY-199). */
+  baseText?: (path: string) => Promise<string | null>;
   /**
    * The master's own additive scope widening — the revision `master scope` applies — with its
    * audited reason, bound to the scope request it answers (`answeringWidening`).
@@ -1574,6 +1699,14 @@ export interface DaemonEffects {
    * session over and never escalates capacity: it cycles exactly as it did before.
    */
   sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>;
+  /**
+   * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the
+   * prompt's non-destructive answer into the session's pane; `promptSession` then gives it the one
+   * instruction to carry on with a safe alternative. A loop wired without them never answers a
+   * prompt, and fails an attempt blocked on one once it has stood for `blockedPromptFailMs`.
+   */
+  answerSession?: (agent: HerdrAgent, keys: string[]) => void | Promise<void>;
+  promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
@@ -1642,12 +1775,67 @@ async function record(state: DaemonState, key: string, action: Omit<DaemonAction
   return entry;
 }
 
+/**
+ * Session cleanup for a worker whose supervisor scope has ended (GY-189). `watch` exiting leaves
+ * the launch pane behind, the pane's own shell still sitting in the worktree; nothing runs there any
+ * more, so the pane is closed, once. Only a pane the host probe found to be the recorded session's
+ * idle shell in this item's worktree is closed, whatever the session ledger (which the worker can
+ * write) names; a pane whose scope is still live, or whose shell runs anything, is left alone.
+ *
+ * Settlement may have excused that very shell, so until the close is recorded done the item's
+ * assessment is withdrawn from `assessments` and the fence stays up for a later cycle. A pane closed
+ * this cycle is probed again once it is gone, since the shell may have started something after the
+ * first probe counted its children: only that fresh assessment may lower the fence. Closing is safe
+ * to repeat, so a close a restart interrupted (`started`, then `indeterminate`) is simply retried.
+ */
+export async function closeEndedWorkerPanes(state: DaemonState, effects: DaemonEffects, open: Work[], assessments: Record<string, ContainmentAssessment>,
+  observed: { now: string; clockOffset: { min: number; max: number } }, now: () => number, performed: DaemonAction[]) {
+  const closed: Work[] = [];
+  for (const item of open) {
+    const assessment = assessments[item.id], quarantine = item.containmentQuarantine, recorded = assessment?.verification?.recordedScope;
+    if (!quarantine?.scope || !recorded || recorded.unit !== quarantine.scope.unit || recorded.pid !== quarantine.scope.pid || !endedScopeStates.includes(recorded.activeState)) continue;
+    const pane = closablePane(item, assessment.verification!);
+    if (!pane) continue;
+    const epoch = quarantine.epoch, key = `close:ended-scope:${item.id}:${epoch}:${pane}`, previous = state.actions[key];
+    if (previous?.state === 'done') continue;
+    delete assessments[item.id];
+    const interrupted = previous?.state === 'started' || previous?.state === 'indeterminate';
+    if (!interrupted && !readyToRetry(previous, state.cycle)) continue;
+    const attempts = (previous?.attempts ?? 0) + 1, why = `its supervisor scope ${recorded.unit} is ${recorded.activeState}`;
+    const entry = (outcome: 'started' | 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
+    try {
+      await entry('started', `Closing pane ${pane} of ${item.key} epoch ${epoch}: ${why}`);
+      let gone = false;
+      try { await effects.closeSession(pane); } catch (error) { if (!paneAlreadyGone(error)) throw error; gone = true; }
+      performed.push(await entry('done', `${gone ? 'Pane was already gone' : 'Closed pane'} ${pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`));
+      closed.push(item);
+    } catch (error) {
+      try { performed.push(await entry('failed', `Could not close pane ${pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}; the containment quarantine stays until it is closed`)); } catch { /* recorded next cycle */ }
+    }
+  }
+  if (!closed.length || !effects.containment) return;
+  let fresh: Record<string, ContainmentAssessment> = {};
+  try { fresh = await effects.containment(closed, observed); } catch { /* re-probed next cycle */ }
+  // A shell still exiting after its pane closed, or a probe that failed, is left to the next
+  // cycle's probe, which settles or escalates it; the pre-close assessment is never used.
+  for (const item of closed) if (fresh[item.id]?.settleable) assessments[item.id] = fresh[item.id];
+}
+
 /** One preservation per attempt: the record an interrupted attempt leaves for the next one. */
 export const preserveKey = (work: Pick<Work, 'id'>, epoch: number) => `preserve:${work.id}:${epoch}`;
 /** How long a refusal on the review findings stands before the loop reads the findings again. */
 export const findingRecheckMs = 120_000;
 /** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
 export const launchAppearanceMs = 120_000;
+/**
+ * A session blocked on its runtime's own prompt (GY-197). A known prompt is answered on the cycle
+ * that sees it — within one loop interval, well inside two minutes — and answered at most
+ * `blockedPromptAnswers` times, `blockedPromptSettleMs` apart, before it counts as one the loop
+ * cannot answer. A prompt the loop cannot answer is a failed attempt, not a wait: once it has
+ * stood for `blockedPromptFailMs` the session is closed as failed with the prompt as the reason.
+ */
+export const blockedPromptFailMs = 5 * 60_000, blockedPromptAnswers = 2, blockedPromptSettleMs = 15_000;
+export const promptDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 12);
 /**
  * Keep what a worker that died left behind, the same way an exhausted one's is kept (GY-105).
  *
@@ -1843,23 +2031,94 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     });
   }
 
-  // 1b. A worker session that stops on a prompt while it holds its assignment is waiting on input
-  //     no one will give; it is recorded as failed with that reason, once per pane, for the master.
+  // 1b. A session that stops on a prompt is waiting on input no one will give (GY-197). The loop
+  //     reads the prompt off its screen: a known one — a Yes/No or proceed/cancel menu whose "yes"
+  //     runs a destructive command — is declined, and the session is told once to carry on with a
+  //     safe alternative; the prompt and the answer go on the record and on the session's handle.
+  //     A prompt the loop cannot classify is a failed attempt, not a wait: once it has stood for
+  //     `blockedPromptFailMs` the session is closed as failed with the prompt's text as the reason,
+  //     and the item is dispatched again (a reviewer's or producer's request is launched again).
+  const readPrompt = async (agent: HerdrAgent): Promise<RuntimePrompt> => {
+    let screen: string | null = null;
+    try { screen = effects.sessionOutput ? await effects.sessionOutput(agent) : null; } catch { screen = null; }
+    return classifyRuntimePrompt(screen) ?? { kind: 'unknown', text: 'its screen could not be read', keys: null, answer: null };
+  };
+  const unblock = async (who: string, slot: string, agent: HerdrAgent, item: Work, principal: string | null, epoch: number | null, directory: string | null,
+    handle: (outcome: string, finished: boolean) => Promise<unknown>, fail: (reason: string) => Promise<string>) => {
+    const prompt = await readPrompt(agent), digest = promptDigest(prompt.text);
+    const answeredKey = `session:answered:${slot}:${agent.pane_id}:${digest}`, answered = state.actions[answeredKey];
+    if (prompt.kind === 'destructive-command' && prompt.keys && effects.answerSession && (answered?.attempts ?? 0) < blockedPromptAnswers) {
+      // An answered dialog is given time to close before it is answered again.
+      if (answered && now() - Date.parse(answered.at) < blockedPromptSettleMs) return;
+      const attempts = (answered?.attempts ?? 0) + 1;
+      await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key} is blocked on its runtime's destructive-command prompt "${prompt.text}"; declining it with "${prompt.answer}"`, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        await effects.answerSession(agent, prompt.keys);
+        await effects.promptSession?.(agent, continueAfterDecline(item.key, prompt, directory));
+        const outcome = `answered its runtime's destructive-command prompt "${prompt.text}" with "${prompt.answer}" and told it to continue with a safe alternative (explicit paths or a mktemp -d directory)`;
+        performed.push(await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key}: the loop ${outcome}`, attempts, cycle: state.cycle }, now(), effects.persist));
+        await handle(`The loop ${outcome}`, false);
+      } catch (error) {
+        performed.push(await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} is blocked on its runtime's destructive-command prompt "${prompt.text}", and declining it failed: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+      return;
+    }
+    const why = prompt.kind === 'destructive-command' ? effects.answerSession ? `the loop declined it ${blockedPromptAnswers} times and it is still showing` : 'this loop cannot send it keys' : 'the loop cannot classify it';
+    const seenKey = `session:blocked:${slot}:${agent.pane_id}:${digest}`, seen = state.actions[seenKey];
+    const minutes = Math.round(blockedPromptFailMs / 60_000);
+    if (!seen) {
+      performed.push(await record(state, seenKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key}${epoch !== null ? ` (epoch ${epoch})` : ''} is waiting on input (Herdr reports it blocked) instead of deciding on its own, at a runtime prompt (${why}): "${prompt.text}". Unless it moves on, the loop closes it as failed with that prompt as the reason in ${minutes} minutes and dispatches ${item.key} again. A session that needs something records a typed request and exits — POST /api/work/${item.key}/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item, rather than holding its slot at a prompt`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      // The session is blocked, not gone: it still holds its pane, and the one moment somebody
+      // needs the attach command is this one. The handle stays running, carrying why it stalled.
+      await handle(`waiting on input instead of recording a typed request, at a runtime prompt (${why}): "${prompt.text}"; closed as failed after ${minutes} minutes unless it moves on`, false);
+      return;
+    }
+    if (now() - Date.parse(seen.at) < blockedPromptFailMs) return;
+    const failKey = `session:unanswered:${slot}:${agent.pane_id}:${digest}`, previous = state.actions[failKey];
+    if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+    const reason = `blocked for ${minutes} minutes on a runtime prompt (${why}): "${prompt.text}"`, attempts = (previous?.attempts ?? 0) + 1;
+    await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key} was ${reason}; closing it as a failed attempt`, attempts, cycle: state.cycle }, now(), effects.persist);
+    try {
+      const next = await fail(reason);
+      performed.push(await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key} was closed as failed: ${reason}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} was ${reason}, but it could not be closed as failed: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  };
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
     if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || failedOver.has(item.id)) return;
-    const key = `session:blocked:${profile.name}:${agent.pane_id}:${item.epoch}`;
-    if (state.actions[key]) return;
-    performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it. A session that needs something records a typed request and exits — POST /api/work/${item.key}/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item, rather than holding the lease at a prompt`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-    // The session is blocked, not gone: it still holds its pane, and the one moment somebody
-    // needs the attach command is this one. The handle stays running, carrying why it stalled;
-    // step 1 records it finished once the agent is actually closed.
-    await effects.recordSession?.(item, { id: `${profile.principal}:${item.epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
+    const epoch = item.lease!.epoch, pane = agent.pane_id;
+    const handle = (outcome: string, finished: boolean) => effects.recordSession?.(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
       ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      ...(agent.pane_id ? { pane: agent.pane_id, attach: `herdr pane attach ${agent.pane_id}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
-      subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-      outcome: 'waiting on input instead of recording a typed request; answer or stop it, and the attempt is recorded as failed with that reason' }).catch(() => {});
+      pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`,
+      subject: `${item.key}: ${item.title}`.slice(0, 300), state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {}) ?? Promise.resolve();
+    await unblock(`Worker session ${profile.agentName}`, `${profile.name}:${epoch}`, agent, item, profile.principal, epoch, item.workspaces.find(entry => entry.epoch === epoch)?.path ?? null, handle, async reason => {
+      // The attempt ends on the record — what it left uncommitted kept, the prompt as the reason —
+      // which ends the lease, so the dispatch step claims the item again on the next cycle.
+      const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, `ended without submitting: its session ${profile.agentName} was ${reason}`, now, performed);
+      if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
+      const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
+      let stop = 'its supervisor stops on the ended lease';
+      try {
+        if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
+      } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+      await effects.closeSession(pane);
+      await handle(`closed as failed: ${reason}`, true);
+      return `the attempt ended on the record, ${stop}, pane ${pane} was closed, and ${item.key} is dispatched again`;
+    });
+  });
+  for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('session', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
+    const agent = agents.find(candidate => candidate.name === session.agentName), item = open.find(candidate => candidate.key === session.work);
+    if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || state.actions[failoverKey(session.role, item, session.record)]?.state === 'done') return;
+    await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, async () => {}, async reason => {
+      if (!effects.endSession) { await effects.closeSession(agent.pane_id!); return 'its pane was closed and its request launches again on the next dispatch tick'; }
+      await effects.endSession(session, `closed as failed: ${reason}`.slice(0, 500));
+      if (!session.requestId || !effects.relaunch) return 'its request launches again on the next dispatch tick';
+      try { return `relaunched on profile ${(await effects.relaunch(session, item, snapshot)).profile}`; }
+      catch (error) { return `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`; }
+    });
   });
 
   // 1c. A lease that keeps advancing while Herdr no longer reports the session renewing it is an
@@ -1965,7 +2224,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     try {
       const findings = await effects.reviewFindings(item);
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
-      const scoped = findingScope(paths, findings, path => existing.has(path));
+      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText);
       if ('refusal' in scoped) {
         const detail = boundDetail(`Not widened on a review finding: ${scoped.refusal}`);
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
@@ -1975,7 +2234,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       }
       const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
-        `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+        `Additive scope ${item.key}'s own change calls for — a review finding names it, or a test pins text a planned file holds: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       const widened = await effects.widenScope(item, request, paths, reason) as Work | undefined;
       // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
       const recorded = widened?.scopeDecision;
@@ -2101,6 +2360,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
   const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
+  await closeEndedWorkerPanes(state, effects, open, assessments, { now: snapshot.now, clockOffset }, now, performed);
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) await isolate('settle', item, item.key, async () => {
     const epoch = item.containmentQuarantine!.epoch;
     const assessment = assessments[item.id];
@@ -2132,9 +2392,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
 
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
-  //    An item whose planned files overlap a claimed or unmerged item is not claimable (the
-  //    loop never overrides that; `master dispatch --allow-overlap` is the operator's call), and
-  //    the smallest planned scope within a priority is offered first.
+  //    Planned-file overlap never holds an item (dispatch is optimistic: the merge queue and a
+  //    sync round integrate whichever lands second); only exclusive resources do. The smallest
+  //    planned scope within a priority is offered first.
   const claimable = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }).sort(dispatchOrder);
@@ -2703,11 +2963,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     if (state.actions[key]?.state === 'done') return;
     performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) without a valid merge execution: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
-  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !mergedWithoutAuthorization(candidate));
+  //    A candidate waiting its turn in the merge queue is not attempted: the refusal would only
+  //    restate its position, and each one would push its first real attempt further out (GY-192).
+  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !mergedWithoutAuthorization(candidate) && !waitingInMergeQueue(candidate));
+  // The cycle snapshot is 30-45 s old by now, and observations and bookkeeping write to the item
+  // throughout. The merge is invoked on the item as it stands immediately before the call, under
+  // the same action key; one whose candidate or queue turn moved is left to the next cycle.
+  const readMergeItem = async (item: Work, key: string) => {
+    const current = (await effects.snapshot()).work.find(candidate => candidate.id === item.id);
+    return current && current.stage === 'merge' && !mergedWithoutAuthorization(current) && !waitingInMergeQueue(current) && candidateKey('merge', current) === key ? current : null;
+  };
   for (const item of mergeCandidates) await isolate('merge', item, item.key, async () => {
     const key = candidateKey('merge', item);
     const previous = state.actions[key];
-    if (!readyToRetry(previous, state.cycle)) return;
+    if (!mergeRetryDue(previous, item, state.cycle, now())) return;
     // With automatic merging off the guarded merge runs for exactly the candidate an approver
     // agent approved (step 4c requested it). Until that approval is applied, the loop waits on the
     // approver rather than on a person, and says which decision it is waiting for.
@@ -2729,13 +2998,30 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
         return;
       }
     }
+    let target = await readMergeItem(item, key);
+    if (!target) return;
     await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-    try {
-      const result = await effects.merge(item);
-      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${(result as { result?: string })?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      // A refusal is the gate working, not a daemon fault: record it and keep cycling.
-      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+    for (let retries = 0; ; retries++) {
+      try {
+        const result = await effects.merge(target) as { result?: string; pending?: boolean } | undefined;
+        // A retained execution with an unknown provider outcome is pending, not merged (GY-195).
+        if (result?.pending) performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail: `Guarded merge pending for ${item.key}: ${result.result ?? 'the provider outcome is unknown'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        else performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${result?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      } catch (error) {
+        // A race with the item's own background writes judged nothing about the candidate: it is
+        // retried at once on a fresh read, and never counted toward the backoff (GY-192).
+        const race = transientMergeRace(error);
+        if (race && retries < mergeRaceRetries) {
+          const reread = await readMergeItem(item, key);
+          if (reread) { target = reread; continue; }
+        }
+        // A refusal is the gate working, not a daemon fault: record it and keep cycling.
+        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed',
+          detail: `Guarded merge refused for ${item.key}${race ? ` after ${retries + 1} attempt(s) this cycle, each lost to a concurrent write; not counted toward the backoff` : ''}: ${message(error)}`,
+          attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
     }
   });
 
@@ -3280,6 +3566,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     childWaits: () => ledger.drain(),
     // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
     sessionOutput: async agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
+    // The decline is typed into the pane and given a moment to close the dialog, so the instruction
+    // that follows lands in the runtime's input rather than in the closing menu.
+    answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
+    promptSession: async (agent, text) => { await deliverPrompt(agent.name ?? agent.pane_id!, text, run); },
     reportCapacity: (work, event) => deps.mutate(`work/${work.id}/capacity`, event),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
@@ -3345,6 +3635,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
+    baseText: path => baseText(root, current().baseBranch, path, run),
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;
@@ -3386,7 +3677,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
-    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),
+    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
+      work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run)) }),
     settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present

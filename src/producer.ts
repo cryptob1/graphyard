@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
 import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -106,6 +106,8 @@ export const producerIdleGraceMs = producerLedgerSpec.idleGraceMs;
  * Such sessions have a bound of their own, `unstartedRetryLimit`, because a request whose
  * sessions keep not starting has a launcher problem that more launches will not fix.
  */
+/** Every session one request may have in all, however each ended: the dispatch failure limit (auto-dispatch.ts). */
+export const requestAttemptLimit = 12;
 export const sessionRetryLimit = 4, sessionRetryBaseMs = 60_000, sessionRetryMaxMs = 30 * 60_000, unstartedRetryLimit = 3;
 export const sessionRetryDelay = (attempts: number) => Math.min(sessionRetryBaseMs * 4 ** Math.max(0, attempts - 1), sessionRetryMaxMs);
 const retriedStates = ['failed', 'expired'];
@@ -204,6 +206,7 @@ export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
     + `A proof that passes against an unchanged tree proves nothing, so for each proof that passes also show it exercises its criterion: in a second detached worktree of the same head at ${stripped} (git worktree add --detach ${stripped} ${binding.sha}), remove the behaviour the criterion the proof is attached to describes — revert or stub exactly the lines of the change that implement it — and run the same proof there. `
     + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"],"exercise":{"criterion":"<the criterion id, such as AC-1>","behaviour":"<the behaviour you removed, in words a worker can find in the diff>","result":"pass"|"fail","executed":N}} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, a failing or incomplete run submitted as result fail rather than omitted, and exercise as the stripped run's true outcome: a proof that still passes there is recorded as not exercising its criterion rather than as passing, which is the finding, not something to hide — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
     + `Keep everything this session writes — the install, build output, evidence files — inside ${checkout.directory}; Graphyard removes that directory when the session ends. When every proof of the group is submitted, remove both worktrees with git worktree remove --force ${worktree} and git worktree remove --force ${stripped}, print a one-paragraph summary naming each proof and its result, and stop; Graphyard closes this session once it observes the evidence. `
+    + destructivePromptGuidance
     + autonomousSession('submit pass or fail evidence for every proof of the group', `submit that proof as result fail with executed as the cases that ran, putting the blocked command and its error in environment`);
 }
 
@@ -232,10 +235,14 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const pending = ledger.producers.find(record => record.state === 'pending' && record.key === work.key && record.group === binding.group);
   if (pending) throw new Error(`A producer session for ${work.key} ${binding.group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
   // One live session per request: a request whose sessions all failed or expired may be launched
-  // again, as its next attempt, until the retry limit.
+  // again, as its next attempt, until the retry limit. A session that settled any other way while
+  // the request still stands answered nothing, and the dispatcher attempts it again (GY-193), up to
+  // `requestAttemptLimit` sessions for the request in all.
   const prior = ledger.producers.filter(record => record.requestId === request.id);
-  if (prior.some(record => !retriedStates.includes(record.state))) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
-  if (prior.length >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions fail or expire; no further automatic attempt`);
+  if (prior.some(record => record.state === 'pending')) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
+  const failedRuns = prior.filter(record => retriedStates.includes(record.state)).length;
+  if (retriedStates.includes(prior.at(-1)?.state ?? '') && failedRuns >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${failedRuns} sessions fail or expire; no further automatic attempt`);
+  if (prior.length >= requestAttemptLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions; no further automatic attempt`);
   // The profile's room (GY-107): one session per name, and no more sessions than it declares.
   // A name this session would take that Herdr already shows is the same launch twice.
   const id = randomUUID();
