@@ -1055,7 +1055,10 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   // profile's own OpenCode permissions laid over the allow-all.
   const environment: Record<string, string> = { ...contract?.environment, ...profile.environment, ...plan.environment };
   if (account) {
-    const variable = contract ? contract.homeVariable : environmentVariable[account.kind as EnvironmentKind];
+    // A runtime that names no home variable falls back to its kind's known one, and an account
+    // whose home still cannot be applied is refused rather than started on the default login (GY-180).
+    const variable = contract?.homeVariable ?? (Object.hasOwn(environmentVariable, account.kind) ? environmentVariable[account.kind as EnvironmentKind] : null);
+    if (!variable && account.home) throw new LaunchRefusedError(account.kind, `Graphyard refuses to launch account ${account.name}: its home ${account.home} cannot be applied because ${contract && 'fleet' in account ? `runtime ${account.fleet.runtime}` : 'its environment'} names no login-home variable and the ${account.kind} kind has none known, so the session would run on the default login instead of ${account.name}. Set the runtime's home variable with master registry runtime set NAME --home-variable VAR.`);
     if (variable && account.home) environment[variable] = account.home;
     // mise resolves installed runtimes under XDG_DATA_HOME; keep it on the operator's own install.
     if (variable === 'XDG_DATA_HOME' && account.home) {
