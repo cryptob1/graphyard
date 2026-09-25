@@ -65,7 +65,7 @@ test('unit:review-criteria-only-prompt — the reviewer launch prompt states the
     'APPROVE when every criterion is met and no finding or thread is BLOCKING',
     'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion it blocks', 'never request changes for a FOLLOW-UP',
     // The closing lines.
-    '"Resolved threads: ID1 ID2"', '"Follow-up threads: ID3 ID4"', 'End the review body with two lines',
+    '"Resolved threads: ID1 ID2"', '"Follow-up threads: ID3 ID4"', '"Overridden threads: ID5 ID6"', 'End the review body with three lines',
     'files the Follow-up threads and findings as one backlog item',
     // A finding with no thread has its own line, which the loop files in the same item.
     'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own', '"Follow-up finding: PATH:LINE — what is wrong and why"',

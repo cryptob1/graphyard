@@ -94,9 +94,13 @@ test('unit:queue-authored-tip-carry — a carried binding applies only to the ex
   assert.equal(carriedApproval({ ...agent, policy: { ...agent.policy, reviewerProfiles: [{ name: 'cursor', runtime: 'cursor', reviewerApp: 'cursor-app', timeoutSeconds: 1800 }] } } as Work), null, 'an agent approval carries only for the profile still dispatched');
 });
 
-test('unit:queue-real-base-tip — the review launcher refuses a candidate that does not contain the real base tip, and diagnose reports it', () => {
+test('unit:queue-real-base-tip — the review launcher refuses a candidate behind the real base tip that does not merge cleanly, and diagnose reports it', () => {
   const candidate = { sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author: 'worker' };
-  const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], at, prState: 'open', draft: false, baseTip: sha40('b2'), baseTree: sha40('7b'), baseTipContained: false } as Observation;
+  // GY-191: behind and mergeable is reviewed as it stands; only a head GitHub reports conflicting is refused.
+  const mergeable = { key: 'GY-7', policy: { checks: [], review: true }, submission: { epoch: 1, pr: 7 }, candidate, reworkRequested: false,
+    observation: { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], at, prState: 'open', draft: false, baseTip: sha40('b2'), baseTree: sha40('7b'), baseTipContained: false } } as unknown as Work;
+  assert.equal(assertReviewCandidate(mergeable, at).sha, H, 'a mergeable head behind the base is reviewed');
+  const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: false, conflicting: true, protected: true, files: [], scopeFiles: [], at, prState: 'open', draft: false, baseTip: sha40('b2'), baseTree: sha40('7b'), baseTipContained: false } as Observation;
   const work = { key: 'GY-7', policy: { checks: [], review: true }, submission: { epoch: 1, pr: 7 }, candidate, observation, reworkRequested: false, ready: true, dependencies: [], workspaces: [], criteria: [], evidence: [], gates: [], violations: [], plannedFiles: [], scenarioRequirements: [] } as unknown as Work;
   assert.throws(() => assertReviewCandidate(work, at), new RegExp(`GY-7 candidate ${H.slice(0, 12)} does not contain the base branch tip ${sha40('b2').slice(0, 12)}; .* Run graphyard sync GY-7`));
   const behind = diagnose(work, [work], Date.parse(at)).find(entry => entry.kind === 'base-behind')!;
