@@ -114,13 +114,21 @@ export interface ProtectionInputs { repository: string; branch: string; required
 
 export async function readProtection(gh: GitHubCli, repository: string, branch: string): Promise<any | null> {
   const protection = await ghJson(gh, ['api', `repos/${repository}/branches/${branch}/protection`], null) as any;
-  // GitHub executes merges through its merge queue (GY-258), which lives in the branch's rules.
-  if (protection && typeof protection === 'object') {
-    Object.defineProperty(protection, installBranchRules, { value: await ghJson(gh, ['api', `repos/${repository}/rules/branches/${branch}`], null), enumerable: false });
-    // A user-owned repository cannot have a merge queue and merges through auto-merge instead (GY-310).
-    Object.defineProperty(protection, installRepositoryMerge, { value: repositoryMergeSettings(await ghJson(gh, ['api', `repos/${repository}`], null)), enumerable: false });
-  }
+  if (protection && typeof protection === 'object') await attachMergeFacts(gh, repository, branch, protection);
   return protection;
+}
+/**
+ * How GitHub merges on the branch, read whether or not it is protected yet: its merge queue
+ * (GY-258) lives in the branch's rules, and a user-owned repository cannot have one and merges
+ * through auto-merge instead (GY-310). Answers what `mergeQueueSatisfied` and `installMergeMode` read.
+ */
+export async function readMergeFacts(gh: GitHubCli, repository: string, branch: string) {
+  return attachMergeFacts(gh, repository, branch, {});
+}
+async function attachMergeFacts<T extends object>(gh: GitHubCli, repository: string, branch: string, target: T) {
+  Object.defineProperty(target, installBranchRules, { value: await ghJson(gh, ['api', `repos/${repository}/rules/branches/${branch}`], null), enumerable: false });
+  Object.defineProperty(target, installRepositoryMerge, { value: repositoryMergeSettings(await ghJson(gh, ['api', `repos/${repository}`], null)), enumerable: false });
+  return target;
 }
 const installBranchRules = Symbol.for('graphyard.install.branchRules');
 const installRepositoryMerge = Symbol.for('graphyard.install.repositoryMerge');
@@ -236,8 +244,11 @@ export async function applyProtection(gh: GitHubCli, inputs: ProtectionInputs) {
   const payload = protectionPayload(inputs, current);
   const result = await gh(['api', '--method', 'PUT', `repos/${inputs.repository}/branches/${inputs.branch}/protection`, '--input', '-'], { input: JSON.stringify(payload), allowFailure: true });
   if (result.code !== 0) throw new Error(`Branch protection could not be applied; run "gh auth status" and confirm the account administers ${inputs.repository}`);
-  if (mergeQueueSatisfied(current, inputs.graphyardAppId) === false) {
-    if (installMergeMode(current) === 'auto-merge') await enableAutoMerge(gh, inputs.repository);
+  // A fresh repository's branch is unprotected (GitHub answers 404), so its merge settings are read
+  // on their own: the first install must set the merge mode, not only a re-run (GY-310).
+  const merge = current ?? await readMergeFacts(gh, inputs.repository, inputs.branch);
+  if (mergeQueueSatisfied(merge, inputs.graphyardAppId) === false) {
+    if (installMergeMode(merge) === 'auto-merge') await enableAutoMerge(gh, inputs.repository);
     else if (inputs.graphyardAppId && !await applyMergeQueue(gh, inputs.repository, inputs.branch, inputs.graphyardAppId)) await enableAutoMerge(gh, inputs.repository);
   }
   return payload;
