@@ -54,6 +54,30 @@ const binds = (request: Pick<DispatchRequest, 'sha' | 'baseSha' | 'policyRevisio
   !!work.candidate && request.sha === work.candidate.sha && request.baseSha === work.candidate.baseSha && request.policyRevision === work.policyRevision;
 
 /**
+ * Why being behind the base withholds review and proofs of this head, or null when it does not.
+ *
+ * Being behind alone never does (GY-191). Main moves on every merge, so a rule that waited for a
+ * head containing the tip stalled every candidate under load: nothing requested a review, and
+ * nothing refreshed the head once its one refresh was spent. A candidate GitHub reports mergeable
+ * against the current base is reviewed and proven as it stands; the merge queue integrates it with
+ * the current base and re-tests the combined tip before anything merges (merge-queue.ts), so the
+ * merge gate still requires a validated tip that contains the base. Only a head that does not
+ * merge cleanly — GitHub reports a conflict, or has not yet computed mergeability — is withheld,
+ * and that one goes back to its worker for a sync.
+ */
+export function behindBaseHold(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): string | null {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.baseTipContained !== false) return null;
+  // The control plane's own attempt to merge this tip in conflicted (merge-queue.ts baseRefreshConflict).
+  const refresh = work.baseRefresh;
+  if (refresh?.conflict && refresh.from.sha === candidate.sha && refresh.base === observation.baseTip && refresh.policyRevision === work.policyRevision)
+    return `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')} and cannot be brought onto it without resolving a conflict; it needs a sync before it can be reviewed`;
+  if (observation.mergeable === true) return null;
+  const why = observation.conflicting ? 'GitHub reports a merge conflict with that base' : 'GitHub does not report it mergeable against that base';
+  return `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')} and ${why}; it needs a sync before it can be reviewed`;
+}
+
+/**
  * Why the current head does or does not need a launched reviewer.
  *
  * `needed` answers the dispatcher; `state` names *which* answer it is, because most of the
@@ -89,7 +113,8 @@ export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): 
   const verdict = observation.agentReview;
   if (verdict?.verdict === 'changes-requested' && verdict.provider === provider && verdict.sha === candidate.sha)
     return { needed: false, state: 'changes-requested', reason: `${verdict.profile ?? provider} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
-  if (observation.baseTipContained === false) return { needed: false, state: 'base-not-contained', reason: `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')}; a review of it would be dismissed when GitHub recomputes the merge base` };
+  const behind = behindBaseHold(work);
+  if (behind) return { needed: false, state: 'base-not-contained', reason: behind };
   // Mechanical verification precedes judgment, for every provider: no reviewer is asked about a
   // head whose unit and integration proofs have not run, and a head that fails one goes back to
   // its worker (the build gate names the criterion) instead of consuming a reviewer session.

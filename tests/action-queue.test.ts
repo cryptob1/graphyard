@@ -180,9 +180,9 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(item.autoDispatch!.review, null, 'and the control plane asks nobody to review a head nobody may review');
   assert.equal(refusalAction(item, 'review', item.nextAction!.refusal!), 'request-rework', 'the refusal maps there too, so the queue and the gate agree');
 
-  // A head that does not contain the base tip would have any approval of it dismissed when GitHub
-  // recomputes the merge base: that is answered by a fresh reading and a base refresh, not a review.
-  item = await engine.observe(item.id, item.revision, observation(item, { reviews: [], baseTipContained: false, baseTip: sha40('ef') }));
+  // A head that does not contain the base tip and conflicts with it (GY-191: behind alone is
+  // reviewed as it stands) is answered by a fresh reading and a sync, not a review.
+  item = await engine.observe(item.id, item.revision, observation(item, { reviews: [], baseTipContained: false, baseTip: sha40('ef'), mergeable: false, conflicting: true }));
   assert.equal(item.nextAction!.kind, 'resync');
   assert.equal(item.nextAction!.gate, 'review');
   assert.match(item.nextAction!.reason, /does not contain the base tip [0-9a-f]{12}/);

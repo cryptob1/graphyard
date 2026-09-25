@@ -39,4 +39,4 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the first refusing gate and anything else holding the item; `base-behind` resolves itself, `base-conflict` needs rework.
+`graphyard diagnose GY-N` explains the first refusing gate and anything else holding it; conflicting `base-behind` and `base-conflict` get rework.

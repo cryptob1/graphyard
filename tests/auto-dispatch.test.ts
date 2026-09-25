@@ -155,16 +155,25 @@ test('unit:auto-dispatch-binding — a verdict or trusted evidence satisfies the
     for (const transition of transitions) assert.match(transition.request.resolution!, pattern);
     assert.equal(live(fresh).length, 0);
   }
-  // The control plane dispatches codex and agent review through GitHub itself; a head behind the base tip waits.
+  // The control plane dispatches codex and agent review through GitHub itself; a head behind the base tip
+  // waits only when it does not merge cleanly (GY-191).
   const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 }] } as any });
   reconcileAutoDispatch(agent, [agent], new Date(clock));
   assert.equal(agent.autoDispatch!.review, null); assert.equal(reviewNeed(agent).state, 'proofs-pending', 'the control plane\'s own review dispatch waits for the proofs too');
   assert.equal(agent.autoDispatch!.producers.length, 2, 'producers are launched whatever the review provider');
   agent.evidence = provenHead(); assert.match(reviewNeed(agent).reason, /control plane dispatches agent review/);
-  const behind = work({ observation: observation({ sha: H, baseSha: B }, { baseTipContained: false, baseTip: B2 }) });
+  // GY-191: being behind alone never withholds review. A mergeable head behind the tip is reviewed as it
+  // stands; the merge queue integrates and re-tests it against the current base before merging.
+  const behind = work({ evidence: provenHead(), observation: observation({ sha: H, baseSha: B }, { baseTipContained: false, baseTip: B2 }) });
   reconcileAutoDispatch(behind, [behind], new Date(clock));
-  assert.equal(behind.autoDispatch!.review, null); assert.match(reviewNeed(behind).reason, /does not contain the base tip/);
-  assert.equal(behind.autoDispatch!.producers.length, 2, 'evidence for a head behind the base still carries, so it is produced');
+  assert.equal(behind.autoDispatch!.review?.sha, H, 'a mergeable head behind the base is reviewed'); assert.equal(reviewNeed(behind).state, 'required');
+  // One GitHub reports conflicting with the base is withheld: only a sync can move it.
+  const conflicting = work({ evidence: provenHead(), observation: observation({ sha: H, baseSha: B }, { baseTipContained: false, baseTip: B2, mergeable: false, conflicting: true }) });
+  reconcileAutoDispatch(conflicting, [conflicting], new Date(clock));
+  assert.equal(conflicting.autoDispatch!.review, null); assert.match(reviewNeed(conflicting).reason, /does not contain the base tip .* merge conflict/);
+  const unproven = work({ observation: observation({ sha: H, baseSha: B }, { baseTipContained: false, baseTip: B2, mergeable: false, conflicting: true }) });
+  reconcileAutoDispatch(unproven, [unproven], new Date(clock));
+  assert.equal(unproven.autoDispatch!.producers.length, 2, 'evidence for a head behind the base still carries, so it is produced');
 });
 
 test('unit:auto-dispatch-binding — the reviewer profile automatic dispatch launches is the configured one, else the only one', () => {
