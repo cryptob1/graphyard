@@ -4,7 +4,53 @@ import type { ShippingPulse as Pulse } from '../src/shipping-pulse';
 const STALE_AFTER_MS = 120_000;
 const hours = (value: number | null) => value === null ? 'Unavailable' : `${value}h`;
 
-export default function ShippingPulse({ token, repository }: { token: string; repository?: string }) {
+const isNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+// A number the page may show as unavailable: durations, proof totals, and a delivery's pull request number.
+const isHours = (value: unknown) => value === null || isNumber(value);
+const isString = (value: unknown): value is string => typeof value === 'string';
+const isObject = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * Whether a body read from /api/shipping-pulse has every field the page draws: the headline
+ * reads the production median, and Show details reads the counts, the nested production
+ * metric (split, exclusions, coverage), the weeks and the recent deliveries. Anything else
+ * reads as unavailable instead of breaking the page. Fields a server before them did not
+ * send (`configured`, `sources`, `dominantExclusion`, `unconfiguredReason`) may be absent,
+ * and the view reads their absence as it always has.
+ */
+export function wellFormedPulse(body: any): body is Pulse {
+  if (!isObject(body)) return false;
+  const { counts, intentToMerge, prToProduction: production, range, weeks, recent } = body;
+  if (body.completeness !== 'complete' && body.completeness !== 'partial') return false;
+  if (body.partialReason != null && !isString(body.partialReason)) return false;
+  if (!isString(body.generatedAt) || !isObject(range) || !isString(range.start) || !isString(range.end)) return false;
+  if (!isObject(counts) || !isNumber(counts.days7) || !isNumber(counts.days30)) return false;
+  if (!isObject(intentToMerge) || !isHours(intentToMerge.medianHours) || !isNumber(intentToMerge.sampleSize) || !isNumber(intentToMerge.excluded)) return false;
+  if (!isObject(production)) return false;
+  if (production.configured !== undefined && typeof production.configured !== 'boolean') return false;
+  if (production.sparse !== undefined && typeof production.sparse !== 'boolean') return false;
+  if (production.unconfiguredReason != null && !isString(production.unconfiguredReason)) return false;
+  if (![production.averageHours, production.medianHours, production.p90Hours].every(isHours)) return false;
+  if (![production.sampleSize, production.eligible, production.excluded, production.coveragePercent].every(isNumber)) return false;
+  if (!isObject(production.split) || !isHours(production.split.prToMergeAverageHours) || !isHours(production.split.mergeToProductionAverageHours)) return false;
+  if (!isObject(production.exclusions) || !Object.values(production.exclusions).every(isNumber)) return false;
+  if (production.sources != null && (!isObject(production.sources) || !isNumber(production.sources.verifiedDeliveries) || typeof production.sources.providerObservations !== 'boolean')) return false;
+  if (production.dominantExclusion != null && (!isObject(production.dominantExclusion) || !isString(production.dominantExclusion.reason) || !isNumber(production.dominantExclusion.count))) return false;
+  if (!Array.isArray(weeks) || !weeks.every(week => isObject(week) && isString(week.start) && isNumber(week.count))) return false;
+  // The weekly chart labels its first and last week, so deliveries need at least one week to draw.
+  if (!Array.isArray(recent) || (recent.length > 0 && weeks.length === 0)) return false;
+  return recent.every(item => isObject(item) && isString(item.key) && isString(item.title) && isHours(item.pullRequest)
+    && isString(item.mergeSha) && isString(item.mergedAt) && isObject(item.quality)
+    && isHours(item.quality.passingProofs) && isHours(item.quality.requiredProofs)
+    && Array.isArray(item.quality.violations) && item.quality.violations.every(isString)
+    && (item.quality.unavailableReason == null || isString(item.quality.unavailableReason)));
+}
+
+/**
+ * One live read of the shipping pulse: the report, whether the last read failed, and how stale
+ * the figures are. Insights reads it once for its headline numbers and its detail (GY-168).
+ */
+export function usePulse(token: string) {
   const [pulse, setPulse] = useState<Pulse | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   // Staleness is elapsed time since this browser last read the pulse successfully.
@@ -21,16 +67,23 @@ export default function ShippingPulse({ token, repository }: { token: string; re
         if (!response.ok) throw new Error(String(response.status));
         const next = await response.json();
         // Opening Insights lands here, so a malformed body reads as unavailable instead of breaking the page.
-        if (!next || typeof next !== 'object' || !next.counts || !Array.isArray(next.weeks) || !Array.isArray(next.recent)) throw new Error('The shipping pulse report is malformed');
+        if (!wellFormedPulse(next)) throw new Error('The shipping pulse report is malformed');
         if (active) { setPulse(next); setUnavailable(false); readAt.current = performance.now(); setElapsed(0); }
       } catch { if (active) { setUnavailable(true); setElapsed(performance.now() - readAt.current); } }
     };
     void load(); const poll = setInterval(load, 30_000); const tick = setInterval(() => setElapsed(performance.now() - readAt.current), 10_000);
     return () => { active = false; controller.abort(); clearInterval(poll); clearInterval(tick); };
   }, [token, reloads]);
+  return { pulse, unavailable, elapsed, stale: unavailable || elapsed > STALE_AFTER_MS, refresh: () => setReloads(count => count + 1) };
+}
+export type PulseRead = ReturnType<typeof usePulse>;
+
+/** The shipping pulse detail under Insights → Show details, from one read (`usePulse`). */
+export function ShippingPulse({ read, repository }: { read: PulseRead; repository?: string }) {
+  const { pulse, unavailable, elapsed, stale, refresh } = read;
   if (!pulse && !unavailable) return <section className="pulse-state" role="status"><h2>Loading shipping pulse…</h2><p>Reading bounded delivery history from the repository ledger.</p></section>;
   if (!pulse && unavailable) return <section className="pulse-state danger" role="alert"><h2>Shipping pulse unavailable</h2><p>The delivery ledger could not be read. Check the control-plane connection; missing data is not shown as zero.</p></section>;
-  return <ShippingPulseView pulse={pulse!} repository={repository} stale={unavailable || elapsed > STALE_AFTER_MS} elapsed={elapsed} onRefresh={() => setReloads(count => count + 1)}/>;
+  return <ShippingPulseView pulse={pulse!} repository={repository} stale={stale} elapsed={elapsed} onRefresh={refresh}/>;
 }
 
 /**
@@ -53,7 +106,7 @@ export function ShippingPulseView({ pulse, repository, stale, elapsed, onRefresh
   // from reading these as conservative bounds the way the counts can be read.
   const durationSample = pulse.truncated && <p className="muted">Sampled durations: more deliveries fell in this window than the query reads, so these durations come only from the newest ones. Older deliveries in the window were not read and could move these values up or down. Unlike the counts, they are not lower bounds.</p>;
   return <div className="pulse" aria-labelledby="pulse-title">
-    <div className="page-heading"><div><div className="eyebrow">REPOSITORY DELIVERY FLOW</div><h1 id="pulse-title">Shipping pulse</h1><p>Exact observed merges, without individual activity or productivity scoring.</p></div><div className="pulse-actions"><button type="button" onClick={onRefresh}>Refresh</button><span className={`pulse-badge ${state}`}>{state}</span></div></div>
+    <div className="section-title"><div><h2 id="pulse-title">Shipping pulse</h2><p>Exact observed merges, without individual activity or productivity scoring.</p></div><div className="pulse-actions"><button type="button" onClick={onRefresh}>Refresh</button><span className={`pulse-badge ${state}`}>{state}</span></div></div>
     {stale && <div className="notice" role="status"><strong>Data is stale.</strong> This browser last read the pulse {Math.max(1, Math.round(elapsed / 60_000))} minute(s) ago; the repository generated it at {new Date(pulse.generatedAt).toLocaleString()}. Refreshing has not succeeded since, so check the control-plane connection and use Refresh above before relying on these figures.</div>}
     {pulse.completeness === 'partial' && <div className="notice" role="status"><strong>Partial history.</strong> {pulse.partialReason}</div>}
     {empty ? <section className="pulse-state"><h2>No deliveries in this window</h2><p>The ledger was read successfully. No exact observed merges occurred between {new Date(pulse.range.start).toLocaleDateString()} and {new Date(pulse.range.end).toLocaleDateString()} (inclusive, repository UTC).</p></section> : <>
