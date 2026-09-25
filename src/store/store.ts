@@ -6,12 +6,10 @@ import { migration, tables } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
-import { BackgroundLane, leaseLaneConnections, type StoreLane } from './lanes.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 
 export * from './snapshot-delta.js';
 export { advisoryLocks } from './locks.js';
-export * from './lanes.js';
 export type { CoordinationTrim } from './coordination-sql.js';
 
 /**
@@ -44,12 +42,27 @@ async function reserve(pool: pg.Pool) {
   } finally { clearTimeout(timer); }
 }
 
+/**
+ * Which connections a transaction may use (GY-274). Lease renewals run on a reserved pool, so a
+ * saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
+ * tick, whose first pass after a deploy ran 65 s) holds at most half the main pool.
+ */
+export type StoreLane = 'request' | 'lease' | 'background'; export const leaseLaneConnections = 2;
+/** A counting semaphore over the background share; a waiter inherits a released permit directly. */
+export class BackgroundLane {
+  private held = 0; private waiting: (() => void)[] = []; constructor(readonly limit: number) {}
+  get inUse() { return this.held; }
+  async acquire() {
+    if (this.held >= this.limit) await new Promise<void>(resolve => this.waiting.push(resolve)); else this.held++;
+    let released = false;
+    return () => { if (released) return; released = true; const next = this.waiting.shift(); if (next) next(); else this.held--; };
+  }
+}
+
 export class Store {
   pool: pg.Pool;
-  /** Lease renewals only (GY-274, lanes.ts): never shared with requests or the tick. */
-  leasePool: pg.Pool;
-  /** At most half the main pool may serve background work at once. */
-  readonly background: BackgroundLane;
+  /** Lease renewals only; `background` bounds the tick to half the main pool. */
+  leasePool: pg.Pool; readonly background: BackgroundLane;
   constructor(url: string, options: { max?: number } = {}) {
     const max = Math.max(2, Math.floor(options.max ?? 12));
     this.pool = new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
@@ -164,12 +177,9 @@ export class Store {
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   async close() { await Promise.all([this.pool.end(), this.leasePool.end()]); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: { lane?: StoreLane } = {}): Promise<T> {
-    const lane = options.lane ?? 'request';
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
-    let db: pg.PoolClient;
-    try { db = await (lane === 'lease' ? this.leasePool : this.pool).connect(); }
-    catch (error) { permit?.(); throw error; }
+    const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
       // Serializes short coordination decisions across replicas, including dependency edits
