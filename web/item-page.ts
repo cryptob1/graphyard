@@ -49,7 +49,10 @@ export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRel
   const own = steps.current !== 'build' ? work.gates.find(gate => gate.name === stepGate[steps.current!] && !gate.passed) : undefined;
   const failing = own ?? unmet[0];
   const handedIn = steps.current !== 'build';
-  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: steps.who, lines: failing ? plainLines(failing) : [], current: true }];
+  // A blocker recorded before the hand-in fails the ready gate, and the item is Blocked
+  // (web/groups.ts): only the master agent clears it, whatever the builder's step would say.
+  const blocked = failing?.name === 'ready' && !!work.blocker && failing.reasons.includes(work.blocker);
+  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: blocked ? 'Master agent' : steps.who, lines: failing ? plainLines(failing) : [], current: true }];
   for (const gate of unmet) {
     if (gate === failing) continue;
     const step = stepOfGate(gate.name, handedIn);
@@ -81,7 +84,7 @@ export function activityLabel(kind: string): string {
     repair: 'Asked to repair the branch',
     // The control plane's own facts.
     'human.requested': 'Asked you for a decision', 'human.answered': 'You answered', 'review.requested': 'Review requested', 'review.failover': 'Handed to another reviewer',
-    'queue.ejected': 'Taken out of the line to merge', 'queue.predicted': 'Lined up to merge', 'merge.execution.committed': 'Merged', 'delivery.verified': 'Merged',
+    'queue.ejected': 'Taken out of the line to merge', 'queue.predicted': 'Lined up to merge', 'merge.execution.committed': 'Merged', 'delivery.verified': 'Live in production',
     'direct-merge.delivered': 'Merged', 'lease.expired': 'A builder’s time ran out', 'work.closed': 'Closed', 'intake.created': 'Created',
     'base.refreshed': 'Brought up to date with the main branch', 'base.conflict': 'Conflicts with the main branch', 'capacity.exhausted': 'Out of agent capacity',
     'capacity.interrupted': 'Out of agent capacity', 'capacity.restored': 'Agent capacity restored', 'capacity.escalated': 'Asked for more agent capacity',

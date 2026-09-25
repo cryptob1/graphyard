@@ -180,7 +180,9 @@ test('the Activity section reads the kinds the ledger records — command names 
     deployment: true, revoke: true, session: true, request: true, repair: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
-    ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Merged', 'Asked you for a decision', 'Graphyard checked GitHub']);
+    ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Live in production', 'Asked you for a decision', 'Graphyard checked GitHub']);
+  // The merge and the release serving it are two facts: the feed never shows two merges.
+  assert.notEqual(activityLabel('delivery.verified'), activityLabel('merge.execution.committed'));
   assert.equal(activityLabel('something.unheard.of'), 'Updated');
   // The page reads one page of /api/events and does not follow the cursor.
   assert.equal(historyPage, eventHistoryLimits.page);
@@ -214,4 +216,16 @@ test('What is left names who clears each step from the refusal itself: exhausted
   // A conflict with the base and unresolved review threads are the builder's to clear on a new head.
   const threads = { ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', ['Branch protection requires conversation resolution and 2 review threads are unresolved on 594f711015d0: a on b:1; c on d:2. GitHub blocks the merge until each is resolved'])] } as unknown as Work;
   assert.deepEqual(whatIsLeft(threads, NOW).map(group => [group.label, group.who]), [['Review', 'Reviewer agent'], ['Merge', 'Builder agent']]);
+  // A blocker recorded before the hand-in fails the ready gate: the item is Blocked, and only the
+  // master agent clears it — the What is left group and Who acts next both say so.
+  const blocker = 'Needs the staging database credentials';
+  const blocked = { ...base, submission: null, candidate: null, observation: null, reworkRequested: false, blocker, lease: { owner: 'graphyard-codex-1', epoch: 1, expiresAt: at(30 * minute) },
+    gates: [gate('ready', [blocker]), gate('build', ['Worker has not submitted implementation for this attempt', 'Pull request has not been independently observed']),
+      gate('review', ['Independent approval of the current commit is required']), gate('test', []), gate('acceptance', []), gate('merge', ['GitHub observation missing or older than two minutes'])] } as unknown as Work;
+  const blockedAll = [...all, blocked];
+  const [held] = whatIsLeft(blocked, NOW);
+  assert.deepEqual([held.label, held.who], ['Build', 'Master agent']);
+  assert.ok(held.lines.some(line => line.includes(blocker)), 'the blocker is shown as written');
+  assert.equal(nextActor(blocked, groupWithin(blocked, blockedAll, NOW), NOW).who, 'Master agent');
+  assert.match(page(blocked, blockedAll), /<h3>Build <small>· cleared by Master agent<\/small><\/h3>/);
 });
