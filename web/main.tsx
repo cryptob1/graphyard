@@ -46,12 +46,10 @@ function App() {
   function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem('graphyard-token'); setToken(''); setDraftToken(''); setStatus(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
   /** The sign-in page's first read: once the status reply accepts the token, the work snapshot, then the dashboard. */
   async function firstLoad(system: any, signal: AbortSignal) {
-    const epoch = sessionEpoch.current;
-    const response = await fetch('/api/work-snapshot', { headers: { Authorization: `Bearer ${token}` }, signal });
+    const epoch = sessionEpoch.current, response = await fetch('/api/work-snapshot', { headers: { Authorization: `Bearer ${token}` }, signal });
     if (response.status === 401 || response.status === 403) throw Object.assign(new Error(REJECTED_NOTICE), { unauthorized: true });
     if (!response.ok) throw new Error(`Unable to load dashboard (${response.status}).`);
-    const items = await response.json();
-    if (signal.aborted || epoch !== sessionEpoch.current) throw new Error('Superseded');
+    const items = await response.json(); if (signal.aborted || epoch !== sessionEpoch.current) throw new Error('Superseded');
     setWork(items.work); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError('');
   }
   async function refresh(epoch: number) { const [items, system] = await Promise.all([api('work-snapshot'), api('status')]); if (epoch !== sessionEpoch.current) return; setWork(items.work); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
