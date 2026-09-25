@@ -44,6 +44,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // settlement may only be proposed while the local clock can be compared with the control plane.
   const clockOffset = { min: Math.round(startedAt - clock), max: Math.round(readAt - clock) };
   const performed: DaemonAction[] = [];
+  // The merge queue batches by this loop's configuration; a failed publication is retried next cycle.
+  if (effects.publishMergeBatchSize) await timings.step('merge queue', () => effects.publishMergeBatchSize!().catch(() => undefined));
   const resumed = reconcilePendingActions(state, snapshot.work, clock);
   if (resumed.length) { performed.push(...resumed); await timings.step('reconcile', () => effects.persist(state)); }
   // One item's failure is that item's failed action, never the cycle's (GY-187). Each step handles

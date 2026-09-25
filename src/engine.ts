@@ -10,7 +10,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, disprovedConflict, currentRestore, decideIdentityCarry, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, disprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -320,6 +320,18 @@ export class Engine {
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
   documentation: DocumentationPolicy = configuredDocumentation();
+  /**
+   * How many consecutive queue entries one combined tip validates (GY-330): the master's
+   * `mergeQueue.batchSize` as it last published it (POST /api/merge-queue), read back from the
+   * installation ledger by `loadMergeBatchSize`, else the default.
+   */
+  mergeBatchSize = defaultMergeBatchSize;
+  /** Reads the batch size the master last published from the installation ledger. */
+  async loadMergeBatchSize() {
+    const row = (await this.store.pool.query('SELECT (payload->>\'batchSize\')::int AS size FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeBatchSizeEvent])).rows[0];
+    this.mergeBatchSize = Number.isSafeInteger(row?.size) && row.size >= 1 ? row.size : defaultMergeBatchSize;
+    return this.mergeBatchSize;
+  }
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
     if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
@@ -1492,7 +1504,7 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
-    const result = evaluate(work, all, now, this.ciAppIds);
+    const result = evaluate(work, all, now, this.ciAppIds, this.mergeBatchSize);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
     if (work.gates.some(g => !g.passed) || work.violations.length) work.mergeAuthorization = null;

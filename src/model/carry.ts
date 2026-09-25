@@ -10,11 +10,17 @@ import type { Work } from './work.js';
  * approved, proven head H with a tip H' that Graphyard itself produced — a two-parent merge of H
  * and the commit H' will land on, authored by the control-plane App, with no conflict resolved —
  * the two commits are provably the same reviewed content plus already-validated history. Only
- * then is a binding carried, and only as far as the predecessor's changes let it: an approval is
- * carried when the predecessor touched none of the reviewed files, and a proof when its declared
- * scope is disjoint from those changes. Everything else is re-required with the reason recorded.
- * The decision is made once, at publication, from facts the control plane observed itself; it is
- * never asserted by a worker, a producer, or a reviewer.
+ * then is a binding carried. The review judges whether the change is right and the proofs what it
+ * does; the combined tip's CI, which always runs again, judges whether the combination works. So
+ * the first ground is the change's own diff (GY-330): when the tip's diff against its merge base
+ * has the same patch-id as the replaced head's diff against its own, the change nobody changed
+ * keeps its approval and every proof, even where the base edited another hunk of a reviewed file.
+ * Where that is not shown — the diff changed, or a side of it could not be read completely — a
+ * binding carries only as far as the predecessor's changes let it: an approval when the
+ * predecessor touched none of the reviewed files, and a proof when its declared scope is disjoint
+ * from those changes. Everything else is re-required with the reason recorded. The decision is
+ * made once, at publication, from facts the control plane observed itself; it is never asserted by
+ * a worker, a producer, or a reviewer.
  */
 
 /** What Graphyard's merge produced when it published a tip, as GitHub reports the commit. */
@@ -31,7 +37,21 @@ export interface TipMerge {
   conflicts: boolean;
   /** Paths changed between the replaced head's bound base and the predicted base, or null when GitHub could not list them completely. */
   baseChanges: string[] | null;
+  /**
+   * The candidate's own diff on each side of the merge, as patch-ids (GY-330): `reviewed` from
+   * GitHub's compare of the replaced head against its merge base with the bound base, `tip` from
+   * the compare of the tip against its merge base with the predicted base. A side is null when
+   * GitHub could not list it completely (a truncated list, or a file with no textual patch);
+   * absent on records that predate the rule.
+   */
+  diff?: { reviewed: string | null; tip: string | null } | null;
 }
+/**
+ * What a carry decision rested on (GY-330): `diff unchanged` — the tip's own diff has the reviewed
+ * diff's patch-id, so every binding carried; `diff changed` — it has another, so each binding was
+ * decided by the files rule; `files` — no patch-id could be compared, so the files rule decided.
+ */
+export interface CarryGround { rule: 'diff unchanged' | 'diff changed' | 'files'; patchId: string | null; tipPatchId: string | null }
 /** The identity behind an exact-commit approval, as the review gate accepted it. */
 export interface ApprovalIdentity { provider: ReviewProvider; reviewer: string; sha: string; reviewId?: number; reviewerApp?: string }
 export interface CarriedApproval extends ApprovalIdentity { carried: true; originalSha: string; reason: string }
@@ -47,6 +67,8 @@ export interface QueueCarry {
   reviewedFiles: string[];
   approval: CarriedApproval | RequiredApproval;
   evidence: CarriedProof[];
+  /** The ground the decision rested on; absent on decisions recorded before GY-330. */
+  ground?: CarryGround;
 }
 export interface CarryInput {
   from: { sha: string; baseSha: string }; to: { sha: string; baseSha: string }; policyRevision: number; at: string;
@@ -61,6 +83,18 @@ export interface CarryInput {
 }
 
 const short = (sha: string) => sha.slice(0, 12);
+/** The candidate's diff is shown unchanged across the merge: both patch-ids known and equal. */
+export function diffUnchanged(merge: Pick<TipMerge, 'diff'> | null | undefined): boolean {
+  const diff = merge?.diff;
+  return !!diff?.reviewed && diff.reviewed === diff.tip;
+}
+/** How a decision's ground reads in status: `diff unchanged (patch-id 1a2b3c4d5e6f)`. */
+export function describeGround(ground: CarryGround | null | undefined): string | null {
+  if (!ground) return null;
+  if (ground.rule === 'diff unchanged') return `diff unchanged (patch-id ${ground.patchId!.slice(0, 12)})`;
+  if (ground.rule === 'diff changed') return `diff changed (patch-id ${ground.patchId!.slice(0, 12)} became ${ground.tipPatchId!.slice(0, 12)}); files rule`;
+  return 'files rule (the diff could not be compared)';
+}
 const list = (paths: string[]) => paths.length > 6 ? `${paths.slice(0, 6).join(', ')} and ${paths.length - 6} more` : paths.join(', ');
 
 /** The one reason that refuses every binding at once, or null when the tip qualifies for per-binding decisions. */
@@ -73,7 +107,8 @@ export function carryRefusal(input: Pick<CarryInput, 'from' | 'to' | 'merge' | '
   if (!merge.authoredByApp) return `tip ${short(to.sha)} was authored by ${merge.author ?? 'an unknown identity'}, not by the ${input.app} App`;
   if (merge.conflicts) return `tip ${short(to.sha)} needed conflict resolution, which is new content nobody reviewed or proved`;
   if (!predecessor.validated) return predecessor.key ? `predecessor ${predecessor.key} is not fully validated on tip ${short(to.baseSha)}` : `the predicted base ${short(to.baseSha)} is not validated`;
-  if (merge.baseChanges === null) return `the files ${predecessor.key ?? 'the base branch'} changed between ${short(from.baseSha)} and ${short(to.baseSha)} could not be listed completely`;
+  // An unchanged diff decides every binding on its own; the base's file list is needed only without it.
+  if (merge.baseChanges === null && !diffUnchanged(merge)) return `the files ${predecessor.key ?? 'the base branch'} changed between ${short(from.baseSha)} and ${short(to.baseSha)} could not be listed completely`;
   return null;
 }
 
@@ -85,8 +120,21 @@ export function decideCarry(input: CarryInput): QueueCarry {
   if (refusal) {
     return { ...base, approval: { carried: false, reason: refusal }, evidence: input.proofs.map(({ proof }) => ({ proof, carried: false, reason: refusal })) };
   }
-  const changed = merge!.baseChanges!;
   const who = predecessor.key ?? 'the base branch';
+  const diff = merge!.diff ?? null;
+  // The change's own diff is what the review read and what the proofs exercised; the base moving
+  // around it is answered by the combined tip's CI. The same patch-id on both sides carries all.
+  if (diffUnchanged(merge)) {
+    const id = short(diff!.reviewed!);
+    const ground: CarryGround = { rule: 'diff unchanged', patchId: diff!.reviewed, tipPatchId: diff!.tip };
+    const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the replaced head ${short(from.sha)}` }
+      : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `approval of ${short(from.sha)} by ${input.approval.reviewer} carried to Graphyard-authored tip ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` };
+    const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => !evidence ? { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` }
+      : { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` });
+    return { ...base, approval, evidence, ground };
+  }
+  const ground: CarryGround = diff?.reviewed && diff.tip ? { rule: 'diff changed', patchId: diff.reviewed, tipPatchId: diff.tip } : { rule: 'files', patchId: diff?.reviewed ?? null, tipPatchId: diff?.tip ?? null };
+  const changed = merge!.baseChanges!;
   const reviewedTouched = input.reviewedFiles.filter(path => changed.includes(path));
   const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the replaced head ${short(from.sha)}` }
     : reviewedTouched.length ? { carried: false, reason: `${who} changed reviewed files ${list(reviewedTouched)}; a fresh independent approval of ${short(to.sha)} is required` }
@@ -101,7 +149,10 @@ export function decideCarry(input: CarryInput): QueueCarry {
     if (intersecting.length) return { proof, carried: false, evidenceId: evidence.id, producer: evidence.producer, reason: `${who} changed ${list(intersecting)} inside the scope of evidence ${evidence.id}; fresh evidence for ${short(to.sha)} is required` };
     return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: its scope (${list(evidence.scopeFiles)}) is disjoint from the ${changed.length} files ${who} changed` };
   });
-  return { ...base, approval, evidence };
+  // A changed diff names both patch-ids on what it re-required, so the record says why.
+  const changedDiff = ground.rule === 'diff changed' ? `; the candidate's own diff changed (patch-id ${short(ground.patchId!)} became ${short(ground.tipPatchId!)})` : '';
+  const note = <T extends { carried: boolean; reason: string }>(entry: T): T => entry.carried || !changedDiff ? entry : { ...entry, reason: `${entry.reason}${changedDiff}` };
+  return { ...base, approval: note(approval), evidence: evidence.map(note), ground };
 }
 
 export type CarryBearer = Pick<Work, 'candidate' | 'queue' | 'baseRefresh' | 'policyRevision'>;
