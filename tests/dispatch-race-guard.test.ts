@@ -88,7 +88,9 @@ async function masterHarness(state: { work: Work[]; releasedAt?: string | null }
     failures: { [requestId]: { kind, work: 'GY-7', sha: headSha, attempts, reason: `${kind} profile refused the launch`, at: iso(-60_000), nextAt: iso(60_000) } } }), { mode: 0o600 });
   /** Writes the loop's producer ledger with these sessions. */
   const producerSessions = (records: object[]) => writeFile(join(root, '.graphyard/producers.json'), JSON.stringify({ version: 1, producers: records }), { mode: 0o600 });
-  return { run, refusal, reads, close, refusedLaunches, producerSessions, root, credentials };
+  /** Writes the loop's review ledger with these sessions. */
+  const reviewSessions = (records: object[]) => writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify({ version: 1, reviews: records }), { mode: 0o600 });
+  return { run, refusal, reads, close, refusedLaunches, producerSessions, reviewSessions, root, credentials };
 }
 
 const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40), reviewRequestId = 'c'.repeat(32);
@@ -108,6 +110,10 @@ function underProof(): Work {
 /** One producer ledger record for the live producer request, as the loop writes it. */
 const producerSession = (state: string, at: number, attempt = 1) => ({ id: randomUUID(), requestId: producerRequestId, attempt, key: 'GY-7', pr: 12, sha: headSha, baseSha, policyRevision: 1, group: 'manual', proofs: ['manual:produced-review'],
   profile: 'producer', principal: 'producer-principal', agentName: 'produce-1', pane: null, requestedAt: iso(at), expiresAt: iso(at + 3_600_000), state, outcome: {}, closedAt: iso(at + 60_000), resolution: `${state} session`, acknowledgedAt: iso(at + 1_000) });
+
+/** One review ledger record for the live review request, as the loop writes it. */
+const reviewSession = (state: string, at: number, attempt = 1) => ({ id: randomUUID(), key: 'GY-7', pr: 12, sha: headSha, baseSha, policyRevision: 1, profile: 'reviewer', agentName: `review-${attempt}`, pane: null,
+  sessionDirectory: '/nonexistent/review-session', requestedAt: iso(at), tokenExpiresAt: iso(at + 3_600_000), requestId: reviewRequestId, attempt, state, closedAt: iso(at + 60_000), resolution: `${state} session`, acknowledgedAt: iso(at + 1_000) });
 
 /** The executor's durable launch rows for the live review and producer requests. */
 const reviewRow = (overrides: Partial<ActionRow> = {}): ActionRow => dispatchRow({ id: actionId('request-review', workId, 'review'), kind: 'request-review', binding: 'review', gate: 'review',
@@ -269,14 +275,18 @@ test('unit:system-driven-items master review stays open only as the recovery of 
   assert.match(reviewRecovery(underReview(), [verdict('DISMISSED')], undefined, now)!, /completed without satisfying it/, 'a dismissed verdict answers nothing');
   assert.match(reviewRecovery(underReview(), [1, 2, 3, 4].map(n => session('failed', -n * 3_600_000)), undefined, now)!, /exhausted its 4 automatic sessions/);
   assert.match(reviewRecovery(underReview(), [], { attempts: dispatchFailureLimit }, now)!, /refused 12 time\(s\)/);
-  // The durable row is the executor's, on any host: while it is pending, claimed, backing off, settling or about to reopen, the loop still launches the request whatever this host's ledgers say.
-  const stopped = [session('completed', -120_000)];
+  // The durable row is the executor's, on any host: while it is pending, claimed, backing off, settling, about to reopen or stalled and rechecking, a launch the loop's cursor saw refused may still succeed there.
+  const refused = { attempts: dispatchFailureLimit };
   for (const [label, row] of Object.entries(launchRows(reviewRow)))
-    assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), stopped, undefined, now), null, `a ${label} request-review row`);
-  // A row stalled on one unchanged refusal still rechecks, and is claimed a minute after its cause clears: a hand launch in that wait would be a second launch.
-  assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [stalledRow(reviewRow)], history: [] } }), stopped, undefined, now), null, 'a stalled row waiting to recheck');
+    assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), [], refused, now), null, `a ${label} request-review row`);
   // Once the item no longer needs the action its row is retired, and the recovery is the master's again.
-  assert.match(reviewRecovery(underReview({ actionQueue: { actions: [], history: [{ ...stalledRow(reviewRow), resolvedAt: iso(-1_000), resolution: 'retired' }] } }), stopped, undefined, now)!, /completed without satisfying it/);
+  assert.match(reviewRecovery(underReview({ actionQueue: { actions: [], history: [{ ...stalledRow(reviewRow), resolvedAt: iso(-1_000), resolution: 'retired' }] } }), [], refused, now)!, /refused 12 time\(s\)/);
+  // A settled or exhausted request stays the master's to recover whatever row the queue retains: the executor's launch takes the same one-session-per-request ledger lock as the hand recovery, so it stands down on the recovery's session instead of launching beside it.
+  const exhausted = [1, 2, 3, 4].map(n => session('failed', -n * 3_600_000));
+  for (const [label, row] of Object.entries(launchRows(reviewRow))) {
+    assert.match(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), [session('completed', -120_000)], undefined, now)!, /completed without satisfying it/, `a settled request under a ${label} row`);
+    assert.match(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), exhausted, undefined, now)!, /exhausted its 4 automatic sessions/, `an exhausted request under a ${label} row`);
+  }
   const master = await masterHarness({ work: [underReview()] });
   try {
     assert.match(await master.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/);
@@ -286,6 +296,14 @@ test('unit:system-driven-items master review stays open only as the recovery of 
     // The launch reads its review request from the snapshot the guard judged, never from a later one a new head could change.
     assert.equal(master.reads.filter(url => url.startsWith('/api/work-snapshot')).length - before, 1, 'master review reads one work snapshot');
   } finally { await master.close(); }
+  // The executor's request-review row stays queued after the request's sessions are exhausted; master review is still the recovery, not refused as the loop's.
+  const retained = await masterHarness({ work: [underReview({ actionQueue: { actions: [stalledRow(reviewRow)], history: [] } })] });
+  try {
+    assert.match(await retained.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/, 'while the loop still launches it');
+    await retained.reviewSessions([1, 2, 3, 4].map(n => reviewSession('failed', -n * 3_600_000, 5 - n)));
+    // Past the guard the launch itself runs, which this checkout has no reviewer App for.
+    assert.match(await retained.refusal(['review', 'GY-7']), /Register the reviewer GitHub App/, 'an exhausted request under a retained row reaches the launch');
+  } finally { await retained.close(); }
 });
 
 test('unit:system-driven-items master decide attest reopens for a produced manual proof once the loop stops relaunching its producer request', async () => {
@@ -303,14 +321,25 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
   assert.match(producerRecovery(underProof(), 'manual:produced-review', loop([], { [producerRequestId]: { attempts: dispatchFailureLimit } }))!, /refused 12 time\(s\)/);
   assert.equal(handDecision(underProof(), 'attest', attest, loop([producerSession('completed', -120_000)])), null);
   assert.equal(handDecision(underProof(), 'attest', { proof: 'unit:guard' }, loop([producerSession('completed', -120_000)])), 'evidence', 'only a manual proof is ever attested');
-  // The executor launches producers from the durable dispatch row bound to the request; while it runs, the attestation stays the loop's.
-  const stopped = loop([producerSession('completed', -120_000)]);
-  for (const [label, row] of Object.entries(launchRows(producerRow)))
-    assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [row], history: [] } }, 'attest', attest, stopped), 'evidence', `a ${label} producer dispatch row`);
-  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [producerRow({ inputs: { ...producerRow().inputs, requestId: null } as any })], history: [] } }, 'attest', attest, stopped), 'evidence', 'a row naming the request only by its group');
-  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [producerRow({ inputs: { ...producerRow().inputs, requestId: 'e'.repeat(32), group: 'unit' } as any })], history: [] } }, 'attest', attest, stopped), null, "another request's row does not hold this one");
-  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [stalledRow(producerRow)], history: [] } }, 'attest', attest, stopped), 'evidence', 'a stalled row waiting to recheck still launches the producer once its cause clears');
+  // The executor launches producers from the durable dispatch row bound to the request; while its launch can still succeed, the attestation stays the loop's.
+  const withRow = (row: ActionRow) => ({ ...underProof(), actionQueue: { actions: [row], history: [] } });
+  const stopped = loop([], { [producerRequestId]: { attempts: dispatchFailureLimit } });
+  // Sessions that never started exhaust the loop's retries, but the executor's launch is refused only at the session limit.
+  const unstarted = loop([1, 2, 3].map(n => ({ ...producerSession('failed', -n * 3_600_000, 4 - n), resolution: 'never started: no activity' })));
+  assert.match(producerRecovery(underProof(), 'manual:produced-review', unstarted)!, /exhausted its 3 automatic sessions/);
+  for (const [label, row] of Object.entries(launchRows(producerRow))) {
+    assert.equal(handDecision(withRow(row), 'attest', attest, stopped), 'evidence', `a ${label} producer dispatch row`);
+    assert.equal(handDecision(withRow(row), 'attest', attest, unstarted), 'evidence', `a ${label} row still launched after sessions that never started`);
+  }
+  assert.equal(handDecision(withRow(producerRow({ inputs: { ...producerRow().inputs, requestId: null } as any })), 'attest', attest, stopped), 'evidence', 'a row naming the request only by its group');
+  assert.equal(handDecision(withRow(producerRow({ inputs: { ...producerRow().inputs, requestId: 'e'.repeat(32), group: 'unit' } as any })), 'attest', attest, stopped), null, "another request's row does not hold this one");
   assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [], history: [stalledRow(producerRow)] } }, 'attest', attest, stopped), null, 'a retired row launches nothing');
+  // A row whose every claim launchProducer refuses for good — one session per request, or the session limit reached — launches nothing, and the attestation is the only way left.
+  const settled = loop([producerSession('completed', -120_000)]), exhausted = loop([1, 2, 3, 4].map(n => producerSession('failed', -n * 3_600_000, 5 - n)));
+  for (const [label, row] of Object.entries(launchRows(producerRow))) {
+    assert.equal(handDecision(withRow(row), 'attest', attest, settled), null, `a settled request under a ${label} row`);
+    assert.equal(handDecision(withRow(row), 'attest', attest, exhausted), null, `an exhausted request under a ${label} row`);
+  }
   const master = await masterHarness({ work: [underProof()] });
   try {
     const decide = ['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'reviewed', 'by', 'hand'];
@@ -322,6 +351,14 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
     await master.refusedLaunches(producerRequestId, dispatchFailureLimit, 'producer');
     assert.match(await master.refusal(decide), /No master operator-agent identity is provisioned/, 'so does a producer launch the loop gave up on');
   } finally { await master.close(); }
+  // The producer dispatch row stays queued after the request's sessions are exhausted: every claim of it is refused, so the attestation is allowed.
+  const retained = await masterHarness({ work: [{ ...underProof(), actionQueue: { actions: [stalledRow(producerRow)], history: [] } }] });
+  try {
+    const decide = ['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'reviewed', 'by', 'hand'];
+    assert.match(await retained.refusal(decide), /GY-7 is system-driven: master decide attest is a hand action the loop owns/, 'while the loop still launches it');
+    await retained.producerSessions([1, 2, 3, 4].map(n => producerSession('failed', -n * 3_600_000, 5 - n)));
+    assert.match(await retained.refusal(decide), /No master operator-agent identity is provisioned/, 'an exhausted request under a retained row reaches the two-party decision');
+  } finally { await retained.close(); }
 });
 
 test('unit:dispatch-race-guard a hand launch through a long backoff claims nothing once the backoff is about to end', async () => {

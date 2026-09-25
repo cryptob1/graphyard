@@ -2,7 +2,7 @@ import { actionClaimMs, claimable, claimLive, settling, waitingToRetry, type Act
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import type { Work } from '../model/work.js';
-import { sessionRetry } from '../producer.js';
+import { sessionRetry, sessionRetryLimit } from '../producer.js';
 import { dispatchFailureLimit } from '../auto-dispatch.js';
 import { mergedWithoutAuthorization } from '../master.js';
 
@@ -82,8 +82,10 @@ export interface LoopSessions {
  * Why the loop has stopped relaunching a live request, or null while it still launches it: its
  * last session settled without satisfying it, its sessions are exhausted, or its launch was
  * refused `dispatchFailureLimit` times. These are the states in which the loop's dispatch step
- * says no further automatic attempt follows. Whatever the local ledgers say, a durable action row
- * an executor still runs for the request (`rowRunning`) means the loop has not stopped.
+ * says no further automatic attempt follows. A durable action row an executor still runs for the
+ * request (`rowRunning`) means the loop has not stopped — unless the ledger shows a stop the
+ * row's own launch is refused on too (`rowRefused`): such a row is re-offered forever and every
+ * claim of it ends in the same refusal, so it launches nothing and the recovery is the master's.
  *
  * A session closed `completed` on the verdict it posted has answered the request even while the
  * snapshot still carries it: the control plane has not ingested that GitHub review yet. A second
@@ -91,16 +93,19 @@ export interface LoopSessions {
  * together with the first, so the request is stopped only once that verdict is dismissed — and
  * a dismissal reopens the record as `failed`, which the loop relaunches itself.
  */
-function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number, rows: ActionRow[] = []): string | null {
-  if (rowRunning(rows)) return null;
+function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number, rows: ActionRow[], rowRefused: (retry: SessionRetry) => boolean): string | null {
   const retry = sessionRetry(sessions, request.id, now);
   const answered = sessions.filter(session => session.requestId === request.id).at(-1);
   if (answered?.state === 'completed' && answered.verdict && answered.verdict.state !== 'DISMISSED') return null;
-  if (retry.settled && retry.last && retry.last.state !== 'pending') return `${label} request ${request.id}'s session attempt ${retry.attempts} ${retry.last.state} without satisfying it`;
-  if (retry.exhausted) return `${label} request ${request.id} exhausted its ${retry.attempts} automatic sessions`;
+  const stopped = retry.settled && retry.last && retry.last.state !== 'pending' ? `${label} request ${request.id}'s session attempt ${retry.attempts} ${retry.last.state} without satisfying it`
+    : retry.exhausted ? `${label} request ${request.id} exhausted its ${retry.attempts} automatic sessions` : null;
+  if (stopped && rowRefused(retry)) return stopped;
+  if (rowRunning(rows)) return null;
+  if (stopped) return stopped;
   if (failure && failure.attempts >= dispatchFailureLimit) return `the loop's launch of ${label} request ${request.id} was refused ${failure.attempts} time(s)`;
   return null;
 }
+type SessionRetry = ReturnType<typeof sessionRetry>;
 
 /**
  * Whether the loop's executor still runs a durable action row for the request. The local ledgers
@@ -109,9 +114,27 @@ function stoppedRequest(label: string, request: { id: string }, sessions: LoopSe
  * settles, or waiting out a backoff. A stalled row (`actionStall`) is no exception — it is
  * re-offered every `actionStallRecheckMs` and claimed a minute after the condition that refused it
  * clears, so a hand launch made during that wait would be the second of two launches for one
- * request. Only the row's retirement, when the item no longer needs the action, stops the executor.
+ * request. Only the row's retirement, when the item no longer needs the action, stops the executor
+ * — or a stop its launch can never get past (`producerRowRefused`, `reviewRowRefused`).
  */
 const rowRunning = (rows: ActionRow[]) => rows.length > 0;
+
+/**
+ * Whether the executor's claim of a producer dispatch row can only be refused: `launchProducer`
+ * (src/producer.ts) refuses a request that already has a session that did not fail or expire ("one
+ * session per request") and one that has had `sessionRetryLimit` sessions ("no further automatic
+ * attempt"), whatever time passes. A request exhausted only by sessions that never started is
+ * still launched by the executor up to that limit, so its row still runs.
+ */
+const producerRowRefused = (retry: SessionRetry) => retry.settled || retry.attempts >= sessionRetryLimit;
+/**
+ * The review row's counterpart. The executor's `request-review` handler launches through
+ * `launchReview` (src/reviewer.ts), which holds one session per request under the review ledger's
+ * lock: the hand recovery takes that same lock, so the executor's claim stands down on the
+ * recovery's pending session rather than launching beside it. A request the loop has stopped
+ * relaunching is therefore the master's to recover whatever row the queue retains for it.
+ */
+const reviewRowRefused = () => true;
 
 /** The open review launch rows: the executor's `request-review` handler launches for the item's live review request whatever request its row names. */
 const reviewRows = (work: Pick<Work, 'actionQueue'>) => (work.actionQueue?.actions ?? []).filter(row => row.kind === 'request-review');
@@ -127,7 +150,7 @@ const producerRows = (work: Pick<Work, 'actionQueue'>, request: { id: string; gr
  */
 export function reviewRecovery(work: Work, sessions: ReviewSession[], failure: { attempts: number } | undefined, now: number): string | null {
   const request = liveReviewRequest(work);
-  return request ? stoppedRequest('review', request, sessions, failure, now, reviewRows(work)) : null;
+  return request ? stoppedRequest('review', request, sessions, failure, now, reviewRows(work), reviewRowRefused) : null;
 }
 
 /**
@@ -138,7 +161,7 @@ export function reviewRecovery(work: Work, sessions: ReviewSession[], failure: {
  */
 export function producerRecovery(work: Pick<Work, 'autoDispatch' | 'actionQueue'>, proof: string, loop: LoopSessions): string | null {
   const request = work.autoDispatch?.producers.find(entry => entry.state === 'requested' && entry.proofs?.includes(proof));
-  return request ? stoppedRequest('producer', request, loop.sessions, loop.failures[request.id], loop.now, producerRows(work, request)) : null;
+  return request ? stoppedRequest('producer', request, loop.sessions, loop.failures[request.id], loop.now, producerRows(work, request), producerRowRefused) : null;
 }
 
 export const systemDriven = (work: Pick<Work, 'systemDriven'>) => work.systemDriven === true;
