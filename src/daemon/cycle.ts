@@ -14,6 +14,7 @@ import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
+import { faultStep } from './faults.js';
 
 /**
  * One coordination cycle: close finished sessions, reclaim the disk finished assignments hold,
@@ -100,6 +101,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   spent('merge');
 
   await deploymentStep(cycle);
+  // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
+  //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
+  await faultStep(cycle, assessments);
   spent('deployment');
 
   // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have

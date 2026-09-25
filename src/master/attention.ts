@@ -7,6 +7,7 @@ import { currentRestore, refusedReconciliation } from '../merge-queue.js';
 import { missingBaseAncestry } from '../merge-base-ancestry.js';
 import { type ProductionReport, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';
+import { classified, type FaultClass, type FaultKind } from '../model/fault-classes.js';
 import { humanOnlyDecisions } from './harness.js';
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
@@ -28,11 +29,14 @@ export interface ControlPlaneStatus {
  * and `humanOnly` then names which of those decisions it is.
  */
 export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' | 'human'; approvedBy: 'approver' | null; human: boolean; humanOnly: typeof humanOnlyDecisions[number] | null; next: string }
-export interface AttentionItem extends AttentionOwner { subject: string; text: string }
+/** An attention item carries its fault kind and class (GY-173); a builder that sets neither is classified by its wording. */
+export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass }
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
+/** The sources of installation attention; each is also its fault kind. */
+export const installationSources = ['app-permissions', 'held-jobs', 'delegation-limits', 'production'] as const;
 /** The owner of one installation attention line, by the source that raised it. */
-export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'delegation-limits' | 'production', text: string): AttentionOwner {
+export function installationOwner(source: typeof installationSources[number], text: string): AttentionOwner {
   // Reinstating a suspended App installation is an account decision on the operator's GitHub account.
   if (source === 'app-permissions') return /suspended/i.test(text) ? humanOwner('spending money or opening third-party accounts', 'Reinstate the suspended GitHub App installation from the account that owns it')
     : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
@@ -40,12 +44,16 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
   return agentOwner('master', 'Fix or trigger the deployment of the base branch with the configured provider, then graphyard master verify-deployment GY-N for each pending delivery');
 }
+/** Why a work item raises attention; each cause is also its fault kind. */
+export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
+  'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'contaminated', 'merge-base-dismissed', 'merge-refused', 'gate'] as const satisfies readonly FaultKind[];
+export type WorkAttentionCause = typeof workAttentionCauses[number];
 /**
  * The owner of a work item's attention, from the same facts that raised it. Everything an agent
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'contaminated' | 'merge-base-dismissed' | 'merge-refused' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: WorkAttentionCause): AttentionOwner {
   const key = work.key;
   if (cause === 'merge-refused') return agentOwner('master', `Nothing to run by hand: the integration job asks GitHub again on every observation of ${key}; fix what GitHub names (branch protection, the App's pull request permission, a moved head) and the next observation clears it`);
   if (cause === 'merge-base-dismissed') return agentOwner('master', missingBaseAncestry(work)
@@ -120,7 +128,7 @@ export function workAttentionOwner(work: Work, cause: 'human-request' | 'contain
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const report = status?.appPermissions;
   const items: AttentionItem[] = [];
-  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text) });
+  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text), ...classified(source) });
   for (const text of report?.attention ?? []) raise('app-permissions', text);
   if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
@@ -145,7 +153,7 @@ export function fleetStatus(fleet: FleetView | null | undefined) {
     loggedIn: account.loggedIn, quota: account.quota, usage: account.usage, resetsAt: account.resetsAt, observedAt: account.observedAt, eligible: account.eligible, ineligible: account.ineligible }));
   const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.map(text => ({ subject: 'fleet', text,
     ...agentOwner('master', /is not configured/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON' : /serves no role/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --reason REASON, or graphyard master registry account remove NAME --reason REASON'
-      : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)') })) : [];
+      : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)'), ...classified('fleet') })) : [];
   return { attentionItems, fleet: { configured: fleet.configured, revision: fleet.revision, updatedAt: fleet.updatedAt, host: fleet.host, runtimes: fleet.runtimes.map(runtime => runtime.name), accounts, roles: fleet.roles,
     ineligible: accounts.filter(account => !account.eligible).map(account => ({ account: account.account, reason: account.ineligible })), recentSelections: fleet.sessions.slice(-10).map(session => ({ at: session.selectedAt, role: session.role, account: session.account, work: session.work, reason: session.reason, endedAt: session.endedAt })),
     refusals: fleet.refusals.slice(-5), next: fleet.configured ? null : 'No role is configured in the agent registry, so sessions launch from local profiles; run graphyard master registry propose --apply' } };
