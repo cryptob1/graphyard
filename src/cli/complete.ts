@@ -1,3 +1,4 @@
+import { parseArgs } from 'node:util';
 import { workMutation, type CliCommand } from './registry.js';
 import { selfVerification } from './verify.js';
 
@@ -15,12 +16,16 @@ export const completeCommand: CliCommand = {
     '  complete GY-N EPOCH PR        Submit implementation and end the lease; gates decide',
     '                                completion. Refused when the PR reverts, deletes or',
     '                                rewrites files outside plannedFiles relative to the base.',
-    '                                Reports what graphyard verify ran on HEAD and its outcome',
+    '                                Reports what graphyard verify ran on HEAD and its outcome.',
+    '                                --no-docs STATEMENT states the change alters no documented',
+    '                                behaviour, instead of a docs diff (the reviewer checks it)',
   ],
   run: async (context, work) => {
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
-    const submitted = await workMutation(context, work)('submit', { epoch: Number(context.args[0]), pr: Number(context.args[1]) });
+    const { values, positionals } = parseArgs({ args: context.args, options: { 'no-docs': { type: 'string' } }, allowPositionals: true });
+    const statement = values['no-docs']?.trim();
+    const submitted = await workMutation(context, work)('submit', { epoch: Number(positionals[0]), pr: Number(positionals[1]), ...(statement ? { documentation: statement } : {}) });
     context.print({ ...submitted, selfVerification: verification });
   },
 };
