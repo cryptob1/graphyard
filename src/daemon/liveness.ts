@@ -1,5 +1,6 @@
 // Concern: loop liveness — cycle cost, cycle-failure backoff, loop attention and the watchdog.
 import { type AttentionItem, agentOwner } from '../master.js';
+import { classified, noteFault } from '../model/fault-classes.js';
 import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, liveProcess, message, type StepCost } from './state.js';
 import type { LatencyBudget, SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
@@ -129,6 +130,8 @@ export async function noteCycleFailure(state: DaemonState, error: unknown, phase
   const at = new Date(options.now).toISOString();
   const last = { cycle: state.cycle, at, phase, call, reason: message(error).slice(0, 1000), delayMs, nextAt: new Date(options.now + delayMs).toISOString() };
   state.failures = { ...state.failures, consecutive, total: state.failures.total + 1, last };
+  // A run of failures reaching the attention bound is one loop fault instance (GY-173), not one per retry.
+  if (consecutive === cycleFailureAttentionAfter) noteFault(state.faults, { ...classified('loop-failures'), subject: 'loop', text: `${consecutive} consecutive failed cycles, the last in ${describeFailingCall(last)}: ${last.reason}` }, at);
   // The cycle ended, failed, and the loop is alive: the counter and the heartbeat both say so.
   state.cycle += 1;
   state.lastCycleAt = at;
@@ -193,25 +196,25 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
     ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; the time went to child processes in the ${cost.longestWait.step} step (${Math.round(cost.longestWait.childWaitMs / 1000)}s), so look at what Herdr, gh or git is slow on rather than restarting a loop that is still cycling`
     : cost?.slowest ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; shorten the ${cost.slowest.step} step rather than restarting a loop that is still cycling`
       : 'graphyard master status shows the last cycle under daemon.cost';
-  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart) });
+  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart), ...classified('loop-liveness') });
   // A cycle whose own work does not fit its interval is raised whatever the lag says: the loop
   // looks healthy the instant a long cycle ends, and the cost is the only reading that names
   // what took the time. A cycle that merely waited is reported net: its work fit, and the wait is
   // in the breakdown for anyone reading it.
   if (cost && !cost.withinInterval && report.liveness.state !== 'slow' && report.liveness.state !== 'absent') {
-    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.slowest ? `. The ${cost.slowest.step} step is the slowest, at ${Math.round(cost.slowest.ms / 1000)}s of work` : ''}`, ...agentOwner('master', shorten) });
+    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.slowest ? `. The ${cost.slowest.step} step is the slowest, at ${Math.round(cost.slowest.ms / 1000)}s of work` : ''}`, ...agentOwner('master', shorten), ...classified('loop-cost') });
   }
   // A cycle that keeps failing is retried in-process with backoff; past the bound it names the
   // failing call, because a restart would not clear a read that times out every time.
   const failures = report.failures;
   if (failures?.last && failures.consecutive >= cycleFailureAttentionAfter) items.push({ subject: 'loop',
     text: `The master loop has failed ${failures.consecutive} consecutive cycles, the last (cycle ${failures.last.cycle} at ${failures.last.at}) in ${describeFailingCall(failures.last)}: ${failures.last.reason}. It keeps cycling in-process, waiting ${Math.round(failures.last.delayMs / 1000)}s before the next attempt (due ${failures.last.nextAt}); a restart does not clear this`,
-    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
+    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`), ...classified('loop-failures') });
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
-    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`) });
+    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`), ...classified('loop-silence') });
   if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
-    ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step') });
+    ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step'), ...classified('delivery-budget') });
   return items;
 }
 
