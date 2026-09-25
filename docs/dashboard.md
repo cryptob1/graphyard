@@ -9,7 +9,7 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned, GY-162), **
 
 Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**. A tile counts and filters one group.
 
-`GET /api/board` (`src/model/board.ts`) serves these groups; the page derives none. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor` or `human-only`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
+`GET /api/board` (`src/model/board.ts`) serves these groups, not the page. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor` or `human-only`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
 
 ## Workers
 
@@ -24,7 +24,7 @@ Running rows offer:
 
 ## The status sentence
 
-Rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). A merged item reads *Merged* until production serves it, then *Live* (counted this week). Moving and Blocked rows time their step: past thirty minutes, `1h 12m overdue`.
+Rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). A merged item reads *Merged*, then *Live* once production serves it (counted this week). Moving and Blocked rows past thirty minutes read `1h 12m overdue`.
 
 ## An item page
 

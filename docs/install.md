@@ -46,7 +46,7 @@ Show the plan and any `drift` to the human. **Verify** explicit approval; an age
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-It writes credentials, sets the [deployment variables](deployment.md#variables), deploys, runs the App flow and applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
+It writes credentials, sets [deployment variables](deployment.md#variables), deploys, runs the App flow, applies [branch protection](github.md#require-the-check). **Verify** `GET /healthz` answers.
 
 ## Step 4 — the GitHub App confirmation
 
@@ -87,7 +87,7 @@ Confirm `doctor` shows `appPermissions.missing` empty; `delegationLimits` drift 
 
 ## Agent execution contract
 
-Run the preconditions, `--plan`, wait for approval, `--apply`, then report the verification and `nextSteps`. Never read a token file or weaken a gate to finish.
+Run the preconditions and `--plan`, await approval, `--apply`, then report the verification and `nextSteps`. Never read a token file or weaken a gate to finish.
 
 ## Manual fallback for unsupported platforms
 

@@ -31,7 +31,7 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports th
 | `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` or `s3` ([artifacts](recovery.md#artifact-backends-capacity-and-migration)) |
 | `RAILWAY_API_TOKEN` | Optional; records failed or missing deployments as incidents |
 
-Installers derive the four capacity limits from the deployed principals; an unset limit is derived at start-up and reported as `delegationLimits` drift.
+Installers derive the four capacity limits from the deployed principals; an unset one is derived at start-up and reported as `delegationLimits` drift.
 
 ### CI producer
 
@@ -54,12 +54,12 @@ node bin/graphyard.mjs db backup ./graphyard.json   # with DATABASE_URL set
 node bin/graphyard.mjs db verify FILE
 ```
 
-**Upgrade:** back up, deploy, confirm `/healthz` names the new commit, then any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only to an image with the same schema generation. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
+**Upgrade:** back up, deploy, confirm `/healthz` names the new commit, then any [App-permission migration](install.md#upgrading-an-existing-installation). **Rollback** only to a same-schema-generation image. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
 
 ## Manual fallback
 
 Only for an unsupported platform or an existing deployment: set the variables table above by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, and verify with `doctor`.
 
-- Compose: `cp .env.example .env`, replace every secret, then `docker compose --profile full up -d`; put TLS in front of 4310 and never expose Postgres.
+- Compose: `cp .env.example .env`, replace every secret, `docker compose --profile full up -d`; front 4310 with TLS, never expose Postgres.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
 - Railway by hand: `railway init`, `railway add --database postgres`, set the variables, `railway up`. Declare hand-set variables with `preserve()` in `.railway/railway.ts`.

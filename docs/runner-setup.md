@@ -37,8 +37,8 @@ The runner uses a `worker` credential with no proof scope; `graphyard runner att
 - Every send carries the request key `ATTEMPT_ID-ack` and an identical body; the idempotency receipt makes them one commit.
 - An already-acknowledged answer is success; any other 2xx is refused.
 - A confirmed refusal is a decision and is never retried; only transport failures, timeouts, 408, 429 and 5xx are.
-- At most **5 sends**, paused 1, 2, 4 and 8 seconds apart, and no send starts more than **60 seconds** after the first.
-- No heartbeat is sent and the attestor is not told to proceed until the acknowledgement is confirmed.
+- At most **5 sends**, 1, 2, 4 and 8 seconds apart, none starting over **60 seconds** after the first.
+- Until the acknowledgement is confirmed, no heartbeat is sent and the attestor waits.
 
 ### The attempt boundary
 

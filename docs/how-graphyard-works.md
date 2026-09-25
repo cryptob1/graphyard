@@ -28,7 +28,7 @@ Text equivalent: the human operator sends human-only decisions to Graphyard. Her
 
 ![Control-plane components: callers, engine, Postgres, reconciliation worker and GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: sessions, the dashboard and producers call the API; the coordination engine applies each mutation in one locked Postgres transaction and appends an event; the reconciliation worker exchanges facts with GitHub, publishes the required check and runs the guarded merge. The webhook only wakes a job.
+Text equivalent: sessions, the dashboard and producers call the API; the coordination engine applies each mutation in one locked Postgres transaction and appends an event; the reconciliation worker syncs GitHub, publishes the required check and runs the guarded merge; the webhook only wakes a job.
 
 - Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
 - Every claim increments the epoch; commands from an old epoch or an expired lease are refused.

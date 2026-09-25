@@ -11,7 +11,7 @@ Restart `graphyard master run` freely: it reconciles and never dispatches twice.
 
 ## Lost worker before submission
 
-The lease expires 120 seconds after the last heartbeat; the next claim gets a higher epoch; keep the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([who may settle what](delegation.md#who-may-settle-what)).
+A lease expires 120 seconds after the last heartbeat; the next claim gets a higher epoch; keep the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([who may settle what](delegation.md#who-may-settle-what)).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -82,7 +82,7 @@ A merge production never served is a `delivery.deployment-incident` ([observatio
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: never backfill evidence; repair access and open a follow-up item. To merge directly on purpose, an admin opens a window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: never backfill evidence; repair access and open a follow-up item. An admin opens a deliberate direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 

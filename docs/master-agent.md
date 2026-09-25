@@ -9,7 +9,7 @@ Only three decisions are human-only: goals and priorities, spending money or ope
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or externally blocked in Graphyard, and every merged change is verified against the deployed release or has a recorded deployment blocker.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
 
 1. `master status`.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -18,9 +18,9 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
 6. Close finished agent sessions.
 
-Findings, rework, idle workers, proof setup never stop it. `controlPlane.production` flags main ahead of production.
+Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` runs it under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it with `systemctl --user restart graphyard-master` when `daemon.liveness` is `stalled` or `absent`.
+`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it with `systemctl --user restart graphyard-master` when `daemon.liveness` is `stalled` or `absent`.
 
 ### System-driven items
 
@@ -28,20 +28,28 @@ The loop drives every item. Unless created `"systemDriven": false`, one refuses 
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, at most 30). A handle closes at the second consecutive sweep that misses it; an unobserved one is left alone for 3 minutes, and another host's handle to that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
+**The control plane reconciles session liveness; closing finished sessions is not the master's
+manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
+that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
-- **Ended**: agentless pane, or terminal state (`idle`, `done`, `blocked` are not).
-- **Superseded**: a review or proof session for a head the item moved past. Implementation sessions are left to the lease.
+- **Ended**: agentless pane, or terminal state. `idle`, `done` and
+  `blocked` are deliberately not terminal.
+- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+  way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process; concurrency and names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
+sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
 
-**Instead of closing sessions by hand:** nothing (with the loop stopped, `graphyard master run --once` sweeps); attach to an overlong one. Never mark another session's handle finished to free a slot.
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+another session's handle finished to free a slot.
 
 ## Research before build
 
-Before dispatching a feature (or an item with `"research": true`), a read-only Pi session runs on `run.research` (`model`, default `zai/glm-5.3-flash`; `timeoutMinutes` 15; `tokenBudget`; `questionDeadlineHours` 4) and records a `researchBrief`: reusable code, prior art, risks, approach. Product questions go under Needs you with a recommendation and deadline; build proceeds on it, and a differing later answer requests rework. Worker and reviewer prompts carry it. A failed or timed-out run never holds the item; one run per requirements revision.
+Before a feature (or `"research": true` item) dispatches, one read-only Pi session per requirements revision on `run.research` (`model`, `timeoutMinutes` 15, `tokenBudget`) records a `researchBrief` (reusable code, prior art, risks, approach) for the worker and reviewer prompts. Its product questions go under Needs you with a recommended answer and deadline; build proceeds on it, a differing answer requests rework, and a failed run never holds the item.
 
 ## Automatic dispatch at submit
 
