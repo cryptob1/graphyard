@@ -18,6 +18,7 @@ import { mergeOrder } from './delegation.js';
 import { harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
 import { capacityRetryAt, quotaRoles, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
+import { automatableProof } from './model/mechanical-proofs.js';
 import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
@@ -368,12 +369,18 @@ An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
 
-Check the automatic-merge preference in master status. When disabled, each merge
-needs an approved merge decision: request it with \`graphyard master decide GY-N
-merge\`, and \`graphyard master merge\` refuses a candidate the approver agent has not
-approved. Otherwise routine merges may use \`graphyard master merge --all\`. The command
-rechecks the exact current candidate, every configured gate, and GitHub state
-immediately before merging. Unapproved decisions, stale observations, failures, and
+Items are system-driven unless created with \`"systemDriven": false\`: for them
+\`graphyard master run\` dispatches, launches review and proof producers, requests
+merge decisions and performs the guarded merge, and the master CLI refuses those hand
+actions, naming the loop step. The loop drives an item created \`"systemDriven": false\`
+the same way; opting out only also allows the hand actions, so check master status
+for the loop's pending decision or merge before taking one and never request a second.
+Check the automatic-merge preference in master status. When disabled, each merge needs
+an approved merge decision, which the loop requests; a hand
+\`graphyard master decide GY-N merge\` is only for an opted-out item the loop has not
+requested it for, and \`graphyard master merge\` refuses a candidate the approver agent
+has not approved. Otherwise opted-out items may also use \`graphyard master merge --all\`. The guarded merge rechecks the exact current
+candidate, every configured gate, and GitHub state immediately before merging. Unapproved decisions, stale observations, failures, and
 changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read \`docs/master-agent.md\`
 in Graphyard or run \`graphyard master guide\` for the complete operating loop.
@@ -1943,11 +1950,14 @@ export function workAttentionOwner(work: Work, cause: 'human-request' | 'contain
   if (cause === 'containment-settleable') return agentOwner('master', `graphyard master settle-containment ${key} REASON`);
   if (cause === 'containment-grace') return agentOwner('master', `Wait out the grace window, then graphyard master status verifies the host and graphyard master settle-containment ${key} REASON once settleable`);
   if (cause === 'containment') return agentOwner('master', `Stop the recorded supervisor on its host, then graphyard master decide ${key} ${work.stage === 'done' ? 'recover' : 'rework'} REASON and graphyard master approver ${key} DECISION`, 'approver');
-  if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, graphyard master dispatch ${key} PROFILE`);
-  if (cause === 'hold-overdue') return agentOwner('master', `Nothing to decide: the loop dispatches ${key} over the overlap on its next cycle with a free worker; graphyard master dispatch ${key} PROFILE does it now`);
+  // A system-driven item is never pushed by hand (GY-175): the owner text names the loop step, not a command the CLI refuses.
+  const driven = work.systemDriven === true;
+  if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, ${driven ? `the loop's dispatcher launches ${key} again` : `graphyard master dispatch ${key} PROFILE`}`);
+  if (cause === 'hold-overdue') return agentOwner('master', `Nothing to decide: the loop dispatches ${key} over the overlap on its next cycle with a free worker${driven ? '' : `; graphyard master dispatch ${key} PROFILE does it now`}`);
   if (cause === 'proof-gap') return agentOwner('master', `graphyard master decide ${key} grant '{"principal":"PRODUCER","patterns":["${(work.proofGaps ?? [])[0] ?? 'PROOF'}"]}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
-  if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then graphyard master review ${key}`);
-  if (cause === 'launch-review') return agentOwner('master', `Fix the refusal reason, then graphyard master review ${key}`);
+  const reviewNext = driven ? `the loop relaunches the review on its own; graphyard master review ${key} only once the loop has stopped relaunching its request` : `graphyard master review ${key}`;
+  if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then ${reviewNext}`);
+  if (cause === 'launch-review') return agentOwner('master', `Fix the refusal reason, then ${reviewNext}`);
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
   const escalation = standingEscalations(work)[0];
   if (escalation) return agentOwner('master', `graphyard master decide ${key} resolve '{"trigger":"${escalation.trigger}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
@@ -1956,9 +1966,10 @@ export function workAttentionOwner(work: Work, cause: 'human-request' | 'contain
   // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
   const first = work.gates.find(gate => !gate.passed);
   const manual = first?.name === 'acceptance' ? /(manual:[\w./-]+)/.exec(first.reasons.join(' '))?.[1] : undefined;
+  if (manual && driven && automatableProof(work, manual)) return agentOwner('control plane', `The loop's producer session produces ${manual} on the exact head; once the loop stops relaunching its request, graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`);
   if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
-  if (first?.name === 'review') return agentOwner('reviewer', `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
-  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `graphyard master merge ${key}`);
+  if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
+  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', driven ? `Nothing to run by hand: the loop's merge step performs the guarded merge of ${key} once its authorization is current` : `graphyard master merge ${key}`);
   if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
 }
@@ -2925,13 +2936,13 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // runtime prompts, say what it may do. Codex's sandbox is widened to the private state the
     // master's own commands write beside its credential.
     const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment: {} }, null, { writable: [dirname(config.credentialFile)] });
-    const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`;
+    const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and leave dispatch, review, proof production and routine merge of system-driven items (every item not created with "systemDriven": false) to node ${config.cliPath} master run, whose loop performs each; the master CLI refuses those hand actions on them. The loop drives an item created with "systemDriven": false the same way; opting out only also allows those hand actions, so take one only where master status shows the loop has not, and merge by hand only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`;
     const reviewInstruction = config.reviewer
-      ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery path for a refused reviewer launch.`
+      ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery of a review request the loop has stopped relaunching: its session settled without answering it, its automatic sessions are exhausted, or its launch reached the dispatch failure limit with no request-review row still queued; on a system-driven item it is refused before then.`
       : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review; once it is registered, master run launches reviews and producers for every submitted head on its own. Never approve a candidate yourself.`;
     const mergeInstruction = config.autoMerge
-      ? 'Automatic routine merging is enabled. Use the guarded merge command when all gates pass.'
-      : `Automatic merging is disabled, so every merge needs explicit operator approval given by an agent: request it with node ${config.cliPath} master decide GY-N merge REASON and launch the approver; master merge refuses a candidate without an approved merge decision. Never wait on a human for it.`;
+      ? `Automatic routine merging is enabled. The loop's merge step performs the guarded merge of every item when all gates pass; node ${config.cliPath} master merge is also allowed only for an item created with "systemDriven": false.`
+      : `Automatic merging is disabled, so every merge needs explicit operator approval given by an agent. For every item the loop requests the merge decision, launches its approver and merges on the approval. Only for an item created with "systemDriven": false, and only when master status shows no merge decision the loop requested for it, may you request it with node ${config.cliPath} master decide GY-N merge REASON and launch the approver; master merge refuses a candidate without an approved merge decision. Never wait on a human for it.`;
     const administrationInstruction = config.browser
       ? `GitHub administration of ${config.repository} is yours: reconcile protection with node ${config.cliPath} master protection --apply, and when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions, installation-accept, or protection, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
@@ -2950,12 +2961,23 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
 type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies };
+/** Claims the item and builds its worktree; `claimBy` is a hand dispatch's claim deadline (prepareWorkerLaunch). */
+type WorkerPreparer = (root: string, key: string, profileName: string, run?: WorkerCommand, claimBy?: number) => Promise<PreparedWorker>;
 
 /**
  * `sandbox` runs the launch's sandbox probe (GY-134). The worktree prepareWorkerLaunch creates is
  * always probed; a worktree an injected preparer supplies is probed only when a runner is given.
  */
-export interface DispatchOptions { allowOverlap?: boolean; holdBoundMs?: number; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec }
+export interface DispatchOptions {
+  allowOverlap?: boolean; holdBoundMs?: number; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
+  claimBy?: number;
+}
+/** Refuses a hand launch past its `claimBy`: the item's backed-off dispatch action is the executor's again, so the launch claims nothing. */
+export function assertClaimDeadline(key: string, claimBy: number | undefined, now = Date.now()) {
+  if (claimBy !== undefined && now >= claimBy)
+    throw new Error(`${key}: the hand launch did not reach its lease claim before the item's backed-off dispatch action is offered to the executor again, so it claims nothing; the loop's dispatcher launches the item`);
+}
 export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
 export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
   const now = Date.parse(observedAt);
@@ -2976,7 +2998,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   return hold;
 }
 
-export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker> = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
+export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
   assertDispatchable(work, allWork, observedAt, options);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
@@ -3000,7 +3022,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
     for (let attempt = 1; ; attempt++) {
-      try { ({ target, harness, dependencies, delivery, sandbox, started, consent } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null))); break; }
+      try {
+        assertClaimDeadline(work.key, options.claimBy);
+        ({ target, harness, dependencies, delivery, sandbox, started, consent } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy)); break; }
       catch (error) {
         if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
         // The registry session chosen for this launch never ran; its account is free again at once.
@@ -3025,8 +3049,8 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: (root: string, key: string, profileName: string) => Promise<PreparedWorker>, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null) {
-  const prepared = await prepare(root, work.key, profile.name);
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number) {
+  const prepared = await prepare(root, work.key, profile.name, undefined, claimBy);
   // The worker writes its worktree, the worktree's own Git admin directory and the shared one;
   // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
   const paths = workerPaths(prepared.path);
@@ -3119,7 +3143,12 @@ export async function releaseWorkerLaunch(root: string, key: string, epoch: numb
   await run(process.execPath, [config.cliPath, 'release', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
 }
 
-export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand): Promise<PreparedWorker> {
+/**
+ * `claimBy` is a hand dispatch's deadline on this host's clock (GY-175): it is checked again
+ * immediately before the lease claim, after the credential read, discovery and base fetch, so a
+ * backed-off dispatch row the executor may claim by then never meets a second launch at the claim.
+ */
+export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand, claimBy?: number): Promise<PreparedWorker> {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readWorkerCredential(root, profile.credentialFile);
@@ -3130,6 +3159,7 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'inherit'] });
   const base = String(await run('git', ['rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`], { cwd: root, env })).trim();
   if (!/^[0-9a-f]{40}$/i.test(base)) throw new Error('Worker launcher could not resolve the current managed base branch');
+  assertClaimDeadline(key, claimBy);
   const claim = JSON.parse(String(await run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
   const claimedEpoch = Number.isSafeInteger(claim.epoch) && claim.epoch > 0 ? claim.epoch as number : null;
   try {
@@ -4164,6 +4194,11 @@ export interface AutonomyDependencies {
   fetcher?: typeof fetch;
   /** Runs the roster applier; the default is the asynchronous runner with the applier's output passed through. */
   run?: (command: string, args: string[], options?: ChildRunOptions) => string | Buffer | Promise<string | Buffer>;
+  /**
+   * Refuses a `decide` the caller does not own (GY-175), judged on the exact work document and
+   * snapshot clock the decision is then built from, so a later read cannot move the item under it.
+   */
+  assertDecision?: (work: Work, action: string, input: unknown, now: number) => void | Promise<void>;
 }
 const words = (args: string[]) => args.join(' ').trim();
 async function jsonArgument(value: string) { return JSON.parse(value.startsWith('@') ? await readFile(value.slice(1), 'utf8') : value); }
@@ -4180,11 +4215,12 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
   };
   const operator = () => agentToken(root, config, 'operatorAgent');
-  const item = async (key: string | undefined) => {
+  const snapshotItem = async (key: string | undefined) => {
     if (!key) throw new Error(`Use master ${id} GY-N …`);
-    const found = (await deps.coordinator('work-snapshot')).work.find((work: Work) => work.id === key || work.key === key);
-    if (!found) throw new Error(`Unknown work item ${key}`); return found as Work;
+    const snapshot = await deps.coordinator('work-snapshot'), found = snapshot.work.find((work: Work) => work.id === key || work.key === key);
+    if (!found) throw new Error(`Unknown work item ${key}`); return { work: found as Work, now: Date.parse(snapshot.now) };
   };
+  const item = async (key: string | undefined) => (await snapshotItem(key)).work;
   const reason = (rest: string[]) => { const text = words(rest); if (!text) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`); return text; };
   if (id === 'environments') {
     // The agent accounts sessions run on: discover or create them, report login and quota, and
@@ -4225,7 +4261,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     return call(await operator(), `work/${work.id}/requirements`, { ...input, reason: guardBroadScope({ ...input, title: work.title, description: work.description }, reason(args.slice(2)), { allow: allowBroad, command: 'master requirements', existing: work.plannedFiles }) });
   }
   if (id === 'decide') {
-    const work = await item(args[0]); const action = args[1];
+    const { work, now } = await snapshotItem(args[0]); const action = args[1];
     if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON');
     // A handler cites the decisions it followed and the fingerprint of the context it judged from.
     const flags: Record<string, string> = {}; const rest: string[] = [];
@@ -4235,6 +4271,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     }
     const explicit = rest[0] && /^[{@]/.test(rest[0]);
     const input = explicit ? await jsonArgument(rest[0]) : {};
+    await deps.assertDecision?.(work, action, input, now);
     return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(rest.slice(explicit ? 1 : 0)),
       ...(flags.precedent ? { precedent: flags.precedent.split(',').map(value => value.trim()).filter(Boolean) } : {}), ...(flags.context ? { context: flags.context } : {}) });
   }

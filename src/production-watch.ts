@@ -83,16 +83,30 @@ export interface ProductionReport {
   attention: string[];
 }
 export const INCIDENT_EVENT = 'delivery.deployment-incident', RECOVERY_EVENT = 'delivery.deployment-recovered';
+/** A delivery first observed inside the release production serves; containment is never asked again for it. */
+export const CONTAINED_EVENT = 'delivery.deployment-contained';
+/**
+ * The deliveries known not to be in the serving release, with that release: a restart at an
+ * unchanged serving SHA (a config-only restart, a failed rollout, a crash loop) restores them and
+ * asks none again. A plane event (no work id), written only when the set changes.
+ */
+export const PENDING_EVENT = 'production.deployment-pending';
 /** A merged commit not served within this long is a missing deployment. */
 export const DEPLOYMENT_GRACE_MS = 5 * 60_000;
 /** Deliveries older than this are not re-verified against the provider on every pass. */
 export const DEPLOYMENT_WINDOW_MS = 14 * 86_400_000;
 export const DEPLOYMENT_POLL_MS = 60_000;
+/** How often the watch's own timer offers it a pass; the pass itself runs at most once per poll interval. */
+export const PRODUCTION_WATCH_TIMER_MS = 5_000;
 
 export interface ProductionWatchOptions {
   provider: DeploymentProvider | null;
-  /** The control plane's GitHub adapter, for containment and ahead-by; null leaves both unknown. */
-  github: { request(path: string): Promise<any> } | null;
+  /**
+   * The control plane's GitHub adapter, for containment and ahead-by; null leaves both unknown.
+   * The adapter answers both with one-commit compares (`contains`, `aheadBy`); a client with only
+   * `request` is asked the plain compare.
+   */
+  github: { request(path: string): Promise<any>; contains?(base: string, head: string): Promise<boolean>; aheadBy?(base: string, head: string): Promise<number> } | null;
   build: BuildIdentity; baseBranch: string;
   graceMs?: number; windowMs?: number; pollMs?: number; now?: () => number;
 }
@@ -100,7 +114,18 @@ export interface ProductionWatchOptions {
 export class ProductionWatch {
   private incidents = new Map<string, ProductionIncident>();
   private loaded = false; private lastPass = 0;
-  private containment = new Map<string, boolean>();
+  /**
+   * Containment is monotonic: a delivery recorded inside a serving release is deployed and is never
+   * compared again (the record is in the ledger, so a restart — which every deploy is — keeps it).
+   * A delivery known not to be in the serving release is not asked again until production serves
+   * another commit, so an unchanged serving SHA costs no compares and a new one costs one per
+   * delivery still pending. Keyed by work id.
+   */
+  private deployedIn = new Map<string, string>();
+  private notIn = new Map<string, string>();
+  /** The pending set last written to the ledger, so an unchanged one is not written again. */
+  private recordedPending = '';
+  private passing = false;
   private report: ProductionReport;
   constructor(private store: Store, private options: ProductionWatchOptions) {
     this.report = { provider: options.provider?.name ?? null, providerDescription: options.provider?.description ?? null, observedAt: null, error: null, running: options.build.commit, serving: null, servingSource: null, latest: null, ahead: null, aheadError: null, deployed: [], pending: [], incidents: [], attention: [] };
@@ -117,41 +142,66 @@ export class ProductionWatch {
       decided.add(row.work_id);
       if (row.kind === INCIDENT_EVENT && row.payload?.incident) this.incidents.set(row.work_id, row.payload.incident as ProductionIncident);
     }
+    const since = new Date(this.now - (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS) - 86_400_000).toISOString();
+    // Every containment record in the window, newest per item and with no cap: a record left out
+    // would be compared and recorded again, and the duplicate could crowd out another on a later restart.
+    // This runs before the server listens, so it reads only containment records, through their
+    // partial index (events_deployment_contained), never the window's other events.
+    const contained = (await this.store.pool.query('SELECT DISTINCT ON (work_id) work_id, payload FROM events WHERE kind=$1 AND created_at >= $2 AND work_id IS NOT NULL ORDER BY work_id, seq DESC', [CONTAINED_EVENT, since])).rows;
+    for (const row of contained) if (row.work_id && typeof row.payload?.serving === 'string' && !this.deployedIn.has(row.work_id)) this.deployedIn.set(row.work_id, row.payload.serving);
+    // The negative answers for the last serving commit: only the newest record matters, since a
+    // record for an older serving commit would be asked again anyway. The read is a range on
+    // insertion time over pending records only (events_deployment_pending) bounded by the window, so a ledger with no pending record —
+    // the steady state — is not walked end to end at startup. Nothing is lost: a record older than
+    // the window names only deliveries merged before it, which the watch no longer compares.
+    const pending = (await this.store.pool.query('SELECT payload FROM events WHERE kind=$1 AND created_at >= $2 ORDER BY created_at DESC, seq DESC LIMIT 1', [PENDING_EVENT, since])).rows[0]?.payload;
+    if (typeof pending?.serving === 'string' && Array.isArray(pending.workIds)) {
+      for (const id of pending.workIds) if (typeof id === 'string' && !this.deployedIn.has(id)) this.notIn.set(id, pending.serving);
+      this.recordedPending = pendingKey(pending.serving, pending.workIds.filter((id: unknown) => typeof id === 'string' && !this.deployedIn.has(id)));
+    }
     this.loaded = true;
     this.report.incidents = this.openIncidents();
   }
   private openIncidents() { return [...this.incidents.values()].sort((a, b) => a.since.localeCompare(b.since)); }
   status(): ProductionReport { return structuredClone(this.report); }
+  /** Whether a pass is running now. */
+  get busy() { return this.passing; }
 
-  /** Whether `serving` contains `mergeSha`: equal commits, or the provider reports it as an ancestor. */
+  /** Whether `serving` contains `mergeSha`: equal commits, or the provider reports it as an ancestor; null when unknown. */
   private async contains(mergeSha: string, serving: string): Promise<boolean | null> {
     if (mergeSha === serving) return true;
-    const key = `${mergeSha}..${serving}`;
-    if (this.containment.has(key)) return this.containment.get(key)!;
-    if (!this.options.github) return null;
+    const github = this.options.github;
+    if (!github) return null;
     try {
-      // Ancestry between two commits never changes: the adapter answers it with a one-commit compare,
-      // memoized and persisted across restarts. The full compare this used to fetch held the tick for
-      // minutes after every deploy, one request per delivered item.
-      const github = this.options.github as { contains?: (base: string, head: string) => Promise<boolean>; request: (path: string) => Promise<any> };
-      const contained = github.contains ? await github.contains(mergeSha, serving)
+      // The adapter answers ancestry with a one-commit compare, memoized and persisted across restarts.
+      return github.contains ? await github.contains(mergeSha, serving)
         : await github.request(`/compare/${mergeSha}...${serving}`).then(comparison => comparison?.status === 'ahead' || comparison?.status === 'identical');
-      if (this.containment.size > 500) this.containment.delete(this.containment.keys().next().value!);
-      this.containment.set(key, contained);
-      return contained;
     } catch { return null; }
+  }
+  /** How far the base branch is ahead of `serving`: only the count is read, never the commit or file lists (the adapter's `aheadBy` skips the file-bearing first page). */
+  private async aheadBy(serving: string): Promise<number> {
+    const github = this.options.github!, base = this.options.baseBranch;
+    if (github.aheadBy) return github.aheadBy(serving, base);
+    const comparison = await github.request(`/compare/${serving}...${encodeURIComponent(base)}`);
+    if (typeof comparison?.ahead_by !== 'number') throw new Error('GitHub did not report ahead_by');
+    return comparison.ahead_by;
   }
 
   /**
    * One pass, at most once per poll interval: read the provider, decide what production
    * serves, classify every recent delivery, and write incident or recovery events for what
-   * changed. Provider and GitHub failures are reported, never thrown, so the server tick that
-   * hosts the watch keeps reconciling.
+   * changed. Provider and GitHub failures are reported, never thrown. One pass runs at a time;
+   * the server runs it on its own timer (`startProductionWatch`), never inside the reconciliation tick.
    */
   async tick(force = false): Promise<ProductionReport> {
     const now = this.now;
-    if (!force && now - this.lastPass < (this.options.pollMs ?? DEPLOYMENT_POLL_MS)) return this.status();
+    if (this.passing || (!force && now - this.lastPass < (this.options.pollMs ?? DEPLOYMENT_POLL_MS))) return this.status();
     this.lastPass = now;
+    this.passing = true;
+    try { return await this.pass(now); } finally { this.passing = false; }
+  }
+
+  private async pass(now: number): Promise<ProductionReport> {
     if (!this.loaded) await this.load();
     const at = new Date(now).toISOString();
     const report: ProductionReport = { ...this.report, observedAt: at, error: null, attention: [] };
@@ -167,10 +217,7 @@ export class ProductionWatch {
     report.ahead = null; report.aheadError = null;
     if (report.serving && this.options.github) {
       try {
-        const comparison = await this.options.github.request(`/compare/${report.serving}...${encodeURIComponent(this.options.baseBranch)}`);
-        if (typeof comparison?.ahead_by !== 'number') throw new Error('GitHub did not report ahead_by');
-        report.ahead = { by: comparison.ahead_by, head: typeof comparison?.commits?.at?.(-1)?.sha === 'string' ? comparison.commits.at(-1).sha : null,
-          commits: (Array.isArray(comparison.commits) ? comparison.commits : []).slice(-20).map((c: any) => ({ sha: String(c.sha ?? ''), message: String(c.commit?.message ?? '').split('\n')[0].slice(0, 120) })) };
+        report.ahead = { by: await this.aheadBy(report.serving), head: null, commits: [] };
       } catch (error) { report.aheadError = `Base branch comparison is unavailable: ${error instanceof Error ? error.message : String(error)}`; }
     } else if (!report.serving) report.aheadError = 'Production commit is unknown: no provider deployment list is configured and the build reports no commit (set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA)';
     else report.aheadError = 'Base branch comparison needs the GitHub App';
@@ -178,10 +225,12 @@ export class ProductionWatch {
     const delivered = (await this.store.list()).filter(item => item.stage === 'done' && item.delivery && now - Date.parse(item.delivery.mergedAt) <= (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS))
       .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
     report.deployed = []; report.pending = [];
+    const inWindow = new Set(delivered.map(item => item.id));
+    for (const map of [this.deployedIn, this.notIn]) for (const id of map.keys()) if (!inWindow.has(id)) map.delete(id);
     for (const item of delivered) {
       const mergeSha = item.delivery!.mergeSha.toLowerCase();
       const mergedAt = Date.parse(item.delivery!.mergedAt);
-      const contained = report.serving ? await this.contains(mergeSha, report.serving) : null;
+      const contained = await this.containment(item, mergeSha, report.serving, at);
       if (contained === true) { report.deployed.push(item.key); await this.recover(item, report, at); continue; }
       // The newest attempt the provider made for this merge or anything after it: a failed
       // attempt is the incident's reason, an attempt still in flight is not yet a miss.
@@ -197,10 +246,35 @@ export class ProductionWatch {
       await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of the merge; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. Configure RAILWAY_API_TOKEN (or RAILWAY_TOKEN) so the provider reports the failing deployment'}`);
       report.pending.push(item.key);
     }
+    if (report.serving) await this.recordPending(report.serving, at);
     report.incidents = this.openIncidents();
     report.attention = attentionLines(report);
     this.report = report;
     return this.status();
+  }
+
+  /** Containment of one delivery, asked of GitHub only when neither the record nor the last answer for this serving commit decides it. */
+  private async containment(item: Work, mergeSha: string, serving: string | null, at: string): Promise<boolean | null> {
+    if (this.deployedIn.has(item.id)) return true;
+    if (!serving) return null;
+    if (this.notIn.get(item.id) === serving) return false;
+    const contained = await this.contains(mergeSha, serving);
+    if (contained === false) this.notIn.set(item.id, serving);
+    if (contained === true) {
+      this.notIn.delete(item.id);
+      await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, 'graphyard', CONTAINED_EVENT, JSON.stringify({ key: item.key, mergeSha, serving, at })]);
+      this.deployedIn.set(item.id, serving);
+    }
+    return contained;
+  }
+
+  /** Persists the deliveries known not to be in `serving`, when that set changed since the last record. */
+  private async recordPending(serving: string, at: string) {
+    const workIds = [...this.notIn].filter(([, release]) => release === serving).map(([id]) => id).sort();
+    const key = pendingKey(serving, workIds);
+    if (key === this.recordedPending) return;
+    await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', PENDING_EVENT, JSON.stringify({ serving, workIds, at })]);
+    this.recordedPending = key;
   }
 
   private async raise(item: Work, report: ProductionReport, at: string, status: 'failed' | 'missing', deploymentId: string | null, reason: string) {
@@ -219,6 +293,8 @@ export class ProductionWatch {
   }
 }
 
+function pendingKey(serving: string, workIds: string[]) { return workIds.length ? `${serving}:${[...workIds].sort().join(',')}` : ''; }
+
 /** The operator sentences: how far main is ahead, why, and which merged items are not serving. */
 export function attentionLines(report: Pick<ProductionReport, 'ahead' | 'aheadError' | 'serving' | 'incidents' | 'error' | 'latest' | 'provider'>): string[] {
   const lines: string[] = [];
@@ -229,4 +305,24 @@ export function attentionLines(report: Pick<ProductionReport, 'ahead' | 'aheadEr
   if (report.incidents.length) lines.push(`${report.incidents.length} delivered item${report.incidents.length === 1 ? ' has' : 's have'} an open deployment incident: ${report.incidents.map(incident => `${incident.key} (${incident.status})`).join(', ')}`);
   if (report.error) lines.push(report.error);
   return lines;
+}
+
+/**
+ * Runs the watch on its own timer, outside the server's serial reconciliation tick: a provider or
+ * GitHub read that takes minutes (or never answers) holds only the watch, never engine.reconcile,
+ * the delivery sweep or the job queue. A pass still running when the timer fires is not overlapped.
+ */
+export function startProductionWatch(watch: ProductionWatch, options: { intervalMs?: number; announce?: (incident: ProductionIncident) => void; failed?: (error: unknown) => void } = {}) {
+  let startedAt = 0, stallReportedAt = 0;
+  const timer = setInterval(() => {
+    if (watch.busy) {
+      if (Date.now() - startedAt > 5 * 60_000 && Date.now() - stallReportedAt > 5 * 60_000) { stallReportedAt = Date.now(); console.error(`production watch pass running ${Math.round((Date.now() - startedAt) / 1000)}s; reconciliation is unaffected`); }
+      return;
+    }
+    const before = new Set(watch.status().incidents.map(incident => incident.id));
+    startedAt = Date.now();
+    void watch.tick().then(report => { for (const incident of report.incidents) if (!before.has(incident.id)) options.announce?.(incident); }, error => options.failed?.(error));
+  }, options.intervalMs ?? PRODUCTION_WATCH_TIMER_MS);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
 }
