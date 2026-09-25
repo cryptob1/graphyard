@@ -43,7 +43,7 @@ A candidate enters once its gates pass. Its speculative tip (predicted base merg
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. Only the queue head's tip merges moved bases (approval, disjoint-scope proofs carry; CI re-runs). GitHub conflicts are first test-merged on a scratch branch; clean ones log `base.stale-mergeability`, changing nothing.
+Reviews and proofs bind one head, base and policy revision. Only the queue head's tip merges moved bases (approval, disjoint-scope proofs carry; CI re-runs). GitHub conflicts are test-merged on a scratch branch; clean ones just log `base.stale-mergeability`.
 
 ### Direct merges
 
