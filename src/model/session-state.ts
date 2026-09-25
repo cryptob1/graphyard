@@ -16,13 +16,16 @@ const defaultStates: RuntimeStates = () => endedRuntimeStates;
  * latest observation is `working` or `idle` and no older than `sessionObservationFreshMs`; `seen`
  * is that observation's time. A handle nothing has observed yet reads its launcher's record as the
  * first sighting — the launcher watched it start — so a session registered a moment ago is not
- * shown dead, and one the loop never reports goes unseen once that sighting is stale.
+ * shown dead, and one the loop never reports goes unseen once that sighting is stale. A report
+ * that misses such a handle keeps that sighting's time rather than the time of its own write.
  */
 export const sessionObservationFreshMs = 15 * 60_000;
 export interface SessionObservationReading { state: ObservedSessionState; at: string }
 export function latestObservation(handle: Pick<SessionHandle, 'state' | 'updatedAt' | 'observed' | 'observedAt'>): SessionObservationReading | null {
   if (handle.observed && handle.observedAt) return { state: handle.observed, at: handle.observedAt };
-  return handle.state === 'running' ? { state: 'working', at: handle.updatedAt } : null;
+  // A report that missed an unobserved handle carries that first sighting as `observedAt`, so the
+  // write that says the session is absent does not make it read as freshly seen.
+  return handle.state === 'running' ? { state: 'working', at: handle.observedAt ?? handle.updatedAt } : null;
 }
 export interface SessionView {
   /** The latest observation's state, or null for an ended record nothing observed. */
@@ -63,6 +66,15 @@ export function unseenSessions(all: Work[], now: Date) {
 }
 
 /**
+ * `master status`'s session report, with every open record it does not show running beside the
+ * running and finished ones: a session whose observation went stale is neither, and must not
+ * vanish from the status while the Workers page still lists it as unseen.
+ */
+export function withUnseenSessions<T extends object>(report: T, snapshot: { work?: Work[]; now?: string } | null): T & { unseen?: ReturnType<typeof unseenSessions> } {
+  return snapshot?.work && snapshot.now ? { ...report, unseen: unseenSessions(snapshot.work, new Date(snapshot.now)) } : report;
+}
+
+/**
  * The one session state (GY-172): what the loop observes of every Graphyard-launched session it
  * can see, on every dispatch tick, and writes to the handle as `observed` and `observedAt`.
  *
@@ -73,11 +85,12 @@ export function unseenSessions(all: Work[], now: Date) {
  * launcher registered were never observed or closed at all. Now the loop is the one observer, the
  * handle is the one record, and `sessionView` is the one reading.
  *
- * The rules, per open handle on this host with a coordinate to match:
+ * The rules, per open handle on this host:
  * - listed with an agent in the pane: `working` when the runtime says so, `idle` for any at-prompt
  *   state (`idle`, `done`, `blocked`), and `ended` for a state the runtime reserves for an exit;
  * - listed with no agent in the pane (the agent exited to a shell): `ended`;
- * - not listed: one missed report; absent from `lostAfterReports` consecutive reports, `lost`.
+ * - not listed: one missed report; absent from `lostAfterReports` consecutive reports, `lost`;
+ * - no coordinate to match (its launcher never wrote the pane or name): missed like one not listed.
  * `ended` and `lost` close the record with the reason. A runtime that could not be read is a gap,
  * not a report: nothing is counted against any session. A handle nothing has observed yet is left
  * alone through `sessionLaunchGraceMs`, because a session is registered before its runtime starts.
@@ -125,12 +138,14 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
     if (handle.state !== 'running' || options.settled?.has(handleKey(work.id, handle.id))) continue;
     // Another host's runtime answers for its own sessions; a handle with no coordinate cannot be seen.
     if (options.hostId && handle.host !== options.hostId) continue;
-    if (!handle.pane && !handle.agentName) continue;
     const started = Date.parse(handle.startedAt);
     const young = !handle.observed && Number.isFinite(started) && clock - started < grace;
-    const where = handle.pane ? `pane ${handle.pane}` : `session ${handle.agentName}`;
+    // A handle whose launcher never wrote the pane or name it started cannot be matched to anything
+    // the runtime lists: past the launch grace it is missed like a vanished pane, so it is lost and
+    // closed rather than left open, unseen, where no report could ever end it.
+    const where = handle.pane ? `pane ${handle.pane}` : handle.agentName ? `session ${handle.agentName}` : `session ${handle.id} (registered with no pane or name to match)`;
     const base = { workId: work.id, key: work.key, id: handle.id, kind: handle.kind, role: sessionRole(handle), runtime: handle.runtime, host: handle.host, subject: handle.subject };
-    const entry = runtimeSessionOf(handle, runtime);
+    const entry = handle.pane || handle.agentName ? runtimeSessionOf(handle, runtime) : undefined;
     if (entry) {
       const state = observedRuntimeState(entry, handle.runtime, states);
       // A pane whose agent has not started yet looks like one whose agent exited: registration
@@ -154,10 +169,12 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
     const missed = Math.max((handle.missedReports ?? 0) + 1, Number.isFinite(first) ? 2 : 1);
     const lastSeen = handle.observedAt ?? handle.updatedAt, lastAt = Date.parse(lastSeen);
     if (missed < lostAfterReports) {
-      entries.push({ ...base, observed: handle.observed ?? null, observedAt: handle.observedAt ?? null, missedReports: missed, closed: null, outcome: null, changed: true });
+      // The last sighting is carried as it was: for a handle nothing has observed yet that is its
+      // launcher's record, which the write of this miss would otherwise move to now.
+      entries.push({ ...base, observed: handle.observed ?? null, observedAt: handle.observedAt ?? lastSeen, missedReports: missed, closed: null, outcome: null, changed: true });
       continue;
     }
-    entries.push({ ...base, observed: 'lost', observedAt: handle.observedAt ?? null, missedReports: missed, closed: 'lost', changed: true,
+    entries.push({ ...base, observed: 'lost', observedAt: handle.observedAt ?? lastSeen, missedReports: missed, closed: 'lost', changed: true,
       outcome: `vanished: the ${handle.runtime} runtime on ${handle.host} has not reported ${where} for ${Math.round((clock - firstMissedAt) / 1000)}s (absent from ${missed} consecutive session reports, so the session is lost), ${Number.isFinite(lastAt) ? Math.round(Math.max(0, clock - lastAt) / 1000) : 0}s after its last observed activity at ${lastSeen}` });
   }
   return { entries, missing };
@@ -180,9 +197,12 @@ export function reportedHandle(entry: SessionReportEntry): SessionHandleInput {
  * open record for the report to lose.
  *
  * A registration that cannot be written does not refuse the launch, any more than a handle that
- * could not be written ever failed one: the coordinates are written again once it has started, and
- * a launch is never lost to a control plane that was briefly unreachable.
+ * could not be written ever failed one: the coordinates are written again once it has started,
+ * retried `coordinateAttempts` times, and a launch is never lost to a control plane that was
+ * briefly unreachable. Should every attempt fail, the handle has no coordinate the report can
+ * match, and the report loses and closes it after the launch grace rather than leaving it open.
  */
+export const coordinateAttempts = 3, coordinateRetryMs = 500;
 export interface LaunchedCoordinates { pane?: string | null; agentName?: string | null }
 export async function registeredLaunch<T>(record: ((handle: SessionHandleInput) => Promise<unknown>) | undefined, handle: SessionHandleInput,
   start: () => Promise<T>, coordinates: (launched: T) => LaunchedCoordinates | undefined = launched => launched as LaunchedCoordinates | undefined,
@@ -197,7 +217,12 @@ export async function registeredLaunch<T>(record: ((handle: SessionHandleInput) 
   }
   const where = coordinates(launched);
   const pane = where?.pane ?? null, agentName = where?.agentName ?? null;
-  if (!registered || pane || (agentName && agentName !== handle.agentName))
-    await record({ ...handle, state: 'running', ...(agentName ? { agentName } : {}), ...(pane ? { pane, ...(attach ? { attach: attach(pane) } : {}) } : {}) }).catch(() => {});
+  if (!registered || pane || (agentName && agentName !== handle.agentName)) {
+    const coordinated = { ...handle, state: 'running' as const, ...(agentName ? { agentName } : {}), ...(pane ? { pane, ...(attach ? { attach: attach(pane) } : {}) } : {}) };
+    for (let attempt = 1; attempt <= coordinateAttempts; attempt++) {
+      if (await record(coordinated).then(() => true, () => false)) break;
+      if (attempt < coordinateAttempts) await new Promise(done => setTimeout(done, coordinateRetryMs * attempt));
+    }
+  }
   return launched;
 }

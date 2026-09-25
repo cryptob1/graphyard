@@ -3903,8 +3903,12 @@ export async function registeredReview<T>(config: MasterConfig, args: string[], 
   const work = snapshot.work.find(item => item.id === args[0] || item.key === args[0]);
   const profile = args[1] ? config.reviewers.find(entry => entry.name === args[1]) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
   if (!work?.candidate || !profile) return launch();
-  const request = liveReviewRequest(work), sha = work.candidate.sha;
-  return registeredLaunch(handle => mutate(`work/${work.id}/session`, handle), { id: request?.id ?? `review:${sha}`, kind: 'review', role: 'review', head: sha, runtime: profile.kind, host: config.hostId,
+  const request = liveReviewRequest(work), sha = work.candidate.sha, id = request?.id ?? `review:${sha}`;
+  // A reviewer already recorded open for this request on this head is another launch's session:
+  // registering over it, then closing it when the launcher refuses the duplicate, would record a
+  // running reviewer as ended. Only a handle this call creates is registered, so only it is closed.
+  if (work.sessions?.some(handle => handle.id === id && handle.state === 'running' && handle.head === sha)) return launch();
+  return registeredLaunch(handle => mutate(`work/${work.id}/session`, handle), { id, kind: 'review', role: 'review', head: sha, runtime: profile.kind, host: config.hostId,
     ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), subject: `${work.key}: review ${sha.slice(0, 12)} (PR #${work.candidate.pr})`, state: 'running' },
   launch, launched => launched as { pane?: string | null; agentName?: string | null }, pane => herdrAttach(pane, config.herdrWorkspace));
 }

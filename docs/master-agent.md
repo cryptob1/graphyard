@@ -25,9 +25,9 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, 10 seconds by default and 30 at most), storing each handle's observed state. A handle the runtime stops reporting closes at the second consecutive sweep
+manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, 10 seconds by default and 30 at most), storing each handle's observation. A handle the runtime stops reporting closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `dispatch.sessionReconcile` reports each closure:
+that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane, or terminal state. `idle`, `done` and

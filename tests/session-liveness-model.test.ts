@@ -8,8 +8,8 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import type { RuntimeSession, SessionHandle } from '../src/model/sessions.js';
-import { lostAfterReports, observeSessions, observedRuntimeState, sessionObservationFreshMs, sessionObservationRefreshMs, sessionView, runningSessions } from '../src/model/session-state.js';
+import { recordSession, type RuntimeSession, type SessionHandle } from '../src/model/sessions.js';
+import { lostAfterReports, observeSessions, observedRuntimeState, reportedHandle, sessionObservationFreshMs, sessionObservationRefreshMs, sessionView, runningSessions } from '../src/model/session-state.js';
 import { dispatchEffects, emptyDispatchCursor, herdrSessionListing, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { runtimeEndedStates } from '../src/harness.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -167,6 +167,34 @@ test('unit:session-liveness-model — the rule itself: what a listed entry says,
   assert.equal(sessionView(handle({ observed: 'working', observedAt: new Date(now.getTime() - sessionObservationFreshMs - 1).toISOString() }), now).live, false, 'stale: not running');
   assert.equal(sessionView(handle({ observed: 'lost', observedAt: now.toISOString() }), now).live, false, 'lost is never running');
   assert.equal(sessionView(handle({ state: 'finished', observed: 'working', observedAt: now.toISOString() }), now).live, false, 'a closed record is never running');
+});
+
+test('unit:session-liveness-model — a missed report keeps the last sighting, and a handle with no coordinate to match is lost rather than left open', () => {
+  const now = new Date('2026-09-24T12:00:00.000Z'), ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
+  const handle = (fields: Partial<SessionHandle>): SessionHandle => ({ id: 's', kind: 'review', principal: 'p', epoch: null, runtime: 'claude', host: 'host-1', workspace: null, tab: null,
+    pane: 'wF:p1', agentName: null, role: 'review', head: null, attach: null, transcript: null, subject: 'GY-1: s', startedAt: ago(10 * 60_000), updatedAt: ago(10 * 60_000), endedAt: null,
+    state: 'running', outcome: null, ...fields });
+  const work = (sessions: SessionHandle[]) => ({ id: 'w', key: 'GY-1', sessions } as unknown as Work);
+
+  // Nothing observed this session yet and the report misses it: the write of that miss must not
+  // make it read as seen just now. The launcher's record stays its last sighting.
+  const unobserved = work([handle({})]);
+  const [miss] = observeSessions([unobserved], [], now, { hostId: 'host-1' }).entries;
+  assert.deepEqual([miss.missedReports, miss.closed, miss.observedAt], [1, null, ago(10 * 60_000)]);
+  recordSession(unobserved, reportedHandle(miss), 'executor-a', now);
+  const written = unobserved.sessions![0];
+  assert.equal(written.updatedAt, now.toISOString(), 'the record was written now');
+  assert.deepEqual(sessionView(written, now), { observed: 'working', seenAt: ago(10 * 60_000), live: true, unseenMs: null }, 'yet it is seen when its launcher last saw it');
+  assert.equal(sessionView(written, new Date(now.getTime() + 6 * 60_000)).live, false, 'and goes unseen once that sighting is stale, not 15 minutes after the miss');
+
+  // A launcher that never wrote the pane or name it started: nothing the runtime lists can match it.
+  const bare = handle({ pane: null, agentName: null });
+  assert.deepEqual(observeSessions([work([handle({ pane: null, agentName: null, startedAt: now.toISOString(), updatedAt: now.toISOString() })])], [], now, { hostId: 'host-1' }).entries, [], 'still inside the launch grace: its coordinates may yet be written');
+  const [first] = observeSessions([work([bare])], [{ name: 'someone-else', pane_id: 'wF:p9', agent: 'claude', agent_status: 'working' }], now, { hostId: 'host-1' }).entries;
+  assert.deepEqual([first.missedReports, first.closed], [1, null], 'past the grace it is missed like a vanished pane');
+  const [second] = observeSessions([work([{ ...bare, missedReports: 1 }])], [], now, { hostId: 'host-1' }).entries;
+  assert.equal(second.closed, 'lost', 'and lost at the second consecutive report, so it is closed rather than left open and unseen');
+  assert.match(second.outcome!, /has not reported session s \(registered with no pane or name to match\)/);
 });
 
 test('unit:session-liveness-model — only the observer writes the observation, a delivered item keeps it fresh, and a reopened record carries none of the previous runtime session', async () => {

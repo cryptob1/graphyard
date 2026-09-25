@@ -18,6 +18,7 @@ import { masterInit } from './master-init.js';
 import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
 import { executorHostHeader } from '../model/registry.js';
+import { withUnseenSessions } from '../model/session-state.js';
 import { derivedIntent } from './planned-files-intent.js';
 import { readSecretFromStdin } from './context.js';
 import { reviewerCommand } from './master-reviewer.js';
@@ -154,9 +155,10 @@ export const masterCommands = defineCommands([
         return print(await writeHarnessPermissions(root, masterHarness(root, master, kind.data!), !!values.apply));
       }
       if (id === 'status') {
-        const report = await masterStatusReport(root, master, masterApi, coordinator, cli);
+        let read: any = null; // the snapshot the report read, for the sessions it shows unseen (GY-172)
+        const report = await masterStatusReport(root, master, async path => { const result = await masterApi(path); if (path === 'work-snapshot') read = result; return result; }, coordinator, cli);
         const state = await readDaemonState(root, master).catch(() => null);
-        return print({ ...report, daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null } });
+        return print({ ...report, sessions: withUnseenSessions(report.sessions, read), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null } });
       }
       if (id === 'settle-containment') {
         if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');

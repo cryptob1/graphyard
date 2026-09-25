@@ -171,13 +171,23 @@ test('integration:every-launch-registered — the executor, the loop\'s reviewer
     assert.ok(loopTick.launched.length, `the tick launched the reviewer; it waited on ${JSON.stringify([loopTick.waiting, loopTick.refused])}`);
     assert.deepEqual(order, [`record:${request.id}:running`, 'start:loop-review', `record:${request.id}:running:wA:p71`]);
 
-    // `master review`.
+    // `master review`, once the loop's reviewer has ended too.
+    await mutate(`work/${item.id}/session`, { id: request.id, kind: 'review', runtime: 'claude', host: 'machine-a', subject: `${item.key}: review`, state: 'finished', outcome: 'judged' });
     order.length = 0;
     await registeredReview(master, [item.key], { work: [withReview(await reload(item.id))] }, (path, body) => { order.push(`record:${(body as SessionHandleInput).id}:${(body as SessionHandleInput).state}${(body as SessionHandleInput).pane ? `:${(body as SessionHandleInput).pane}` : ''}`); return mutate(path, body); },
       async () => { order.push('start:master-review'); return { pane: 'wA:p72', agentName: 'review-claude-2' }; });
     assert.deepEqual(order, [`record:${request.id}:running`, 'start:master-review', `record:${request.id}:running:wA:p72`]);
     const recorded = (await reload(item.id)).sessions!.find(handle => handle.id === request.id)!;
     assert.deepEqual([recorded.pane, recorded.agentName, recorded.kind, recorded.head], ['wA:p72', 'review-claude-2', 'review', sha]);
+
+    // A second `master review` for the same request while that reviewer runs is refused by the
+    // launcher; it must not register over the running reviewer nor close it with its refusal.
+    order.length = 0;
+    await assert.rejects(registeredReview(master, [item.key], { work: [withReview(await reload(item.id))] }, (path, body) => { order.push(`record:${(body as SessionHandleInput).id}:${(body as SessionHandleInput).state}`); return mutate(path, body); },
+      async () => { throw new Error(`A reviewer session for ${item.key} is already pending`); }), /already pending/);
+    assert.deepEqual(order, [], 'nothing is recorded for a duplicate launch');
+    const running = (await reload(item.id)).sessions!.find(handle => handle.id === request.id)!;
+    assert.deepEqual([running.state, running.pane, running.outcome], ['running', 'wA:p72', null], 'the running reviewer stays recorded open');
 
     // A launch that fails ends its registration with why, rather than leaving an open record to be lost.
     await assert.rejects(registeredLaunch(handle => mutate(`work/${item.id}/session`, handle), { id: 'doomed', kind: 'coordination', runtime: 'claude', host: 'machine-a', subject: `${item.key}: doomed`, state: 'running' },
