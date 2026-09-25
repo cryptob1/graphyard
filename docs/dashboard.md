@@ -9,7 +9,7 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned, GY-162), **
 
 Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**. A tile counts and filters one group.
 
-`GET /api/board` (`src/model/board.ts`) serves these groups; the page derives none. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor` or `human-only`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items first, as `board.owed`.
+`GET /api/board` (`src/model/board.ts`) serves these groups; the page derives none. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor` or `human-only`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
 
 ## Workers
 
