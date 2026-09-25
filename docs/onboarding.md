@@ -39,7 +39,7 @@ Profiles default to `"approvals": "auto"` so sessions never block on a permissio
 
 ### Configure the fleet
 
-The **agent registry** records runtimes, accounts and roles, proposed from local logins:
+The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies, proposed from `~/.coding_agents`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -48,7 +48,7 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Write a value starting with a dash onto its flag with `=`:
+Write a dash-led value onto its flag with `=`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -58,7 +58,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-An account is one login, held by reference, never the credential:
+An account is one login, held by reference:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
@@ -70,11 +70,11 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 
 ### Add a role
 
-Most preferred account first:
+Most preferred account first; policy applies next launch:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude; Codex is overflow"
-node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --reason "Review on a different model than the author"
+node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only, frontier model"
 ```
 
 ### Size review and proof capacity

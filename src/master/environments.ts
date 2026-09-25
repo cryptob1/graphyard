@@ -13,6 +13,7 @@ import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, en
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, readCredentialFile } from './config.js';
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
+import { timedCall } from './timings.js';
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
@@ -149,8 +150,10 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
   const cacheKey = `${environment.name}\0${environment.home}\0${ceiling}\0${probe.quota !== false}`, cached = healthCache.get(cacheKey);
   if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
-  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } = environment.kind === 'claude' ? await claudeAccount(environment, probe, now)
-    : environment.kind === 'codex' ? await codexAccount(environment, probe)
+  // The probe is an external call like any other: one of a second or more is named on the cycle
+  // or status build that made it, with the account it read (GY-377).
+  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } = environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
+    : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
     : environment.kind === 'opencode' ? { loggedIn: Object.keys((await readJsonFile(resolve(environment.home, 'opencode/auth.json'))) ?? {}).length > 0, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' }
     : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
   const future = (usage: AccountUsage) => !usage.resetsAt || Date.parse(usage.resetsAt) > now;
@@ -290,12 +293,15 @@ export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'
     select: request => client.select({ ...request, observations: request.observations.map(entry => !held[entry.account] ? entry
       : { account: entry.account, quota: { ...entry.quota, state: 'exhausted', resetsAt: held[entry.account].until, reason: describeObservedExhaustion(entry.account, held[entry.account]).slice(0, 500) } }) }) } };
 }
-export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string; kind?: string; environment?: Record<string, string> }, probe: FleetProbe = {}): Promise<LaunchSelection> {
+/** The registry's choice for a role it defines, recorded in the environment log; null when the registry does not define the role. */
+export async function selectRegistryAccount(config: Pick<MasterConfig, 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; principal?: string }, probe: FleetProbe = {}) {
   const fleet = await selectFleetSession(config, role, profile, await heldAwareProbe(config, probe));
-  if (fleet) {
-    await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped).catch(() => {});
-    return fleet;
-  }
+  if (fleet) await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped).catch(() => {});
+  return fleet;
+}
+export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string; kind?: string; environment?: Record<string, string> }, probe: FleetProbe = {}): Promise<LaunchSelection> {
+  const fleet = await selectRegistryAccount(config, role, profile, probe);
+  if (fleet) return fleet;
   const at = new Date(probe.now?.() ?? Date.now()).toISOString();
   const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
   const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
@@ -364,6 +370,20 @@ export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'p
 }
 
 /**
+ * A registry account's startup arguments, from the revision it was chosen in: the runtime's contract,
+ * then the role policy's flags (a permission mode, an auto-approve flag), its model on the runtime's
+ * model flag and its tool allowlist on the runtime's tools flag. A role that limits tools on a runtime
+ * with no tools flag is refused rather than launched with every tool.
+ */
+export function registryLaunchArgs(account: FleetLaunchAccount) {
+  const { contract, policy, modelId } = account.fleet, args = [...contract.args, ...(policy?.args ?? [])];
+  const model = contract.modelFlag && modelId && !args.includes(contract.modelFlag) ? [contract.modelFlag, modelId] : [];
+  const tools = policy?.tools ?? [];
+  if (tools.length && !contract.toolsFlag) throw new LaunchRefusedError(account.kind, `Graphyard refuses to launch account ${account.name}: role ${account.fleet.role ?? 'unknown'} limits its sessions to ${tools.join(', ')}, but runtime ${account.fleet.runtime} names no tools flag, so the session would run with every tool. Set it with master registry runtime set ${account.fleet.runtime} --tools-flag=FLAG.`);
+  return [...args, ...model, ...(tools.length ? [contract.toolsFlag!, tools.join(',')] : [])];
+}
+
+/**
  * What a session launches with once its account is chosen: the account's kind and home, the
  * profile's arguments when they belong to that runtime, and the runtime's broadest approval mode.
  * Codex keeps its workspace sandbox, so the paths and network access the role needs are added to it:
@@ -376,16 +396,19 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   // arguments, the variable that selects the login home, and the flag that selects its model.
   const contract = account && 'fleet' in account ? account.fleet.contract : null;
   const kind = account?.kind ?? profile.kind;
-  const own = !account || account.kind === profile.kind ? profile.agentArgs : [];
-  const model = contract?.modelFlag && account && 'fleet' in account && account.fleet.modelId && !own.includes(contract.modelFlag) && !contract.args.includes(contract.modelFlag) ? [contract.modelFlag, account.fleet.modelId] : [];
+  // A registry launch takes its runtime, account, model and policy from the registry alone (GY-170):
+  // the local profile's own arguments and environment apply only to roles the registry does not define.
+  const fleetArgs = account && 'fleet' in account ? registryLaunchArgs(account) : null;
+  const own = fleetArgs ?? (!account || account.kind === profile.kind ? profile.agentArgs : []);
+  const profileEnvironment = fleetArgs ? {} : profile.environment;
   // An approvals opt-out is refused, naming the runtime, before any session starts (GY-184).
   assertNoApprovalOptOut(kind ?? 'unnamed', profile.approvals);
-  const plan = agentLaunchPlan(kind, profile.approvals, [...(contract?.args ?? []), ...model, ...own], { ...contract?.environment, ...profile.environment });
+  const plan = agentLaunchPlan(kind, profile.approvals, fleetArgs ?? [...(contract?.args ?? []), ...own], { ...contract?.environment, ...profileEnvironment });
   // So is an effective launch whose own arguments or environment still let the runtime ask.
   if (plan.refusal) throw new LaunchRefusedError(kind ?? 'unnamed', plan.refusal);
   // The plan's variables come last: they are the recipe's, where the profile set none, or the
   // profile's own OpenCode permissions laid over the allow-all.
-  const environment: Record<string, string> = { ...contract?.environment, ...profile.environment, ...plan.environment };
+  const environment: Record<string, string> = { ...contract?.environment, ...profileEnvironment, ...plan.environment };
   if (account) {
     // A runtime that names no home variable falls back to its kind's known one, and an account
     // whose home still cannot be applied is refused rather than started on the default login (GY-180).

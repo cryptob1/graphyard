@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { mergeBatchSize } from '../master.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
-import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
+import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
@@ -30,8 +29,12 @@ import { terminalDecisions } from './decision-report.js';
 import { masterBoard } from '../model/board.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { throughputStatus } from '../throughput.js';
+import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
+import { slowReportReader } from '../master/report-cache.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+// `master scope` lives in its own module; it is read from here as it always was.
+export { approveScopeRequest } from './master-scope.js';
 
 /** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
@@ -49,22 +52,30 @@ export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewA
  * review, producer, dispatch, daemon and administration ledgers, the dispatch schedule with its
  * overlap holds, and the conflict set of every open candidate probed over the fetched PR heads.
  */
-export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost } = {}) {
-  const runtime = await observeHerdrAgents();
-  const credentials = await inspectWorkerCredentials(root, master.workers);
+export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; now?: () => number; reportReadBoundMs?: number } = {}) {
+  // Every phase of the build is timed, and every server read of a second or more is named with its
+  // route and the phase it was made in: the report carries both under `timings` (GY-377).
+  const timings = new Timings(dependencies.now);
+  const report = await withTimings(timings, () => buildStatusReport(root, master, timedApi(masterApi), coordinator, cli, dependencies));
+  return { ...report, timings: timings.report() };
+}
+
+async function buildStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; reportReadBoundMs?: number }) {
+  const runtime = await timedStep('herdr', () => observeHerdrAgents());
+  const credentials = await timedStep('credentials', () => inspectWorkerCredentials(root, master.workers));
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
-  const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
+  const { snapshot, clockOffset } = await timedStep('snapshot', () => snapshotWithClock(() => masterApi('work-snapshot')));
   // Sessions the automatic dispatcher launched are settled against this same snapshot: a
   // head change cancels them here as well as in the loop, so status never shows a stale one.
-  try { reviewRecords = (await reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null })).reviews; }
+  try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
   catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
   let producerRecords = (await readProducerLedger(root)).producers;
-  try { producerRecords = (await reconcileProducers(root, master, snapshot.work, runtime.available ? runtime.agents : null)).producers; } catch { /* the ledger as last written stands */ }
+  try { producerRecords = (await timedStep('reconcile producers', () => reconcileProducers(root, master, snapshot.work, runtime.available ? runtime.agents : null))).producers; } catch { /* the ledger as last written stands */ }
   const reviews = summarizeReviews(reviewRecords), producers = summarizeProducers(producerRecords);
   // Every request whose last session failed or expired, with its attempts and the next relaunch.
   const retries = [...sessionRetries(reviewRecords, Date.now()), ...sessionRetries(producerRecords, Date.now())];
   // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
-  const { setup, attention: setupItems } = await setupHealth(root, master, dependencies.supervisorHost);
+  const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost));
   // Status reads the cursor as the loop would, repairing an over-long string in memory; the loop
   // is what logs and persists that repair, so status reports the cursor rather than announcing it.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
@@ -72,17 +83,17 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
   // A dispatcher that keeps failing its tick launches nothing for any item; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
-  const containment = await assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
+  const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
   // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes,
   // over the inventory the loop's reclaim step cached (GY-360): walking a thousand trees here, on
   // every call, is what made status take minutes.
   const worktrees = worktreesDirectory(root);
-  const inventory = await statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false })), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
+  const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
   // live there, and it is judged against its own minimum and budget, before a write there fails.
-  const managedRoot = await managedRootStatus(root, master, [...reviewRecords, ...producerRecords]);
+  const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
   const intervalMs = master.run.intervalSeconds * 1000;
@@ -101,10 +112,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
   // role, the sessions running against the declared limit and the longest wait for a slot.
-  const sessions = nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath, { batchSize: mergeBatchSize(master) }), snapshot.work, agentOwner),
-    snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
+  const sessions = await timedStep('build status', () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath, { batchSize: mergeBatchSize(master) }), snapshot.work, agentOwner),
+    snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
-  const status = routedScopeStatus(await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository)), snapshot.work, cycling?.approvals);
+  const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;
@@ -120,7 +131,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, executors and owed judgments come from derivedAttention, which the loop reads too.
   const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
-    { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees });
+    { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
+      // The intervention report takes the server a minute: status reads the loop's copy, or a bounded live read.
+      reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs });
   // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot)];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
@@ -148,7 +161,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
-    board: await masterBoard(masterApi, snapshot, coordinator, decisions.unanswered),
+    board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
@@ -180,8 +193,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
 }
 
 /** What the report adds after buildMasterStatus; the loop reads it too, to track every class (GY-173). */
-export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
-  observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & Pick<Parameters<typeof derivedAttention>[5], 'rows' | 'trees' | 'standalone' | 'approvals'> & { commit: string | null }) {
+export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
+  observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & Pick<Parameters<typeof derivedAttention>[5], 'rows' | 'trees' | 'standalone' | 'approvals'> & { commit: string | null;
+    /** How the slow intervention report is read (report-cache.ts): the loop's `background`, status's `bounded`, or live. */
+    reports?: 'background' | 'bounded'; reportBoundMs?: number }) {
   const generatedFiles: AttentionItem[] = [];
   try {
     const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
@@ -190,13 +205,16 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
     generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
       ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
   }
+  // Per-item reads run bounded-concurrently and each read below is a step of the recorder in force (GY-377).
   const overflow = await contextOverflows(masterApi, snapshot.work);
-  const interventions = await interventionSummary(masterApi);
+  const reports = slowReportReader(master, masterApi, observed.reports, observed.reportBoundMs);
+  const summarized = await timedStep('attention: interventions', () => interventionSummary(reports.read));
+  const interventions = { ...summarized, summary: { ...summarized.summary, ...reports.freshness() } };
   const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(root) }, { hostId: master.hostId });
-  const decisions = await terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() });
-  const throughput = await throughputStatus(root, coordinator, snapshot.work);
-  const resources = await resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop });
-  const derived = await derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } });
+  const decisions = await timedStep('attention: decisions', () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() }));
+  const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work));
+  const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }));
+  const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
   // The report's last step over the whole list, which the loop runs too: a cause named once, in place of its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
@@ -220,23 +238,4 @@ export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: num
     withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
     lastOverrun: overruns.length ? describe(overruns.at(-1)!) : null,
   };
-}
-
-/**
- * `master scope`: apply an open scope request of the lease-holding epoch as an additive
- * requirements revision; a root-level directory needs --allow-broad-scope.
- */
-export async function approveScopeRequest(root: string, config: MasterConfig, args: string[], deps: { coordinator: (path: string) => Promise<any>; fetcher?: typeof fetch; operatorToken?: () => Promise<string> }) {
-  const allowBroad = args.includes(broadScopeFlag); args = args.filter(flag => flag !== broadScopeFlag);
-  if (!args[0]) throw new Error(`Use master scope GY-N [${broadScopeFlag}] [REASON]`);
-  const work = ((await deps.coordinator('work-snapshot')).work as Work[]).find(item => item.id === args[0] || item.key === args[0]);
-  if (!work) throw new Error(`Unknown work item ${args[0]}`);
-  const request = work.scopeRequest;
-  if (!request) throw new Error(`${work.key} has no open scope request to approve`);
-  if (!work.lease || work.lease.epoch !== request.epoch) throw new Error(`${work.key}'s scope request belongs to epoch ${request.epoch}, which no longer holds the lease; ask the live worker to request again`);
-  const token = await (deps.operatorToken ? deps.operatorToken() : agentToken(root, config, 'operatorAgent')), fetcher = deps.fetcher ?? fetch;
-  const plannedFiles = [...new Set([...work.plannedFiles, ...request.paths])];
-  const reason = guardBroadScope({ ...work, plannedFiles }, args.slice(1).join(' ').trim() || `Approve ${request.requestedBy}'s scope request: ${request.reason}`, { allow: allowBroad, command: 'master scope', existing: work.plannedFiles });
-  const response = await fetcher(`${config.url}/api/work/${work.id}/requirements`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': process.env.GRAPHYARD_REQUEST_ID ?? randomUUID() }, body: JSON.stringify({ expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason }), signal: AbortSignal.timeout(30_000) });
-  const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
 }

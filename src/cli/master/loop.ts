@@ -6,6 +6,7 @@ import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../.
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../../auto-dispatch.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
 import { unhandled, type MasterSession } from './session.js';
+import { timedApi } from '../../master/timings.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 export async function loopCommand(session: MasterSession): Promise<unknown> {
@@ -25,9 +26,12 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
     const executor = daemonExecutor(coordinator.actor.id);
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation, executor });
-    const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => masterApi('work-snapshot'), masterMutation, executor, randomUUID())(work);
+    // The guarded merge's reads and writes are timed against the cycle that made them (GY-377);
+    // daemonEffects times its own.
+    const timedRead = timedApi(masterApi), timedMutation = timedApi(masterMutation, 'POST');
+    const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => timedRead('work-snapshot'), timedMutation, executor, randomUUID())(work);
     // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
-    effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
+    effects.merge = async work => { assertProtocol(await timedRead('status')); return guardedMerge(work); };
     // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon.
     const dispatchCursor = await readDispatchCursor(root, master);
     const stopping = new AbortController();

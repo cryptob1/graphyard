@@ -9,7 +9,7 @@ Graphyard is one stateless container plus Postgres.
 
 ## Versioned images
 
-Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports the version and `commit`; alert on `/healthz?strict` (503 when unhealthy).
+Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports version and `commit`; alert on `/healthz?strict` (503 when unhealthy).
 
 ## Variables
 

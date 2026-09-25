@@ -241,17 +241,15 @@ export function contextOverflowAttention(context: Pick<EscalationContext, 'key' 
     next: `Raise ${contextBudgetVariable} on the control plane, or run graphyard master escalation ${context.key} ${context.escalation.trigger} --budget N with N above ${context.budget.assembled ?? context.budget.limit}` };
 }
 /** Read the context of every standing escalation on open work and return the overflow attention; an unreadable context is skipped. */
-export async function contextOverflows(read: (path: string) => Promise<any>, work: Work[]) {
-  const items: NonNullable<ReturnType<typeof contextOverflowAttention>>[] = [];
-  for (const item of work) {
-    if (item.stage === 'done') continue;
-    for (const escalation of standingEscalations(item)) {
-      const context = await read(`work/${encodeURIComponent(item.key)}/context?trigger=${escalation.trigger}`).catch(() => null);
-      const attention = context?.budget ? contextOverflowAttention(context) : null;
-      if (attention) items.push(attention);
-    }
-  }
-  return items;
+export async function contextOverflows(read: (path: string) => Promise<any>, work: Work[], concurrency = 12) {
+  // Each standing escalation's context is its own read, so they run at once, `concurrency` at a
+  // time, in the order a serial pass would have reported them (GY-377).
+  const escalations = work.filter(item => item.stage !== 'done').flatMap(item => standingEscalations(item).map(escalation => ({ item, escalation })));
+  const contexts: (EscalationContext | null)[] = new Array(escalations.length);
+  let next = 0;
+  const worker = async () => { while (next < escalations.length) { const index = next++, { item, escalation } = escalations[index]; contexts[index] = await read(`work/${encodeURIComponent(item.key)}/context?trigger=${escalation.trigger}`).catch(() => null); } };
+  await Promise.all(Array.from({ length: Math.min(concurrency, escalations.length) }, worker));
+  return contexts.flatMap(context => { const attention = context?.budget ? contextOverflowAttention(context) : null; return attention ? [attention] : []; });
 }
 
 /** Where the rules layer is read: the base tip the item was observed against, else its bound base, else the base branch name. */

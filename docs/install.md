@@ -87,7 +87,7 @@ Confirm `doctor` shows `appPermissions.missing` empty; `delegationLimits` drift 
 
 ## Agent execution contract
 
-Run the preconditions and `--plan`, await approval, `--apply`, then report the verification and `nextSteps`. Never read a token file or weaken a gate to finish.
+Run the preconditions and `--plan`, await approval, `--apply`, then report verification and `nextSteps`. Never read a token file or weaken a gate to finish.
 
 ## Manual fallback for unsupported platforms
 

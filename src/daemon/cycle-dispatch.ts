@@ -133,7 +133,12 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await effects.planeHealth() : null;
   if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
     performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  // Each item's profile is chosen in dispatch order, one after another, and taken before the next
+  // item chooses; the launches themselves do not depend on each other and run at once (GY-377),
+  // so a cycle that dispatches to every free profile costs one launch, not the sum of them. The
+  // concurrency is bounded by capacity: a launch holds a distinct healthy profile for its duration.
   const taken = new Set<string>();
+  const launches: Promise<unknown>[] = [];
   for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (state.actions[key] && state.actions[key].state !== 'failed') return;
@@ -151,6 +156,14 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       }
       return 'stop';
     }
+    taken.add(choice.profile.name);
+    launches.push(isolate('dispatch', item, item.key, () => launch(item, key, choice!, free, pick)));
+  }) === 'stop') break;
+  await cycle.timings.step('launches', () => Promise.all(launches));
+
+  /** One item's launch on the profile chosen for it, passing a profile another dispatcher holds over for the next free one. */
+  async function launch(item: Work, key: string, chosen: NonNullable<ReturnType<typeof health.find>>, free: Awaited<ReturnType<typeof effects.agents>>, pick: () => ReturnType<typeof health.find>) {
+    let choice = chosen;
     const previous = state.actions[key];
     for (;;) {
       const current = choice;
@@ -180,14 +193,14 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
           if (error.resource === 'work') taken.delete(current.profile.name);
           if (previous) state.actions[key] = previous; else delete state.actions[key];
           await effects.persist(state);
-          return error.resource === 'profile' ? 'stop' : undefined;
+          return;
         }
         recordProfileFailure(state, current.profile, message(error), now());
         performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       }
     }
-  }) === 'stop') break;
+  }
 
   // 4b. A base branch that moved under an in-flight candidate GitHub reports conflicting with it
   //     (GY-292: a clean one keeps its head, CI, review and proofs, and only the queue head is
