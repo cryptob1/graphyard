@@ -6,6 +6,7 @@ import { formatAge } from '../duration';
 import { classify, groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, humanOnlyIds, summarySentence, upNextMeaning, type OpenGroup } from '../groups';
 import { leftFlowAt, releaseView } from '../release';
 import { stalledCards } from './actionless';
+import { groupFaults, statusFaults, workFaults } from '../../src/model/fault-classes';
 import type { Dashboard } from './dashboard';
 
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -30,6 +31,13 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   const humanOnly = humanOnlyIds(work, status?.humanOnly);
+  // Open problems by fault class (GY-173): one count per shared cause, read from each open item's
+  // own record the same way the master loop reads it, and from the control plane's status — the
+  // App permissions, integration jobs, GitHub pause and unserved executors its notices show — so a
+  // cause behind several items or notices reads as one. A single problem is already its own row
+  // or notice, so the grouping is drawn once there are two to group.
+  const problems = [...work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now)), ...statusFaults(status)];
+  const faults = problems.length > 1 ? groupFaults(problems) : [];
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const recent = shippedThisWeek(work, now, release);
   // The latest is the newest merge: most real deliveries carry no release record, so ordering by
@@ -60,6 +68,11 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
     {status?.githubBudget?.paused && <div className="notice danger" role="alert"><strong>GitHub requests are paused until {status.githubBudget.paused.until}.</strong> {status.githubBudget.paused.reason}. What exhausted the budget: {status.githubBudget.lastHour.requests} requests in the last hour{status.githubBudget.lastHour.byKind.length > 0 && ` (${status.githubBudget.lastHour.byKind.map((entry: any) => `${entry.kind} ${entry.requests}`).join(', ')})`}. Every gate reads stale until the pause lifts{status.jobs?.length > 0 && `; ${status.jobs.length} integration job${status.jobs.length === 1 ? '' : 's'} recorded the refusal`}.</div>}
     {status?.jobs?.length > 0 && !status?.githubBudget?.paused && <div className="notice danger">{status.jobs.length} GitHub update(s) failed: {status.jobs[0].error}</div>}
     {status?.executors?.attention?.length > 0 && <div className="notice danger" role="alert" aria-label="Unserved actions"><strong>{status.executors.live === 0 ? 'No executor is running.' : `No executor serves ${status.executors.attention.map((entry: any) => entry.kind).join(', ')}.`}</strong> {status.executors.attention.map((entry: any) => <p key={entry.kind}>{entry.text}</p>)}<p className="muted">An action nobody can claim is not queued behind other work; nothing moves until an executor of its kind is started. <a href="/docs/master-agent-reference#running-executors-under-supervision">How executors are supervised ↗</a></p></div>}
+    {/* Drawn whether or not any work exists: status-level faults stand without an item. */}
+    {faults.length > 0 && <section className="fault-classes" aria-label="Problems by class">
+      <h2>Problems by class <small>one cause, counted once per class</small></h2>
+      <ul>{faults.map(group => <li key={group.faultClass} data-fault-class={group.faultClass} title={group.meaning}><span className="mono">{group.faultClass}</span> <strong>{group.count}</strong> <small>{group.subjects.join(', ')}</small></li>)}</ul>
+    </section>}
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
       <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
         <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{group === 'up-next' ? upNextMeaning(byGroup['up-next'], work, now) : groupMeaning[group]}</small>

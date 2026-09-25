@@ -261,6 +261,7 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
  * the runtime says about its arguments (GY-101).
  */
 export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null;
+  /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
   assertSessionName(name, options.retry);
@@ -280,6 +281,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
   const command = launchCommand(kind, args, files, options.prefix);
   await herdrRun(['pane', 'run', pane, command], run);
+  options.onRun?.();
   const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates });
   let named = true;
   try { await herdrJson(['agent', 'rename', pane, name], run); }
