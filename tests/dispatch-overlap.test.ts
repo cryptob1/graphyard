@@ -284,9 +284,15 @@ test('unit:no-hold-behind-open-pr — a fresh item is not held behind an overlap
   assert.deepEqual(dispatchOverlap(fresh, [inReview, building, fresh], clock).map(entry => [entry.key, entry.state, entry.paths]), [['GY-184', 'claimed', [hotspot]]]);
   assert.throws(() => assertDispatchable(fresh, [inReview, building, fresh], iso(0)), /held by planned-file overlap with GY-184 \(claimed, build\) on src\/master-daemon\.ts/);
   assert.deepEqual(dispatchSchedule([inReview, building, fresh], clock).held.map(entry => [entry.key, entry.ahead.map(item => item.key)]), [['GY-192', ['GY-184']]]);
-  // A pull request that was closed is no longer open: that item holds again on the files its candidate changed.
+  // A pull request that was closed while nobody holds the item: nothing is being built on it and it cannot
+  // enter the merge queue, so it holds nothing (in master status either) until it is claimed again.
   const closed = { ...inReview, observation: { ...inReview.observation!, prState: 'closed' } } as Work;
-  assert.deepEqual(dispatchOverlap(fresh, [closed, fresh], clock).map(entry => entry.key), ['GY-166']);
+  assert.deepEqual(dispatchOverlap(fresh, [closed, fresh], clock), [], 'a closed, unclaimed candidate holds nothing');
+  assert.equal(dispatchHold(fresh, [closed, fresh], clock), null);
+  assert.equal(effectiveConcurrency([closed, fresh], clock).edges, 0);
+  // Claimed again for rework, it is being built without an open pull request: it holds on the files its candidate changed.
+  const rebuilding = { ...closed, stage: 'build', reworkRequested: true, lease: { owner: 'GY-166-worker', epoch: 2, expiresAt: iso(hour) } } as Work;
+  assert.deepEqual(dispatchOverlap(fresh, [rebuilding, fresh], clock).map(entry => [entry.key, entry.state]), [['GY-166', 'claimed']]);
 });
 
 test('unit:hold-bound-30m — a dispatch hold lasts at most 30 minutes; past it the hold is overdue and the item is offered a worker over the overlap', async () => {

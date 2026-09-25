@@ -57,7 +57,7 @@ export function exclusionPaths(work: Work): string[] {
 export function dispatchOverlap(work: Work, all: Work[], now: number): OverlapAhead[] {
   if (work.stage === 'done') return [];
   return all.filter(w => w.id !== work.id && inFlight(w, now)).flatMap(w => {
-    const held = overlapHolds(work, w);
+    const held = overlapHolds(work, w, now);
     return held ? [{ key: w.key, stage: w.stage, state: claimedNow(w, now) ? 'claimed' as const : 'submitted' as const, ...held }] : [];
   });
 }
@@ -67,11 +67,14 @@ export function dispatchOverlap(work: Work, all: Work[], now: number): OverlapAh
  * work, and no hold stands once either item's pull request is open, whatever its stage. A fresh
  * item — no pull request, or one that was closed — is held only behind equal- or higher-priority
  * work still being built without an open pull request, on the paths both name or changed
- * (`exclusionPaths`).
+ * (`exclusionPaths`). An item whose pull request was closed, that nobody has claimed and whose
+ * rework was not requested is not being built: it waits for a rework decision and holds nothing.
  */
 /** The item's pull request is observed open and unmerged; a candidate whose pull request was closed no longer counts. */
 const openPullRequest = (work: Work) => !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
-function overlapHolds(work: Work, other: Work): { paths: string[]; theirs: string[] } | null {
+/** The item's pull request is observed closed without merging. */
+const closedPullRequest = (work: Work) => !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'closed';
+function overlapHolds(work: Work, other: Work, now: number): { paths: string[]; theirs: string[] } | null {
   if (other.priority > work.priority) return null;
   // A hold keeps a fresh item from starting on files another item is changing. An item whose pull
   // request is already open is past that point: holding its rework round prevents no conflict (both
@@ -84,6 +87,11 @@ function overlapHolds(work: Work, other: Work): { paths: string[]; theirs: strin
   // a real conflict). On 2026-09-25 ten ready items were held and five workers idle behind GY-166,
   // GY-182, GY-185 and GY-187, all in review, test or merge on the same large files.
   if (openPullRequest(other)) return null;
+  // Nor does a candidate whose pull request closed while nobody holds it and no rework was
+  // requested: it still counts as in flight, but nothing is being built on it and it cannot enter
+  // the merge queue, so holding a fresh item behind it only idles a worker. Once claimed again — or,
+  // for effective concurrency, once it may be dispatched for rework — it is being built and holds.
+  if (closedPullRequest(other) && !claimedNow(other, now) && !dispatchable(other, now)) return null;
   const mine = exclusionPaths(work), theirs = exclusionPaths(other);
   const paths = mine.filter(path => theirs.some(entry => pathScopesOverlap(path, entry)));
   if (!paths.length) return null;
@@ -154,7 +162,7 @@ export function effectiveConcurrency(all: Work[], now: number): EffectiveConcurr
   // scheduler dispatches that one over the overlap (`assertDispatchable` accepts an overdue hold), so
   // counting the pair exclusive would report less capacity than the daemon actually launches.
   const overdue = nodes.map(work => dispatchable(work, now) && !!dispatchHold(work, all, now)?.overdue);
-  const adjacent = nodes.map((a, i) => nodes.map((b, j) => i !== j && !overdue[i] && !overdue[j] && !!overlapHolds(a, b) && !!overlapHolds(b, a)));
+  const adjacent = nodes.map((a, i) => nodes.map((b, j) => i !== j && !overdue[i] && !overdue[j] && !!overlapHolds(a, b, now) && !!overlapHolds(b, a, now)));
   const edges = adjacent.reduce((total, row) => total + row.filter(Boolean).length, 0) / 2;
   let budget = 100_000, exhausted = false, best: number[] = [];
   const search = (remaining: number[], chosen: number[]) => {
