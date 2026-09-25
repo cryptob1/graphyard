@@ -17,8 +17,10 @@ import type { Observation, Principal, Work } from '../src/model.js';
 
 // GY-258: GitHub executes merges; Graphyard only gates them. The control plane's App publishes
 // `Graphyard / merge` on the exact head and puts an authorized, requested pull request in GitHub's
-// merge queue; it fails the check and dequeues on withdrawal; nothing in Graphyard calls the merge
-// endpoint; and `master protection` writes the merge queue with the check required.
+// merge queue; it fails the check and dequeues on withdrawal; nothing in Graphyard calls the REST
+// merge endpoint, and the one GraphQL merge (a clean PR without a queue, see
+// merge-delegation-clean.test.ts) is bound to the head; and `master protection` writes the merge
+// queue with the check required.
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), moved = 'c'.repeat(40), groupHead = 'd'.repeat(40);
 const pullRequestId = 'PR_kwDOgraphyard42';
@@ -175,7 +177,9 @@ test('unit:no-graphyard-merge-call — the merge step requests the merge and Git
     assert.equal(fake.calls.some(call => /\/merge(\?|$)/.test(call.path)), false);
     assert.equal(fake.named('mergePullRequest').length, 0);
 
-    // And nowhere in the shipped source: no REST merge endpoint, no GraphQL mergePullRequest.
+    // And nowhere in the shipped source: no REST merge endpoint, and no GraphQL mergePullRequest that
+    // is not bound to the authorized head (GitHub refuses auto-merge on a clean pull request, so a
+    // clean one without a queue is merged at once with expectedHeadOid; branch protection still applies).
     const root = fileURLToPath(new URL('..', import.meta.url));
     const files = [...await sources(join(root, 'src')), ...await sources(join(root, 'scripts')), ...await sources(join(root, 'bin'))];
     const offenders: string[] = [];
@@ -184,10 +188,11 @@ test('unit:no-graphyard-merge-call — the merge step requests the merge and Git
       text.split('\n').forEach((line, index) => {
         // A harness deny rule names the endpoint to forbid it; that is not a call.
         if (/Bash\(gh api \*pulls\/\*\/merge\*\)/.test(line)) return;
+        if (/\bmergePullRequest\s*\(input: \{ pullRequestId: \$id, expectedHeadOid: \$head, mergeMethod: \$method \}\)/.test(line)) return;
         if (/pulls\/\$\{[^}]+\}\/merge\b|pulls\/\d+\/merge\b|\bmergePullRequest\s*\(/.test(line)) offenders.push(`${file.slice(root.length)}:${index + 1}`);
       });
     }
-    assert.deepEqual(offenders, [], 'no source line calls the GitHub merge endpoint');
+    assert.deepEqual(offenders, [], 'no source line calls the GitHub merge endpoint unbound to the head');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

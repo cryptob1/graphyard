@@ -894,6 +894,8 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   // which waits for one — must not hold this rework.
   const proofs = proofRework(work);
   if (proofs) return { action: 'rework', ...proofs };
+  const ci = failedCheckRework(work);
+  if (ci) return { action: 'rework', ...ci };
   // Unresolved review threads block no merge: the reviewer's verdict on the head is the review
   // gate and the threads are its inputs. A thread still open once the review of the current head
   // has settled — one it was not shown, or a policy with no review — is a finding the loop sends
@@ -913,6 +915,27 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
     reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/**
+ * The rework a required CI check that failed on exactly the current head calls for, or null. The
+ * next action for such a head is already `request-rework` (refusal-mapping.ts), but nothing asked
+ * for the round: on 2026-09-25 GY-245's worker had completed, a base refresh produced
+ * a3b75653db55, its `test` check failed, and the item sat in Test for over four hours with its
+ * next step named for no one. The latest attempt of each check decides, so a rerun that is still
+ * going or passed asks for nothing; the binding names the head and the failed checks.
+ */
+export function failedCheckRework(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
+  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  const failed = work.policy.checks.filter(name => {
+    const runs = observation.checks.filter(check => check.name === name);
+    const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
+    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result);
+  }).sort();
+  if (!failed.length) return null;
+  return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
+    binding: `${candidate.sha}:ci:${failed.join(',')}` };
 }
 /**
  * GY-193. The rework a head's own proofs call for, or null. A trusted proof that failed on the head
