@@ -102,7 +102,7 @@ export const itemDocumentationPaths = (item: { documentation?: ItemDocumentation
 export const documentationConsumerScopes = ['web/', 'browser-tests/', 'integrations/'] as const;
 
 const pathToken = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.*-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}/g;
-const wellFormed = (path: string) => {
+export const wellFormed = (path: string) => {
   const segments = pathScope(path).path.split('/');
   return segments.length > 0 && segments.every((segment, index) => segment !== '.' && segment !== '..' && (segment !== '' || index === segments.length - 1));
 };

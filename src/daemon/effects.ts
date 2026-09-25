@@ -6,6 +6,7 @@ import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js'
 import type { Work } from '../model.js';
 import type { DecisionSituation } from '../model/approval.js';
 import type { ScopeRequestState } from '../model/scope.js';
+import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
@@ -13,7 +14,7 @@ import { mergeBatchSize } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, readReviewFindings, basePaths, baseText } from '../review-scope.js';
+import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
@@ -69,6 +70,16 @@ export interface DaemonEffects {
    * audited reason, bound to the scope request it answers (`answeringWidening`).
    */
   widenScope?: (work: Work, request: ScopeRequestState, paths: string[], reason: string) => Promise<unknown>;
+  /**
+   * The successions on the base branch since `since` — git's renames and copies, and the successor
+   * map a split commit records — and which successors are files at the base tip (GY-394).
+   */
+  baseSuccessions?: (since: string) => Promise<SuccessionRead>;
+  /**
+   * Re-plans an open item onto the successors of its planned files: the master's own audited,
+   * additive requirements revision (`successorWidening`), which removes nothing.
+   */
+  replan?: (work: Work, paths: string[], reason: string) => Promise<unknown>;
   merge: (work: Work) => Promise<unknown>;
   /**
    * The deployed release and which deliveries it serves. The containment the previous observation
@@ -542,6 +553,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
     baseText: path => baseText(root, current().baseBranch, path, run),
+    baseSuccessions: (() => { let reader: ReturnType<typeof successionReader> | null = null, branch = ''; return (since: string) => {
+      if (!reader || branch !== current().baseBranch) { branch = current().baseBranch; reader = successionReader(root, branch, run); }
+      return reader(since);
+    }; })(),
+    get replan() {
+      return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
+        asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
+    },
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;

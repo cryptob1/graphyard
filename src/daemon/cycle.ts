@@ -9,7 +9,7 @@ import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
-import { scopeStep } from './cycle-scope.js';
+import { scopeStep, successorStep } from './cycle-scope.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
@@ -92,6 +92,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   spent('close');
 
   const { settled, budget } = await timings.step('scope', () => scopeStep(cycle));
+  // 2c. Open items planning a file the base split or renamed are re-planned onto its successors.
+  await timings.step('successors', () => successorStep(cycle));
   spent('decisions');
 
   const assessments = await timings.step('reclaim', () => reclaimStep(cycle));
