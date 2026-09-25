@@ -1032,11 +1032,11 @@ test('master run executes the durable loop as a supervised process and master st
     // GY-59: a deployed server behind the CLI's merge protocol is refused as version skew by the loop and by
     // master merge, naming both commits, and master status reports the same skew without refusing.
     proofScoped = false; skewed = true;
-    await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), /server runs an unknown commit, CLI expects [0-9a-f]{40}: deploy main first \(server merge protocol 1, CLI merge protocol 2/);
+    await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), new RegExp(`server runs an unknown commit, CLI expects [0-9a-f]{40}: deploy main first \\(server merge protocol ${MERGE_PROTOCOL - 1}, CLI merge protocol ${MERGE_PROTOCOL}`));
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'merge', '--all'], { cwd: root, env }), /deploy main first/);
     const skewedStatus = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
     assert.match(skewedStatus.versionSkew, /deploy main first/); assert.match(skewedStatus.cli.commit, /^[0-9a-f]{40}$/);
-    assert.deepEqual(skewedStatus.controlPlane.build, { commit: null, protocol: 1 });
+    assert.deepEqual(skewedStatus.controlPlane.build, { commit: null, protocol: MERGE_PROTOCOL - 1 });
   } finally {
     await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });

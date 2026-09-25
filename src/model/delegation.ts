@@ -1,5 +1,4 @@
 import type { Work } from './work.js';
-import { fenceMergeExecution } from './escalation.js';
 
 // Rulings that stop delivery until an authorized recovery clears them. A plan
 // rejection is superseded by a later approve-plan from the same slice lead; a
@@ -24,7 +23,6 @@ export function holdDelivery(work: Work, hold: NonNullable<Work['leadHold']>) {
   const superseded = leadHoldRefusal(work);
   work.leadHold = hold;
   work.mergeAuthorization = null;
-  fenceMergeExecution(work, `Slice lead ${hold.leadId} ruled ${hold.action} under rule ${hold.ruleId}`, hold.at);
   const merge = work.gates.find(gate => gate.name === 'merge');
   const reason = leadHoldRefusal(work)!;
   if (merge) {
