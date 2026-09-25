@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store, migrationLock } from '../src/store.js';
+import { advisoryLocks, Store } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
 
 // A new release boots while the live replica is mid-coordination: holding the advisory lock
@@ -30,8 +30,6 @@ async function liveReplica(database: string, hold: (db: pg.Client) => Promise<vo
   await hold(db);
   return async () => { await db.query('ROLLBACK'); await db.end(); };
 }
-/** Another migrating release, mid-migration: it holds the migration lock (never the coordination lock, GY-203). */
-const holdMigration = async (db: pg.Client) => { await db.query('SELECT pg_advisory_xact_lock($1)', [migrationLock]); };
 const holdCoordination = async (db: pg.Client) => {
   await db.query('SELECT pg_advisory_xact_lock(71490321)');
   await db.query("INSERT INTO work_items(id, document) VALUES(gen_random_uuid(), '{}'::jsonb)");
@@ -77,20 +75,20 @@ test('integration:init-does-not-wait-on-live-replica a release whose migration d
 test('integration:migration-lock-bounded a release that must migrate fails within its lock timeout naming the migration lock and the generation it tried to reach', async () => {
   const deployed = new Store(url('pending'));
   await deployed.init();
-  // The live replica runs the previous release: nothing records this release's migration yet.
+  // Nothing records this release's migration yet, and another release is migrating: it holds the
+  // migration lock (GY-203: a migration no longer takes the coordination lock, so the live
+  // replica's coordination work does not hold it up).
   await deployed.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
-  // Mid-coordination, the live replica does not hold the migration up (GY-203); another migrating release does.
-  const coordinating = await liveReplica('pending', holdCoordination);
-  const release = await liveReplica('pending', holdMigration);
+  const release = await liveReplica('pending', async db => { await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]); });
   const next = new Store(url('pending'));
   try {
     const boot = await timed(() => next.init({ lockTimeoutMs: 500 }));
     assert.ok(boot.error, 'a migrating release must not start while the lock is held');
     assert.ok(boot.ms < 5000, `startup failed only after ${boot.ms} ms`);
     assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} gave up after 500 ms`));
-    assert.match(boot.error.message, new RegExp(`waiting for the migration advisory lock pg_advisory_xact_lock\\(${migrationLock}\\)`));
+    assert.match(boot.error.message, new RegExp(`waiting for the migration advisory lock pg_advisory_xact_lock\\(${advisoryLocks.migration}\\)`));
     assert.match(boot.error.message, /startup fails instead of outlasting the health check/);
-  } finally { await release(); await coordinating(); }
+  } finally { await release(); }
   try {
     await next.init({ lockTimeoutMs: 500 });
     assert.equal(await next.schema(), schemaVersion, 'once the lock is free the migration completes');
@@ -116,9 +114,9 @@ test('integration:migration-lock-bounded lock waits share one deadline: a lock r
   const deployed = new Store(url('deadline'));
   await deployed.init();
   await deployed.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
-  // Another migrating release holds the migration lock for most of the budget, while another session
+  // Another migrating release holds the migration lock for most of the budget, while a session
   // keeps a read open on jobs that outlasts it: a per-lock budget would wait on each in turn.
-  const coordination = await liveReplica('deadline', holdMigration);
+  const coordination = await liveReplica('deadline', async db => { await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]); });
   const reader = await liveReplica('deadline', async db => { await db.query('SELECT count(*) FROM jobs'); });
   let released: Promise<void> | undefined;
   const handoff = setTimeout(() => { released = coordination(); }, 1200);

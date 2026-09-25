@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { demand, type Principal, type Work } from './model.js';
 import type { Store } from './store.js';
 import { save, wakeJob } from './store.js';
+import { settleDelivered } from './model/actions.js';
 import { reconciliationRefusalPrefix } from './merge-queue.js';
 import { unauthorizedMergeViolation, type OperatorAuthorizedDelivery } from './engine.js';
 
@@ -97,6 +98,8 @@ export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows:
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, window.setBy, 'merge.operator-authorized',
       JSON.stringify({ details: { ...record, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision: work.revision, evidenceAsOf: null, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
     await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
+    // What the delivery still owes, in the same transaction: nothing retries against it (GY-185).
+    settleDelivered(work, all, now);
     await save(db, work, 'graphyard', 'direct-merge.delivered', now, { window: record.decision });
     delivered.push(work);
   }

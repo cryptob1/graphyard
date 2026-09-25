@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { demand } from '../../model.js';
+import { demand, type Work } from '../../model.js';
+import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { catchUpPipelineTimelines, pipelineBackfillState } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
@@ -103,12 +104,20 @@ export const statusRoutes = defineRoutes('status', [
       // seconds — and a ledger reconstruction in front of those reads would sit in the path of
       // every claim, so a fleet that polls harder would pay reconstruction latency to act.
       if (view === 'full') await catchUpPipelineTimelines(services.engine.store);
-      // The coordination view reads the work index (GY-203): whole documents only for the items
-      // it needs, so the poll stays small as the board's history grows.
-      const store = services.engine.store;
-      const snapshot = view === 'coordination' ? await store.coordinationSnapshot() : await store.workSnapshot(); const visibleWork = operatorVisible(snapshot.work);
-      const scoped = { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
-      return view === 'coordination' ? coordinationSnapshot(scoped) : scoped;
+      const scope = <T extends { work: Work[]; jobs: IntegrationJob[] }>(snapshot: T) => {
+        const visibleWork = operatorVisible(snapshot.work);
+        return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
+      };
+      if (view === 'full') return scope(await services.engine.store.workSnapshot());
+      // The coordination view is trimmed in the database (GY-185): the histories it bounds never
+      // leave it whole, and what the SQL cut is added to what the view says it left out.
+      const { trimmed, ...snapshot } = await services.engine.store.coordinationSnapshot();
+      const trimmedView = coordinationSnapshot(scope(snapshot));
+      for (const work of trimmedView.work) {
+        const cut = trimmed.get(work.id);
+        if (cut) { trimmedView.omitted.evidence += cut.evidence; trimmedView.omitted.dispatchHistory += cut.dispatchHistory; trimmedView.omitted.queueHistory += cut.queueHistory; trimmedView.omitted.actionHistory += cut.actionHistory; trimmedView.omitted.sessions += cut.sessions; }
+      }
+      return trimmedView;
     },
   },
   { method: 'GET', path: '/api/work', handle: async ({ services, operatorVisible }) => operatorVisible(await services.engine.store.list()) },

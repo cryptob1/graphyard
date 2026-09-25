@@ -154,7 +154,7 @@ test('integration:headroom-warned-before-exhaustion — status reports each reso
     const finished: HerdrAgent[] = [{ name: 'reviewer-a', pane_id: 'pane-9', agent_status: 'done' }];
     const full = await status(reviewLedgerBound, finished);
     const symptoms = [
-      { subject: 'GY-7', text: 'GY-7\'s request-review action is stalled, not retrying: 3 attempts in a row failed for one unchanged reason — reviewer agent reviewer-a is busy in Herdr', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names' },
+      { subject: 'GY-7', text: 'GY-7\'s request-review action is stalled, retried only on a widening backoff: 3 attempts in a row failed for one unchanged reason — reviewer agent reviewer-a is busy in Herdr', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names' },
       { subject: 'GY-8', text: `GY-8's request-review action is stalled — ${JSON.stringify(['The review ledger (.graphyard/reviews.json) refused the write: its bound is 200 records and 0 are live sessions'])}`, role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names' },
     ];
     const reported = attributeAttention([...full.attention, ...symptoms], full.readings);
@@ -221,7 +221,7 @@ test('integration:refusal-names-exhausted-resource — an exhausted agent-name n
   assert.match(named, /^Herdr agent-name namespace \(reviewer-a\) is at its bound: 1 names used of 1 names, 0 names left — reviewer profile reviewer-a: reviewer-a \(done/);
   assert.doesNotMatch(named, /busy|capacity|concurrency/i, 'the refusal is not read as reviewer capacity');
   const namedStall = stalledEntry(named);
-  assert.match(namedStall, /stalled, not retrying: \d+ attempts in a row failed for one unchanged reason — Herdr agent-name namespace \(reviewer-a\) is at its bound: 1 names used of 1 names/);
+  assert.match(namedStall, /stalled, retried only on a widening backoff: \d+ attempts in a row failed for one unchanged reason — Herdr agent-name namespace \(reviewer-a\) is at its bound: 1 names used of 1 names/);
 
   // The review ledger: the launch reaches the ledger write, which its own cap refuses.
   const directory = await scratchRoot();
