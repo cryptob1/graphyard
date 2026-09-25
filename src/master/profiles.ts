@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 
 const safeEnvironment = z.record(
@@ -219,6 +220,11 @@ export const masterRunSchema = z.object({
   // An account whose provider usage reached this percentage of any window is skipped at launch:
   // a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
+  // The runtime of each narrow role (GY-169): `herdr`, a terminal session (what an absent setting
+  // means), or `pi`, the headless runner (src/runner) — the approver, and the producer for the
+  // unit proof group. `pi` names the environment wrapper and model those runs use.
+  runtimes: narrowRoleRuntimeSchema.optional(),
+  pi: piRuntimeSchema.optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 

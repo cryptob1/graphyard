@@ -23,6 +23,9 @@ import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
+import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
+import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, startNarrowRun } from '../runner/roles.js';
+import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
 type AutonomyFetch = typeof fetch;
@@ -254,12 +257,26 @@ async function abandonLaunch(error: unknown, pane: string | undefined, tabId: st
  */
 export const approverSessionId = (decision: string) => `approver:${decision}`;
 export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
-export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar) {
+export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar,
+  headless: { runner?: Runner; fetcher?: typeof fetch } = {}) {
   const config = await loadMasterConfig(root);
-  await agentToken(root, config, 'approver');
+  const token = await agentToken(root, config, 'approver');
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
   const name = nameForLaunch(retry, () => approverSessionName(work, decision));
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
+  // GY-169: with the approver's runtime set to `pi` (and no AGENT_KIND override) the approver is a
+  // headless run under the same session name. Its verdict comes back as a validated
+  // graphyard_decide call and is applied here as the approver identity, on the route `master
+  // approve`/`master refuse` use, so the server's separation rules decide exactly as they do today.
+  if (!explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
+    const pi = piRuntimeSchema.parse(config.run.pi ?? {});
+    const started = startNarrowRun({ runner: headless.runner ?? narrowRunner(pi), name, role: 'approver', work: work.key, subject: decision,
+      prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
+      options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, pi.approverTimeoutMinutes * 60_000),
+      apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
+    return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
+      run: started.record, settled: started.settled as Promise<RunRecord> | undefined };
+  }
   // The approver's runtime and account come from the registry's approver role. An explicit
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
   // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
@@ -303,9 +320,10 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // slot are unknown, so a launch whose record cannot be written is closed and fails.
   try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString() }); }
   catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
-  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, runtime: kind, session,
+  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane! as string | null, delivery, focusChanged: false, runtime: kind as string, session,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
-      : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null };
+      : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null,
+    run: null as RunRecord | null, settled: undefined as Promise<RunRecord> | undefined };
 }
 
 /**
@@ -631,7 +649,10 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'approver') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
-    return launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents(), deps.runtime, {}, registrar(work.id));
+    const launched = await launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, await deps.agents(), deps.runtime, {}, registrar(work.id));
+    // A headless approver runs in this process, so the command waits for its verdict and reports the run.
+    const { settled, ...report } = launched;
+    return settled ? { ...report, run: await settled } : report;
   }
   if (id === 'principals') {
     const live = (await deps.coordinator('principals')).principals;

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
+import { runRecordSchema } from '../runner/types.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
@@ -231,6 +232,8 @@ export const approvalWatchSchema = z.object({
   session: z.string().max(200).nullable().default(null),
   /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
   capacity: z.string().max(500).nullable().default(null),
+  /** A headless approver's run (GY-169): its last events, its result, and what became of its verdict. */
+  run: runRecordSchema.nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 /**

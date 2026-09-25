@@ -10,7 +10,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, disprovedConflict, currentRestore, decideIdentityCarry, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -1256,7 +1256,7 @@ export class Engine {
       this.evaluate(work, all, now);
       if (carry && kept === undefined) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors,
+      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors, trigger: speculation.trigger ?? null,
         ...(kept !== undefined && speculation.carriedBase ? { carriedBase: speculation.carriedBase } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
@@ -1326,12 +1326,25 @@ export class Engine {
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
       requireCurrent(!work.queue && refresh.policyRevision === work.policyRevision
         && work.candidate?.sha === refresh.from.sha && work.candidate.baseSha === refresh.from.baseSha, 'Candidate, queue entry or policy changed while the base was refreshed');
+      if (refresh.stale) {
+        // GitHub's conflict reading was stale (GY-375): the test merge was clean and nothing was
+        // written. The reading replaces the refresh record for this head, keeping what it carried
+        // onto the head, and the stored observation has its conflict disproved.
+        const kept = work.baseRefresh?.head === refresh.from.sha ? work.baseRefresh : null;
+        work.baseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
+        if (work.observation?.conflicting && disprovedConflict(work, work.observation)) work.observation = { ...work.observation, conflicting: false, mergeable: true };
+        this.evaluate(work, all, now);
+        await this.recordDispatch(db, work, now);
+        await save(db, work, 'graphyard', 'base.stale-mergeability', now, { head: refresh.from.sha, base: refresh.base, reading: refresh.stale.reading });
+        await wakeJob(db, work.id);
+        return work;
+      }
       const carry = refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
       work.baseRefresh = { ...refresh, carry };
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', refresh.conflict ? 'base.conflict' : 'base.refreshed', now, { from: refresh.from, base: refresh.base, head: refresh.head,
+      await save(db, work, 'graphyard', refresh.conflict ? 'base.conflict' : 'base.refreshed', now, { from: refresh.from, base: refresh.base, head: refresh.head, trigger: refresh.trigger ?? null,
         ...(refresh.conflict ? { conflict: refresh.conflict } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
@@ -1371,7 +1384,7 @@ export class Engine {
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', restore!.outcome === 'restored' ? 'branch.restored' : restore!.outcome === 'conflict' ? 'branch.restore-conflict' : 'branch.unrepairable', now,
-        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason, ...(refresh.conflict ? { conflict: refresh.conflict } : {}) });
+        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, trigger: refresh.trigger ?? null, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason, ...(refresh.conflict ? { conflict: refresh.conflict } : {}) });
       await wakeJob(db, work.id);
       return work;
     });
@@ -1751,7 +1764,11 @@ export class Engine {
       // across observations of the same pull request until that read replaces it.
       if (observation.githubQueue === undefined && previousObservation?.githubQueue && previousObservation.candidate?.pr === observation.candidate.pr) observation.githubQueue = previousObservation.githubQueue;
       work.candidate = observation.candidate;
-      work.observation = observation;
+      // A conflict the control plane's own test merge of this head onto this tip found clean is
+      // GitHub's stale reading (GY-375): it is stored disproved — the head merges cleanly, which is
+      // all GitHub's `mergeable: false` withheld from an open, non-draft pull request — so nothing
+      // refreshes, holds or reworks it for that reading again.
+      work.observation = observation.conflicting && disprovedConflict(work, observation) ? { ...observation, conflicting: false, mergeable: true } : observation;
       // Snapshot all provider review identities after the revision. Approvals in this
       // first observation never count, regardless of clock skew or future reevaluation.
       if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && !work.formalReviewBaseline && observation.reviewIds
