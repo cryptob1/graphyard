@@ -16,6 +16,7 @@ import { unhandled, type MasterSession } from './session.js';
 /** Launch profiles, the master session, reviewer launches, and GitHub administration through the operator. */
 export async function fleetCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
+  const reviewCommand: typeof launchReview = (...a) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
   if (id === 'start') {
     const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
     const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
@@ -34,7 +35,6 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'review') {
     const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
-    const reviewCommand: typeof launchReview = (...a) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
     return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
   }
   if (id === 'protection') {
