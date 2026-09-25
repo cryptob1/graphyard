@@ -34,9 +34,12 @@ test('unit:renewal-transient-tolerated a renewal that throws twice and then succ
     if (calls === 2 || calls === 3) { failures.push(calls); throw new TypeError('fetch failed'); }
     return renewal(2000);
   }, { intervalMs: 100, retryMs: 30, retryMaxMs: 100, safetyMarginMs: 300, graceMs: 50, session: quiet });
-  let settled = false; void supervising.then(() => { settled = true; });
-  while (calls < 6) await delay(20);
+  let settled = false; void supervising.then(() => { settled = true; }, () => { settled = true; });
+  // Bounded, so a supervisor that stops the worker on a failed renewal fails this test, not hangs it.
+  const waitUntil = performance.now() + 10_000;
+  while (calls < 6 && !settled && performance.now() < waitUntil) await delay(20);
   assert.equal(settled, false, 'the worker is still running after two failed renewals');
+  assert.ok(calls >= 6, `renewals continued after the two failures (${calls} calls)`);
   await writeFile(marker, '');
   assert.equal(await supervising, 0, 'the worker exited on its own; the supervisor never stopped it');
   assert.deepEqual(failures, [2, 3]);
