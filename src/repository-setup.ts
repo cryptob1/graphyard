@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
@@ -534,14 +534,17 @@ export async function executorSupervisionStatus(root: string, run: SystemctlRunn
  * @embedded-postgres/*), since an omit=optional install or a discarded optional build leaves the
  * tree unable to run; only an optional package for another platform, or an optional peer, may be absent.
  */
-export function installMatchesLockfile(lockfile: { packages?: Record<string, any> }, installed: { packages?: Record<string, any> } | null, host: InstallHost = currentInstallHost()): true | string {
+export function installMatchesLockfile(lockfile: LockfileInventory, installed: { packages?: Record<string, any> } | null, host: InstallHost = currentInstallHost()): true | string {
   if (!installed?.packages) return 'the install records no hidden lockfile (node_modules/.package-lock.json)';
-  const wanted = lockfile.packages ?? {}, held = installed.packages;
+  const wanted = lockfilePackages(lockfile), held = installed.packages;
   for (const [name, entry] of Object.entries(held)) {
     const want = wanted[name];
     if (!want) return `${name} is installed but package-lock.json no longer names it`;
-    if (want.version !== entry.version) return `${name} is installed at ${entry.version ?? 'no version'}, package-lock.json names ${want.version ?? 'no version'}`;
+    // A v1 record of a git, file, link or tarball dependency keeps its source in `version`; npm's hidden
+    // lockfile records the package's own version instead, so only its integrity identifies it.
+    if (!want[legacySource] && want.version !== entry.version) return `${name} is installed at ${entry.version ?? 'no version'}, package-lock.json names ${want.version ?? 'no version'}`;
     if (want.integrity && entry.integrity && want.integrity !== entry.integrity) return `${name} is installed from a different tarball than package-lock.json names`;
+    if (want[legacySource]) continue;
     // A git, file or link dependency carries its identity in `resolved` or `link`, usually with no integrity.
     if (Boolean(want.link) !== Boolean(entry.link)) return `${name} is installed ${entry.link ? 'as a link' : 'as a package'}, package-lock.json names ${want.link ? 'a link' : 'a package'}`;
     if ((!want.integrity || !entry.integrity) && (want.resolved ?? null) !== (entry.resolved ?? null)) return `${name} is installed from ${entry.resolved ?? 'no recorded source'}, package-lock.json names ${want.resolved ?? 'no recorded source'}`;
@@ -549,9 +552,33 @@ export function installMatchesLockfile(lockfile: { packages?: Record<string, any
   for (const [name, entry] of Object.entries(wanted)) {
     if (!name || held[name]) continue;
     if (!entry.optional && !entry.devOptional) return `${name} is named by package-lock.json but not installed`;
-    if (!entry.peer && platformAdmits(entry, host)) return `${name} is an optional package for this platform (${host.os} ${host.cpu}${host.libc ? ` ${host.libc}` : ''}) named by package-lock.json but not installed`;
+    if (!entry.peer && !entry[platformUnrecorded] && platformAdmits(entry, host)) return `${name} is an optional package for this platform (${host.os} ${host.cpu}${host.libc ? ` ${host.libc}` : ''}) named by package-lock.json but not installed`;
   }
   return true;
+}
+
+export interface LockfileInventory { lockfileVersion?: number; packages?: Record<string, any>; dependencies?: Record<string, any> }
+/** Marks a v1 record whose `version` is its source, not a version; and a v1 record, whose platform is unrecorded. */
+const legacySource = Symbol('legacySource'), platformUnrecorded = Symbol('platformUnrecorded');
+/**
+ * The lockfile's packages keyed by install path, as npm's hidden lockfile keys them. A lockfileVersion 1
+ * file has no `packages`, only the nested `dependencies` tree, which is unfolded into the same
+ * `node_modules/<name>[/node_modules/<name>]` paths. v1 records carry no os/cpu/libc, so an optional one
+ * is never required here (it may be for another platform).
+ */
+function lockfilePackages(lockfile: LockfileInventory): Record<string, any> {
+  if (lockfile.packages || !lockfile.dependencies) return lockfile.packages ?? {};
+  const packages: Record<string, any> = {};
+  const unfold = (dependencies: Record<string, any>, prefix: string) => {
+    for (const [name, entry] of Object.entries(dependencies ?? {})) {
+      const path = `${prefix}node_modules/${name}`;
+      const plain = typeof entry.version === 'string' && /^\d+\.\d+\.\d+/.test(entry.version);
+      packages[path] = { version: entry.version, resolved: entry.resolved, integrity: entry.integrity, optional: entry.optional, dev: entry.dev, [platformUnrecorded]: true, ...(plain ? {} : { [legacySource]: true }) };
+      if (entry.dependencies) unfold(entry.dependencies, `${path}/`);
+    }
+  };
+  unfold(lockfile.dependencies, '');
+  return packages;
 }
 
 export interface InstallHost { os: string; cpu: string; libc: string | null }
@@ -625,9 +652,24 @@ export async function ensureWorktreeDependencies(worktree: string, install: Depe
   return { state: 'installed', install: own, reason: `package-lock.json differs from the install it resolved (${matches}); installed its own` };
 }
 
-async function installMatches(lockfile: { packages?: Record<string, any> }, install: string): Promise<true | string> {
+async function installMatches(lockfile: LockfileInventory, install: string): Promise<true | string> {
   // A hidden lockfile an interrupted install left truncated is a mismatched install: npm ci replaces it.
   const installed = parseJson(await readFile(resolve(install, '.package-lock.json'), 'utf8').catch(() => 'null'));
-  return installed instanceof Error ? `the install's hidden lockfile (${resolve(install, '.package-lock.json')}) is unreadable: ${installed.message}`
-    : installMatchesLockfile(lockfile, installed);
+  if (installed instanceof Error) return `the install's hidden lockfile (${resolve(install, '.package-lock.json')}) is unreadable: ${installed.message}`;
+  const matches = installMatchesLockfile(lockfile, installed);
+  return matches === true ? installFoldersExist(installed, install) : matches;
+}
+
+/**
+ * npm counts a hidden lockfile as the install only while every package folder it names exists: a
+ * deleted or half-removed `node_modules/<pkg>` under an intact `.package-lock.json` is a broken
+ * install. Paths are relative to the directory holding node_modules (the mirror's target for a
+ * shared install); a link entry, or a folder reached through a symlink, must resolve.
+ */
+async function installFoldersExist(installed: { packages?: Record<string, any> }, install: string): Promise<true | string> {
+  const root = dirname(install);
+  const names = Object.keys(installed.packages ?? {}).filter(Boolean);
+  const missing = await Promise.all(names.map(async name => (await stat(resolve(root, name)).catch(() => null))?.isDirectory() ? null : name));
+  const first = missing.find(name => name !== null);
+  return first ? `${first} is recorded in the install's hidden lockfile but its folder ${resolve(root, first)} is missing` : true;
 }

@@ -124,15 +124,35 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     await mkdir(join(root, 'node_modules'), { recursive: true }); await mkdir(worktree, { recursive: true });
     const lock = (version: string) => ({ name: 'app', lockfileVersion: 3, packages: { '': { name: 'app' }, 'node_modules/left-pad': { version, integrity: `sha512-${version}` }, 'node_modules/@esbuild/aix-ppc64': { version: '0.1.0', optional: true, os: ['aix'], cpu: ['ppc64'] } } });
     await writeFile(join(root, 'node_modules', '.package-lock.json'), JSON.stringify({ name: 'app', lockfileVersion: 3, packages: { 'node_modules/left-pad': { version: '1.0.0', integrity: 'sha512-1.0.0' } } }));
+    await mkdir(join(root, 'node_modules', 'left-pad'));
     const installs: string[] = [];
-    // As npm ci does, the installer leaves the checkout's lockfile as the install's hidden lockfile.
-    const installer = async (cwd: string) => { installs.push(cwd); await mkdir(join(cwd, 'node_modules'), { recursive: true }); await writeFile(join(cwd, 'node_modules', '.package-lock.json'), await readFile(join(cwd, 'package-lock.json'))); };
+    // As npm ci does, the installer leaves the checkout's lockfile as the install's hidden lockfile and a folder for each package this host takes.
+    const installer = async (cwd: string) => {
+      installs.push(cwd); await mkdir(join(cwd, 'node_modules'), { recursive: true });
+      const { packages } = JSON.parse(await readFile(join(cwd, 'package-lock.json'), 'utf8'));
+      const taken = Object.fromEntries(Object.entries(packages).filter(([path, entry]) => path && !(entry as { optional?: boolean }).optional));
+      await writeFile(join(cwd, 'node_modules', '.package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: taken }));
+      for (const path of Object.keys(taken)) await mkdir(join(cwd, path), { recursive: true });
+    };
 
     await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(lock('1.0.0')));
     const shared = await ensureWorktreeDependencies(worktree, installer);
     assert.equal(shared.state, 'current', shared.reason);
     assert.equal(shared.install, join(root, 'node_modules'));
     assert.deepEqual(installs, [], 'an install that matches the lockfile is used as it is');
+    // npm counts a hidden lockfile only while every package folder it names exists: a removed package under an intact record is reinstalled.
+    await rm(join(root, 'node_modules', 'left-pad'), { recursive: true });
+    const removed = await ensureWorktreeDependencies(worktree, installer);
+    assert.equal(removed.state, 'installed', removed.reason);
+    assert.match(removed.reason, /node_modules\/left-pad is recorded in the install's hidden lockfile but its folder .*node_modules\/left-pad is missing/);
+    assert.deepEqual(installs, [worktree]);
+    await rm(join(worktree, 'node_modules'), { recursive: true }); await mkdir(join(root, 'node_modules', 'left-pad')); installs.length = 0;
+    // The check after npm ci exits 0 counts folders too: a hidden lockfile with no packages installed is a failed install.
+    await rm(join(root, 'node_modules', 'left-pad'), { recursive: true });
+    const hollow = await ensureWorktreeDependencies(worktree, async cwd => { await mkdir(join(cwd, 'node_modules'), { recursive: true }); await writeFile(join(cwd, 'node_modules', '.package-lock.json'), await readFile(join(cwd, 'package-lock.json'))); });
+    assert.equal(hollow.state, 'failed', hollow.reason);
+    assert.match(hollow.reason, /npm ci exited 0 without installing it: node_modules\/left-pad is recorded .* is missing/);
+    await rm(join(worktree, 'node_modules'), { recursive: true }); await mkdir(join(root, 'node_modules', 'left-pad'));
 
     await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(lock('2.0.0')));
     const changed = await ensureWorktreeDependencies(worktree, installer);
@@ -148,7 +168,7 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.equal(dryRun.state, 'failed', dryRun.reason);
     assert.match(dryRun.reason, /npm ci exited 0 without installing it: the install records no hidden lockfile/);
 
-    await mkdir(join(worktree, 'node_modules'));
+    await mkdir(join(worktree, 'node_modules', 'left-pad'), { recursive: true });
     await writeFile(join(worktree, 'node_modules', '.package-lock.json'), JSON.stringify({ packages: { 'node_modules/left-pad': { version: '2.0.0', integrity: 'sha512-2.0.0' } } }));
     assert.equal((await ensureWorktreeDependencies(worktree, installer)).state, 'current', 'the worktree\'s own matching install is kept');
     assert.equal(installs.length, 1);
@@ -182,6 +202,27 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.equal(installMatchesLockfile(platformLock, heldForLinux, linuxGlibc), true, 'the musl-only package and the optional peer may be absent on glibc');
     assert.match(String(installMatchesLockfile(platformLock, heldForLinux, { os: 'linux', cpu: 'x64', libc: 'musl' })), /linux-x64-musl is an optional package for this platform/);
     assert.equal(installMatchesLockfile(platformLock, { packages: {} }, { os: 'win32', cpu: 'arm64', libc: null }), true, 'nothing in it is for win32 arm64');
+    // A lockfileVersion 1 file keeps its inventory in the nested `dependencies` tree; npm's hidden lockfile is v3 with `packages`.
+    const v1 = { lockfileVersion: 1, dependencies: {
+      'left-pad': { version: '1.0.0', integrity: 'sha512-1.0.0', dependencies: { 'nested': { version: '2.0.0', integrity: 'sha512-n' } } },
+      'from-git': { version: 'git+ssh://git@github.com/o/dep.git#aaa', from: 'git+ssh://git@github.com/o/dep.git' },
+      'fsevents': { version: '2.3.3', integrity: 'sha512-f', optional: true },
+    } };
+    const heldV3 = { lockfileVersion: 3, packages: { 'node_modules/left-pad': { version: '1.0.0', integrity: 'sha512-1.0.0' }, 'node_modules/left-pad/node_modules/nested': { version: '2.0.0', integrity: 'sha512-n' }, 'node_modules/from-git': { version: '3.1.0', resolved: 'git+ssh://git@github.com/o/dep.git#aaa' } } };
+    assert.equal(installMatchesLockfile(v1, heldV3, linuxGlibc), true, 'a v1 lockfile matches the v3 hidden lockfile npm ci writes for it; its optional records carry no platform, so they may be absent');
+    assert.match(String(installMatchesLockfile({ ...v1, dependencies: { ...v1.dependencies, 'left-pad': { ...v1.dependencies['left-pad'], version: '1.1.0' } } }, heldV3, linuxGlibc)), /node_modules\/left-pad is installed at 1\.0\.0, package-lock\.json names 1\.1\.0/);
+    assert.match(String(installMatchesLockfile(v1, { packages: { ...heldV3.packages, 'node_modules/stray': { version: '1.0.0' } } }, linuxGlibc)), /node_modules\/stray is installed but package-lock\.json no longer names it/);
+    assert.match(String(installMatchesLockfile(v1, { packages: { 'node_modules/left-pad': heldV3.packages['node_modules/left-pad'] } }, linuxGlibc)), /node_modules\/left-pad\/node_modules\/nested is named by package-lock\.json but not installed/);
+    // End to end: a checkout with a v1 lockfile is installed once, then reported current, never failed after a good npm ci.
+    await rm(join(worktree, 'node_modules'), { recursive: true, force: true }); await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(v1));
+    const npmV3 = async (cwd: string) => {
+      await mkdir(join(cwd, 'node_modules'), { recursive: true }); await writeFile(join(cwd, 'node_modules', '.package-lock.json'), JSON.stringify(heldV3));
+      for (const path of Object.keys(heldV3.packages)) await mkdir(join(cwd, path), { recursive: true });
+    };
+    const legacy = await ensureWorktreeDependencies(worktree, npmV3);
+    assert.equal(legacy.state, 'installed', legacy.reason);
+    assert.equal((await ensureWorktreeDependencies(worktree, async () => { throw new Error('not reinstalled'); })).state, 'current');
+    await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(lock('2.0.0')));
     // The install always takes the full tree: an inherited production/omit config would skip devDependencies while npm exits 0.
     assert.ok(npmCiArgs.includes('--include=dev'));
     // Optional dependencies too: an .npmrc omit=optional would skip platform packages (esbuild's binary, which tsx loads; @embedded-postgres/*) while npm exits 0, and the lockfile check accepts a missing optional entry.
