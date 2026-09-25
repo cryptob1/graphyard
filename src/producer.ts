@@ -221,10 +221,17 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const pending = ledger.producers.find(record => record.state === 'pending' && record.key === work.key && record.group === binding.group);
   if (pending) throw new Error(`A producer session for ${work.key} ${binding.group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
   // One live session per request: a request whose sessions all failed or expired may be launched
-  // again, as its next attempt, until the retry limit.
+  // again, as its next attempt, until the retry limit. A session that settled otherwise while the
+  // request still stands (the dispatcher checked it still requests this head above) answered
+  // nothing, and the dispatcher bounds those attempts itself (GY-193, auto-dispatch.ts).
   const prior = ledger.producers.filter(record => record.requestId === request.id);
-  if (prior.some(record => !retriedStates.includes(record.state))) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
-  if (prior.length >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions fail or expire; no further automatic attempt`);
+  if (prior.some(record => record.state === 'pending')) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
+  // Evidence recorded as not exercising its criterion is the worker's to fix on a new head: another
+  // session on this head would record the same finding, so the loop requests rework instead.
+  const unexercised = work.evidence.find(entry => entry.sha === binding.sha && !!entry.unexercised && binding.proofs.includes(entry.proof));
+  if (unexercised) throw new Error(`${work.key} ${unexercised.proof} on ${binding.sha.slice(0, 12)} was recorded as not exercising its criterion (${unexercised.unexercised}); the head returns to its worker, so no further producer session is launched for it`);
+  const failed = prior.filter(record => retriedStates.includes(record.state));
+  if (failed.length >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${failed.length} sessions fail or expire; no further automatic attempt`);
   // The profile's room (GY-107): one session per name, and no more sessions than it declares.
   // A name this session would take that Herdr already shows is the same launch twice.
   const id = randomUUID();

@@ -21,6 +21,7 @@ import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity
 import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
 import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
+import { mechanicalFailure, mechanicalVerdicts } from './model/mechanical-proofs.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { followUpThreadIds, launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
@@ -825,7 +826,7 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
 export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
-  const needed = neededDecision(work, config);
+  const needed = neededDecision(work, config, now);
   if (!needed) return null;
   if (needed.action === 'merge') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
@@ -836,7 +837,7 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
   return stopped.stopped ? { ...needed, reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
 }
 /** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
-function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
+function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now = Date.now()): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -850,6 +851,11 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
   // requested changes, and the loop never asked again because both keyed on the head alone.
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
+  // A head whose proofs already say it cannot pass returns to its worker at once (GY-193): no review
+  // is requested for it, so the thread rule's wait for "the review that judges first" would wait on
+  // a review that never comes, and no producer launched again on it could record anything else.
+  const proofs = work.reworkRequested ? null : proofRework(work, now);
+  if (proofs) return { action: 'rework', reason: proofs.reason, binding: proofs.binding };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
@@ -869,6 +875,36 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
     reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/**
+ * Why the head's own proofs return it to its worker, or null (GY-193): trusted evidence that failed
+ * a mechanical proof (the build gate says the head returns to its worker before review), and
+ * evidence the control plane recorded as not exercising its criterion — the producer's finding
+ * that the proof also passes with the change removed, quoted as recorded. The open review threads
+ * are named beside them, so the worker's round addresses both, and the binding names the proofs.
+ */
+export function proofRework(work: Work, now: number): { reason: string; binding: string } | null {
+  // Both grounds are evidence on the head: with none recorded there is nothing to read.
+  if (work.stage === 'done' || !work.submission || !work.candidate || !work.evidence?.length) return null;
+  const sha = work.candidate.sha, at = new Date(now);
+  const failed = mechanicalVerdicts(work, [work], at).filter(verdict => verdict.outcome === 'failed');
+  const failedProofs = new Set(failed.map(verdict => verdict.proof));
+  // The latest record of each proof on this head and policy, when it is a pass the control plane
+  // refused as not exercising its criterion and no trusted evidence has answered the proof since.
+  const unexercised = [...new Set(work.evidence.map(entry => entry.proof))].flatMap(proof => {
+    if (failedProofs.has(proof) || currentEvidence(work, proof, at)) return [];
+    const latest = work.evidence.filter(entry => entry.proof === proof && entry.sha === sha && entry.policyRevision === work.policyRevision && !entry.revocation).at(-1);
+    return latest?.unexercised ? [{ proof, finding: latest.unexercised, producer: latest.producer }] : [];
+  });
+  if (!failed.length && !unexercised.length) return null;
+  const grounds = [
+    ...failed.map(verdict => mechanicalFailure(verdict, sha)),
+    ...unexercised.map(entry => `${entry.proof} was recorded as not exercising its criterion on ${sha.slice(0, 12)}; the producer ${entry.producer} found: ${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}`),
+  ];
+  const threads = blockingThreads(work);
+  const open = threads.length ? ` ${threadReworkSummary(sha, threads)}.` : '';
+  return { reason: `${work.key}: ${grounds.join('; ')}. No review is requested for a head whose proofs cannot pass, so the item returns to a worker now rather than waiting on one; the next head is proven afresh.${open}`,
+    binding: `${sha}:proofs:${[...failedProofs, ...unexercised.map(entry => entry.proof)].sort().join(',')}` };
 }
 /**
  * The standing control-plane lease-loss the loop may ask to settle, and why. `superseded` when a
