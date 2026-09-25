@@ -258,6 +258,26 @@ test('unit:ended-worker-pane-closed a close that fails keeps the fence up, and a
   assert.equal(retried.state.actions[`settle:${work.id}:1`]?.state, 'done');
 });
 
+test('unit:ended-worker-pane-closed a close interrupted by a daemon restart is retried, and the quarantine then settles', async () => {
+  const work = stranded(), key = `close:ended-scope:${work.id}:1:w1V:p2PP`;
+  // The daemon persisted `started` and died before the close returned (review of eadf6d1e).
+  const interrupted = async () => {
+    const { state } = await loop(work, { containment: probedBy(paneShellProbe()), closeSession: () => { throw new Error('herdr: server unavailable'); } });
+    state.actions[key] = { ...state.actions[key]!, state: 'started' };
+    return state;
+  };
+  const restarted = await loop(work, { containment: probedBy(paneShellProbe()) }, await interrupted());
+  assert.deepEqual(restarted.closed, ['w1V:p2PP'], 'the interrupted close is attempted again');
+  assert.equal(restarted.state.actions[key]?.state, 'done');
+  assert.equal(restarted.settled.length, 1, 'the fence comes down once the close is done');
+  assert.equal(restarted.state.actions[`settle:${work.id}:1`]?.state, 'done');
+
+  // Where the pane had in fact closed before the restart, the repeat finds it gone and settles too.
+  const gone = await loop(work, { containment: probedBy(paneShellProbe()), closeSession: () => { throw new Error('herdr: pane_not_found w1V:p2PP'); } }, await interrupted());
+  assert.match(gone.state.actions[key]?.detail ?? '', /^Pane was already gone w1V:p2PP/);
+  assert.equal(gone.settled.length, 1);
+});
+
 test('unit:ended-worker-pane-closed settlement after a close comes only from a probe taken once the pane is gone', async () => {
   const work = stranded(), key = `close:ended-scope:${work.id}:1:w1V:p2PP`;
   // The shell started a background job after the first probe counted its children, and the job survives the pane close.

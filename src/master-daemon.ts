@@ -486,6 +486,11 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = state.approvals[key] ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: the decision was requested before the restart; its approver session is supervised from here'
         : 'Resumed: no request was recorded before the restart; a standing one is adopted, otherwise it is requested again';
+    } else if (action.kind === 'close') {
+      // Closing a pane is safe to repeat: one already gone settles as gone. Left indeterminate, an
+      // ended worker's close would never be retried, and its quarantine never settled (GY-189).
+      next.state = 'failed';
+      next.detail = 'Resumed: the pane close was interrupted; it is tried again, and a pane already gone settles it';
     } else {
       next.state = 'indeterminate';
       next.detail = `Resumed: the ${action.kind} request was interrupted and its effect is unknown`;
