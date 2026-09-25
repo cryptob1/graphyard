@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
-import { fleetRoles } from './registry.js';
-import type { AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, SelectionRequest, SessionSkip } from './registry.js';
+import { fleetRoles, rolePolicy } from './registry.js';
+import type { AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, SelectionRequest, SessionSkip } from './registry.js';
 
 /**
  * Which sessions of the agent registry are live, which accounts may take another, the choice an
@@ -94,7 +94,7 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   return null;
 }
 
-export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; reason: string; skipped: SessionSkip[] }
+export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[] }
 export interface SessionRefusal { account: null; reason: string; skipped: SessionSkip[] }
 /**
  * The session an action runs on: the first account of the role, in the role's own order, that is
@@ -114,8 +114,10 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
     const account = registry.accounts.find(entry => entry.name === name);
     const refusal = account ? accountIneligibility(registry, account, now, request.host) : `${name} is not a registered account`;
     if (refusal) { skipped.push({ account: name, reason: refusal }); continue; }
-    const runtime = registry.runtimes.find(entry => entry.name === account!.runtime)!, model = registry.models.find(entry => entry.name === account!.model)!;
-    return { account: account!, runtime, model, skipped,
+    // The role's policy names the model its sessions run, where it names one; else the account's own.
+    const policy = rolePolicy(role), runtime = registry.runtimes.find(entry => entry.name === account!.runtime)!;
+    const model = registry.models.find(entry => entry.name === (policy.model ?? account!.model)) ?? registry.models.find(entry => entry.name === account!.model)!;
+    return { account: account!, runtime, model, policy, skipped,
       reason: `${name} is the first eligible account for ${role.name} (preference ${index + 1} of ${role.accounts.length}; ${running.length + 1} of ${role.concurrency} concurrent)${skipped.length ? ` — passed over ${skipped.map(entry => entry.reason).join('; ')}` : ''}` };
   }
   return { account: null, skipped, reason: `no eligible account for ${role.name}: ${skipped.map(entry => entry.reason).join('; ')}` };
@@ -132,7 +134,7 @@ export interface FleetAccountView {
   /** Why the account cannot take a session now; null when it can. */
   ineligible: string | null;
 }
-export interface FleetRoleView { role: FleetRoleName; accounts: string[]; concurrency: number; live: number; next: string | null; blocked: string | null }
+export interface FleetRoleView { role: FleetRoleName; accounts: string[]; concurrency: number; live: number; next: string | null; blocked: string | null; policy: RolePolicy }
 export interface FleetView {
   revision: number; updatedAt: string | null; configured: boolean; host: string | null;
   runtimes: FleetRuntime[]; models: FleetModel[]; accounts: FleetAccountView[]; roles: FleetRoleView[];
@@ -162,7 +164,7 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
     const first = host ? choice?.account?.name ?? null : role.accounts.find(name => accounts.find(account => account.name === name)?.eligible) ?? null;
     const running = live.filter(session => session.role === role.name).length;
     const blocked = host ? (choice!.account ? null : choice!.reason) : running >= role.concurrency ? `role ${role.name} is at its concurrency limit (${running} of ${role.concurrency} live)` : first ? null : `no eligible account for ${role.name}`;
-    return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked };
+    return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
   });
   const unassigned = accounts.filter(account => !account.roles.length).map(account => `${account.name} serves no role; name it in a role or remove it`);
   const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
