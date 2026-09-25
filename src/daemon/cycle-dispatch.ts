@@ -14,6 +14,7 @@ import { clearProfileFailure, profileHealth, recordProfileFailure } from './sess
 import { detailChanged, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
+import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
@@ -23,9 +24,27 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //    Planned-file overlap never holds an item (dispatch is optimistic: the merge queue and a
   //    sync round integrate whichever lands second); only exclusive resources do. The smallest
   //    planned scope within a priority is offered first.
-  const claimable = open.filter(item => {
+  const offered = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }).sort(dispatchOrder);
+  // 4-research. Research before build (GY-259): an item about to be offered whose requirements
+  //     were never researched gets one cheap Pi session first, and waits only while that run is
+  //     within its time limit. A run that fails or times out is recorded and the item is built
+  //     without a brief; research never holds an item past its bound.
+  const held = new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id));
+  if (effects.recordResearch && effects.research) await isolate('dispatch', null, 'research', async () => {
+    const settings = researchSettings(config.run);
+    const step = await researchStep({ items: offered.filter(item => !held.has(item.id)), clock, settings, config, cwd: effects.research!.cwd,
+      runner: effects.research!.runner ?? researchRunner(settings), record: effects.recordResearch! });
+    for (const id of step.held) held.add(id);
+    for (const action of step.actions) {
+      const item = offered.find(entry => entry.key === action.work)!, key = `research:${item.id}:${action.state}`;
+      if (!detailChanged(state.actions[key], action.detail)) continue;
+      // A notice, never a failed action: research that fails is recorded on the item and holds nothing.
+      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: item.epoch, state: 'done', detail: action.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    }
+  });
+  const claimable = offered.filter(item => !held.has(item.id));
 
   // 4a. Capacity. A role whose every configured account is spent is not a launch to keep
   //     retrying and not a failure to keep reporting: each item that needs the role records one

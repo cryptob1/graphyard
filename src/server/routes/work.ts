@@ -9,6 +9,7 @@ import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDec
 import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
+import { answerResearch, recordResearch } from '../../research.js';
 
 // Every mutating work route refuses a slice lead the same way and leaves the same
 // ledger entry. Routing order decides which handler matches first; it must never
@@ -46,6 +47,16 @@ export const workRoutes = defineRoutes('work', [
       return action === 'park' ? requestHumanDecision(context.services, context.actor, target, data, key)
         : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key)
         : recordCapacity(context.services, context.actor, target, data, key);
+    },
+  },
+  // Research before build (GY-259): the loop records a run and its brief as the coordinator, and
+  // the operator answers the brief's product questions. Neither holds the item.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(research|research-answer)$/,
+    async handle(context, [id, action]) {
+      await refuseLead(context, id, action);
+      const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      return action === 'research' ? recordResearch(context.services, context.actor, target, data, key) : answerResearch(context.services, context.actor, target, data, key);
     },
   },
   // Closing an item that will never be delivered: the master's or an admin's, never a worker's.

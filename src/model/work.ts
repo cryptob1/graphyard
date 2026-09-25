@@ -54,6 +54,9 @@ export const createSchema = z.object({
   // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item
   // created before the field existed carries none and is not system-driven.
   systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
+  // Research before build (GY-259): a feature item is researched unless this is false, and any
+  // other item only when it is true. See src/research.ts.
+  research: z.boolean().optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
@@ -121,6 +124,36 @@ export interface Observation {
   revertedDelivery?: RevertedDelivery;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
+/**
+ * A product question the research step raised (GY-259). It is asked of the operator in Graphyard
+ * as a goals-and-priorities request with a recommended answer and a deadline, and never holds the
+ * build: the item proceeds on the recommendation, marked provisional, until an answer arrives.
+ * `answer.epoch` is the attempt current when it arrived and `inFlight` whether an attempt was
+ * building or submitted then; a differing answer to an attempt in flight returns its head.
+ */
+export interface ResearchQuestion {
+  id: string; kind: 'goals-and-priorities';
+  question: string; why: string; recommendation: string;
+  at: string; deadline: string;
+  answer: { by: string; at: string; text: string; differs: boolean; epoch: number; inFlight: boolean; waitedMs: number } | null;
+}
+/** The research brief the loop recorded on the item, or the failure that left it without one (GY-259, src/research.ts). */
+export interface ResearchRecord {
+  /** The requirements revision researched: a digest of title, description and criteria. One run per revision. */
+  revision: string;
+  state: 'running' | 'recorded' | 'failed';
+  startedAt: string; endedAt: string | null;
+  runtime: string; model: string; timeoutMs: number; tokenBudget: number;
+  brief: {
+    existingCode: { path: string; note: string }[];
+    patterns: { pattern: string; source: string }[];
+    risks: string[];
+    approach: string;
+  } | null;
+  questions: ResearchQuestion[];
+  failure: { reason: string; detail: string } | null;
+  recordedBy: string;
+}
 export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string }
 export interface Work extends Create {
   /**
@@ -164,6 +197,8 @@ export interface Work extends Create {
    */
   humanRequest?: HumanRequest | null;
   humanRequests?: HumanRequest[];
+  /** What the research step found before build, and the product questions it asked (src/research.ts). */
+  researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
   closure?: Closure | null;
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */

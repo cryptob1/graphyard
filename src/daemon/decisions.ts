@@ -5,6 +5,7 @@ import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendin
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
+import { researchRework } from '../research.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
 // ---- Routine decisions ---------------------------------------------------------------------
@@ -171,6 +172,10 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   if (proofs) return { action: 'rework', ...proofs };
   const ci = failedCheckRework(work);
   if (ci) return { action: 'rework', ...ci };
+  // The operator answered a product question the head was built on provisionally, and the answer
+  // differs from that recommendation (GY-259): the head no longer builds what was asked.
+  const research = researchRework(work);
+  if (research) return { action: 'rework', ...research };
   // Unresolved review threads block no merge: the reviewer's verdict on the head is the review
   // gate and the threads are its inputs. A thread still open once the review of the current head
   // has settled — one it was not shown, or a policy with no review — is a finding the loop sends

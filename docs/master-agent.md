@@ -47,6 +47,15 @@ sessions only, and a name is busy only while a live session has it. A session pa
 that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
+## Research before build
+
+Before the loop dispatches a feature (or any item whose intent sets `"research": true`; `false` opts a feature out), it runs one headless Pi session on the research model: `run.research` in `.graphyard/master.json` (`model`, default `zai/glm-5.3-flash`; `command`, default `run.pi.command`; `timeoutMinutes`, default 15; `tokenBudget`, default 200000 estimated tokens; `questionDeadlineHours`, default 4; `enabled`). The session is read-only and submits `graphyard_research_brief`: existing code to reuse, patterns and prior art with sources, risks, a recommended approach, and product questions. The loop records it as `researchBrief` on the item (`POST /api/work/GY-N/research`).
+
+- **One run per requirements revision** (title, description and criteria). Dispatch waits only while it runs.
+- **Never blocking.** A run that fails, times out or overruns its budget is recorded as `failed`, and the item is built without a brief.
+- **Product questions go to Needs you**, as goals-and-priorities requests with why, a recommended answer and a deadline, never to chat. The build proceeds at once on the recommendations, marked provisional. An answer (`research-answer`) is added to the brief; one that differs from what a built head assumed requests rework.
+- **The worker's launch request carries the brief** and the product decisions; the reviewer checks the change against the recommended approach and the answered questions.
+
 ## Automatic dispatch at submit
 
 When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`). The review request follows once the head's unit and integration proofs pass (`proofs-pending` until then; a failure returns it to its worker). `*-postmerge` proofs are refused (use `policy.deploySmoke`). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch first awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
