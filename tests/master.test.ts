@@ -508,21 +508,16 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   }, execution.owner, async (_work, held) => { recommitted = held.id; return uncommittedStore.commit(); });
   assert.match(uncommittedResult.result, /merge requested/); assert.equal(recommitted, execution.id, 'the resumed execution is committed before the provider call');
   assert.equal(resumedCalls.filter(args => args[1] === '--method').length, 1);
-  // Only a recorded provider commit marks an unknown provider outcome, and GitHub's pull request
-  // answers it (GY-202), whether or not the authority has since lapsed: merged is never merged
-  // again, and an open pull request whose head moved is never retried.
+  // Only a recorded provider commit marks an unknown provider outcome; that execution is retained
+  // for observation and never retried while GitHub cannot say whether it merged, whether or not its
+  // authority has since lapsed. It is reported as pending, never as merged (GY-195): the loop
+  // records it as waiting and asks GitHub again (GY-202).
   const committedExecution = { ...verifiedExecution, committingAt: new Date().toISOString() };
   for (const expiresAt of [committedExecution.expiresAt, new Date(Date.now() - 1000).toISOString()]) {
     const uncertain = work({ observation: candidate.observation, mergeExecution: { ...committedExecution, expiresAt } });
-    const readPull = (pull: object) => (_command: string, args: string[]) => {
-      if (args[1] === 'repos/owner/project/pulls/42') return JSON.stringify(pull);
-      throw new Error('must not repeat a possibly attempted provider call');
-    };
-    const recovered = await mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, async () => { throw new Error('must not cancel a merged execution'); }, verify,
-      readPull({ state: 'closed', merged: true, merge_commit_sha: 'c'.repeat(40), head: { sha: uncertain.candidate!.sha }, base: { ref: 'main' } }), execution.owner);
-    assert.deepEqual(recovered.merged?.sha, 'c'.repeat(40));
-    await assert.rejects(mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, async () => { throw new Error('must not cancel'); }, verify,
-      readPull({ state: 'open', merged: false, head: { sha: 'd'.repeat(40) }, base: { ref: 'main' } }), execution.owner), /the candidate moved, so the merge is not retried/);
+    const recovered = await mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, cancel, verify, () => { throw new Error('must not repeat a possibly attempted provider call'); }, execution.owner) as { pending?: boolean; merged?: boolean; result: string };
+    assert.equal(recovered.pending, true, 'an unknown provider outcome is pending'); assert.notEqual(recovered.merged, true, 'and never reported as merged');
+    assert.match(recovered.result, new RegExp(`provider outcome of merge execution ${committedExecution.id} is unknown; GitHub could not be read .*; Graphyard retained it until ${expiresAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} and asks GitHub again`));
   }
   const lateExecution = { ...execution, issuedAt: new Date(Date.now() - 110_000).toISOString(), expiresAt: new Date(Date.now() + 10_000).toISOString() };
   const late = work({ observation: candidate.observation, mergeExecution: lateExecution }); cancelled = '';

@@ -5,11 +5,22 @@ import type { IntegrationJob } from '../coordination.js';
 import { migration, tables } from './schema.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
+import { advisoryLocks } from './locks.js';
+import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 
 export * from './snapshot-delta.js';
+export { advisoryLocks } from './locks.js';
+export type { CoordinationTrim } from './coordination-sql.js';
 
-/** The advisory lock every coordination transaction takes (Store.transaction). */
-const coordinationLock = 71490321;
+/**
+ * How long the store waits for a pooled connection, and how long any one statement may run —
+ * including the wait for the coordination lock, which is itself a statement (GY-185). Without them
+ * a saturated pool queued every request behind it indefinitely: callers timed out on their own
+ * clocks while the server kept working through requests nobody was waiting for any more. A bounded
+ * wait fails the one request with a reason, and the pool drains.
+ */
+export const storeConnectionTimeoutMs = 10_000, storeStatementTimeoutMs = 60_000;
+const coordinationLock = advisoryLocks.coordination;
 /** How long a migrating release may wait for locks in total: well inside Railway's 120-second health check. */
 export const migrationLockTimeoutMs = 30_000;
 /** The migration's statements ahead of the first table's DDL: the shared trigger function. */
@@ -19,7 +30,7 @@ const newerSchema = (current: number) => new Error(`Database schema generation $
 
 /** How long a migrating release waits for its watchdog's connection; a database at its limit refuses at once. */
 const watchdogConnectMs = 5_000;
-/** A pool connection, or an error after `watchdogConnectMs` without one (the pool itself waits without bound). */
+/** A pool connection, or an error after `watchdogConnectMs` without one (sooner than the pool's own `storeConnectionTimeoutMs`). */
 async function reserve(pool: pg.Pool) {
   let timer: NodeJS.Timeout | undefined;
   const connecting = pool.connect();
@@ -33,7 +44,9 @@ async function reserve(pool: pg.Pool) {
 
 export class Store {
   pool: pg.Pool;
-  constructor(url: string) { this.pool = new pg.Pool({ connectionString: url, max: 12 }); }
+  constructor(url: string) {
+    this.pool = new pg.Pool({ connectionString: url, max: 12, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+  }
   /**
    * Apply the additive migration and record the schema generation it reached. Running
    * against a database a newer release already migrated refuses: rolling the application
@@ -42,10 +55,11 @@ export class Store {
    * A release whose generation and migration are already recorded starts without any
    * coordination or table lock: it reads graphyard_schema and its comment (the digest of the
    * migration that last ran) and skips the DDL, so a new container never queues behind a busy
-   * live replica. Only a release that must migrate takes the coordination lock, and every
+   * live replica. Only a release that must migrate takes a lock — the migration lock, never the
+   * coordination lock (GY-203) — and every
    * lock wait of the migration shares one `lockTimeoutMs` deadline: each step's lock_timeout
    * is the time left, and a watchdog cancels any lock wait still running at the deadline, so
-   * waits on the coordination lock, across tables, and between the statements of one table's
+   * waits on the migration lock, across tables, and between the statements of one table's
    * DDL never add up past it. The watchdog's connection is reserved before the migration begins,
    * and a migration that cannot reserve it, or loses it past the deadline, fails at once.
    * Startup then fails naming the lock, well inside the platform's
@@ -71,7 +85,7 @@ export class Store {
     const lose = (error: Error) => { lost ??= error; };
     guard.on('error', lose);
     guard.on('end', () => lose(new Error('Connection terminated')));
-    let waitingOn = `the coordination advisory lock pg_advisory_xact_lock(${coordinationLock})`;
+    let waitingOn = `the migration advisory lock pg_advisory_xact_lock(${advisoryLocks.migration})`;
     // A watchdog that cannot run past the deadline aborts the migration: without it, lock waits
     // inside one step could restart lock_timeout without end.
     let abort!: (error: Error) => void, aborted: Error | undefined;
@@ -103,7 +117,12 @@ export class Store {
       const pid = Number((await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
       poll = setTimeout(() => { polling = watch(pid); }, Math.max(0, deadline - Date.now()));
       await db.query('BEGIN');
-      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      // The pool's statement timeout bounds coordination reads and writes, not the migration's own
+      // work: its lock waits share the deadline above, and a backfill or index build still completes.
+      await db.query('SET LOCAL statement_timeout = 0');
+      // The migration's own lock, never the coordination lock (GY-203): two migrations serialize,
+      // while the live replica's coordination transactions run on beside it.
+      await step(waitingOn, 'SELECT pg_advisory_xact_lock($1)', [advisoryLocks.migration]);
       await step('a lock on the migration\'s shared function graphyard_immutable', migrationPrelude);
       for (const table of tables) await step(`a lock on table ${table.name} (or an object its migration touches)`, table.ddl);
       const current = Number((await step('a lock on table graphyard_schema', 'SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
@@ -117,7 +136,7 @@ export class Store {
       await db.query('ROLLBACK').catch(() => {});
       // 55P03: a lock wait hit the time left; 57014 after the watchdog fired: it cancelled a lock wait past the deadline.
       const code = (error as { code?: string }).code;
-      if (code === '55P03' || (code === '57014' && cancelledWaiting)) throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session (usually the live replica); startup fails instead of outlasting the health check — retry the deploy when the live replica is idle`, { cause: error });
+      if (code === '55P03' || (code === '57014' && cancelledWaiting)) throw new Error(`Schema migration to generation ${schemaVersion} gave up after ${timeout} ms waiting for ${waitingOn}, held by another session; startup fails instead of outlasting the health check — retry the deploy when it is released`, { cause: error });
       throw error;
     } finally {
       // A cancel still in flight must not reach whatever this connection runs next.
@@ -156,6 +175,32 @@ export class Store {
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
+  }
+  /**
+   * The work snapshot as the coordination view reads it, trimmed in SQL (`coordinationDocumentSql`)
+   * rather than after every whole document was loaded, with how much each item's histories lost.
+   * A settled delivery comes from the work index (src/store/tables/work-index.ts), read in the same
+   * snapshot, so only the live items' documents are read at all (GY-203).
+   * The master loop, the dispatcher and every executor poll this; the full snapshot stays for the
+   * readers that derive reports from whole documents.
+   */
+  async coordinationSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[]; trimmed: Map<string, CoordinationTrim> }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      // A settled delivery is served from the work index (GY-203): its document is never read.
+      // Every other item's document is trimmed in SQL, and only those documents are read.
+      const settled = (await client.query('SELECT number, summary AS document, trimmed FROM work_index WHERE settled')).rows;
+      const live = (await client.query(`SELECT d.number, x.document, ${coordinationTrimSql('x.document', coordinationTail)} AS trimmed
+        FROM (SELECT w.number, ${detoasted('w.document')} AS document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) OFFSET 0) d
+        CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`)).rows;
+      const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
+      const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
+      await client.query('COMMIT');
+      const trimmed = new Map<string, CoordinationTrim>(rows.map(row => [row.document.id, row.trimmed as CoordinationTrim]));
+      return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs, trimmed };
+    } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+    finally { client.release(); }
   }
   async events(id?: string) {
     // A delta row reads as the full row it stands for (snapshot-delta.ts).

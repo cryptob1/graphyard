@@ -68,9 +68,8 @@ before(async () => {
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
 
 /**
- * Every item this file creates owns a planned scope of its own. Planned-file overlap holds a
- * dispatch whatever else is true of an item, so an item that shares a scope with another would
- * not be dispatchable for a reason that has nothing to do with the escalation under test.
+ * Every item this file creates owns a planned scope of its own, so what it overlaps is never part
+ * of the case under test (overlap holds no dispatch; an exclusive resource does).
  */
 let sequence = 0;
 async function created(overrides: Record<string, unknown> = {}) {
@@ -186,13 +185,13 @@ test('integration:escalation-does-not-freeze-workable-item — a ready item carr
   // The half the escalation does block is unchanged: nothing may be delivered under one, and an
   // item that cannot take an assignment anyway is still named for the concern rather than for a
   // dispatch no executor could complete.
-  const blocked = await ready();
-  const holder = await engine.execute(worker, 'claim', (await ready({ plannedFiles: blocked.plannedFiles })).id, {}, id());
+  const blocked = await ready({ exclusiveResources: ['escalation-staging'] });
+  const holder = await engine.execute(worker, 'claim', (await ready({ exclusiveResources: ['escalation-staging'] })).id, {}, id());
   const stood = await standingLoss(blocked, 1);
   await engine.reconcile();
   const held = await reload(stood);
   assert.equal(action(held).kind, 'escalate');
-  assert.match(action(held).reason, new RegExp(`no assignment it can take \\(its planned files overlap ${holder.key} \\(claimed\\)`));
+  assert.match(action(held).reason, new RegExp(`no assignment it can take \\(exclusive resources are held by ${holder.key} \\(escalation-staging\\)`));
   assert.equal(action(held).needsHuman.decision, `resolving ${held.key}'s lease-loss escalation`);
 });
 
