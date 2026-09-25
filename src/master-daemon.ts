@@ -527,11 +527,14 @@ export function percentiles(values: number[]) {
  * and nothing left undecided for longer than fifteen. A breach means workers are waiting on the
  * loop, so it is escalated with the numbers rather than left in the metrics.
  */
-export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number) {
+export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number, routes = false) {
   const measured = percentiles(decisions.map(entry => entry.waitedMs));
+  // A rule refusal the loop puts to the approver (`routes`, GY-176) is not the worker's answer: the
+  // request stays open, and its wait counts, until the approver approves or refuses it.
   const open = work.flatMap(item => {
     const request = item.scopeRequest;
-    return request && !request.decision ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)) }] : [];
+    const routed = routes && request?.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
+    return request && (!request.decision || routed) ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed }] : [];
   }).sort((a, b) => b.waitedMs - a.waitedMs);
   // One id per breach, not per wording: the numbers in the detail move every cycle, and an
   // escalation that changed key each time would read as a new incident every twenty seconds.
@@ -540,7 +543,8 @@ export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: nu
       ? [{ id: 'p90', detail: `Scope decisions are too slow: p90 is ${Math.round(measured.p90Ms / 1000)}s over the last ${measured.count} requests, above the ${scopeDecisionBudgetMs / 60_000}-minute budget` }] : []),
     ...open.filter(entry => entry.waitedMs > scopeBlockedBudgetMs)
       .map(entry => ({ id: `blocked:${entry.key}:${entry.epoch}`,
-        detail: `${entry.key} has been blocked on its scope request for ${Math.round(entry.waitedMs / 60_000)} minutes, above the ${scopeBlockedBudgetMs / 60_000}-minute bound; decide it with graphyard master scope ${entry.key} REASON` })),
+        detail: `${entry.key} has been blocked on its scope request for ${Math.round(entry.waitedMs / 60_000)} minutes, above the ${scopeBlockedBudgetMs / 60_000}-minute bound; ${entry.routed
+          ? `its requirements decision is with the independent approver: read it with graphyard master decisions ${entry.key}` : `decide it with graphyard master scope ${entry.key} REASON`}` })),
   ];
   return { ...measured, open, longestOpenMs: open[0]?.waitedMs ?? 0, breaches, withinBudget: !breaches.length };
 }
@@ -1934,17 +1938,21 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       const decision = decided.scopeDecision;
       if (!decision) throw new Error('The control plane answered without a decision');
       settled.set(item.id, decided);
-      state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: decision.at, waitedMs: decision.waitedMs, state: decision.state }));
+      // An additive refusal no finding grounds is put to the independent approver in step 4c, on
+      // this same cycle: naming `master scope` would leave it waiting for a master to be around. Its
+      // wait is measured when the approver answers, the decision the worker actually waits on.
+      const routed = decision.state === 'refused' && !!effects.decide && !!effects.approver && !!routableScopeRequest(decided.scopeRequest ? decided : { ...item, scopeRequest: { ...request, decision } }, clock);
+      if (!routed) state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: decision.at, waitedMs: decision.waitedMs, state: decision.state }));
       const waited = `${Math.round(decision.waitedMs / 1000)}s after ${request.requestedBy} asked`;
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
         detail: boundDetail(decision.state === 'approved'
           ? `Widened ${item.key} with ${namePaths(request.paths)} ${waited}: ${decision.reason}`
           : `Refused ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'} ${waited}: ${decision.reason}`),
         attempts, cycle: state.cycle }, now(), effects.persist));
-      if (decision.state === 'refused' && await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision })) return;
-      // An additive refusal no finding grounds is put to the independent approver in step 4c, on
-      // this same cycle: naming `master scope` would leave it waiting for a master to be around.
-      const routed = !!effects.decide && !!effects.approver && !!routableScopeRequest(decided.scopeRequest ? decided : { ...item, scopeRequest: { ...request, decision } }, clock);
+      if (decision.state === 'refused' && await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision })) {
+        if (routed) state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: new Date(clock).toISOString(), waitedMs: Math.max(0, clock - Date.parse(request.at)), state: 'approved' }));
+        return;
+      }
       if (decision.state === 'refused' && !routed) {
         const escalationKey = `escalation:scope:${item.id}:${request.at}`;
         performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
@@ -1960,7 +1968,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   // 2b. The promise that decision rests on: workers wait minutes, not a shift. A p90 above the
   //     budget, or any request left undecided past the blocked bound, is escalated with the
   //     numbers — the loop is the only thing that could have answered them.
-  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock);
+  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock, !!effects.decide && !!effects.approver);
   for (const breach of budget.breaches) {
     const key = `escalation:scope-budget:${breach.id}`;
     if (!detailChanged(state.actions[key], breach.detail)) continue;
@@ -2374,6 +2382,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     if (!scope || state.actions[key]?.state === 'done') return;
     const approved = judged.state === 'applied', by = approved ? judged.approvedBy : judged.refusal?.approver;
     const why = approved ? judged.approvalReason : judged.refusal?.reason ?? judged.outcome;
+    // The wait the worker saw, from its ask to the approver's answer (step 2 left the rule refusal unmeasured).
+    state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: scope.epoch, at: stamp, waitedMs: Math.max(0, clock - Date.parse(scope.at)), state: approved ? 'approved' : 'refused' }));
     await note(key, item, 'scope', 'done', `${approved ? 'Approved' : 'Refused'} ${item.key}'s scope request (epoch ${scope.epoch}) for ${namePaths(scope.paths)} through ${watch.action} decision ${watch.decision}${by ? ` by ${by}` : ''}${why ? `: ${boundDetail(why, 400)}` : ''}; ${scope.requestedBy} reads it with ${config.cliPath ? `node ${config.cliPath}` : 'graphyard'} scope-request ${item.key} ${scope.epoch} --wait`);
   };
   /** Look again at a decision already requested: its state on the control plane, and its session. */

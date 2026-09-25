@@ -10,9 +10,9 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import { routedScopeRequests } from '../src/cli/status-attention.js';
-import { answeringWidening, daemonSummary, emptyDaemonState, runCycle, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { answeringWidening, daemonSummary, emptyDaemonState, runCycle, scopeBudget, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { scopeOutcomeMessage, scopeRequestOutcome } from '../src/model/scope.js';
+import { scopeBlockedBudgetMs, scopeOutcomeMessage, scopeRequestOutcome } from '../src/model/scope.js';
 import { awaitScopeOutcome } from '../src/cli/session-commands.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import type { Principal, Work } from '../src/model.js';
@@ -572,4 +572,33 @@ test('unit:scope-outcome-delivered — after a partial widening, a refusal names
   assert.equal(told.state, 'refused');
   assert.match(told.text, /for src\/server\/routes\/work\.ts was refused/);
   assert.doesNotMatch(told.text, /measure\.ts/, 'the helper, now planned, is not among the paths to finish without');
+});
+
+test('unit:scope-approver-routine — a routed request stays open in the blocked-time budget until the approver answers, and its wait is measured to that answer', async () => {
+  let work = await claimed('budget counts the approver wait');
+  const asked = await ask(work, [helper], 'The layout measures its breakpoints through a helper');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  work = await reload(work.id);
+  assert.equal(work.scopeRequest!.decision!.decidedBy, 'graphyard', 'the rule refused it and the loop routed it');
+  assert.equal(state.scope.filter(entry => entry.work === work.key).length, 0, 'the rule refusal is not the answer the worker waits on, so it is not measured');
+
+  // Past the blocked bound with the approver still judging: the request is open and breaches.
+  const later = Date.parse(asked.scopeRequest!.at) + scopeBlockedBudgetMs + 60_000;
+  const live = { ...work, lease: { ...work.lease!, expiresAt: new Date(later + 60_000).toISOString() } };
+  const routed = scopeBudget([live], [], later, true);
+  assert.deepEqual(routed.open.map(entry => entry.key), [work.key], 'the approver wait counts');
+  assert.equal(routed.breaches.length, 1);
+  assert.match(routed.breaches[0].detail, /with the independent approver: read it with graphyard master decisions/);
+  assert.doesNotMatch(routed.breaches[0].detail, /master scope/, 'a routed request never names master scope');
+  assert.equal(scopeBudget([live], [], later, false).open.length, 0, 'a loop that routes nothing leaves the rule refusal to its master scope escalation');
+
+  const [requested] = await standing(work);
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: requested.id, reason: 'The helper is the layout criterion spelled out' });
+  await loop.cycle(state);
+  const measured = state.scope.filter(entry => entry.work === work.key);
+  assert.equal(measured.length, 1, 'one sample, taken when the approver answered');
+  assert.equal(measured[0].state, 'approved');
+  work = await reload(work.id);
+  assert.equal(scopeBudget([work], [], Date.now(), true).open.length, 0, 'an answered request is no longer open');
 });
