@@ -234,16 +234,60 @@ export function assignmentSurrender(epoch: number, argv: string[] = process.argv
   };
 }
 
+/** How long before the lease's own expiry a supervisor stops retrying a failed renewal (GY-274). */
+export const renewalSafetyMarginMs = 15_000;
+/**
+ * Whether a failed renewal is the server's definite answer rather than a transient failure: a 4xx
+ * refusal naming the epoch, the lease or its ownership, or a renewal that came back for another
+ * epoch. A network error, a timeout, a 5xx, a 408 or 429, or a proxy's page during a deploy is
+ * transient, and the lease that is still running is what decides whether the worker stops.
+ */
+export function definiteRenewalRefusal(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+  const { confirmedRefusal, status, definite } = error as { confirmedRefusal?: unknown; status?: unknown; definite?: unknown };
+  if (confirmedRefusal === true || definite === true) return true;
+  return typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0;
   async function heartbeat() {
     const started = performance.now();
     const result = await renew();
     const duration = Date.parse(result.lease?.expiresAt ?? '') - Date.parse(result.updatedAt);
-    if (result.lease?.epoch !== epoch || !Number.isFinite(duration) || duration <= 0) throw new Error('Invalid lease renewal');
+    if (result.lease?.epoch !== epoch || !Number.isFinite(duration) || duration <= 0) throw Object.assign(new Error('Invalid lease renewal'), { definite: true });
     deadline = started + duration;
-    if (deadline <= performance.now()) throw new Error('Lease expired during renewal');
+    if (deadline <= performance.now()) throw Object.assign(new Error('Lease expired during renewal'), { definite: true });
+  }
+  const safetyMarginMs = options.safetyMarginMs ?? renewalSafetyMarginMs;
+  const retryMs = options.retryMs ?? 1000, retryMaxMs = options.retryMaxMs ?? 10_000;
+  /**
+   * One renewal, retried with backoff while the lease still has more than the safety margin left
+   * (GY-274). A deploy restarts the server for about a minute and its first reconcile used to hold
+   * the pool; the lease is 120 s precisely so that a worker survives that. Returns 'renewed', or
+   * 'refused' on the server's definite answer, or 'lapsing' when the retry window closed; a
+   * lapsing lease is left to the expiry timer, which stops the worker only once it has expired.
+   */
+  async function renewWithRetry(stopped: () => boolean): Promise<'renewed' | 'refused' | 'lapsing' | 'stopped'> {
+    for (let attempt = 0; ; attempt++) {
+      // Inside the safety margin nothing more is attempted: the lease is left to expire on its own.
+      if (attempt === 0 && deadline - safetyMarginMs <= performance.now()) return 'lapsing';
+      try { await heartbeat(); return 'renewed'; }
+      catch (error) {
+        const reason = error instanceof Error ? error.message.slice(0, 300) : String(error);
+        if (definiteRenewalRefusal(error)) { console.error(`Graphyard refused the lease renewal: ${reason}`); return 'refused'; }
+        const window = deadline - safetyMarginMs - performance.now();
+        const wait = Math.min(retryMs * 2 ** attempt, retryMaxMs, window);
+        if (wait <= 0) {
+          console.error(`Graphyard lease renewal is still failing (${reason}); retries stop ${safetyMarginMs} ms before the lease expires and the worker stops only if the lease actually expires.`);
+          return 'lapsing';
+        }
+        console.error(`Graphyard lease renewal failed transiently (${reason}); retrying in ${Math.round(wait)} ms with ${Math.round((deadline - performance.now()) / 1000)}s of lease left.`);
+        await delay(wait);
+        if (stopped()) return 'stopped';
+      }
+    }
   }
   await heartbeat();
   const env = { ...process.env };
@@ -395,7 +439,9 @@ export async function supervise(command: string, args: string[], epoch: number, 
               stop(1);
               return;
             }
-            await heartbeat(); if (!stopping) armDeadline();
+            const renewal = await renewWithRetry(() => stopping);
+            if (renewal === 'renewed') { if (!stopping) armDeadline(); }
+            else if (renewal === 'refused') { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }
           }
           catch { console.error('Graphyard lease cannot be renewed. Stopping worker.'); stop(1); }
           finally { pending = false; }

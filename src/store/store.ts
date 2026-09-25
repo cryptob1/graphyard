@@ -42,10 +42,43 @@ async function reserve(pool: pg.Pool) {
   } finally { clearTimeout(timer); }
 }
 
+/**
+ * Which connections a transaction may use (GY-274). `lease` renewals — a worker's heartbeat, an
+ * executor's claim renewal — run on a small pool of their own, so a saturated main pool can never
+ * make a live worker's lease lapse. `background` work — the reconciliation tick — may hold at
+ * most `backgroundLimit` of the main pool's connections at once, so a slow tick (the first one
+ * after a deploy ran 65 s) always leaves requests the rest.
+ */
+export type StoreLane = 'request' | 'lease' | 'background';
+/** Connections reserved for lease renewals beside the main pool. */
+export const leaseLaneConnections = 2;
+
 export class Store {
   pool: pg.Pool;
-  constructor(url: string) {
-    this.pool = new pg.Pool({ connectionString: url, max: 12, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+  /** Lease renewals only: never shared with requests or the tick. */
+  leasePool: pg.Pool;
+  /** How many main-pool connections background work may hold at once: at most half the pool. */
+  readonly backgroundLimit: number;
+  private backgroundHeld = 0;
+  private backgroundWaiting: (() => void)[] = [];
+  constructor(url: string, options: { max?: number } = {}) {
+    const max = Math.max(2, Math.floor(options.max ?? 12));
+    this.pool = new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+    this.leasePool = new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+    this.backgroundLimit = Math.max(1, Math.floor(max / 2));
+  }
+  /** Background connections held right now; never more than `backgroundLimit`. */
+  get backgroundInUse() { return this.backgroundHeld; }
+  private async backgroundPermit() {
+    if (this.backgroundHeld >= this.backgroundLimit) await new Promise<void>(resolve => this.backgroundWaiting.push(resolve));
+    else this.backgroundHeld++;
+    let released = false;
+    return () => {
+      if (released) return; released = true;
+      // A waiter inherits the permit directly, so the count never dips below what is held.
+      const next = this.backgroundWaiting.shift();
+      if (next) next(); else this.backgroundHeld--;
+    };
   }
   /**
    * Apply the additive migration and record the schema generation it reached. Running
@@ -154,9 +187,13 @@ export class Store {
     return { version: Number(rows[0].version), digest: rows[0].digest };
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
-  async close() { await this.pool.end(); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
-    const db = await this.pool.connect();
+  async close() { await Promise.all([this.pool.end(), this.leasePool.end()]); }
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: { lane?: StoreLane } = {}): Promise<T> {
+    const lane = options.lane ?? 'request';
+    const permit = lane === 'background' ? await this.backgroundPermit() : null;
+    let db: pg.PoolClient;
+    try { db = await (lane === 'lease' ? this.leasePool : this.pool).connect(); }
+    catch (error) { permit?.(); throw error; }
     try {
       await db.query('BEGIN');
       // Serializes short coordination decisions across replicas, including dependency edits
@@ -167,7 +204,7 @@ export class Store {
       await db.query('COMMIT');
       return result;
     } catch (error) { await db.query('ROLLBACK'); throw error; }
-    finally { db.release(); }
+    finally { db.release(); permit?.(); }
   }
   async list(): Promise<Work[]> {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
