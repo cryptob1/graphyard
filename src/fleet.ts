@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile,
   type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
+import { sessionName } from './session-name.js';
 import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimes, type AgentRegistry, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type SessionSkip } from './model/registry.js';
 
 /**
@@ -19,7 +20,11 @@ import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, pr
  * role at a time.
  */
 export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
-export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient }
+export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
+  /** The runtime sessions Herdr lists on this host right now: a registry session whose runtime session is gone does not count toward its role (GY-190). */
+  runtime?: RuntimeInventory }
+/** What Herdr listed on the executor's own host, and whether it could be read at all. */
+export interface RuntimeInventory { agents: { name?: string | null }[]; available: boolean }
 /** The three calls an executor makes. */
 export interface FleetClient {
   document(): Promise<AgentRegistry>;
@@ -31,6 +36,41 @@ export interface FleetSelection { selected: boolean; reason: string; skipped: Se
 export interface FleetLaunchAccount { name: string; kind: string; home: string | null; fleet: { runtime: string; contract: LaunchContract; model: string; modelId: string | null; session: string; reason: string } }
 
 export class FleetUnreachableError extends Error {}
+/**
+ * A launch the registry refused only because its role is at its concurrency limit (GY-190). It is
+ * not a fault of any account and not a decision to give up on: the launch waits for a slot, and the
+ * loop makes it again on the first cycle after one frees.
+ */
+export const roleAtCapacity = (reason: string) => /^role \S+ is at its concurrency limit\b/.test(reason);
+/** The refusal's reason when `error` is a launch refused for its role's capacity, else null. (A tag, not a subclass: fleet.ts and master.ts import each other.) */
+export const capacityRefusal = (error: unknown): string | null => { const tag = error instanceof Error ? (error as Error & { roleAtCapacity?: unknown }).roleAtCapacity : null; return typeof tag === 'string' ? tag : null; };
+
+/**
+ * How long a registry session is left alone after its selection before its runtime session is
+ * looked for: the launch that follows a selection creates the Herdr tab within seconds, and a launch
+ * on another process of this host may still be making it.
+ */
+export const runtimeGraceMs = 60_000;
+/** The Herdr name prefixes every approver session for `key` starts with (see `approverSessionName`). */
+const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
+/**
+ * Why a live registry session no longer has a runtime session behind it, or null while it may. A
+ * registry session records a launch, not a process: nothing reports a session's end, so a session
+ * that judged its decision and exited kept its role's slot until its outer window passed, and after
+ * `concurrency` launches the role stopped launching (GY-190). Herdr is the host's own record of what
+ * runs, so a session selected on this host, past the launch grace, whose runtime session Herdr no
+ * longer lists, has ended. Only roles whose runtime session name the registry session determines are
+ * judged here — an approver is named for its item — and only from an inventory that could be read;
+ * every other role's liveness stays with its lease or request, which the control plane settles.
+ */
+export function runtimeSessionGone(session: FleetSession, runtime: RuntimeInventory | undefined, host: string | null | undefined, now: number): string | null {
+  if (session.endedAt || !runtime?.available || !host || session.host !== host) return null;
+  if (now - Date.parse(session.selectedAt) < runtimeGraceMs) return null;
+  if (session.role !== 'approver' || !session.work) return null;
+  const prefixes = approverPrefixes(session.work);
+  if (runtime.agents.some(agent => !!agent.name && prefixes.some(prefix => agent.name!.startsWith(prefix)))) return null;
+  return `its approver session for ${session.work} is gone from Herdr on ${host}`;
+}
 
 /**
  * Why the registry passed an account over, in the launcher's own three causes. Only a quota the
@@ -136,11 +176,18 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }) } : null;
   }));
   const observations = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
+  // A session of this role whose runtime session is gone is ended before the choice, so the role's
+  // count is of sessions that actually run and a finished approver never refuses the next one.
+  const now = probe.now?.() ?? Date.now();
+  for (const session of liveSessions(registry).filter(entry => entry.role === role)) {
+    const gone = runtimeSessionGone(session, probe.runtime, host, now);
+    if (gone) await client.end(session.id, gone).catch(() => {});
+  }
   const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota }) => ({ account, quota })) });
-  const at = new Date(probe.now?.() ?? Date.now()).toISOString();
+  const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)
-    throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${chosen.reason}`, skipped);
+    throw Object.assign(new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${chosen.reason}`, skipped), roleAtCapacity(chosen.reason) ? { roleAtCapacity: chosen.reason } : {});
   const account: FleetLaunchAccount = { name: chosen.account.name, kind: chosen.runtime.launch.kind, home: chosen.account.credential.home,
     fleet: { runtime: chosen.runtime.name, contract: chosen.runtime.launch, model: chosen.model.name, modelId: chosen.model.id, session: chosen.session.id, reason: chosen.reason } };
   return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string) => client.end(chosen.session!.id, reason).catch(() => {}) };
@@ -161,10 +208,29 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
     const reason = account ? accountIneligibility(fleet.registry, account, now, host) : `${name} is not a registered account`;
     return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown', resetsAt: account?.quota.resetsAt ?? null };
   });
-  const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
+  const running = liveSessions(fleet.registry).filter(session => session.role === role && !runtimeSessionGone(session, probe.runtime, host, now)).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
   const usable = !full && accounts.some(account => account.healthy);
   return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts };
+}
+
+/**
+ * The loop's reconciliation of the registry against what runs (GY-190): every live registry session
+ * whose runtime session is gone from this host's Herdr, and every session the caller names as
+ * finished (an approver whose decision is judged), is ended with the reason why. Returns what it
+ * ended. A configuration that names no control plane has no registry to reconcile.
+ */
+export async function reconcileFleetSessions(config: FleetConfig, runtime: RuntimeInventory, finished: ReadonlyMap<string, string>, probe: FleetProbe = {}) {
+  if (!probe.registry && (!config.url || !config.hostId)) return [];
+  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000);
+  const registry = await client.document(), now = probe.now?.() ?? Date.now(), ended: { session: string; role: FleetRoleName; work: string | null; account: string; reason: string }[] = [];
+  for (const session of liveSessions(registry)) {
+    const reason = finished.get(session.id) ?? runtimeSessionGone(session, runtime, config.hostId, now);
+    if (!reason) continue;
+    await client.end(session.id, reason);
+    ended.push({ session: session.id, role: session.role, work: session.work, account: session.account, reason });
+  }
+  return ended;
 }
 
 // ---------------------------------------------------------------------------
