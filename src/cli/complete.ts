@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
 import { selfVerification } from './verify.js';
@@ -54,11 +55,15 @@ export const completeCommand: CliCommand = {
     '                                Reports what graphyard verify ran on HEAD and its outcome.',
     '                                Refused while GitHub requests are paused, it waits for the',
     '                                named reset and submits again (bounded)',
+    '                                --no-docs STATEMENT states the change alters no documented',
+    '                                behaviour, instead of a docs diff (the reviewer checks it)',
   ],
   run: async (context, work) => {
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
-    const body = { epoch: Number(context.args[0]), pr: Number(context.args[1]) }, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
+    const { values, positionals } = parseArgs({ args: context.args, options: { 'no-docs': { type: 'string' } }, allowPositionals: true });
+    const statement = values['no-docs']?.trim();
+    const body = { epoch: Number(positionals[0]), pr: Number(positionals[1]), ...(statement ? { documentation: statement } : {}) }, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
     const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, body, requestId));
     context.print({ ...submitted, selfVerification: verification });
   },
