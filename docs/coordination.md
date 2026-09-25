@@ -9,21 +9,23 @@ A criterion states an outcome and its proofs:
 {"id":"AC-1","text":"Retrying a confirmed booking produces exactly one SMS request","proofs":["integration:sms-idempotency"]}
 ```
 
-A producer runs `unit:` and `integration:` proofs on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested by two-party decision unless `producerProofs` makes it producer-runnable. `e2e:` proofs run through the [validation runner](validation.md).
+`unit:` and `integration:` proofs are producer-runnable: a producer runs them on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless listed in `producerProofs`, which makes it producer-runnable. `e2e:` proofs run through the [validation runner](validation.md).
 
 ## Revise requirements explicitly
 
-`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the document against `expectedPolicyRevision`; stop the worker first: prior evidence, review and authorization lapse.
+`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the whole document against `expectedPolicyRevision`; stop the worker first, since prior evidence, review and authorization lapse.
 
-## Schedule by overlap, smallest scope first
+## Dispatch optimistically, smallest scope first
 
-`plannedFiles` holds paths or directory prefixes ending in `/`. Overlap holds *dispatch* behind in-flight items of equal or higher priority, comparing `plannedFiles` until a candidate exists, then its changed files; an item whose pull request is open never waits. The hold lapses into attention after two hours; `master dispatch GY-N PROFILE --allow-overlap` overrides it. Name files, not directories: a root-level directory is flagged `highConflict` and refused without `--allow-broad-scope`. `master status` lists open candidates `git merge-tree` cannot merge together.
+`plannedFiles` (paths, or directory prefixes ending in `/`) is the change-scope contract, not a lock: the merge queue and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and lists candidates `git merge-tree` cannot merge. Smallest planned scope dispatches first; a root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
-`exclusiveResources` are reserved atomically at claim.
+## Review gate: verdicts, not threads
+
+The gate is the reviewer's approval of the exact head plus required CI. Threads are its inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` also bounds a candidate's changes: at `complete`, on every new head and at landing, every file outside scope that is not new must match the bound base byte-for-byte. Anything else is refused, naming the files and the items that shipped them. A worker cannot widen `plannedFiles`; a scope request or an audited revision can.
+`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and the items that shipped them. A worker cannot widen `plannedFiles`; a scope request or an audited revision can.
 
 ### Keep current with `graphyard sync`
 
@@ -31,7 +33,7 @@ A producer runs `unit:` and `integration:` proofs on the exact head ([automatic 
 
 ### Generated files never conflict
 
-`docs/README.md`, `docs/protocol.md` ([development](development.md)) and the managed `AGENTS.md` blocks are generated; `sync` regenerates them after merging. The regression guard classifies paths in `GRAPHYARD_GENERATED_FILES` (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.
+`docs/README.md` and `docs/protocol.md` are generated in full ([development](development.md)), and the managed `AGENTS.md` blocks are rendered by `init`; `sync` regenerates them after merging. The regression guard classifies paths in `GRAPHYARD_GENERATED_FILES` (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.
 
 ## Ship in under thirty minutes
 
@@ -39,6 +41,4 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the first refusing gate and anything else holding the item; `base-behind` resolves itself, `base-conflict` needs rework.
-
-Reconciliation keeps every open item owned by a live lease, action row or `dueAt` wait, queuing a successor otherwise, escalated after three identical failures; `master status` counts violations.
+`graphyard diagnose GY-N` explains the first refusing gate and anything else holding it; conflicting `base-behind` and `base-conflict` get rework.

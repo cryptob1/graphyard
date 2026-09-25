@@ -1,236 +1,416 @@
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import type { Store } from '../src/store.js';
-import type { Work } from '../src/model.js';
-import { claimAction, reconcileActions, settleAction } from '../src/model/actions.js';
-import { actionStallThreshold } from '../src/model/action-progress.js';
-import { livenessFailureLimit, livenessNext, livenessTick, livenessViolations, livenessWaitBoundMs, obligationOf, successorAction } from '../src/model/liveness.js';
+import type { Observation, Principal, Work } from '../src/model.js';
+import type { NextAction } from '../src/model/action-kinds.js';
+import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction, settleDelivered } from '../src/model/actions.js';
+import { nextAction } from '../src/model/next-action.js';
+import { livenessCarry, livenessOf, livenessRetryLimit, livenessViolations, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
+import { livenessStatus } from '../src/cli/liveness-report.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
+import { masterConfigSchema } from '../src/master.js';
 
 /**
- * GY-201: every open item always has exactly one owned next step with a deadline — a live leased
- * session, an action row, or a named wait with a dueAt — and the server keeps it so.
- *
- * - `unit:liveness-violations-detected` builds items in every state, including the three the
- *   design review found stranded in production (a merge with its PR open and no execution, a
- *   failed proof nobody asked to rework, a refused scope request), and asserts exactly which are
- *   violations and which obligation holds each of the others.
- * - `unit:violations-get-successor-actions` drives each violation through one reconciliation tick
- *   and asserts exactly one successor per item, none duplicated on the next tick, and that a
- *   successor failing `livenessFailureLimit` times for one reason is escalated, not retried.
- * - `unit:liveness-count-reported` asserts master status reports the count and each violation's
- *   age, and that the count is zero once the fixture board has settled through the engine.
+ * GY-201: every open item always has exactly one owned next step with a deadline, and the server
+ * keeps it that way. Each test is named for the proof it produces and runs the real engine on a
+ * disposable Postgres; the stranded states are the record as the incidents left it — the owed row
+ * gone — rather than states this test invents.
  */
+const repository = 'owner/project';
+const PROOF = 'integration:liveness-proof';
+const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
+const worker: Principal = { id: 'implementer', role: 'worker' };
+const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
+const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: [PROOF] };
+const base = 'b'.repeat(40);
+const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
+let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let serial = 0;
 
-const now = new Date('2031-03-01T12:00:00Z');
-const at = (offsetMs: number) => new Date(now.getTime() + offsetMs).toISOString();
-const hour = 3_600_000;
-const head = 'a'.repeat(40), base = 'b'.repeat(40);
-const PROOF = 'unit:liveness-fixture';
+before(async () => {
+  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 201;
+  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-liveness-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await pg.initialise(); await pg.start(); await pg.createDatabase('liveness_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/liveness_test`); await store.init();
+  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  engine.principals = [operator, worker, coordinator, producer];
+});
+after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
-let number = 0;
-function item(key: string, overrides: Partial<Work> = {}): Work {
-  number += 1;
-  return {
-    id: `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'],
-    stage: 'build', revision: 1, policyRevision: 1, createdAt: at(-3 * hour), updatedAt: at(-2 * hour), stageEnteredAt: at(-2 * hour), ready: true,
-    epoch: 1, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [],
-    evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides,
-  } as Work;
+const id = () => randomUUID();
+const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
+const events = async (work: Work, kind: string) => (await store.pool.query('SELECT payload FROM events WHERE work_id=$1 AND kind=$2 ORDER BY seq', [work.id, kind])).rows.map(row => row.payload.details);
+const setDocument = (work: Work, path: string, value: unknown) => store.pool.query('UPDATE work_items SET document=jsonb_set(document,$2::text[],$3::jsonb) WHERE id=$1', [work.id, `{${path}}`, JSON.stringify(value)]);
+/** The record as a stranded item was found: whatever row owned its next step is gone. */
+const strand = (work: Work) => setDocument(work, 'actionQueue', { actions: [], history: [] });
+const judge = async (work: Work) => { const all = await store.list(); return livenessOf(all.find(item => item.id === work.id)!, all, new Date()); };
+const rows = (work: Work) => work.actionQueue?.actions ?? [];
+const head = (work: Work) => work.candidate?.sha ?? sha(work.key);
+const observation = (work: Work, extra: Partial<Observation> = {}): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { sha: head(work), baseSha: base, pr: work.submission!.pr, branch: work.workspaces[0].branch, author: 'implementer' },
+  checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha: head(work), state: 'APPROVED' }],
+  protected: true, mergeable: true, merged: false, mergeSha: null, baseTip: base, baseTree: '7e'.repeat(20), files: [], scopeFiles: [], at: new Date().toISOString(), ...extra });
+
+const released = async () => {
+  const n = ++serial;
+  const created = await engine.execute(operator, 'create', null, { title: `Liveness ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
+  return engine.execute(operator, 'ready', created.id, {}, id());
+};
+const claimed = async () => engine.execute(worker, 'claim', (await released()).id, {}, id());
+/** A submitted, observed candidate; `evidence` decides what its proof says. */
+async function candidate(evidence: 'pass' | 'fail' | null, extra: Partial<Observation> = {}, alone = false) {
+  let w = await claimed();
+  // Alone in the merge queue, so a proven candidate is first rather than waiting behind another.
+  if (alone) await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
+  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/liveness-${w.key}`, branch: `graphyard/${w.key.toLowerCase()}-1` }, id());
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + serial }, id());
+  w = await engine.observe(w.id, w.revision, observation(w, extra));
+  if (evidence) w = await engine.execute(producer, 'evidence', w.id, { proof: PROOF, sha: head(w), baseSha: base, policyRevision: w.policyRevision, result: evidence, executed: 3, skipped: 0,
+    ...(evidence === 'pass' ? { exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } } : {}) }, id());
+  return engine.observe(w.id, (await reload(w)).revision, observation(w, extra));
 }
-const candidate = { sha: head, baseSha: base, pr: 71, branch: 'graphyard/gy-1-1', author: 'worker', createdAt: at(-2 * hour) };
-const observed = (overrides: Partial<NonNullable<Work['observation']>> = {}) => ({
-  candidate, checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
-  reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], merged: false, mergeSha: null, mergeable: true, protected: true,
-  files: ['src/a.ts'], scopeFiles: [], at: at(-60_000), prState: 'open' as const, draft: false, baseTip: base, baseTipContained: true, ...overrides,
-}) as NonNullable<Work['observation']>;
-const passed = (...names: string[]) => names.map(name => ({ name, passed: true, reasons: [] }));
-
-/** Every state the invariant has to answer for, keyed by what the test expects of it. */
-function board() {
-  const done = item('GY-9', { stage: 'done', candidate, submission: { epoch: 1, pr: 70 }, observation: observed({ merged: true, mergeSha: 'c'.repeat(40) }) });
-  const leased = item('GY-10', { lease: { owner: 'worker-a', epoch: 1, expiresAt: at(90_000) }, gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] });
-  const queued = item('GY-11', { gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] });
-  reconcileActions(queued, [queued], now);
-  const dependent = item('GY-12', { gates: [{ name: 'ready', passed: false, reasons: ['Dependency GY-10 is unfinished'] }] });
-  const backlog = item('GY-13', { ready: false, stage: 'backlog' });
-  // The GY-183 shape: the merge ahead of it landed, and nothing drives this one's merge.
-  const stranded = item('GY-14', { stage: 'merge', candidate, submission: { epoch: 1, pr: 71 }, observation: observed(),
-    gates: [...passed('ready', 'build', 'review', 'test', 'acceptance'), { name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-9 is ahead'] }] });
-  // Every gate passed, the pull request open, no merge execution and no row: nothing merges it.
-  const unmerged = item('GY-15', { stage: 'merge', candidate, submission: { epoch: 1, pr: 72 }, observation: observed(), gates: passed('ready', 'build', 'review', 'test', 'acceptance', 'merge') });
-  // The gate words it as the real evaluator does: a failed proof returns the head to its worker.
-  const failed = item('GY-16', { stage: 'build', candidate, submission: { epoch: 1, pr: 73 }, observation: observed(),
-    workspaces: [{ host: 'machine-a', path: '/work/gy-16', branch: 'graphyard/gy-16-1', epoch: 1, owner: 'worker-a' }],
-    evidence: [{ id: 'e1', proof: PROOF, sha: head, baseSha: base, policyRevision: 1, producer: 'producer-a', trusted: true, result: 'fail', executed: 3, skipped: 0, at: at(-hour) }],
-    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: [`AC-1: ${PROOF} failed on aaaaaaaaaaaa (trusted evidence from producer-a); the head returns to its worker before review`] },
-      ...passed('review', 'test'), { name: 'acceptance', passed: false, reasons: [`AC-1: ${PROOF} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`] }, ...passed('merge')] });
-  const decision = { state: 'refused' as const, reason: 'docs/ops.md is outside the implied scope', at: at(-hour), decidedBy: 'graphyard', waitedMs: 1000, paths: ['docs/ops.md'], requestedBy: 'worker-b', requestedAt: at(-hour - 1000), epoch: 1 };
-  const refused = item('GY-17', { scopeRequest: { epoch: 1, paths: ['docs/ops.md'], reason: 'the runbook changes', requestedBy: 'worker-b', at: at(-hour - 1000), decision },
-    scopeDecision: decision, blocker: 'Scope request refused: docs/ops.md is outside the implied scope' });
-  // A dependency that shipped long ago and a wait that never cleared.
-  const orphaned = item('GY-18', { gates: [{ name: 'ready', passed: false, reasons: ['Dependency GY-9 is unfinished'] }] });
-  return { done, leased, queued, dependent, backlog, stranded, unmerged, failed, refused, orphaned };
+async function refusedScope() {
+  const w = await claimed();
+  await engine.execute(worker, 'scope', w.id, { epoch: w.epoch, paths: ['web/unrelated.tsx'], reason: 'The page is easier to change here too' }, id());
+  const decided = await engine.execute(coordinator, 'autoscope', w.id, { epoch: w.epoch }, id());
+  assert.equal(decided.scopeRequest?.decision?.state, 'refused', 'the rule refused a path the item does not imply');
+  return decided;
 }
-const all = (fixture: ReturnType<typeof board>) => Object.values(fixture);
+async function staleWait() {
+  // A draft pull request: no producer request may stand for its head, so the item waits on an
+  // event outside it. Entered an hour ago, the wait is past its bound.
+  const w = await candidate(null, { draft: true });
+  assert.equal(nextAction(w, await store.list(), new Date()), null, `the draft waits: ${JSON.stringify(w.nextAction)}`);
+  await setDocument(w, 'stageEnteredAt', new Date(Date.now() - 2 * livenessWaitBoundMs).toISOString());
+  return reload(w);
+}
+async function retainedExecution() {
+  const w = await candidate('pass');
+  const past = new Date(Date.now() - 10 * 60_000).toISOString();
+  await setDocument(w, 'mergeExecution', { id: `execution-${w.key}`, owner: coordinator.id, sha: head(w), baseSha: base, policyRevision: w.policyRevision, authorizationRevision: w.revision,
+    issuedAt: past, expiresAt: past, verifiedAt: past, committingAt: past });
+  await strand(w);
+  return reload(w);
+}
 
-test('unit:liveness-violations-detected — an open item with no live session, no action row and no named wait inside its deadline is a violation, in each stranded state', () => {
-  const fixture = board(), items = all(fixture);
-  const found = livenessViolations(items, now);
-  assert.deepEqual(Object.fromEntries(found.map(entry => [entry.key, entry.state])), {
-    'GY-14': 'stranded-merge', 'GY-15': 'stranded-merge', 'GY-16': 'failed-proof', 'GY-17': 'refused-scope', 'GY-18': 'stale-wait',
-  });
-  for (const entry of found) {
-    assert.ok(entry.ageMs >= 0 && Number.isFinite(Date.parse(entry.since)), `${entry.key} carries its age`);
-    assert.doesNotMatch(entry.reason, /\d{4}-\d\d-\d\dT/, `${entry.key}'s reason is worded without times, so it reads the same every tick`);
+// ---- AC-1 ---------------------------------------------------------------------------------------
+
+test('unit:liveness-violations-detected — every open item holds exactly one obligation (a live leased session, an open action row, or a named wait with a dueAt) and an item holding none is a violation, classified by its state: a stranded merge with no execution and an open PR, a retained merge execution past its authority, a failed proof with no rework, a refused scope request, and a wait past its dueAt', async () => {
+  const now = () => new Date();
+  // Healthy items each hold one obligation, with a due time.
+  const ready = await released();
+  const healthy = await judge(ready);
+  assert.equal(healthy.violation, null);
+  assert.equal(healthy.obligation!.kind, 'action');
+  assert.equal(healthy.obligation!.action!.kind, 'dispatch');
+  assert.ok(Date.parse(healthy.obligation!.dueAt) > Date.now(), 'an open row is due by its idle bound');
+  const building = await judge(await claimed());
+  assert.equal(building.violation, null);
+  assert.equal(building.obligation!.kind, 'session', 'the leased worker owns the build');
+  const backlog = await engine.execute(operator, 'create', null, { title: 'Backlog', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
+  assert.deepEqual(await judge(backlog), { work: backlog.id, key: backlog.key, obligation: null, violation: null }, 'backlog is not open work');
+
+  // The stranded states, each as the incident left the record.
+  const merge = await candidate('pass', {}, true);
+  assert.equal(nextAction(merge, await store.list(), now())?.kind, 'merge', `the proven candidate is owed its merge: ${merge.gates.flatMap(gate => gate.reasons).join('; ')}`);
+  assert.equal(merge.mergeExecution ?? null, null);
+  assert.equal(merge.observation!.merged, false, 'its pull request is open');
+  const failed = await candidate('fail');
+  const scope = await refusedScope();
+  const stale = await staleWait();
+  const retained = await retainedExecution();
+  for (const item of [merge, failed, scope]) await strand(item);
+
+  const expected: [Work, ViolationClass, string][] = [[merge, 'stranded-merge', 'merge'], [retained, 'stranded-merge', 'resync'], [failed, 'failed-proof', 'request-rework'],
+    [scope, 'refused-scope', 'escalate'], [stale, 'stale-wait', 'escalate']];
+  const found = livenessViolations(await store.list(), now());
+  for (const [item, kind, successor] of expected) {
+    const verdict = await judge(item);
+    assert.equal(verdict.obligation, null, `${item.key} holds nothing`);
+    assert.equal(verdict.violation?.class, kind, `${item.key}: ${JSON.stringify(verdict.violation)}`);
+    assert.equal(verdict.violation!.successor?.kind, successor, `${item.key} is owed ${successor}`);
+    assert.ok(verdict.violation!.ageMs >= 0 && Date.parse(verdict.violation!.since) <= Date.now(), 'with an age');
+    assert.ok(found.some(entry => entry.key === item.key), `${item.key} is listed among the violations`);
   }
-  assert.match(found.find(entry => entry.key === 'GY-14')!.reason, /PR #71 is open on a{12} with no merge execution/);
-  assert.match(found.find(entry => entry.key === 'GY-16')!.reason, new RegExp(`failed ${PROOF} on a{12} and no rework is requested`));
-  assert.match(found.find(entry => entry.key === 'GY-17')!.reason, /docs\/ops\.md outside plannedFiles was refused/);
-  assert.match(found.find(entry => entry.key === 'GY-18')!.reason, /waits on dependency GY-9 past its deadline/);
+  assert.deepEqual(found.map(entry => entry.key).sort(), expected.map(([item]) => item.key).sort(), 'and nothing healthy is');
+  // What each is owed, precisely: the retained execution a fresh reading of its outcome, the
+  // refused scope request a scope decision naming the command, the stale wait an escalation.
+  const reading = (await judge(retained)).violation!.successor!;
+  assert.equal(reading.binding, `reconcile-merge:execution-${retained.key}`);
+  // The live attempt's additive request is the independent approver's to judge (GY-176 routes it);
+  // one the loop cannot route (here it also asks for a criteria change) names the master's command.
+  const decision = (await judge(scope)).violation!.successor!;
+  assert.ok(decision.inputs.kind === 'escalate' && decision.inputs.trigger === 'scope' && decision.inputs.detail.includes(`graphyard master decisions ${scope.key}`) && !decision.inputs.detail.includes('graphyard master scope'), JSON.stringify(decision));
+  const everything = await store.list(), stored = everything.find(item => item.id === scope.id)!;
+  const unroutable = { ...stored, scopeRequest: { ...stored.scopeRequest!, criteria: [{ id: 'AC-9', text: 'A new criterion' }] } } as Work;
+  const master = livenessOf(unroutable, everything.map(item => item.id === scope.id ? unroutable : item), new Date()).violation!.successor!;
+  assert.ok(master.inputs.kind === 'escalate' && master.inputs.detail.includes(`graphyard master scope ${scope.key}`), JSON.stringify(master));
+  const escalation = (await judge(stale)).violation!.successor!;
+  assert.ok(escalation.inputs.kind === 'escalate' && escalation.inputs.trigger === 'stale-wait', JSON.stringify(escalation));
 
-  // And the obligation that owns each of the others, with its deadline.
-  const lease = obligationOf(fixture.leased, items, now);
-  assert.deepEqual(lease, { kind: 'session', owner: 'worker-a', epoch: 1, dueAt: at(90_000) });
-  const row = obligationOf(fixture.queued, items, now);
-  assert.equal(row?.kind, 'action');
-  assert.ok(row && row.kind === 'action' && row.action === 'dispatch' && Date.parse(row.dueAt) > now.getTime());
-  const wait = obligationOf(fixture.dependent, items, now);
-  assert.deepEqual(wait && { kind: wait.kind, dueAt: wait.dueAt }, { kind: 'wait', dueAt: at(90_000) }, 'a wait on another item is due when that item\'s own obligation is');
-  assert.equal(livenessViolations([fixture.backlog, fixture.done], now).length, 0, 'backlog and done items are not open work');
-
-  // A wait the item names for itself holds only until its deadline.
-  const merged = item('GY-19', { stage: 'merge', candidate, observation: observed({ merged: true, mergeSha: 'd'.repeat(40), mergedAt: at(-10 * 60_000) }), gates: passed('ready', 'build', 'review', 'test', 'acceptance', 'merge') });
-  const settled = obligationOf(merged, [merged], now);
-  assert.ok(settled && settled.kind === 'wait' && settled.wait === 'settled' && settled.dueAt === at(livenessWaitBoundMs - 10 * 60_000));
-  const later = new Date(now.getTime() + livenessWaitBoundMs);
-  assert.deepEqual(livenessViolations([merged], later).map(entry => [entry.state, entry.reason]), [['stranded-merge', 'GY-19\'s PR #71 merged as dddddddddddd and its delivery is not recorded']]);
-  // A lease that lapsed is not a session, and the violation dates from its expiry.
-  const lapsed = item('GY-20', { lease: { owner: 'worker-c', epoch: 1, expiresAt: at(-5 * 60_000) }, submission: { epoch: 1, pr: 74 }, candidate, stage: 'merge', observation: observed(), gates: passed('ready', 'build', 'review', 'test', 'acceptance', 'merge') });
-  const lost = livenessViolations([lapsed], now);
-  assert.equal(lost[0]?.since, at(-5 * 60_000));
-  assert.equal(lost[0]?.ageMs, 5 * 60_000);
+  // Two states no rule answers at all are violations too, never silence: a gate refusing with no
+  // reason, and a wait on an item that does not exist.
+  const at = new Date().toISOString();
+  const shell = (key: string, overrides: Partial<Work>) => ({ id: `id-${key}`, key, title: key, type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'review', ready: true,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], plannedFiles: ['src/'], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+    submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true }, gates: [], ...overrides } as unknown as Work);
+  const mute = shell('GY-MUTE', { gates: [{ name: 'review', passed: false, reasons: [] }] });
+  const orphan = shell('GY-ORPHAN', { stage: 'build', gates: [{ name: 'ready', passed: false, reasons: ['Dependency GY-GONE is unfinished'] }] });
+  assert.equal(livenessOf(mute, [mute], now()).violation?.class, 'unaccounted');
+  assert.equal(livenessOf(orphan, [orphan], now()).violation?.class, 'stale-wait');
 });
 
-test('unit:violations-get-successor-actions — one tick gives each violation exactly one successor for its state, the next tick adds none, and a successor failing N times for one reason is escalated', () => {
-  const fixture = board(), items = all(fixture);
-  const first = livenessTick(items, now);
-  assert.deepEqual(livenessViolations(items, now), [], 'every violation is repaired within the tick that saw it');
-  const rows = (work: Work) => work.actionQueue?.actions ?? [];
-  const expected: [Work, string, string | null][] = [
-    [fixture.stranded, 'merge', null], [fixture.unmerged, 'merge', null], [fixture.failed, 'request-rework', null],
-    [fixture.refused, 'escalate', 'scope'], [fixture.orphaned, 'escalate', 'stale-wait'],
-  ];
-  for (const [work, kind, trigger] of expected) {
-    assert.equal(rows(work).length, 1, `${work.key} holds exactly one row`);
-    assert.equal(rows(work)[0].kind, kind, `${work.key} is repaired by ${kind}`);
-    if (trigger) assert.equal((rows(work)[0].inputs as { trigger: string }).trigger, trigger);
-    assert.equal(first.find(entry => entry.key === work.key)!.transitions.filter(entry => entry.event === 'requested').length, 1);
+// ---- AC-2 ---------------------------------------------------------------------------------------
+
+test('unit:violations-get-successor-actions — one reconciliation tick opens exactly one successor for each violation (merge, reconcile-merge, request-rework, scope decision, escalate), deduplicated by reason across ticks, and an action failing N times for one unchanged reason is converted to escalate instead of retried', async () => {
+  const merge = await candidate('pass', {}, true), failed = await candidate('fail'), scope = await refusedScope(), stale = await staleWait(), retained = await retainedExecution();
+  for (const item of [merge, failed, scope]) await strand(item);
+  const cases: [Work, ViolationClass, string, string | null][] = [[merge, 'stranded-merge', 'merge', null], [retained, 'stranded-merge', 'resync', 'reconcile-merge'],
+    [failed, 'failed-proof', 'request-rework', null], [scope, 'refused-scope', 'escalate', 'scope'], [stale, 'stale-wait', 'escalate', 'stale-wait']];
+  for (const [item, kind] of cases) assert.equal((await judge(item)).violation?.class, kind, `${item.key} starts in violation`);
+
+  await engine.reconcile();
+  for (const [item, kind, successor, tag] of cases) {
+    const after = await reload(item);
+    const verdict = await judge(item);
+    assert.equal(verdict.violation, null, `${item.key} is repaired within one tick: ${JSON.stringify(verdict.violation)}`);
+    assert.equal(verdict.obligation!.kind, 'action');
+    const owed = rows(after).filter(row => row.kind === successor);
+    assert.equal(owed.length, 1, `${item.key}: exactly one ${successor} row`);
+    if (tag === 'reconcile-merge') assert.match(owed[0].binding, /^reconcile-merge:/);
+    else if (tag) assert.ok(owed[0].inputs.kind === 'escalate' && owed[0].inputs.trigger === tag, JSON.stringify(owed[0].inputs));
+    const repaired = await events(item, 'liveness.repaired');
+    assert.equal(repaired.length, 1, `${item.key}: the repair is on the ledger`);
+    assert.equal(repaired[0].class, kind);
+    assert.equal(repaired[0].successor.id, owed[0].id, 'naming the row it opened');
   }
-  assert.match(fixture.stranded.nextAction!.reason, /^reconcile-merge: /);
-  assert.match(fixture.refused.nextAction!.reason, /^scope-decision: /);
-  assert.match((rows(fixture.refused)[0].inputs as { detail: string }).detail, /graphyard master decide GY-17 requirements/);
-  // Owned items are left exactly as they are: the lease, the queued row and the named wait stand.
-  assert.equal(rows(fixture.leased).length, 0);
-  assert.equal(rows(fixture.dependent).length, 0);
-  assert.equal(rows(fixture.queued).length, 1);
 
-  // The next tick recognises every row it queued: no duplicate, no churn.
-  const ids = items.map(work => rows(work).map(row => row.id).join());
-  const second = livenessTick(items, new Date(now.getTime() + 30_000));
-  assert.deepEqual(second.flatMap(entry => entry.transitions), [], 'the same violation names the same row');
-  assert.deepEqual(items.map(work => rows(work).map(row => row.id).join()), ids);
-  // Deduplicated by reason: the same reason binds the same successor, a different one another.
-  const again = successorAction(fixture.orphaned, 'stale-wait', 'GY-18 waits on dependency GY-9 past its deadline: x');
-  assert.equal(successorAction(fixture.orphaned, 'stale-wait', 'GY-18 waits on dependency GY-9 past its deadline: x').binding, again.binding);
-  assert.notEqual(successorAction(fixture.orphaned, 'stale-wait', 'GY-18 waits on dependency GY-9 past its deadline: y').binding, again.binding);
+  // A second tick finds nothing to repair and queues nothing twice: every successor's id is
+  // derived from its reason.
+  const before = Object.fromEntries(await Promise.all(cases.map(async ([item]) => [item.id, rows(await reload(item)).map(row => row.id)] as const)));
+  await engine.reconcile();
+  for (const [item] of cases) {
+    const ids = rows(await reload(item)).map(row => row.id);
+    assert.deepEqual(ids, before[item.id], `${item.key}: no duplicate after a second tick`);
+    assert.equal(new Set(ids).size, ids.length);
+    assert.equal((await events(item, 'liveness.repaired')).length, 1, `${item.key}: nothing further to repair`);
+  }
 
-  // The stranded merge's successor fails, again and again, for one unchanged reason.
-  const executor = { id: 'executor-1', host: 'machine-a', principal: 'coordinator' };
-  const stranded = fixture.stranded, reason = 'Merge gate refused: Merge queue position 2 of 2: GY-9 is ahead';
-  let clock = now.getTime() + 60_000;
-  const fail = (why: string) => {
-    const claimed = claimAction(items, executor, new Date(clock), { work: stranded.key, kinds: ['merge'] });
-    assert.ok(claimed, `the successor is offered at attempt ${stranded.actionQueue!.actions[0].attempts + 1}`);
-    settleAction(stranded, claimed!.row.id, { executor: executor.id, principal: executor.principal }, 'failed', why, new Date(clock));
-    clock += 11 * 60_000;
-    livenessTick(items, new Date(clock));
+  // N failures for one unchanged reason: retried below the limit, escalated at it.
+  const item = await released();
+  const reason = 'every worker profile is busy or unavailable (claude-a: busy)';
+  const dispatchId = rows(item).find(row => row.kind === 'dispatch')!.id;
+  const fail = async () => {
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{actionQueue,actions}',(SELECT jsonb_agg(row - 'retryAt') FROM jsonb_array_elements(document->'actionQueue'->'actions') row)) WHERE id=$1", [item.id]);
+    const taken = await engine.claimNextAction(coordinator, { host: 'host-1', kinds: ['dispatch'], work: item.key }, id());
+    assert.equal(taken.action?.id, dispatchId, 'the dispatch row is offered');
+    await engine.settleClaimedAction(coordinator, dispatchId, { result: 'failed', reason }, id());
   };
-  assert.equal(livenessFailureLimit, actionStallThreshold);
-  for (let attempt = 1; attempt < livenessFailureLimit; attempt += 1) fail(reason);
-  assert.equal(rows(stranded)[0].kind, 'merge', `after ${livenessFailureLimit - 1} identical failures the successor is still retried`);
-  fail(reason);
-  assert.deepEqual(rows(stranded).map(row => row.kind), ['escalate'], 'the Nth identical failure converts it to one escalation');
-  const escalation = rows(stranded)[0];
-  assert.equal((escalation.inputs as { trigger: string }).trigger, 'liveness');
-  assert.match(escalation.reason, new RegExp(`failed ${livenessFailureLimit} times for one unchanged reason \\(${reason.replace(/[()]/g, '\\$&')}\\)`));
-  assert.ok(stranded.actionQueue!.history.some(row => row.kind === 'merge' && row.history.at(-1)?.event === 'cancelled'), 'the merge row is retired, with why');
-  // And it stays converted: later ticks neither retry the merge nor add a second escalation.
-  for (let tick = 0; tick < 3; tick += 1) {
-    clock += 11 * 60_000;
-    const next = livenessTick(items, new Date(clock)).find(entry => entry.key === stranded.key)!;
-    assert.deepEqual(next.transitions.filter(entry => entry.event === 'requested'), []);
-    assert.deepEqual(rows(stranded).map(row => row.id), [escalation.id]);
-  }
-
-  // Failures whose reason keeps changing are retries, not a stall: nothing is converted.
-  const orphan = item('GY-30', { stage: 'merge', candidate, submission: { epoch: 1, pr: 80 }, observation: observed(),
-    gates: [...passed('ready', 'build', 'review', 'test', 'acceptance'), { name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-99 is ahead'] }] });
-  clock = now.getTime();
-  livenessTick([orphan], new Date(clock));
-  for (let attempt = 1; attempt <= livenessFailureLimit + 1; attempt += 1) {
-    const claimed = claimAction([orphan], executor, new Date(clock + 1), { work: orphan.key })!;
-    settleAction(orphan, claimed.row.id, { executor: executor.id, principal: executor.principal }, 'failed', `transient failure ${attempt}`, new Date(clock + 1));
-    clock += 11 * 60_000;
-    livenessTick([orphan], new Date(clock));
-  }
-  assert.deepEqual(rows(orphan).map(row => row.kind), ['merge'], 'a successor whose failures keep changing is retried');
-  assert.equal(livenessNext(orphan, [orphan], new Date(clock))!.kind, 'merge');
+  for (let failure = 1; failure < livenessRetryLimit; failure++) await fail();
+  await engine.reconcile();
+  let current = await reload(item);
+  assert.equal(current.nextAction?.kind, 'dispatch', `${livenessRetryLimit - 1} identical failures are still retried`);
+  await fail();
+  await engine.reconcile();
+  current = await reload(item);
+  assert.equal(current.nextAction?.kind, 'escalate', `the ${livenessRetryLimit}th identical failure converts it`);
+  assert.ok(current.nextAction!.inputs.kind === 'escalate' && current.nextAction!.inputs.trigger === 'stalled-action' && current.nextAction!.inputs.detail.includes(reason));
+  assert.deepEqual(rows(current).map(row => row.kind), ['escalate'], 'the dispatch is retired, not retried');
+  const escalationId = rows(current)[0].id;
+  await engine.reconcile();
+  current = await reload(item);
+  assert.deepEqual(rows(current).map(row => row.id), [escalationId], 'and it stays converted: one escalation, no dispatch reopened');
+  assert.equal((await engine.claimNextAction(coordinator, { host: 'host-1', kinds: ['dispatch'], work: item.key }, id())).action, null, 'no executor is offered the dispatch again');
+  assert.equal((await judge(item)).violation, null, 'the escalation owns the item');
+  assert.equal(actionId('escalate', item.id, rows(current)[0].binding), escalationId);
 });
 
-/** A repository `master status` accepts, with its loop cursor written. */
-async function statusHost() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-liveness-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-liveness-secrets-'));
-  execFileSync('git', ['init', '-q', root]);
-  const credentialFile = join(secrets, 'coordinator.token');
-  await writeFile(credentialFile, 'coordinator-token-'.padEnd(48, 'x'), { mode: 0o600 });
-  const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [],
-    operatorAgent: { id: 'graphyard-master-operator', credentialFile }, approver: { id: 'graphyard-approver', credentialFile }, run: { proofWorkflow: 'acceptance.yml' } });
-  await writeDaemonState(master, emptyDaemonState(master));
-  return { root, master, cleanup: () => Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]) };
-}
-
-test('unit:liveness-count-reported — master status reports the count of liveness violations with each one\'s age, and the count is zero once the fixture board settles through the engine', async t => {
-  const host = await statusHost();
-  t.after(host.cleanup);
-  const report = async (work: Work[]) => {
-    const masterApi = async (path: string) => path === 'work-snapshot' ? { work: structuredClone(work), now: now.toISOString() } : { decisions: [] };
-    return masterStatusReport(host.root, host.master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }) as Promise<any>;
+test('unit:violations-get-successor-actions — a stalled action is escalated, never abandoned: after N identical verify-deployment failures the row is retried once the widest stall backoff has passed, re-escalated at once on the same failure, and a deployment observed on a later attempt verifies the delivery', () => {
+  const t0 = Date.parse('2026-09-20T10:00:00.000Z');
+  let clock = t0;
+  const now = () => new Date(clock);
+  const at = new Date(t0).toISOString(), mergeSha = 'e'.repeat(40);
+  const work = { id: 'id-GY-DEPLOY', key: 'GY-DEPLOY', title: 'Deploy', type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'done', ready: true,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], plannedFiles: ['src/'], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+    submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true, deploySmoke: true }, gates: [],
+    delivery: { mergedAt: at, mergeSha, authorizationRevision: 1 } } as unknown as Work;
+  const executor = { id: 'executor-1', host: 'host-1', principal: 'coordinator' };
+  const reason = 'the deployment endpoint answered 503 Service Unavailable';
+  settleDelivered(work, [work], now());
+  assert.equal(work.nextAction?.kind, 'verify-deployment');
+  const verifyId = work.actionQueue!.actions[0].id;
+  /** One failed attempt, settled and reconciled at the instant it failed; the row's backoff is returned, not waited out. */
+  const attempt = () => {
+    const taken = claimAction([work], executor, now());
+    assert.equal(taken?.row.id, verifyId, `the verify-deployment row is offered at ${now().toISOString()}`);
+    clock += 1000;
+    const settled = settleAction(work, verifyId, { executor: executor.id, principal: executor.principal }, 'failed', reason, now());
+    settleDelivered(work, [work], now());
+    return Date.parse(settled.action.retryAt!);
   };
-  const fixture = board(), items = all(fixture);
-  const before = await report(items);
-  assert.equal(before.counts.liveness, 5, 'the count of open items nothing owns');
-  assert.equal(before.liveness.violations, 5);
-  assert.deepEqual(before.liveness.items.map((entry: { key: string }) => entry.key).sort(), ['GY-14', 'GY-15', 'GY-16', 'GY-17', 'GY-18']);
-  for (const entry of before.liveness.items) assert.ok(typeof entry.ageMs === 'number' && entry.ageMs > 0 && entry.since, `${entry.key} is reported with its age`);
-  assert.equal(before.liveness.oldestMs, Math.max(...before.liveness.items.map((entry: { ageMs: number }) => entry.ageMs)));
+  for (let failure = 1; failure < livenessRetryLimit; failure++) {
+    const retryAt = attempt();
+    assert.equal(work.nextAction?.kind, 'verify-deployment', `failure ${failure} is retried`);
+    clock = retryAt;
+  }
+  attempt();
+  const lastFailure = clock;
+  assert.equal(work.nextAction?.kind, 'escalate', `the ${livenessRetryLimit}th identical failure escalates`);
+  assert.ok(work.nextAction!.inputs.kind === 'escalate' && work.nextAction!.inputs.trigger === 'stalled-action');
+  assert.equal(claimAction([work], executor, now()), null, 'nothing is offered while the escalation is fresh');
+  clock = lastFailure + actionStallMaxMs - 60_000;
+  settleDelivered(work, [work], now());
+  assert.equal(work.nextAction?.kind, 'escalate', 'the escalation holds inside the widest stall backoff');
+  clock = lastFailure + actionStallMaxMs;
+  settleDelivered(work, [work], now());
+  assert.equal(work.nextAction?.kind, 'verify-deployment', 'once it has passed, the action is owed again rather than abandoned');
+  assert.deepEqual(work.actionQueue!.actions.map(row => row.kind), ['verify-deployment'], 'the escalation row makes way for the retry');
+  attempt();
+  assert.equal(work.nextAction?.kind, 'escalate', 'the same failure on the retry escalates again at once');
+  clock += actionStallMaxMs;
+  settleDelivered(work, [work], now());
+  assert.equal(work.nextAction?.kind, 'verify-deployment', 'and is retried again after the next backoff');
+  // The incident ends: this attempt observes the deployment.
+  const taken = claimAction([work], executor, now());
+  assert.equal(taken?.row.id, verifyId);
+  work.delivery!.deployment = { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: now().toISOString() } as NonNullable<Work['delivery']>['deployment'];
+  settleAction(work, verifyId, { executor: executor.id, principal: executor.principal }, 'done', 'deployment observed', now());
+  settleDelivered(work, [work], now());
+  assert.notEqual(work.nextAction?.kind, 'verify-deployment', 'the delivery is verified');
+  assert.notEqual(work.nextAction?.kind, 'escalate');
+  assert.deepEqual(work.actionQueue!.actions.filter(row => row.state !== 'done').map(row => row.kind), [], 'nothing is left owed');
+});
 
-  // The board settles the way the server settles it: the reconciliation tick evaluates each open
-  // item through the engine — real gates, real action computation, the liveness repair — in turn.
-  const engine = new Engine({} as Store, [15368], 120, 'owner/project');
-  for (let pass = 0; pass < 2; pass += 1) for (const work of items) if (work.stage !== 'done') engine.evaluate(work, items, now);
-  const after = await report(items);
-  assert.equal(after.counts.liveness, 0, `no open item is left without an owned next step: ${JSON.stringify(after.liveness.items)}`);
-  assert.deepEqual(after.liveness, { violations: 0, oldestMs: null, items: [] });
-  for (const work of items.filter(entry => entry.ready && entry.stage !== 'done')) assert.ok(obligationOf(work, items, now), `${work.key} is owned after settling`);
+test('unit:violations-get-successor-actions — resync and request-review rows refused for one stable reason keep being retried on the widest backoff after they escalate', () => {
+  for (const kind of ['resync', 'request-review'] as const) {
+    const t0 = Date.parse('2026-09-20T10:00:00.000Z');
+    let clock = t0;
+    const now = () => new Date(clock);
+    const at = new Date(t0).toISOString();
+    const work = { id: `id-${kind}`, key: `GY-${kind.toUpperCase()}`, title: kind, type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'review', ready: true,
+      createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], plannedFiles: ['src/'], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+      submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true }, gates: [] } as unknown as Work;
+    const inputs = kind === 'resync' ? { kind, pr: 1, sha: null, baseSha: null, baseTip: null, observedAt: null }
+      : { kind, provider: 'reviewer', requestId: 'request-1', pr: 1, sha: 'a'.repeat(40), baseSha: base, policyRevision: 1 };
+    const base_: NextAction = { kind, work: work.id, key: work.key, gate: 'review', refusal: 'refused', reason: `${kind} is owed`, inputs: inputs as NextAction['inputs'], llmRole: null, binding: `${kind}:1` };
+    const next = () => livenessCarry(work, { gate: 'review', refusal: 'refused', action: base_, wait: null, defect: null }, [work], now()).action!;
+    const tick = () => reconcileActions(work, [work], now(), { next: next() });
+    const executor = { id: 'executor-1', host: 'host-1', principal: 'coordinator' };
+    const rowId = actionId(kind, work.id, base_.binding);
+    const reason = `${kind} refused: the provider says the pull request is locked`;
+    const fail = () => {
+      const taken = claimAction([work], executor, now(), { kinds: [kind] });
+      assert.equal(taken?.row.id, rowId, `${kind} is offered at ${now().toISOString()}`);
+      clock += 1000;
+      const settled = settleAction(work, rowId, { executor: executor.id, principal: executor.principal }, 'failed', reason, now());
+      tick();
+      return Date.parse(settled.action.retryAt!);
+    };
+    tick();
+    for (let failure = 1; failure < livenessRetryLimit; failure++) { clock = fail(); assert.equal(next().kind, kind, `${kind}: failure ${failure} is retried`); }
+    fail();
+    assert.equal(next().kind, 'escalate', `${kind}: escalated after ${livenessRetryLimit} identical refusals`);
+    for (let round = 1; round <= 3; round++) {
+      clock += actionStallMaxMs;
+      tick();
+      assert.equal(next().kind, kind, `${kind}: round ${round} retries it on the widest backoff`);
+      fail();
+      assert.equal(next().kind, 'escalate', `${kind}: round ${round} re-escalates on the unchanged refusal`);
+    }
+  }
+});
+
+test('unit:liveness-violations-detected — a pending producer request or a running proof session owns the wait on its own clock: a producer running 45 minutes inside its 120-minute timeout is not a violation, one past it is', async () => {
+  const stale = await staleWait();
+  assert.equal((await judge(stale)).violation?.class, 'stale-wait', 'with nothing running, an hour past stage entry is stale');
+  const started = Date.now() - 45 * 60_000;
+  const handle = { id: `proof-${stale.key}`, kind: 'proof', principal: 'proof-runner', epoch: null, runtime: 'claude', host: 'test', workspace: null, tab: null, pane: null, agentName: null,
+    role: 'proof:integration', head: head(stale), attach: null, transcript: null, subject: 'integration proofs', startedAt: new Date(started).toISOString(), updatedAt: new Date().toISOString(), endedAt: null, state: 'running', outcome: null };
+  await setDocument(stale, 'sessions', [handle]);
+  const all = await store.list(), item = all.find(entry => entry.id === stale.id)!;
+  const running = livenessOf(item, all, new Date());
+  assert.equal(running.violation, null, `the producer inside its timeout owns the wait: ${JSON.stringify(running.violation)}`);
+  assert.equal(running.obligation!.dueAt, new Date(started + 120 * 60_000).toISOString(), 'due at the end of the producer timeout, dated from the session start');
+  assert.equal(livenessOf(item, all, new Date(started + 121 * 60_000)).violation?.class, 'stale-wait', 'and past it, the wait is stale');
+  // A producer request pending for the head is the same obligation, dated from when it was requested.
+  const requestedAt = new Date(Date.now() - 45 * 60_000).toISOString();
+  await setDocument(stale, 'sessions', []);
+  await setDocument(stale, 'autoDispatch', { review: null, history: [], producers: [{ id: 'request-1', kind: 'producer', group: 'integration', proofs: [PROOF], sha: head(stale), baseSha: base, policyRevision: stale.policyRevision, pr: stale.submission!.pr, requestedAt, reason: 'unproven', state: 'requested' }] });
+  const requested = await judge(stale);
+  assert.equal(requested.violation, null, `the pending request owns the wait: ${JSON.stringify(requested.violation)}`);
+  assert.equal(requested.obligation!.dueAt, new Date(Date.parse(requestedAt) + 120 * 60_000).toISOString());
+});
+
+test('unit:unknown-merge-reconciled-from-github — a merge the provider made under a committed execution is delivered even when a lagging read cancelled that execution and a fresh one was acquired before the merged observation arrived', async () => {
+  let w = await candidate('pass', {}, true);
+  // Published at the head of the merge queue, as the queue leaves a candidate it is about to merge.
+  await setDocument(w, 'queue,speculation', { ref: `refs/graphyard/queue/${w.key.toLowerCase()}`, tip: head(w), base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() });
+  w = await engine.observe(w.id, (await reload(w)).revision, observation(w));
+  assert.ok(w.gates.every(gate => gate.passed), `authorized to merge: ${w.gates.flatMap(gate => gate.reasons).join('; ')}`);
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
+  await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, id());
+  const committed = await engine.commitMerge(coordinator, w.id, { executionId: granted.execution.id }, id());
+  // The provider merges; GitHub's replica still answers open, so the broker cancels its execution.
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await engine.cancelMerge(coordinator, w.id, { executionId: granted.execution.id, reason: 'GitHub shows the pull request open and unmerged' }, id());
+  // Another reading on the same lagging replica, and a fresh execution acquired on it.
+  await engine.observe(w.id, (await reload(w)).revision, observation(w));
+  const fresh = await engine.acquireMerge(coordinator, w.id, { expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
+  assert.notEqual(fresh.execution.id, granted.execution.id);
+  assert.ok(committed.committingAt, 'the first execution called the provider');
+  const merged = await engine.observe(w.id, (await reload(w)).revision, observation(w, { merged: true, mergedAt, mergeSha: sha(`merge-${w.key}`) }));
+  assert.equal(merged.stage, 'done', `delivered: ${merged.violations.join('; ')}`);
+  assert.ok(!merged.violations.some(entry => entry.startsWith('Merge observed without a prior authorization')), 'no false unauthorized-merge violation');
+  assert.equal(merged.delivery?.mergeSha, sha(`merge-${w.key}`), 'the delivery is recorded');
+});
+
+// ---- AC-3 ---------------------------------------------------------------------------------------
+
+test('unit:liveness-count-reported — master status reports the count of liveness violations and each one\'s age, and the count is zero once the fixture board settles', async () => {
+  // A board with a stranded item among healthy ones.
+  await released(); await claimed(); await candidate('pass');
+  const stranded = await candidate('fail');
+  await strand(stranded);
+  const board = { work: await store.list(), now: new Date(Date.now() + 1000).toISOString() };
+  const reported = livenessStatus(board);
+  assert.ok(reported.violations >= 1, 'the stranded item is counted');
+  assert.equal(reported.violations, reported.items.length);
+  const entry = reported.items.find(item => item.key === stranded.key)!;
+  assert.equal(entry.class, 'failed-proof');
+  assert.ok(entry.ageMs >= 1000 && Date.parse(entry.since) <= Date.parse(board.now), `with its age: ${JSON.stringify(entry)}`);
+  assert.equal(reported.oldestMs, Math.max(...reported.items.map(item => item.ageMs)));
+
+  // One reconciliation tick settles the board, and `master status` reports zero.
+  await engine.reconcile();
+  const settled = { work: await store.list(), now: new Date().toISOString() };
+  assert.deepEqual(livenessStatus(settled), { violations: 0, oldestMs: null, items: [] }, 'every open item holds an obligation');
+
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-liveness-status-')), root = await mkdtemp(join(tmpdir(), 'graphyard-liveness-root-'));
+  try {
+    const credentialFile = join(directory, 'coordinator.token');
+    await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    execFileSync('git', ['init', '-q', root]);
+    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), repository,
+      baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+    await writeDaemonState(master, emptyDaemonState(master));
+    const masterApi = async (path: string) => path === 'work-snapshot' ? settled : { decisions: [] };
+    const report = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }) as { liveness: ReturnType<typeof livenessStatus>; counts: Record<string, number> };
+    assert.equal(report.liveness.violations, 0, 'master status reports the count');
+    assert.deepEqual(report.liveness.items, []);
+    assert.equal(report.counts.livenessViolations, 0, 'and counts it');
+    const strandedStatus = await masterStatusReport(root, master, async (path: string) => path === 'work-snapshot' ? board : { decisions: [] }, { actor: { id: 'coordinator-1' } }, { commit: null }) as typeof report;
+    assert.equal(strandedStatus.liveness.violations, reported.violations, 'a board with a violation reads non-zero');
+    assert.ok(strandedStatus.liveness.items.every(item => typeof item.ageMs === 'number' && item.since), 'each with its age');
+  } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 });

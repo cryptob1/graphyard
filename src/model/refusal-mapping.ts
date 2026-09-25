@@ -58,9 +58,9 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'merge', match: /^Pull request is not mergeable against the current base$/, kind: 'resync' },
   { gate: 'merge', match: /branch protection have not been verified$/, kind: 'escalate' },
   { gate: 'merge', match: /^Ejected from the merge queue:/, kind: 'request-rework' },
-  // Unresolved review threads (GY-139) are findings the worker answers on a new head, where the
-  // reviewer names the threads it verified fixed and the loop resolves them: rework, not a human.
-  { gate: 'merge', match: /^Branch protection requires conversation resolution and \d+ review threads? (is|are) unresolved on /, kind: 'request-rework' },
+  // Unresolved review threads never refuse a merge in Graphyard's gate; a branch that still requires
+  // conversation resolution is protection drift, reconciled with graphyard master protection --apply.
+  { gate: 'merge', match: /^Branch protection still requires conversation resolution, which Graphyard's review gate does not use: /, kind: 'escalate' },
   { gate: 'merge', match: /^Candidate has not entered the merge queue$/, kind: 'merge' },
   { gate: null, match: /.*/, kind: 'escalate' },
 ];

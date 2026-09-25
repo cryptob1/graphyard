@@ -41,7 +41,7 @@ Installers derive the four capacity limits from the deployed principals; an unse
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
 ```
 
-Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN` on the `graphyard-reporting` environment (default branch only) with `GRAPHYARD_URL`. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (dropping a live principal only with `--remove ID`); `--rotate ID` rotates one producer and `--deploy` sets the GitHub secret.
+Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN` on the `graphyard-reporting` environment (default branch only) with `GRAPHYARD_URL`. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID` drops a principal); `--rotate ID` rotates one producer and `--deploy` sets the GitHub secret.
 
 ### Production deployment observation
 

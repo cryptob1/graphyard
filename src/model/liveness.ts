@@ -1,245 +1,279 @@
-import { createHash } from 'node:crypto';
+import { actionId, actionIdleMs, actionSettleMs, actionStall, actionStallMaxMs, claimLive, reconcileActions, waitingToRetry, type ActionRow } from './actions.js';
 import { actionAccount } from './next-action.js';
-import { reconcileActions, actionId, type ActionRow, type ActionTransition } from './actions.js';
-import { actionIdleMs, actionSettleMs, actionStall, claimLive, settling, waitingToRetry } from './action-progress.js';
-import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
-import type { ActionAccount, WaitKind } from './action-account.js';
+import { nextActionLlmRoles, type NextAction, type NextActionInputs } from './action-kinds.js';
+import type { ActionAccount, ActionWait } from './action-account.js';
+import { producerGroupDecisions } from './mechanical-proofs.js';
+import { roleSessionMaximumMs } from './sessions.js';
+import { redecidableScopeRefusal, routableScopeRequest, scopeRefusalBlocker } from './scope.js';
 import type { Work } from './work.js';
 
 /**
  * The liveness invariant (GY-201): every open item always has exactly one owned next step with a
- * deadline, and the server — not a loop re-deriving the world — keeps it so.
+ * deadline, and the server — not a loop re-deriving the world — keeps it that way.
  *
- * Correctness is enforced transactionally: every guard refuses what must not happen. Nothing
- * guaranteed that anybody then owned what happens next, so a correct refusal could become a
- * terminal state in disguise — a merge stranded with its PR open and no execution, a failed proof
- * nobody asked to rework, a refused scope request nobody decides, a wait nobody ever ends. This
- * module names, for every open item, the one obligation that moves it:
+ * Correctness is enforced transactionally everywhere; liveness used to be left to whoever happened
+ * to look next, so a guard that correctly refused became a terminal state in disguise: a merge
+ * whose provider outcome was retained and never re-read, a failed proof nobody reworked, a scope
+ * refusal nobody decided, a dispatch attempted 782 times for one unchanged reason. An item's
+ * obligation is one of three things:
  *
- * - `session` — a live lease: the worker holding it owes the next step by the lease's expiry.
- * - `action` — a durable action row (`actions.ts`) someone claims, runs or is still settling.
- * - `wait` — a named wait on an event outside the item (`action-account.ts`), with its `dueAt`.
+ * - `session` — a live leased session doing what the item waits for, due when its lease expires;
+ * - `action` — an open row on the durable action queue for the step the item needs, due by the
+ *   row's claim, retry, settle window or idle bound;
+ * - `wait` — a named wait on an event outside this item, due at a bound (`livenessWaitBoundMs`),
+ *   or, for a wait on another item, when that item's own obligation is due.
  *
- * An open item with none of the three is a liveness violation. The engine repairs one within the
- * reconciliation tick that sees it (`livenessNext`): it synthesizes the successor action for the
- * state the item is in, bound to the violation's reason so the same violation never queues a
- * second row, and a successor that keeps failing for one unchanged reason is converted to an
- * escalation instead of being retried forever. `master status` counts what is left, with ages.
- *
- * Backlog is not open work: an item nobody released waits on the operator's goals-and-priorities
- * call, which carries no deadline this control plane may impose (the same rule `computeAccount`
- * applies). Done items have no next step here; a delivery's deployment is `verify-deployment`'s.
+ * An open item with none of these is a violation. The reconciliation tick (`Engine.reconcile`)
+ * repairs each one in its own transaction by opening the successor the item's state calls for,
+ * with an id derived from its reason so repeating the repair never queues a second row.
  */
 
-/** How long a wait the item itself names — a session the control plane owes, a merge whose record follows — may stand. */
-export const livenessWaitBoundMs = 60 * 60_000;
-/** How many identical failures turn a successor into an escalation: the same threshold that classifies a stall. */
-export { actionStallThreshold as livenessFailureLimit } from './action-progress.js';
+/** Consecutive failures with one unchanged reason after which a row is escalated rather than retried. */
+export const livenessRetryLimit = 8;
+/** How long an item may wait on an event nobody else is named as owing before the wait is stale. */
+export const livenessWaitBoundMs = 30 * 60_000;
 
-export type Obligation =
-  | { kind: 'session'; owner: string; epoch: number; dueAt: string }
-  | { kind: 'action'; id: string; action: NextActionKind; state: ActionRow['state']; dueAt: string }
-  | { kind: 'wait'; wait: WaitKind; on: string | null; detail: string; dueAt: string | null };
-
-/** What an open item with no obligation is stuck in, which decides the successor that repairs it. */
-export const livenessStates = ['refused-scope', 'failed-proof', 'stranded-merge', 'stale-wait', 'unowned'] as const;
-export type LivenessState = typeof livenessStates[number];
-/** The repair each state gets; `reconcile-merge` is the guarded `merge` (or a `resync` of a merge already landed). */
-export const livenessRepairs: Record<LivenessState, 'scope-decision' | 'request-rework' | 'reconcile-merge' | 'escalate'> = {
-  'refused-scope': 'scope-decision', 'failed-proof': 'request-rework', 'stranded-merge': 'reconcile-merge', 'stale-wait': 'escalate', unowned: 'escalate',
-};
-
+export type ObligationKind = 'session' | 'action' | 'wait';
+export interface Obligation { kind: ObligationKind; owner: string | null; dueAt: string; detail: string; action?: { id: string; kind: ActionRow['kind']; state: ActionRow['state'] } }
+export const violationClasses = ['stranded-merge', 'failed-proof', 'refused-scope', 'stale-wait', 'stalled-action', 'unaccounted', 'unowned-action'] as const;
+export type ViolationClass = typeof violationClasses[number];
 export interface LivenessViolation {
-  work: string; key: string; state: LivenessState;
-  /** Why the item has no owned next step, worded without times so the same violation always reads the same. */
-  reason: string;
-  /** Since when nothing has owned it, as well as the record can tell, and how long ago that was. */
+  work: string; key: string; class: ViolationClass;
+  /** When the item last had an obligation, as near as the record says, and how long ago that was. */
   since: string; ageMs: number;
+  detail: string;
+  /** The step the repair opens; null only when no rule names one. */
+  successor: NextAction | null;
 }
+export interface Liveness { work: string; key: string; obligation: Obligation | null; violation: LivenessViolation | null }
 
-/** Released and not done: the items the invariant is about. */
-export const openItem = (work: Pick<Work, 'ready' | 'stage'>) => work.ready && work.stage !== 'done';
-const liveLease = (work: Work, now: Date) => !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
-const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : 'none';
+type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'defect'>;
 const iso = (ms: number) => new Date(ms).toISOString();
-const digest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16);
-const latest = (...stamps: (string | null | undefined)[]) => {
-  const times = stamps.map(stamp => stamp ? Date.parse(stamp) : NaN).filter(Number.isFinite);
-  return times.length ? iso(Math.max(...times)) : null;
-};
+const heldSince = (work: Work) => work.stageEnteredAt ?? work.updatedAt;
+const liveLease = (work: Work, now: Date) => !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
+const escalate = (work: Work, trigger: string, reason: string, detail: string, binding: string, gate: string | null = null, refusal: string | null = null): NextAction =>
+  ({ kind: 'escalate', work: work.id, key: work.key, gate, refusal, reason, inputs: { kind: 'escalate', trigger, detail }, llmRole: nextActionLlmRoles.escalate, binding });
+
+// ---- Rows as obligations ----------------------------------------------------------------------
 
 /**
- * The obligation a durable row stands for, and its deadline: a live claim's expiry, a backoff's
- * retry, a completed action's settle window, or the idle bound from the row's last transition. A
- * completed row whose settle window passed is history waiting to be reopened, not an obligation.
+ * When a row on the queue is due. Every row there is owed by somebody — pending (or its claim
+ * lapsed, so it is claimable), claimed, or settling — and one whose settle window has passed is
+ * overdue rather than gone: the next evaluation reopens it while the item still needs it.
  */
-function rowObligation(row: ActionRow, now: Date): Obligation | null {
-  const at = (dueAt: string): Obligation => ({ kind: 'action', id: row.id, action: row.kind, state: row.state, dueAt });
-  if (row.state === 'done') return settling(row, now) ? at(iso(Date.parse(row.resolvedAt!) + actionSettleMs)) : null;
-  if (row.state === 'claimed' && claimLive(row, now)) return at(row.claim!.expiresAt);
-  if (waitingToRetry(row, now)) return at(row.retryAt!);
-  return at(iso(Date.parse(row.history.at(-1)?.at ?? row.requestedAt) + actionIdleMs));
+function rowDueAt(row: ActionRow, now: Date) {
+  if (row.state === 'claimed' && claimLive(row, now)) return row.claim!.expiresAt;
+  if (row.state === 'done') return iso(Date.parse(row.resolvedAt!) + actionSettleMs);
+  if (waitingToRetry(row, now)) return row.retryAt!;
+  return iso(Date.parse(row.requestedAt) + actionIdleMs);
+}
+const openRow = (work: Work, id: string) => (work.actionQueue?.actions ?? []).find(row => row.id === id) ?? null;
+/** The newest record of a row: the open one, else the last retired copy. */
+const latestRow = (work: Work, id: string) => (work.actionQueue?.actions ?? []).find(row => row.id === id)
+  ?? [...(work.actionQueue?.history ?? [])].reverse().find(row => row.id === id) ?? null;
+/**
+ * The unchanged run of failures an action ended on, read across every copy of its row: a
+ * conversion retires the row and a lifted one opens it afresh, so the retired copies and the open
+ * one are one history, their cancellations and fresh requests set aside.
+ */
+function failureRun(work: Work, id: string) {
+  const copies = [...(work.actionQueue?.history ?? []), ...(work.actionQueue?.actions ?? [])].filter(row => row.id === id);
+  if (!copies.length) return null;
+  const history = copies.flatMap(row => row.history).filter(entry => entry.event !== 'cancelled' && entry.event !== 'requested');
+  const run = actionStall({ ...copies.at(-1)!, history });
+  return run && { ...run, lastAt: history.filter(entry => entry.event === 'failed').at(-1)!.at };
 }
 
-interface WaitDue { dueAt: string | null; stale: boolean }
+// ---- The derivation's liveness rules ----------------------------------------------------------
+
 /**
- * When a named wait is due, and whether it already is.
- *
- * A wait on another item — a dependency, the entry ahead in the merge queue — is owned by that
- * item, so it is due when that item's own obligation is and is never stale while that item is
- * open: a violation there is reported, and repaired, once, on the item that holds it. A wait on an
- * item that is done or gone should have cleared, so it is stale. A wait the item names for itself
- * (a session the control plane owes it, a merge whose delivery record follows) is due
- * `livenessWaitBoundMs` after it began. A wait with no deadline at all — a person's decision — is
- * not an obligation this control plane can hold anybody to.
+ * A row that failed `livenessRetryLimit` times for one unchanged reason is escalated instead of
+ * retried. The escalation holds while the situation is the one that failed (same action id) and its
+ * last failure is younger than the longest stall backoff (`actionStallMaxMs`); it lifts once its
+ * own row is completed after that run, once the situation moves on, or once that backoff has
+ * passed. A lifted conversion retries the action once: an identical failure escalates it again at
+ * once, anything else ends the run. So an escalated action is still attempted on the widest
+ * backoff, and a condition that clears — a deployment incident ending — is found by the retry.
  */
-function waitDue(work: Work, account: ActionAccount, all: Work[], now: Date, seen: Set<string>): WaitDue | null {
-  const wait = account.wait;
-  if (!wait) return null;
+function stalledConversion(work: Work, action: NextAction, now: Date): NextAction | null {
+  if (action.kind === 'escalate') return null;
+  const id = actionId(action.kind, work.id, action.binding);
+  const run = failureRun(work, id);
+  if (!run || run.failures < livenessRetryLimit || now.getTime() - Date.parse(run.lastAt) >= actionStallMaxMs) return null;
+  const binding = `stalled:${id}:${run.reason}`;
+  const answered = latestRow(work, actionId('escalate', work.id, binding));
+  if (answered?.result === 'done' && Date.parse(answered.resolvedAt!) >= Date.parse(run.lastAt)) return null;
+  return escalate(work, 'stalled-action', `${work.key}'s ${action.kind} failed ${run.failures} times in a row for one unchanged reason and is escalated rather than retried until ${iso(Date.parse(run.lastAt) + actionStallMaxMs)}: ${run.reason}`,
+    `${action.kind} failed ${run.failures} times since ${run.since}: ${run.reason}`, binding, action.gate, action.refusal);
+}
+
+/**
+ * A refused scope request is owed a scope decision: the rule again when it would now approve;
+ * otherwise one escalation row, the only one. For an additive request of the live attempt the loop
+ * routes that row's judgement to an independent approver as a requirements decision (GY-176), so it
+ * names that owner rather than a master; anything else is the master's.
+ */
+function scopeDecision(work: Work, action: NextAction, now: Date): NextAction | null {
+  const request = work.scopeRequest;
+  if (action.kind !== 'escalate' || action.gate !== 'ready' || !action.refusal?.startsWith(scopeRefusalBlocker) || request?.decision?.state !== 'refused') return null;
+  if (redecidableScopeRefusal(work) && liveLease(work, now) && work.lease!.epoch === request.epoch)
+    return { ...action, kind: 'approve-scope', reason: `${work.key}'s refused scope request would be approved by the rules as they stand; the control plane decides it again`,
+      inputs: { kind: 'approve-scope', epoch: request.epoch, paths: [...request.paths], requestedBy: request.requestedBy, detail: request.reason }, llmRole: null, binding: `scope:${request.epoch}:${request.at}:redecide` };
+  const decides = routableScopeRequest(work, now.getTime()) ? `the independent approver judges the requirements decision the loop requests for it (graphyard master decisions ${work.key}), which` : `graphyard master scope ${work.key}`;
+  return escalate(work, 'scope', `${request.requestedBy}'s scope request on ${work.key} was refused and is owed a scope decision: ${request.decision.reason}`,
+    `${decides} decides ${request.paths.join(', ')} (${request.reason}); refused because ${request.decision.reason}`, `scope-refused:${request.epoch}:${request.at}`, action.gate, action.refusal);
+}
+
+/** When a wait is due, or null when what it names is gone. A wait on another item is due when that item's own step is. */
+function waitDueAt(work: Work, wait: ActionWait, all: Work[], now: Date): string | null {
+  if (wait.kind === 'session' && liveLease(work, now) && wait.on === work.lease!.owner) return work.lease!.expiresAt;
   if (wait.kind === 'dependency' || wait.kind === 'queue') {
-    const upstream = all.find(entry => entry.key === wait.on || entry.id === wait.on);
-    // Stale since the item it names finished, or since this item began waiting on it, if later.
-    if (!upstream || !openItem(upstream)) return { dueAt: latest(upstream?.stage === 'done' ? upstream.stageEnteredAt : null, account.heldSince) ?? now.toISOString(), stale: true };
-    const held = obligationOf(upstream, all, now, seen);
-    return { dueAt: held?.dueAt ?? null, stale: false };
+    const other = all.find(item => item.key === wait.on);
+    if (!other || other.stage === 'done' || (wait.kind === 'queue' && !other.queue)) return null;
+    if (liveLease(other, now)) return other.lease!.expiresAt;
+    const rows = (other.actionQueue?.actions ?? []).map(row => rowDueAt(row, now)).sort();
+    return rows[0] ?? now.toISOString();
   }
-  if (wait.kind === 'human') return null;
-  const began = wait.kind === 'settled' ? latest(work.observation?.mergedAt, account.heldSince) : latest(account.heldSince, work.candidate?.createdAt);
-  const dueAt = iso(Date.parse(began ?? now.toISOString()) + livenessWaitBoundMs);
-  return { dueAt, stale: Date.parse(dueAt) <= now.getTime() };
+  if (wait.kind === 'human') return iso(Date.parse(heldSince(work)) + 24 * 60 * 60_000);
+  return iso(Math.max(Date.parse(heldSince(work)) + livenessWaitBoundMs, ...sessionObligations(work).map(entry => Date.parse(entry.at) + roleSessionMaximumMs[entry.role])));
 }
 
 /**
- * The one obligation that owns an open item's next step, or null when nothing does. A live lease
- * comes first — the worker holding it owes the step — then the item's oldest durable row, then
- * the named wait its account gives, while that wait is not past its deadline.
+ * The review and proof obligations the head holds while the item waits: a request pending for it
+ * and a session running on it. Each has its own clock — from the request or the session's start,
+ * due by that role's session maximum (a producer's `producerTimeoutMinutes`) — so a wait they own
+ * is not stale merely because the item entered its stage more than `livenessWaitBoundMs` ago.
  */
-export function obligationOf(work: Work, all: Work[], now: Date, seen = new Set<string>()): Obligation | null {
-  if (liveLease(work, now)) return { kind: 'session', owner: work.lease!.owner, epoch: work.lease!.epoch, dueAt: work.lease!.expiresAt };
-  for (const row of work.actionQueue?.actions ?? []) { const held = rowObligation(row, now); if (held) return held; }
-  if (seen.has(work.id)) return null;
-  seen.add(work.id);
+function sessionObligations(work: Work): { at: string; role: 'review' | 'proof' }[] {
+  const head = work.candidate?.sha ?? null;
+  const requests = [work.autoDispatch?.review, ...(work.autoDispatch?.producers ?? [])]
+    .filter(request => !!request && request.state === 'requested' && request.sha === head)
+    .map(request => ({ at: request!.requestedAt, role: request!.kind === 'review' ? 'review' as const : 'proof' as const }));
+  const sessions = (work.sessions ?? []).filter(handle => handle.state === 'running' && (handle.kind === 'review' || handle.kind === 'proof') && (!handle.head || handle.head === head))
+    .map(handle => ({ at: handle.startedAt, role: handle.kind as 'review' | 'proof' }));
+  return [...requests, ...sessions].filter(entry => Number.isFinite(Date.parse(entry.at)));
+}
+const ownedWait = (wait: ActionWait) => wait.kind !== 'dependency' && wait.kind !== 'queue';
+
+/**
+ * The liveness rules applied to what the derivation computed (`actionAccount` calls this): a
+ * stalled row becomes an escalation and a refused scope request a scope decision. Everything else
+ * passes through; a wait or a defect is judged by `livenessFallback`, which only the engine queues.
+ */
+export function livenessCarry(work: Work, computed: Computed, _all: Work[], now: Date): Computed {
+  if (!computed.action) return computed;
+  const next = stalledConversion(work, computed.action, now) ?? scopeDecision(work, computed.action, now);
+  return next ? { ...computed, action: next } : computed;
+}
+
+/**
+ * The successor for an open item the derivation names no action for and nothing moves: a defect,
+ * a wait on an item that no longer holds it up, or a wait on an event nobody else owes that is
+ * past its due time. The engine queues it beside the null action (`Engine.evaluate`), so the state
+ * is owned by an escalation rather than reported and left; the derivation itself still reports
+ * the wait or the defect it found, so every reader of `actionAccount` sees what the item is in.
+ */
+export function livenessFallback(work: Work, all: Work[], now: Date): NextAction | null {
+  if (work.stage === 'done' || !work.ready) return null;
   const account = actionAccount(work, all, now);
-  const due = waitDue(work, account, all, now, seen);
-  if (!due || due.stale) return null;
-  return { kind: 'wait', wait: account.wait!.kind, on: account.wait!.on, detail: account.wait!.detail, dueAt: due.dueAt };
+  if (account.action) return null;
+  if (account.defect) return escalate(work, 'unaccounted', `${work.key} has no rule naming its next step: ${account.defect}`, account.defect, `liveness:unaccounted:${account.defect}`, account.gate, account.refusal);
+  const wait = account.wait;
+  if (!wait || wait.kind === 'settled' && !work.candidate) return null;
+  const due = waitDueAt(work, wait, all, now);
+  if (due === null) return escalate(work, 'stale-wait', `${work.key} waits on ${wait.on}, which no longer holds it up: ${wait.detail}`, wait.detail, `liveness:stale-wait:${wait.kind}:${wait.on}`, account.gate, account.refusal);
+  if (!ownedWait(wait) || Date.parse(due) > now.getTime()) return null;
+  return escalate(work, 'stale-wait', `${work.key} has waited past ${due} on ${wait.on ?? 'nobody named'}: ${wait.detail}`,
+    `${wait.kind} wait on ${wait.on ?? 'nobody named'} due ${due}: ${wait.detail}`, `liveness:stale-wait:${wait.kind}:${wait.on}:${heldSince(work)}`, account.gate, account.refusal);
 }
 
-/** The failing proofs trusted evidence recorded against the current head. */
-const failedProofs = (work: Work) => work.candidate ? [...new Set(work.evidence.filter(entry => entry.trusted && entry.result === 'fail' && !entry.revocation
-  && entry.sha === work.candidate!.sha && entry.policyRevision === work.policyRevision).map(entry => entry.proof))] : [];
+// ---- Detection --------------------------------------------------------------------------------
 
-/**
- * What an item with no obligation is stuck in, in the order the states unblock: a refused scope
- * request first (the worker's ask is what everything else waits on), then a failed proof (a head
- * that failed can never merge), then a merge with its pull request still to land or to record,
- * then a wait that outlived its deadline, and last an item nothing names at all.
- */
-export function livenessState(work: Work, account: ActionAccount, stale: boolean): { state: LivenessState; reason: string } {
-  const key = work.key;
-  const scope = work.scopeRequest?.decision?.state === 'refused' ? work.scopeRequest : null;
-  if (scope || (work.scopeDecision?.state === 'refused' && work.blocker)) {
-    const paths = scope?.paths ?? work.scopeDecision!.paths, why = scope?.decision?.reason ?? work.scopeDecision!.reason;
-    return { state: 'refused-scope', reason: `${key}'s request for ${paths.join(', ')} outside plannedFiles was refused (${why}) and nobody owns deciding it` };
+/** A merge the broker committed to the provider and never saw observed: a fresh reading reconciles it. */
+export function reconcileMergeAction(work: Work): NextAction {
+  const execution = work.mergeExecution!;
+  const inputs: NextActionInputs = { kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: execution.sha, baseSha: execution.baseSha, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null };
+  return { kind: 'resync', work: work.id, key: work.key, gate: 'merge', refusal: null, llmRole: null, inputs, binding: `reconcile-merge:${execution.id}`,
+    reason: `${work.key}'s merge execution ${execution.id} committed ${execution.sha.slice(0, 12)} to the provider and expired at ${execution.expiresAt} with the pull request still open; a fresh reading reconciles the provider outcome` };
+}
+
+function classify(work: Work, all: Work[], now: Date, successor: NextAction | null): ViolationClass {
+  if (!successor) return 'unaccounted';
+  if (successor.binding.startsWith('reconcile-merge:') || successor.kind === 'merge') return 'stranded-merge';
+  if (successor.binding.startsWith('stalled:')) return 'stalled-action';
+  if (successor.inputs.kind === 'escalate' && successor.inputs.trigger === 'stale-wait') return 'stale-wait';
+  if (successor.inputs.kind === 'escalate' && successor.inputs.trigger === 'unaccounted') return 'unaccounted';
+  if (work.scopeRequest?.decision?.state === 'refused' && work.blocker?.startsWith(scopeRefusalBlocker)) return 'refused-scope';
+  if (work.candidate && producerGroupDecisions(work, all, now).some(decision => decision.state === 'failed')) return 'failed-proof';
+  return 'unowned-action';
+}
+
+/** When the item last had an obligation, as near as the record says: the latest fact that could have ended one. */
+function lapsedAt(work: Work, now: Date) {
+  const facts = [work.updatedAt, work.lease?.expiresAt, ...(work.actionQueue?.history ?? []).map(row => row.resolvedAt),
+    ...(work.actionQueue?.actions ?? []).filter(row => row.state === 'done').map(row => row.resolvedAt && iso(Date.parse(row.resolvedAt) + actionSettleMs))]
+    .filter((fact): fact is string => !!fact && Date.parse(fact) <= now.getTime());
+  return facts.sort().at(-1) ?? now.toISOString();
+}
+
+/** The one obligation an open item has now, or the violation that says it has none. */
+export function livenessOf(work: Work, all: Work[], now: Date): Liveness {
+  const base = { work: work.id, key: work.key };
+  if (work.stage === 'done' || !work.ready) return { ...base, obligation: null, violation: null };
+  const violation = (successor: NextAction | null, detail: string, since = lapsedAt(work, now)): Liveness =>
+    ({ ...base, obligation: null, violation: { ...base, class: classify(work, all, now, successor), since, ageMs: Math.max(0, now.getTime() - Date.parse(since)), detail, successor } });
+  const owned = (next: NextAction): Liveness | null => {
+    const row = openRow(work, actionId(next.kind, work.id, next.binding));
+    return row ? { ...base, violation: null, obligation: { kind: 'action', owner: row.claim?.executor ?? null, dueAt: rowDueAt(row, now), detail: next.reason, action: { id: row.id, kind: row.kind, state: row.state } } } : null;
+  };
+  // A merge execution is the broker's step while it holds; a committed one that outlived its
+  // authority with the pull request still open is re-read, never guessed at (GY-195).
+  const execution = work.mergeExecution;
+  if (execution && (execution.committingAt || Date.parse(execution.expiresAt) > now.getTime())) {
+    if (Date.parse(execution.expiresAt) > now.getTime() || work.observation?.merged)
+      return { ...base, violation: null, obligation: { kind: 'wait', owner: execution.owner, dueAt: execution.expiresAt, detail: `merge execution ${execution.id} on ${execution.sha.slice(0, 12)}` } };
+    const next = reconcileMergeAction(work);
+    return owned(next) ?? violation(next, next.reason, execution.expiresAt);
   }
-  const failed = failedProofs(work);
-  if (failed.length && !work.reworkRequested) return { state: 'failed-proof', reason: `${key} failed ${failed.join(', ')} on ${short(work.candidate?.sha)} and no rework is requested` };
-  const observed = work.observation;
-  if (work.candidate && observed && !work.mergeExecution && observed.prState !== 'closed' && (observed.merged || work.stage === 'merge' || !!work.queue || account.action?.kind === 'merge'))
-    return { state: 'stranded-merge', reason: observed.merged ? `${key}'s PR #${work.candidate.pr} merged as ${short(observed.mergeSha)} and its delivery is not recorded`
-      : `${key}'s PR #${work.candidate.pr} is open on ${short(work.candidate.sha)} with no merge execution and nothing driving its merge` };
-  if (stale && account.wait) return { state: 'stale-wait', reason: `${key} waits on ${account.wait.kind}${account.wait.on ? ` ${account.wait.on}` : ''} past its deadline: ${account.wait.detail}` };
-  return { state: 'unowned', reason: `${key} has no live session, no action row and no named wait: ${account.defect ?? account.action?.reason ?? 'nothing names its next step'}` };
+  // A lease that lapsed since the last tick is overdue, not gone: the reconciliation that runs
+  // next clears it and names the step after it, exactly as it always has.
+  if (work.lease && !liveLease(work, now))
+    return { ...base, violation: null, obligation: { kind: 'session', owner: work.lease.owner, dueAt: work.lease.expiresAt, detail: `${work.lease.owner}'s lapsed epoch ${work.lease.epoch}, reclaimed by the next reconciliation` } };
+  const account = actionAccount(work, all, now);
+  if (account.action) return owned(account.action) ?? violation(account.action, `${work.key} needs ${account.action.kind} and no open row owns it: ${account.action.reason}`);
+  const fallback = livenessFallback(work, all, now);
+  if (fallback) return owned(fallback) ?? violation(fallback, fallback.reason);
+  if (account.defect || !account.wait) return violation(null, account.defect ?? `${work.key} names no action and no wait`);
+  const wait = account.wait;
+  const dueAt = waitDueAt(work, wait, all, now)!;
+  const session = wait.kind === 'session' && liveLease(work, now) && wait.on === work.lease!.owner;
+  return { ...base, violation: null, obligation: { kind: session ? 'session' : 'wait', owner: wait.on, dueAt, detail: wait.detail } };
 }
 
-/**
- * Every open item with no owned next step, oldest first. `since` is the latest moment the record
- * shows something owning the item — a lease that lapsed, a row that was retired, a wait's deadline
- * — or the moment it entered its stage, when nothing ever did.
- */
+/** Every open item's violation, oldest first. */
 export function livenessViolations(all: Work[], now: Date): LivenessViolation[] {
-  return all.filter(openItem).flatMap(work => {
-    if (obligationOf(work, all, now)) return [];
-    const account = actionAccount(work, all, now);
-    const due = waitDue(work, account, all, now, new Set([work.id]));
-    const { state, reason } = livenessState(work, account, !!due?.stale);
-    const lapsed = work.lease && !liveLease(work, now) ? work.lease.expiresAt : null;
-    const retired = latest(...(work.actionQueue?.history ?? []).map(row => row.resolvedAt));
-    const since = latest(lapsed, retired, due?.stale ? due.dueAt : null) ?? account.heldSince;
-    return [{ work: work.id, key: work.key, state, reason, since, ageMs: Math.max(0, now.getTime() - Date.parse(since)) }];
-  }).sort((a, b) => b.ageMs - a.ageMs);
+  return all.map(work => livenessOf(work, all, now).violation).filter((entry): entry is LivenessViolation => !!entry).sort((a, b) => b.ageMs - a.ageMs);
 }
 
-/** The count and ages `master status` reports. */
-export function livenessReport(all: Work[], now: Date) {
-  const violations = livenessViolations(all, now);
-  return { violations: violations.length, oldestMs: violations[0]?.ageMs ?? null, items: violations };
-}
+// ---- Repair -----------------------------------------------------------------------------------
 
 /**
- * The successor action that repairs a violation, bound to its reason: the same violation always
- * names the same row (`actionId` is a hash of the binding), so a tick that sees it again finds
- * the row it already queued instead of adding a second.
+ * Keep the fresh reading owed by a committed merge execution that outlived its authority with the
+ * pull request open (GY-195) on the queue, inside the caller's transaction. The reconciliation does
+ * not re-evaluate an item a merge execution holds, so this is the only thing that opens the row,
+ * and reopens it after each settle window until GitHub's observation reconciles the execution.
  */
-export function successorAction(work: Work, state: LivenessState, reason: string): NextAction {
-  const binding = `liveness:${state}:${digest(reason)}`;
-  const make = (kind: NextActionKind, inputs: NextActionInputs): NextAction =>
-    ({ kind, work: work.id, key: work.key, gate: null, refusal: null, reason: `${livenessRepairs[state]}: ${reason}`, inputs, llmRole: nextActionLlmRoles[kind], binding });
-  const candidate = work.candidate;
-  if (state === 'stranded-merge' && candidate) return work.observation?.merged
-    ? make('resync', { kind: 'resync', pr: candidate.pr, sha: candidate.sha, baseSha: candidate.baseSha, baseTip: work.observation.baseTip ?? null, observedAt: work.observation.at })
-    : make('merge', { kind: 'merge', pr: candidate.pr, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null });
-  if (state === 'failed-proof') return make('request-rework', { kind: 'request-rework', pr: candidate?.pr ?? null, sha: candidate?.sha ?? null, detail: reason });
-  if (state === 'refused-scope') return make('escalate', { kind: 'escalate', trigger: 'scope', detail: `decide the refused scope request: graphyard master decide ${work.key} requirements REASON, or unblock it; ${reason}` });
-  return make('escalate', { kind: 'escalate', trigger: state === 'stale-wait' ? 'stale-wait' : 'liveness', detail: reason });
+export function repairLiveness(work: Work, all: Work[], now: Date) {
+  const execution = work.mergeExecution;
+  if (!execution?.committingAt || Date.parse(execution.expiresAt) > now.getTime() || work.observation?.merged) return [];
+  return reconcileActions(work, all, now, { next: reconcileMergeAction(work) });
 }
 
-/**
- * The row a successor already has — open, or retired into the history — carrying a stall: its
- * last `livenessFailureLimit` attempts failed for one unchanged reason. Only a successor is
- * converted. An ordinary action that stalls is waiting on a condition somebody else clears (a busy
- * resource, a provider pause), so it rechecks and retries the moment it clears (GY-110); a
- * successor exists because nothing else owned the item, so nothing else will clear it either.
- */
-function stalledSuccessor(work: Work, action: NextAction) {
-  if (!action.binding.startsWith('liveness:') || action.kind === 'escalate') return null;
-  const id = actionId(action.kind, work.id, action.binding), queue = work.actionQueue;
-  const rows = [...(queue?.actions ?? []), ...[...(queue?.history ?? [])].reverse()].filter(row => row.id === id);
-  for (const row of rows) { const stall = row.stall ?? actionStall(row); if (stall) return stall; }
-  return null;
-}
-
-/**
- * What the item needs next once the invariant is enforced: the computed action when there is one,
- * nothing while a live lease or a named wait inside its deadline owns the step, and otherwise the
- * successor for the item's state — or, once that successor has failed the same way
- * `livenessFailureLimit` times, the escalation that replaces it. Pure over the item, its graph and
- * the clock, and independent of the rows it will produce, so every tick names the same answer.
- */
-export function livenessNext(work: Work, all: Work[], now: Date, account = actionAccount(work, all, now)): NextAction | null {
-  if (!openItem(work) || account.action) return account.action;
-  if (liveLease(work, now)) return null;
-  const due = waitDue(work, account, all, now, new Set([work.id]));
-  if (due && !due.stale) return null;
-  const { state, reason } = livenessState(work, account, !!due?.stale);
-  const successor = successorAction(work, state, reason);
-  const stall = stalledSuccessor(work, successor);
-  if (!stall) return successor;
-  const detail = `${successor.kind} for ${work.key} failed ${stall.failures} times for one unchanged reason (${stall.reason}); it is escalated rather than retried`;
-  return { kind: 'escalate', work: work.id, key: work.key, gate: null, refusal: null, reason: `${livenessRepairs[state]}: ${detail}`,
-    inputs: { kind: 'escalate', trigger: 'liveness', detail: `${detail}; ${reason}` }, llmRole: nextActionLlmRoles.escalate, binding: `liveness:escalate:${digest(`${successor.binding}\0${stall.reason}`)}` };
-}
-
-/**
- * One reconciliation pass over the invariant, as the engine's evaluation runs it for each item:
- * name each open item's next step with `livenessNext` and bring its rows in line. Returns what
- * changed, per item, so a caller can see every successor it queued.
- */
-export function livenessTick(all: Work[], now: Date): { key: string; transitions: ActionTransition[] }[] {
-  return all.filter(openItem).map(work => {
-    const next = livenessNext(work, all, now);
-    const transitions = reconcileActions(work, all, now, { next });
-    work.nextAction = next;
-    return { key: work.key, transitions };
-  });
+/** The ledger entry for a violation found at the start of a tick, judged against the item after it. */
+export function livenessRepairEntry(found: LivenessViolation, work: Work, all: Work[], now: Date) {
+  const after = livenessOf(work, all, now);
+  const repaired = !after.violation && after.obligation;
+  return { kind: repaired ? 'liveness.repaired' : 'liveness.violation', details: { class: found.class, since: found.since, ageMs: found.ageMs, detail: found.detail,
+    successor: found.successor ? { kind: found.successor.kind, id: actionId(found.successor.kind, work.id, found.successor.binding), binding: found.successor.binding } : null,
+    obligation: repaired ? after.obligation : null } };
 }
