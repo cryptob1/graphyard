@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type pg from 'pg';
-import { demand, grantPatternSchema, grantsAuthorize, ungrantableRoles, type Principal, type ProofAuthority, type ProofGrant } from './model.js';
-import type { Store } from './store.js';
+import { demand, deploySmokeProof, deploySmokeRequired, grantPatternSchema, grantsAuthorize, ungrantableRoles, type Principal, type ProofAuthority, type ProofGrant, type Work } from './model.js';
+import { save, type Store } from './store.js';
 
 const principalId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/);
 const reason = z.string().trim().min(1).max(2000);
@@ -53,8 +53,32 @@ export async function authorityRegistry(db: pg.PoolClient, principals: readonly 
  * `manual:*` does not cover it: until a producer holds it, it is a gap the operator is asked to grant.
  */
 export async function unauthorizedProofs(db: pg.PoolClient, principals: readonly Principal[], proofs: readonly string[], producerProofs: readonly string[] = []): Promise<string[]> {
+  return gapsAgainst(await authorityRegistry(db, principals), proofs, producerProofs);
+}
+const gapsAgainst = (registry: readonly ProofAuthority[], proofs: readonly string[], producerProofs: readonly string[] = []) =>
+  proofs.filter(proof => !registry.some(authority => (authority.role === 'producer' || !producerProofs.includes(proof)) && grantsAuthorize(authority.patterns, proof)));
+
+/** The proof names whose authority a work item's stored `proofGaps` reports on. */
+const gapProofs = (work: Work) => [...new Set(work.criteria.flatMap(ac => ac.proofs)), ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])];
+/**
+ * Recomputes the stored `proofGaps` of every open item against live authority after a grant or
+ * revoke, so status stops asking for a grant that has already been applied (and names one a revoke
+ * opened). Only the items whose gaps change are locked, in item order, and saved.
+ */
+async function refreshProofGaps(db: pg.PoolClient, principals: readonly Principal[], actor: string, now: Date) {
   const registry = await authorityRegistry(db, principals);
-  return proofs.filter(proof => !registry.some(authority => (authority.role === 'producer' || !producerProofs.includes(proof)) && grantsAuthorize(authority.patterns, proof)));
+  const gapsOf = (work: Work) => gapsAgainst(registry, gapProofs(work), work.producerProofs);
+  const open: Work[] = (await db.query("SELECT document FROM work_items WHERE document->>'stage' <> 'done' ORDER BY number")).rows.map(row => row.document);
+  const changed: string[] = [];
+  for (const work of open) if (JSON.stringify(gapsOf(work)) !== JSON.stringify(work.proofGaps ?? [])) changed.push(work.id);
+  if (!changed.length) return;
+  for (const row of (await db.query('SELECT document FROM work_items WHERE id = ANY($1::uuid[]) ORDER BY number FOR UPDATE', [changed])).rows) {
+    const work: Work = row.document;
+    const gaps = gapsOf(work);
+    if (JSON.stringify(gaps) === JSON.stringify(work.proofGaps ?? [])) continue;
+    work.proofGaps = gaps;
+    await save(db, work, actor, 'proof-gaps.refreshed', now, { proofGaps: gaps });
+  }
 }
 
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -139,6 +163,7 @@ export class ProofGrants {
         kind === 'grant' ? 'Every requested pattern is already granted' : 'None of the requested patterns is granted; revoke names an exact recorded pattern');
       record.patterns = after;
       const result = await this.write(db, now, record, kind, actor.id, data.reason, data.patterns);
+      await refreshProofGaps(db, this.principals, actor.id, now);
       await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `proof-grant.${kind}`, JSON.stringify({ target: id, patterns: data.patterns, reason: data.reason, effective: result.patterns, revision: result.revision })]);
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;

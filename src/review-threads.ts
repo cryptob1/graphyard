@@ -358,7 +358,9 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
   }
   const open = all.filter(entry => !entry.resolved).map(entry => entry.thread);
   let threads = carried.threads, refused = carried.refused;
-  if (!previous?.item && !previous?.threads.length) {
+  // Like the findings, the threads are read from GitHub until the item is created, never from the
+  // ledger's bounded record: a retry must send the create the same payload under the same key.
+  if (!previous?.item) {
     const submitted = Date.parse(String(review.submitted_at ?? ''));
     threads = []; refused = [];
     for (const id of named) {

@@ -274,6 +274,20 @@ test('integration:proof-grants-gap-report a manual proof a producer must run is 
   assert.deepEqual(revised.proofGaps, []);
 });
 
+test('integration:proof-grants-gap-report a grant or revoke recomputes the stored gaps of open items at once', async () => {
+  const proof = 'manual:gap-refreshed-on-grant';
+  const work = await engine.execute(operator, 'create', null, { title: 'Stored gap fixture', producerProofs: [proof],
+    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id()) as Work;
+  assert.deepEqual(work.proofGaps, [proof]);
+  const stored = async () => (await store.list()).find(item => item.id === work.id)!;
+  // Status reads the stored gaps, so the grant must clear them without a requirements revision...
+  assert.equal((await grant(operator, acceptance.id, [proof])).status, 200);
+  assert.deepEqual((await stored()).proofGaps, []);
+  // ...and a revoke that leaves nobody authorized reopens the gap.
+  assert.equal((await revoke(operator, acceptance.id, [proof])).status, 200);
+  assert.deepEqual((await stored()).proofGaps, [proof]);
+});
+
 test('integration:proof-grants-gap-report closing the gap with a grant clears it on the next intent revision', async () => {
   const proof = 'integration:gap-closing';
   const work = await workFor([proof]);

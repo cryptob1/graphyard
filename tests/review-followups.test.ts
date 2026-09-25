@@ -515,10 +515,17 @@ test('unit:review-followups-filed — a long thread path whose first filing fail
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
     const path = `src/${'deep/'.repeat(300)}file.ts`;
     const gh = github(approvalBody, { paths: { PRRT_follow001: path } }), config = await loadMasterConfig(root);
-    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: async () => { throw new Error('Graphyard refused the follow-up item (503): unavailable'); } });
+    // The first create may have landed with its response lost: the retry must send the identical
+    // payload under the same idempotency key, or the server refuses it as a reused key.
+    const lost: { item: any; key: string }[] = [];
+    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: async (item, key) => { lost.push({ item, key }); throw new Error('Graphyard refused the follow-up item (503): unavailable'); } });
     const items = creator();
     await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
     assert.equal(items.created.length, 1);
+    assert.equal(lost.length, 1);
+    assert.equal(items.created[0].key, lost[0].key);
+    assert.deepEqual(items.created[0].item, lost[0].item, 'the retry repeats the first create payload exactly');
+    assert.ok(items.created[0].item.description.includes(path), 'the full thread path, re-read from GitHub, not the ledger\'s directory prefix');
     const scope = items.created[0].item.plannedFiles.find((entry: string) => entry.startsWith('src/deep/'));
     assert.ok(scope && scope.length <= 500 && scope.endsWith('/') && path.startsWith(scope), `retry scope ${scope}`);
   } finally { await cleanup(); }
