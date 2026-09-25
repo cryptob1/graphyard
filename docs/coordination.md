@@ -15,11 +15,13 @@ A criterion states an outcome and its proofs:
 
 `graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the whole document against `expectedPolicyRevision`; stop the worker first, since prior evidence, review and authorization lapse.
 
-## Schedule by overlap, smallest scope first
+## Dispatch optimistically, smallest scope first
 
-`plannedFiles` holds paths or directory prefixes ending in `/`. Overlap holds *dispatch* behind in-flight items of equal or higher priority, comparing `plannedFiles` until a candidate exists, then its changed files; no hold stands once either pull request is open. The hold lapses into attention after 30 minutes; `master dispatch GY-N PROFILE --allow-overlap` overrides it. Ready items dispatch smallest planned scope first. Name files, not directories: a root-level directory is flagged `highConflict` and refused without `--allow-broad-scope`. `master status` lists open candidates `git merge-tree` cannot merge together.
+`plannedFiles` (paths, or directory prefixes ending in `/`) is the change-scope contract, not a lock: overlap holds nothing. The merge queue and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and lists candidates `git merge-tree` cannot merge. Smallest planned scope dispatches first; a root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
-`exclusiveResources` are reserved atomically at claim.
+## Review gate: verdicts, not threads
+
+The gate is the reviewer's approval of the exact head plus required CI. Unresolved threads are its inputs: the approval lists each on `Resolved threads:` or `Overridden threads:`, recorded with the verdict; the loop resolves those and outdated-line threads. After two rework rounds a bot's thread is advisory. Protection requiring conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 

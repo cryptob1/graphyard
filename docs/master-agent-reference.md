@@ -17,7 +17,7 @@ A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PA
 
 ## Conflict avoidance
 
-Dispatch takes smallest planned scope first and holds overlapping items (`--allow-overlap` overrides); `git merge-tree` reports real conflicts between open candidates under `conflicts` ([rules](coordination.md#schedule-by-overlap-smallest-scope-first)).
+Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports conflicts between candidates under `conflicts` ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
 
 ### Speculative tips and branch protection
 

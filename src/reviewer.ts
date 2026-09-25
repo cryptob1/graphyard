@@ -73,8 +73,13 @@ export const reviewRecordSchema = z.object({
   threadReadFailure: z.string().min(1).max(500).optional(),
   /** The thread IDs the launch prompt listed; an approval without a `Resolved threads:` line vouches for exactly these. */
   threadsListed: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
-  /** The threads this session's approval named on its `Resolved threads:` line, and what the loop resolved (review-threads.ts). */
-  threadResolution: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(listedThreadLimit), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
+  /**
+   * The threads this session's approval named on its `Resolved threads:` and `Overridden threads:`
+   * lines (`overridden` the ones it passed over rather than found fixed), the outdated threads its
+   * approval settled, and what the loop resolved (review-threads.ts).
+   */
+  threadResolution: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
+    overridden: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(), outdated: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit * 2),
     refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50), implicit: z.boolean().optional() }).optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
@@ -828,9 +833,11 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     record.state = 'failed'; record.resolution = dismissalResolution(record, dependencies.work); record.closedAt = now.toISOString();
     changed++;
   }
-  // The reviewer names the threads it verified fixed on its approval's `Resolved threads:` line; the
-  // loop resolves exactly those, with its own GitHub access, once it holds that approval of the
-  // current candidate — or of the head whose approval was carried onto it. Nothing else is resolved.
+  // The reviewer names the threads it verified fixed on its approval's `Resolved threads:` line and
+  // the ones it overrides on `Overridden threads:`; the loop records both with the verdict and
+  // resolves exactly those, plus every thread on an outdated line, with its own GitHub access, once
+  // it holds that approval of the current candidate — or of the head whose approval was carried
+  // onto it. Nothing else is resolved.
   const threads = await resolveApprovedThreads(ledger.reviews, reviewer, config.repository, dependencies.work, dependencies.threadsRun ?? (dependencies.observe ? undefined : dependencies.run ?? defaultChildRun), now);
   changed += threads.changed;
   // A request the control plane no longer holds open releases its records to the retention window.
@@ -864,7 +871,7 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     record.threadResolution = { ...outcome, refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
     const fresh = outcome.resolved.filter(id => !previous?.resolved.includes(id));
-    for (const id of fresh) events.push(`resolved review thread ${id} on ${record.key} PR #${record.pr}, ${outcome.implicit ? 'listed to the session whose approval' : 'named by approval'} ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
+    for (const id of fresh) events.push(`resolved review thread ${id} on ${record.key} PR #${record.pr}, ${outcome.outdated?.includes(id) ? 'outdated at the head approved by' : outcome.overridden?.includes(id) ? 'overridden by approval' : outcome.implicit ? 'listed to the session whose approval' : 'named by approval'} ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
     for (const refusal of outcome.refused) events.push(`did not resolve review thread on ${record.key} PR #${record.pr} named by approval ${verdict.reviewId}: ${refusal}`);
     if (outcome.failure) events.push(`thread resolution for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);
   }

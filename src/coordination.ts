@@ -1,7 +1,7 @@
 import { bootstrapObligations, currentEvidence, describeQueueBinding, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
 import { namedPaths } from './model/scope.js';
 import { behindBaseHold } from './model/behind-base.js';
-import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue } from './merge-queue.js';
+import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './merge-queue.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }
 export interface Diagnostic { kind: string; message: string; next: string }
@@ -28,163 +28,44 @@ export interface OverlapAhead { key: string; stage: Stage; state: 'claimed' | 's
 /** Claimed for dispatch purposes: a live lease, or a containment quarantine still holding the assignment. */
 const claimedNow = (work: Work, now: number) => !!work.containmentQuarantine || !!work.lease && Date.parse(work.lease.expiresAt) > now;
 /**
- * In flight: claimed, or submitted with its candidate standing — not sent back for rework. Such an
- * item is ahead of everything it overlaps. A submitted item whose rework was requested and that
- * nobody has claimed is not: like a ready item, it is a peer waiting for a worker, ordered by
- * `dispatchOrder`, and the first of two overlapping peers to be dispatched then holds the other.
+ * In flight: claimed, or submitted with its candidate standing — not sent back for rework. A
+ * submitted item whose rework was requested and that nobody has claimed is a peer waiting for a
+ * worker, ordered by `dispatchOrder`, like a ready item.
  */
 export const inFlight = (work: Work, now: number) => work.stage !== 'done' && (claimedNow(work, now) || !!work.submission && !work.reworkRequested);
 /**
- * The paths an item excludes other items on. Once the item has a candidate, they are the files
- * that candidate actually changes — its observed diff — and not the scope it declared: a declared
- * scope says where a worker may write, a candidate says where it did, and a directory claim that
- * turned into two files under it conflicts with nothing else under that directory. The declared
- * scope stands in only until a candidate is observed. `fileConflicts` deliberately differs: it is
- * an advisory "might touch the same area" warning and reads both.
+ * The paths an item is judged on for overlap reporting. Once the item has a candidate, they are the
+ * files that candidate actually changes — its observed diff — and not the scope it declared: a
+ * declared scope says where a worker may write, a candidate says where it did. The declared scope
+ * stands in only until a candidate is observed. `fileConflicts` deliberately differs: it is an
+ * advisory "might touch the same area" warning and reads both.
  */
 export function exclusionPaths(work: Work): string[] {
   const observed = work.observation?.files ?? [];
   return work.candidate && observed.length ? [...new Set(observed)] : [...new Set(work.plannedFiles)];
 }
 /**
- * The items ahead of `work` that make its planned files a soft exclusive resource: every item that
- * is claimed (a live lease, or a quarantine still holding its assignment) or submitted but not yet
- * merged, judged on `exclusionPaths` — real changed files once a candidate exists — except one whose
- * pull request is observed open: the merge queue orders that one, so it holds nothing. Whichever of
- * two overlapping items lands second re-integrates the first, so an item with an overlap is held
- * rather than dispatched until the hold bound passes or an operator allows it. A ready item nobody has
- * claimed is not ahead of anything; ordering among those is `dispatchOrder`.
+ * The in-flight items `work` runs beside on the same files, for the record only: dispatch is
+ * optimistic and planned-file overlap holds nothing. Serialising on overlap idled most of the
+ * fleet (2026-09-24/25: ten workers idle behind items changing the same large files) to avoid a
+ * conflict the merge queue and a sync round resolve anyway: whichever of two overlapping items
+ * lands second is re-integrated by base refresh, or sent back for a sync on a real conflict.
+ * `plannedFiles` stays the submission-time change-scope contract; only exclusive resources hold
+ * dispatch (`resourceConflicts`).
  */
-export function dispatchOverlap(work: Work, all: Work[], now: number): OverlapAhead[] {
+export function concurrentOverlap(work: Work, all: Work[], now: number): OverlapAhead[] {
   if (work.stage === 'done') return [];
+  const mine = exclusionPaths(work);
   return all.filter(w => w.id !== work.id && inFlight(w, now)).flatMap(w => {
-    const held = overlapHolds(work, w, claimedNow(w, now));
-    return held ? [{ key: w.key, stage: w.stage, state: claimedNow(w, now) ? 'claimed' as const : 'submitted' as const, ...held }] : [];
+    const theirs = exclusionPaths(w);
+    const paths = mine.filter(path => theirs.some(entry => pathScopesOverlap(path, entry)));
+    if (!paths.length) return [];
+    return [{ key: w.key, stage: w.stage, state: claimedNow(w, now) ? 'claimed' as const : 'submitted' as const, paths, theirs: theirs.filter(entry => mine.some(path => pathScopesOverlap(path, entry))) }];
   });
 }
-/**
- * Whether `other`, in flight, would hold `work` from dispatch, and on which paths: the one pairwise
- * rule `dispatchOverlap` and `effectiveConcurrency` share. Work never waits behind lower-priority
- * work, and no hold stands once either item's pull request is open, whatever its stage. A fresh
- * item — no pull request, or one that was closed — is held only behind equal- or higher-priority
- * work still being built without an open pull request, on the paths both name or changed
- * (`exclusionPaths`); an item whose pull request was closed holds only once it is claimed again.
- */
-/** The item's pull request is observed open and unmerged; a candidate whose pull request was closed no longer counts. */
-const openPullRequest = (work: Work) => !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
-/** The item's pull request is observed closed without merging. */
-const closedPullRequest = (work: Work) => !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'closed';
-function overlapHolds(work: Work, other: Work, otherBuilt: boolean): { paths: string[]; theirs: string[] } | null {
-  if (other.priority > work.priority) return null;
-  // A hold keeps a fresh item from starting on files another item is changing. An item whose pull
-  // request is already open is past that point: holding its rework round prevents no conflict (both
-  // changes exist either way; the merge queue lands them in order and base refresh re-integrates
-  // the second), it only idles workers. On 2026-09-24 ten workers sat idle while the rework rounds
-  // of GY-168, GY-175 and GY-176 were held behind other open pull requests changing the same files.
-  if (openPullRequest(work)) return null;
-  // The same holds for the item ahead: once its pull request is open its change exists, the merge
-  // queue lands the two in order, and the second is re-integrated by base refresh (or sent back on
-  // a real conflict). On 2026-09-25 ten ready items were held and five workers idle behind GY-166,
-  // GY-182, GY-185 and GY-187, all in review, test or merge on the same large files.
-  if (openPullRequest(other)) return null;
-  // An item whose pull request was closed and that nobody is building (`otherBuilt`: claimed now, or
-  // for `effectiveConcurrency` claimable) is not being built either: its submission keeps it in flight
-  // until a rework decision, but its candidate cannot enter the merge queue and no worker is changing
-  // its files. It holds again once reclaimed.
-  if (closedPullRequest(other) && !otherBuilt) return null;
-  const mine = exclusionPaths(work), theirs = exclusionPaths(other);
-  const paths = mine.filter(path => theirs.some(entry => pathScopesOverlap(path, entry)));
-  if (!paths.length) return null;
-  const overlapping = theirs.filter(entry => mine.some(path => pathScopesOverlap(path, entry)));
-  return { paths, theirs: overlapping };
-}
 
-/** Ready to be offered a worker, if nothing overlapping is ahead of it: released, unblocked, unclaimed, and not submitted unless rework was requested. */
+/** Ready to be offered a worker: released, unblocked, unclaimed, and not submitted unless rework was requested. */
 export const dispatchable = (work: Work, now: number) => work.stage !== 'done' && work.ready && !work.blocker && !claimedNow(work, now) && (!work.submission || !!work.reworkRequested);
-
-/** How long a dispatch hold may stand before the overlap stops holding: thirty minutes. */
-export const dispatchHoldBoundMs = 30 * 60_000;
-export interface HoldLink { key: string; stage: Stage; state: 'claimed' | 'submitted'; position: number | null; behind: string[] }
-export interface DispatchHold { ahead: OverlapAhead[]; since: string; ageMs: number; boundMs: number; overdue: boolean; chain: HoldLink[] }
-const latest = (...stamps: (string | null | undefined)[]) => Math.max(...stamps.map(stamp => stamp ? Date.parse(stamp) : NaN).filter(Number.isFinite), 0);
-/** When the item last became dispatchable: its current stage, or the end of its latest attempt, whichever is later. */
-const dispatchableSince = (work: Work, now: number) => latest(work.stageEnteredAt, ...(work.pipeline?.attempts ?? []).map(attempt => attempt.endedAt), work.lease && Date.parse(work.lease.expiresAt) <= now ? work.lease.expiresAt : null);
-/**
- * When an in-flight item started being ahead of anything: its current attempt's claim, or the quarantine that still holds it.
- * Not its stage entry: a submitted candidate re-enters a stage on every gate it passes, and counting from that would restart
- * the hold behind it each time. The stage stamp stands in only for an item with no claim on record.
- */
-const inFlightSince = (work: Work) => latest(work.lastAssignment?.claimedAt, ...(work.pipeline?.attempts ?? []).map(attempt => attempt.claimedAt), work.containmentQuarantine?.at) || latest(work.stageEnteredAt);
-/**
- * The hold on a dispatchable item, with its age and the chain it waits behind. The hold began when
- * the item became dispatchable or when the first item now ahead of it went into flight, whichever
- * is later. The chain follows each item ahead to what it in turn waits for: a submitted item in
- * the merge queue waits behind every entry ahead of it, so a hold three deep names every link, in
- * the order the item must see them merge. A claimed item waits on nobody but its worker. Past
- * `boundMs` the hold is overdue: the item dispatches over the overlap.
- */
-export function dispatchHold(work: Work, all: Work[], now: number, boundMs = dispatchHoldBoundMs): DispatchHold | null {
-  const ahead = dispatchOverlap(work, all, now);
-  if (!ahead.length) return null;
-  const since = Math.max(dispatchableSince(work, now), Math.min(...ahead.map(entry => inFlightSince(all.find(w => w.key === entry.key)!))));
-  const placements = predictQueue(all, now);
-  const chain: HoldLink[] = [];
-  const seen = new Set([work.id]);
-  const queue = ahead.map(entry => entry.key);
-  while (queue.length) {
-    const key = queue.shift()!, item = all.find(w => w.key === key)!;
-    if (seen.has(item.id)) continue; seen.add(item.id);
-    const placement = placements.find(entry => entry.id === item.id);
-    const behind = placement?.predecessors ?? [];
-    chain.push({ key: item.key, stage: item.stage, state: claimedNow(item, now) ? 'claimed' : 'submitted', position: placement ? placement.position + 1 : null, behind });
-    queue.push(...behind);
-  }
-  const ageMs = Math.max(0, now - since);
-  return { ahead, since: new Date(since).toISOString(), ageMs, boundMs, overdue: ageMs > boundMs, chain };
-}
-export const describeChain = (chain: HoldLink[]) => chain.map(link => `${link.key} (${link.state}, ${link.stage}${link.position ? `, merge queue position ${link.position}` : ''}${link.behind.length ? `, itself behind ${link.behind.join(', ')}` : ''})`).join(' → ');
-
-export interface EffectiveConcurrency { effective: number; items: string[]; nodes: number; edges: number; exact: boolean }
-/**
- * How many items could be in flight at once given the overlap graph: the largest set of open
- * items — in flight or dispatchable — no two of which exclude each other; an item held past
- * `dispatchHoldBoundMs` excludes nobody, since it dispatches over the overlap. A fleet whose items all
- * claim the same root directory has an effective concurrency of one however many workers it has.
- * Exact for the sizes a board reaches; a graph past the search budget is answered greedily and
- * says so.
- */
-export function effectiveConcurrency(all: Work[], now: number): EffectiveConcurrency {
-  const nodes = all.filter(work => inFlight(work, now) || dispatchable(work, now));
-  // Two items exclude each other only when neither may be dispatched while the other is in flight:
-  // under the scheduler's own exceptions a higher-priority item goes ahead, and a pair one of whose
-  // pull requests is open holds nothing, so only two items both being built without a pull request
-  // on the same files exclude each other. Nor does a pair one of which is held past the bound: the
-  // scheduler dispatches that one over the overlap (`assertDispatchable` accepts an overdue hold), so
-  // counting the pair exclusive would report less capacity than the daemon actually launches.
-  // A node counted in flight is being built if it is claimed, or would be claimed to be in flight.
-  const built = nodes.map(work => claimedNow(work, now) || dispatchable(work, now));
-  const overdue = nodes.map(work => dispatchable(work, now) && !!dispatchHold(work, all, now)?.overdue);
-  const adjacent = nodes.map((a, i) => nodes.map((b, j) => i !== j && !overdue[i] && !overdue[j] && !!overlapHolds(a, b, built[j]) && !!overlapHolds(b, a, built[i])));
-  const edges = adjacent.reduce((total, row) => total + row.filter(Boolean).length, 0) / 2;
-  let budget = 100_000, exhausted = false, best: number[] = [];
-  const search = (remaining: number[], chosen: number[]) => {
-    if (budget-- <= 0) { exhausted = true; return; }
-    if (!remaining.length) { if (chosen.length > best.length) best = chosen; return; }
-    if (chosen.length + remaining.length <= best.length) return;
-    const pivot = remaining.reduce((a, b) => adjacent[a].filter((edge, k) => edge && remaining.includes(k)).length >= adjacent[b].filter((edge, k) => edge && remaining.includes(k)).length ? a : b);
-    search(remaining.filter(k => k !== pivot && !adjacent[pivot][k]), [...chosen, pivot]);
-    search(remaining.filter(k => k !== pivot), chosen);
-  };
-  search(nodes.map((_, i) => i), []);
-  const exact = !exhausted;
-  if (!exact) {
-    // Fewest overlaps first, until nothing compatible is left.
-    const greedy: number[] = [];
-    for (const i of nodes.map((_, i) => i).sort((a, b) => adjacent[a].filter(Boolean).length - adjacent[b].filter(Boolean).length)) if (!greedy.some(j => adjacent[i][j])) greedy.push(i);
-    if (greedy.length > best.length) best = greedy;
-  }
-  return { effective: best.length, items: [...best].sort((a, b) => a - b).map(i => nodes[i].key), nodes: nodes.length, edges, exact };
-}
 
 /** A directory scope at the repository root (`src/`, `docs/`, `tests/`, `/`): it overlaps almost everything. */
 export const broadScope = (scope: string) => { const { path, prefix } = pathScope(scope); return prefix && path.split('/').filter(Boolean).length <= 1; };
@@ -202,17 +83,17 @@ export interface BroadScopeRefusal { scope: string; narrower: string[]; reason: 
 /**
  * Why a planned scope is refused where planned files are set, one entry per root-level directory
  * claim, with the narrower paths it should name: the paths under that directory the item's own
- * text (title, description, criteria) names. A directory claim holds the item against every other
- * item under the same root, and every one of them against it, whether or not two of them ever
- * change the same file; enough such claims make the overlap graph complete and the fleet deliver
- * one item at a time. An exception is recorded explicitly, never introduced unnoticed.
+ * text (title, description, criteria) names. `plannedFiles` is the change-scope contract a
+ * submission is checked against: a root-level directory claim lets the item rewrite almost anything
+ * under that root unchecked, and dispatch it ahead of smaller items less often. An exception is
+ * recorded explicitly, never introduced unnoticed.
  */
 export function broadScopeRefusals(plannedFiles: string[], text: string[] = []): BroadScopeRefusal[] {
   const named = [...new Set(text.flatMap(namedPaths))];
   return scopeBreadth(plannedFiles).broad.map(scope => {
     const narrower = named.filter(path => path !== scope && !broadScope(path) && pathScopeContains(scope, path) && !plannedFiles.includes(path));
     const instead = narrower.length ? `name ${narrower.join(', ')} instead` : `name the files under ${scope} this item changes instead`;
-    return { scope, narrower, reason: `${scope} is a root-level directory scope: it holds this item against every item touching ${scope} and each of them against it until it merges, whether or not they change the same file — ${instead}` };
+    return { scope, narrower, reason: `${scope} is a root-level directory scope: the change-scope check then admits any file under ${scope}, so a submission is held to almost nothing there — ${instead}` };
   });
 }
 /**

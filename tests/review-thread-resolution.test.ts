@@ -12,9 +12,11 @@ import { listedThreadLimit, threadSection } from '../src/review-threads.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews, updateReviewLedger } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 
-// The reviewer names the threads it verified fixed on a `Resolved threads:` line of its approval;
-// the loop resolves exactly those, with its own GitHub access, once it holds that approval of the
-// current candidate (or of the head whose approval was carried onto it). Nothing else is resolved.
+// The reviewer names the threads it verified fixed on a `Resolved threads:` line of its approval and
+// the ones it overrides on an `Overridden threads:` line; the loop records both with the verdict and
+// resolves exactly those, plus every thread on an outdated line, with its own GitHub access, once it
+// holds that approval of the current candidate (or of the head whose approval was carried onto it).
+// Nothing else is resolved.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -50,9 +52,9 @@ function work(candidateSha = H, baseSha = B, overrides: Partial<Work> = {}): Wor
 const herdrRun = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 
 /** GitHub as the loop's own gh sees it: the approval, the PR's threads, and the resolve mutation. */
-function github(options: { body: string; state?: string }) {
+function github(options: { body: string; state?: string; threads?: { id: string; createdAt: string; outdated?: boolean }[] }) {
   const calls: string[][] = [], resolved: string[] = [];
-  const thread = (id: string, createdAt: string) => ({ id, isResolved: resolved.includes(id), isOutdated: false, path: 'src/a.ts', line: 3, comments: { nodes: [{ author: { login: 'codex' }, body: 'finding', createdAt }] } });
+  const thread = (id: string, createdAt: string, outdated = false) => ({ id, isResolved: resolved.includes(id), isOutdated: outdated, path: 'src/a.ts', line: 3, comments: { nodes: [{ author: { login: 'codex' }, body: 'finding', createdAt }] } });
   const run = (command: string, args: string[]) => {
     calls.push([command, ...args]);
     if (command !== 'gh') throw new Error(`unexpected ${command}`);
@@ -63,8 +65,9 @@ function github(options: { body: string; state?: string }) {
       resolved.push(id);
       return JSON.stringify({ data: { resolveReviewThread: { thread: { id, isResolved: true } } } });
     }
-    if (query.includes('reviewThreads')) return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
-      thread('PRRT_fixed0001', '2026-09-23T11:00:00Z'), thread('PRRT_unnamed01', '2026-09-23T11:00:00Z'), thread('PRRT_later0001', '2026-09-23T12:30:00Z')] } } } } });
+    if (query.includes('reviewThreads')) return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: options.threads
+      ? options.threads.map(entry => thread(entry.id, entry.createdAt, entry.outdated))
+      : [thread('PRRT_fixed0001', '2026-09-23T11:00:00Z'), thread('PRRT_unnamed01', '2026-09-23T11:00:00Z'), thread('PRRT_later0001', '2026-09-23T12:30:00Z')] } } } } });
     throw new Error(`unexpected gh ${args.join(' ')}`);
   };
   return { run, calls, resolved };
@@ -204,5 +207,38 @@ test('unit:threads-listed-resolution — a session with no recorded listing and 
     const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
     assert.deepEqual(gh.resolved, []);
     assert.equal(settled.reviews[0].threadResolution?.implicit, false);
+  } finally { await cleanup(); }
+});
+
+test('unit:overridden-threads-recorded — an approval that overrides a bot thread names it on its Overridden threads line; the override is recorded with the verdict and the thread resolved', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => [listedThread('PRRT_fixed0001'), listedThread('PRRT_wrong0001')] });
+    const gh = github({ body: 'PRRT_wrong0001 flags a null check the caller already guarantees.\nResolved threads: PRRT_fixed0001\nOverridden threads: PRRT_wrong0001',
+      threads: [{ id: 'PRRT_fixed0001', createdAt: '2026-09-23T11:00:00Z' }, { id: 'PRRT_wrong0001', createdAt: '2026-09-23T11:00:00Z' }, { id: 'PRRT_unnamed01', createdAt: '2026-09-23T11:00:00Z' }] });
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+    const resolution = settled.reviews[0].threadResolution!;
+    assert.deepEqual(resolution.overridden, ['PRRT_wrong0001'], 'the override is on the record, auditable beside the verdict');
+    assert.deepEqual(resolution.named, ['PRRT_fixed0001', 'PRRT_wrong0001']);
+    assert.equal(resolution.implicit, false, 'explicit lines vouch for exactly what they name');
+    assert.deepEqual(gh.resolved, ['PRRT_fixed0001', 'PRRT_wrong0001'], 'the unnamed, current-line thread is never resolved');
+    assert.ok(settled.threads.some(line => line.startsWith('resolved review thread PRRT_wrong0001 on GY-64 PR #64, overridden by approval 77')), settled.threads.join('\n'));
+  } finally { await cleanup(); }
+});
+
+test('unit:outdated-threads-auto-resolved — approving a new head resolves every pre-existing thread on an outdated line, even one no line named', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+    const gh = github({ body: 'Looks good.\nResolved threads: none', threads: [
+      { id: 'PRRT_stale0001', createdAt: '2026-09-23T11:00:00Z', outdated: true },
+      { id: 'PRRT_current01', createdAt: '2026-09-23T11:00:00Z' },
+      { id: 'PRRT_newstale1', createdAt: '2026-09-23T12:30:00Z', outdated: true },
+    ] });
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+    const resolution = settled.reviews[0].threadResolution!;
+    assert.deepEqual(resolution.outdated, ['PRRT_stale0001'], 'only an outdated thread opened before the approval');
+    assert.deepEqual(gh.resolved, ['PRRT_stale0001'], 'a thread on a current line, and one opened after the approval, stay open');
+    assert.ok(settled.threads.some(line => line.startsWith('resolved review thread PRRT_stale0001 on GY-64 PR #64, outdated at the head approved by 77')), settled.threads.join('\n'));
   } finally { await cleanup(); }
 });

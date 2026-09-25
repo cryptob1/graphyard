@@ -24,7 +24,7 @@ export const compareFileCap = 300;
 const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { id isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login } url } } }
+    nodes { id isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login __typename } url } } }
   } } }
 }`;
 /**
@@ -657,8 +657,8 @@ export class GitHub {
   /**
    * Every unresolved review thread on the pull request, with the author of its first comment and
    * the path and line it is anchored to. REST exposes no resolution state, so this is the one
-   * GraphQL read an observation makes, and only when protection makes a thread block the merge.
-   * An outdated thread is still unresolved: GitHub blocks on it all the same.
+   * GraphQL read an observation makes, and only while protection still requires conversation
+   * resolution: threads block no merge in Graphyard's gate (the reviewer's verdict does).
    */
   async unresolvedThreads(pr: number): Promise<ReviewThread[]> {
     const [owner, name] = this.config.repository.split('/');
@@ -672,7 +672,7 @@ export class GitHub {
         if (thread?.isResolved !== false) continue;
         const comment = thread.comments?.nodes?.[0];
         const line = Number.isSafeInteger(thread.line) ? thread.line : Number.isSafeInteger(thread.originalLine) ? thread.originalLine : null;
-        threads.push({ ...(typeof thread.id === 'string' ? { id: thread.id } : {}), author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', path: typeof thread.path === 'string' ? thread.path : '(no path)', line, outdated: thread.isOutdated === true,
+        threads.push({ ...(typeof thread.id === 'string' ? { id: thread.id } : {}), author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', ...(comment?.author?.__typename === 'Bot' ? { bot: true } : {}), path: typeof thread.path === 'string' ? thread.path : '(no path)', line, outdated: thread.isOutdated === true,
           ...(typeof comment?.url === 'string' ? { url: comment.url } : {}) });
       }
       if (!connection.pageInfo?.hasNextPage) return threads;
@@ -777,8 +777,9 @@ export class GitHub {
     const [checks, reviews, protection, files, branch] = await Promise.all([
       this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
     ]);
-    // Review threads block a merge only where protection requires conversation resolution, so
-    // they are read only there, and only for a pull request that can still merge (GY-139).
+    // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
+    // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
+    // only while protection still requires conversation resolution (drift, which GitHub enforces).
     const conversations = { required: protection.conversationResolution, unresolved: protection.conversationResolution && !pr.merged && pr.state === 'open' ? await this.unresolvedThreads(pr.number) : [] };
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);

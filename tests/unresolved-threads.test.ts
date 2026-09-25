@@ -1,16 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { agentOwner, assertMergeCandidate, buildMasterStatus, mergeWork } from '../src/master.js';
 import { nameUnresolvedThreads, queueRef } from '../src/merge-queue.js';
 import { unansweredRefusal, uncitedRefusals } from '../src/model/approval.js';
-import { decisionReasonMax, fitDecisionReason, observedFrom, reworkDecisionReason, reworkGroundsMin, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
+import { botThreadReworkRounds, decisionReasonMax, fitDecisionReason, observedFrom, reworkDecisionReason, reworkGroundsMin, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
 
-// GY-139. Each test is named for the proof it produces: integration:unresolved-threads-fail-merge-gate,
-// unit:unresolved-threads-surfaced, integration:blocked-merge-refused-before-execution.
+// The review gate is the configured reviewer's verdict on the exact head plus required CI. Unresolved
+// review threads (a bot's findings above all) are that reviewer's inputs, not merge blockers: they are
+// observed and listed, the reviewer's approval names the ones it fixed or overrides, and the loop sends
+// an item back for threads still open after its review only in its first two rework rounds. Only a
+// branch whose protection still requires conversation resolution — drift from the desired protection —
+// refuses a merge, since GitHub would refuse it too. Each test is named for the proof it produces.
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), baseTree = `f${'b'.repeat(39)}`;
 const ciAppIds = [15368];
@@ -44,7 +47,7 @@ function repository(options: { conversationResolution: boolean; threads: Thread[
     const thread = options.threads[index];
     return { repository: { pullRequest: { reviewThreads: {
       pageInfo: { hasNextPage: index + 1 < options.threads.length, endCursor: String(index + 1) },
-      nodes: thread ? [{ id: `PRRT_thread${index}`, isResolved: thread.isResolved, isOutdated: thread.isOutdated ?? false, path: thread.path, line: thread.line, originalLine: thread.originalLine ?? thread.line, comments: { nodes: [{ author: { login: thread.author }, url: `https://github.com/owner/repo/pull/133#discussion_r${index}` }] } }] : [],
+      nodes: thread ? [{ id: `PRRT_thread${index}`, isResolved: thread.isResolved, isOutdated: thread.isOutdated ?? false, path: thread.path, line: thread.line, originalLine: thread.originalLine ?? thread.line, comments: { nodes: [{ author: { login: thread.author.replace(/\[bot\]$/, ''), __typename: thread.author.endsWith('[bot]') ? 'Bot' : 'User' }, url: `https://github.com/owner/repo/pull/133#discussion_r${index}` }] } }] : [],
     } } } };
   };
   return { github, queries };
@@ -70,41 +73,42 @@ function candidate(observation: Observation | null): Work {
 const mergeGate = (work: Work, now = new Date()) => evaluate(work, [work], now, ciAppIds).gates.find(gate => gate.name === 'merge')!;
 const open: Thread = { isResolved: false, path: 'src/claims.ts', line: 42, author: reviewer };
 
-test('integration:unresolved-threads-fail-merge-gate — an unresolved thread fails the merge gate naming its author and path, and the same candidate with it resolved passes', async () => {
-  const blocked = repository({ conversationResolution: true, threads: [{ isResolved: true, path: 'src/old.ts', line: 3, author: 'someone' }, open, { isResolved: false, isOutdated: true, path: 'src/claims.ts', line: null, originalLine: 7, author: reviewer }] });
-  const observed = await blocked.github.observe(candidate(null));
-  // The observation records each unresolved thread with its author, path and line; the resolved one is not recorded.
-  assert.deepEqual(observed.conversations, { required: true, unresolved: [
-    { id: 'PRRT_thread1', author: reviewer, path: 'src/claims.ts', line: 42, outdated: false, url: 'https://github.com/owner/repo/pull/133#discussion_r1' },
-    { id: 'PRRT_thread2', author: reviewer, path: 'src/claims.ts', line: 7, outdated: true, url: 'https://github.com/owner/repo/pull/133#discussion_r2' },
-  ] });
-  assert.equal(blocked.queries.length, 3, 'every page of threads is read');
-  assert.equal(observed.protected, true); assert.equal(observed.mergeable, true);
-  const refused = mergeGate(candidate(observed));
-  assert.equal(refused.passed, false);
-  assert.ok(refused.reasons.some(reason => reason.includes('conversation resolution') && reason.includes(`${reviewer} on src/claims.ts:42`) && reason.includes(`${reviewer} on src/claims.ts:7 (outdated)`)), refused.reasons.join('\n'));
-  assert.equal(evaluate(candidate(observed), [], new Date(), ciAppIds).stage, 'merge', 'every earlier gate still passes: the merge gate is the one that refuses');
+test('integration:threads-not-merge-blockers — unresolved threads pass the merge gate; only protection that still requires conversation resolution refuses', async () => {
+  const bot = reviewer.replace(/\[bot\]$/, '');
+  const threads: Thread[] = [{ isResolved: true, path: 'src/old.ts', line: 3, author: 'someone' }, open, { isResolved: false, isOutdated: true, path: 'src/claims.ts', line: null, originalLine: 7, author: reviewer }];
+  const recorded = [
+    { id: 'PRRT_thread1', author: bot, bot: true, path: 'src/claims.ts', line: 42, outdated: false, url: 'https://github.com/owner/repo/pull/133#discussion_r1' },
+    { id: 'PRRT_thread2', author: bot, bot: true, path: 'src/claims.ts', line: 7, outdated: true, url: 'https://github.com/owner/repo/pull/133#discussion_r2' },
+  ];
+  // The desired protection: conversation resolution off. The reviewer reads threads at launch; the
+  // observation spends no GraphQL read on them. Open threads on the record still refuse nothing.
+  const unrequired = repository({ conversationResolution: false, threads });
+  assert.deepEqual((await unrequired.github.observe(candidate(null))).conversations, { required: false, unresolved: [] });
+  assert.equal(unrequired.queries.length, 0);
+  const observed = { ...(await unrequired.github.observe(candidate(null))), conversations: { required: false, unresolved: recorded } };
+  const gate = mergeGate(candidate(observed));
+  assert.deepEqual(gate.reasons, [], 'two open bot threads refuse nothing: the approval of this head is the review gate');
+  assert.equal(gate.passed, true);
+  assert.equal(evaluate(candidate(observed), [], new Date(), ciAppIds).queueEjection ?? null, null, 'nor do they eject the queued entry');
 
-  // The same candidate once the threads are resolved: the merge gate passes outright.
+  // Protection drift: a branch that still requires conversation resolution is a merge GitHub refuses.
+  const drift = repository({ conversationResolution: true, threads });
+  const drifted = await drift.github.observe(candidate(null));
+  assert.deepEqual(drifted.conversations, { required: true, unresolved: recorded });
+  const refused = mergeGate(candidate(drifted));
+  assert.equal(refused.passed, false);
+  assert.ok(refused.reasons.some(reason => reason.startsWith('Branch protection still requires conversation resolution') && reason.includes(`${bot} on src/claims.ts:42`) && reason.includes('graphyard master protection --apply')), refused.reasons.join('\n'));
+  assert.match(evaluate(candidate(drifted), [], new Date(), ciAppIds).queueEjection?.reason ?? '', /still requires conversation resolution/);
+  // Drift with every thread resolved merges as before.
   const resolved = repository({ conversationResolution: true, threads: [{ ...open, isResolved: true }] });
   const clear = await resolved.github.observe(candidate(null));
   assert.deepEqual(clear.conversations, { required: true, unresolved: [] });
-  assert.deepEqual(mergeGate(candidate(clear)).reasons, []);
   assert.equal(mergeGate(candidate(clear)).passed, true);
 
-  // Without required conversation resolution a thread blocks nothing, so none is read.
-  const unrequired = repository({ conversationResolution: false, threads: [open] });
-  const free = await unrequired.github.observe(candidate(null));
-  assert.deepEqual(free.conversations, { required: false, unresolved: [] });
-  assert.equal(unrequired.queries.length, 0);
-  assert.equal(mergeGate(candidate(free)).passed, true);
-
-  // An unresolved thread on a queued entry ejects it rather than holding the head of the queue.
-  assert.match(evaluate(candidate(observed), [], new Date(), ciAppIds).queueEjection?.reason ?? '', /review thread is|review threads are/);
-  // A final verification that sees a thread appear between its two reads refuses.
-  let reads = 0; const graphql = blocked.github.graphql.bind(blocked.github);
-  blocked.github.graphql = async (query, variables) => (++reads > 3 ? resolved.github.graphql(query, variables) : graphql(query, variables));
-  await assert.rejects(blocked.github.verify(candidate(null)), /gates changed/);
+  // A final verification that sees a thread appear between its two reads refuses: the observation changed.
+  let reads = 0; const graphql = drift.github.graphql.bind(drift.github);
+  drift.github.graphql = async (query, variables) => (++reads > 3 ? resolved.github.graphql(query, variables) : graphql(query, variables));
+  await assert.rejects(drift.github.verify(candidate(null)), /gates changed/);
 
   // GitHub answers a GraphQL rate limit with 200 and a RATE_LIMITED error: it pauses the client
   // like a REST rate limit, rather than reading as an ordinary failure or as zero threads.
@@ -122,64 +126,48 @@ function authorized(observation: Observation, now: Date): Work {
   if (result.gates.every(gate => gate.passed)) work.mergeAuthorization = { sha: head, baseSha: base, policyRevision: 1 } as Work['mergeAuthorization'];
   return work;
 }
-const observation = (unresolved: { author: string; path: string; line: number | null; outdated: boolean }[], now: Date): Observation => ({
+const observation = (unresolved: { author: string; path: string; line: number | null; outdated: boolean; bot?: boolean }[], now: Date, required = false): Observation => ({
   candidate: { sha: head, baseSha: base, pr: 133, branch: 'graphyard/gy-130-2', author: 'worker' }, checks: [{ name: 'test', result: 'success', appId: 15368, id: 9 }],
   reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 7 }], merged: false, mergeSha: null, mergeable: true, protected: true, prState: 'open', draft: false,
-  baseTip: base, baseTree, baseTipContained: true, files: ['src/claims.ts'], scopeFiles: [], at: now.toISOString(), conversations: { required: true, unresolved },
+  baseTip: base, baseTree, baseTipContained: true, files: ['src/claims.ts'], scopeFiles: [], at: now.toISOString(), conversations: { required, unresolved },
 });
 const status = (work: Work, now: Date) => nameUnresolvedThreads(buildMasterStatus({ work: [work], now: now.toISOString() }, [], [], {}), [work], agentOwner);
 
-test('unit:unresolved-threads-surfaced — master status lists the unresolved threads, names rework as the remedy, and never reports the candidate mergeable', async () => {
+test('unit:unresolved-threads-surfaced — master status lists the open threads without demoting the candidate, and names protection reconciliation, not rework, for protection drift', async () => {
   const now = new Date();
-  const ready = status(authorized(observation([], now), now), now);
-  assert.equal(ready.work[0].mergeable, true, 'the same candidate with no thread open is mergeable');
-  assert.deepEqual(ready.work[0].reviewThreads, []);
-
   const thread = { author: reviewer, path: 'src/claims.ts', line: 42, outdated: false };
-  const blocked = authorized(observation([thread], now), now);
-  const report = status(blocked, now);
+  const report = status(authorized(observation([thread], now), now), now);
   const row = report.work[0];
-  assert.equal(row.mergeable, false);
-  assert.equal(report.counts.mergeable, 0);
-  assert.deepEqual(row.reviewThreads, [thread]);
-  const text = `Branch protection requires conversation resolution and 1 review thread is unresolved on ${head.slice(0, 12)}: ${reviewer} on src/claims.ts:42. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
-  assert.equal(row.attention, text);
-  assert.equal(row.attentionOwner?.role, 'master'); assert.equal(row.attentionOwner?.approvedBy, 'approver'); assert.equal(row.attentionOwner?.human, false);
-  assert.equal(row.attentionOwner?.next, `graphyard master decide GY-130 rework 'Address the unresolved review threads: ${reviewer} on src/claims.ts:42. Fix each finding; resolving or dismissing a thread the master did not write is not the master'\\''s call'`);
-  assert.deepEqual(report.attentionItems.filter(item => item.subject === 'GY-130').map(item => item.text), [text], 'the row and the attention list say the same thing, once');
-  assert.equal(report.counts.attention, report.work.filter(entry => entry.attention).length);
+  assert.equal(row.mergeable, true, 'an open thread does not keep an approved, green candidate from merging');
+  assert.deepEqual(row.reviewThreads, [thread], 'the thread is listed for the record');
+  assert.equal(row.attention, null);
+  assert.equal(report.counts.mergeable, 1);
 
-  // A record whose gates were decided before the thread was observed is still not mergeable.
-  const stale = authorized(observation([], now), now);
-  stale.observation = observation([thread], now);
-  const demoted = status(stale, now);
-  assert.equal(demoted.work[0].mergeable, false); assert.equal(demoted.counts.mergeable, 0);
-  assert.equal(demoted.work[0].attention, text);
-
-  // A path and author are contributor-controlled: whatever they contain, the remedy is one command
-  // whose reason is a single argument, so following it can never run anything the path names.
-  const hostile = { author: `bot"'$(touch pwned)`, path: `src/$(touch pwned)"; echo 'x\`id\`.ts`, line: 1, outdated: false };
-  const next = status(authorized(observation([hostile], now), now), now).work[0].attentionOwner!.next!;
-  const argv = JSON.parse(execFileSync('bash', ['-c', `set -- ${next.replace(/^graphyard master decide /, '')}; printf '%s\\0' "$@" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(s.split("\\0").slice(0,-1))))'`], { encoding: 'utf8' }));
-  assert.equal(argv.length, 3, 'the key, the action and the reason, nothing more');
-  assert.deepEqual(argv.slice(0, 2), ['GY-130', 'rework']);
-  assert.ok(argv[2].includes(`${hostile.author} on ${hostile.path}:1`), 'the reason carries the thread verbatim, unexpanded');
+  // Protection drift: GitHub would refuse, so the row is not mergeable and the remedy is the protection.
+  const drift = authorized(observation([thread], now, true), now);
+  const drifted = status(drift, now), driftRow = drifted.work[0];
+  assert.equal(driftRow.mergeable, false); assert.equal(drifted.counts.mergeable, 0);
+  const text = `Branch protection still requires conversation resolution, which Graphyard's review gate does not use: GitHub refuses the merge of ${head.slice(0, 12)} while 1 thread stays open (${reviewer} on src/claims.ts:42). graphyard master protection --apply removes the requirement; the reviewer's approval of the head is the review gate`;
+  assert.equal(driftRow.attention, text);
+  assert.equal(driftRow.attentionOwner?.role, 'master'); assert.equal(driftRow.attentionOwner?.approvedBy, null);
+  assert.match(driftRow.attentionOwner!.next!, /^graphyard master protection --apply/);
+  assert.deepEqual(drifted.attentionItems.filter(item => item.subject === 'GY-130').map(item => item.text), [text], 'the row and the attention list say the same thing, once');
 
   const guide = (await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
-  assert.match(guide, /An unresolved review thread is a finding to fix/);
-  assert.match(guide, /Resolving a thread the master did not write is not the master's call/);
+  assert.match(guide, /Unresolved review threads are the reviewer's inputs, not merge blockers/);
+  assert.match(guide, /Overridden threads:/);
 });
 
-test('integration:blocked-merge-refused-before-execution — master merge refuses a candidate with unresolved threads before any merge execution is issued', async () => {
+test('integration:blocked-merge-refused-before-execution — master merge refuses before any execution only where protection still requires conversation resolution; an open thread alone refuses nothing', async () => {
   const config = { version: 1 as const, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: '/outside/graphyard.mjs', repository: 'owner/repo', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-repo',
     autoMerge: true, mergeMethod: 'merge' as const, workers: [], reviewers: [], producers: [], run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } };
   const now = new Date();
   const thread = { author: reviewer, path: 'src/claims.ts', line: 42, outdated: false };
-  // As the engine records it: the merge gate refuses over the thread. And as a stale record would
-  // carry it: every gate green and an authorization granted before the thread was observed.
-  const evaluated = authorized(observation([thread], now), now);
-  const stale = authorized(observation([], now), now);
-  stale.observation = observation([thread], now);
+  // Protection drift, as the engine records it (the merge gate refuses over the thread) and as a stale
+  // record would carry it (every gate green, authorized before the thread was observed).
+  const evaluated = authorized(observation([thread], now, true), now);
+  const stale = authorized(observation([], now, true), now);
+  stale.observation = observation([thread], now, true);
   assert.ok(stale.mergeAuthorization && stale.gates.every(gate => gate.passed));
   for (const work of [evaluated, stale]) {
     const acquired: unknown[] = [], provider: string[][] = [];
@@ -192,8 +180,12 @@ test('integration:blocked-merge-refused-before-execution — master merge refuse
     assert.equal(acquired.length, 0, 'no merge execution is requested');
     assert.equal(provider.length, 0, 'nothing is sent to GitHub');
     assert.equal(record.mergeExecution, null, 'no merge execution is recorded');
-    assert.throws(() => assertMergeCandidate(record, new Date().toISOString(), 'graphyard-master#interactive'), /conversation resolution and 1 review thread is unresolved/);
+    assert.throws(() => assertMergeCandidate(record, new Date().toISOString(), 'graphyard-master#interactive'), /still requires conversation resolution/);
   }
+  // Without the requirement the same open thread refuses nothing: the candidate is merge-ready.
+  const free = authorized(observation([thread], now), now);
+  assert.ok(free.mergeAuthorization && free.gates.every(gate => gate.passed), free.gates.flatMap(gate => gate.reasons).join('; '));
+  assert.doesNotThrow(() => assertMergeCandidate({ ...free, mergeExecution: null } as Work, new Date().toISOString(), 'graphyard-master#interactive'));
 });
 
 test('the loop requests thread rework only after the current head\'s review settled without resolving the threads', () => {
@@ -211,27 +203,27 @@ test('the loop requests thread rework only after the current head\'s review sett
   assert.equal(decide({ ...item([]), policy: { checks: ['test'], review: false } } as Work), 'rework', 'no review policy: nothing else judges the threads');
 });
 
-test('master status names the wait, not a rework command, while the threads wait on the current head\'s review', () => {
+test('unit:bot-threads-advisory-after-round-2 — after two rework rounds a bot thread no longer sends the item back; a person\'s thread and the reviewer\'s own CHANGES_REQUESTED still do', () => {
   const now = new Date('2026-09-24T06:00:00Z');
-  const thread = { author: reviewer, path: 'src/claims.ts', line: 42, outdated: false };
-  const item = (reviews: Observation['reviews'], sessions: unknown[] = []) => ({ ...authorized({ ...observation([thread], now), reviews }, now), sessions } as unknown as Work);
-  const approvedAt = (ms: number) => [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 7, submittedAt: new Date(now.getTime() - ms).toISOString() }];
-  const running = { id: 'r-1', kind: 'review', state: 'running', head, principal: 'reviewer', runtime: 'claude', host: 'h', subject: 'review', startedAt: now.toISOString(), updatedAt: now.toISOString(), endedAt: null, outcome: null };
-  const waiting = [item([]), item([{ reviewer: 'chatgpt-codex-connector[bot]', sha: head, state: 'COMMENTED', id: 8 }]), item(approvedAt(threadResolutionGraceMs * 2), [running]), item(approvedAt(60_000))];
-  for (const work of waiting) {
-    assert.equal(routineDecision(work, { autoMerge: true }, now.getTime()), null, 'the loop defers the rework');
-    const report = status(work, now), row = report.work[0];
-    assert.equal(row.mergeable, false, 'the threads still block the merge');
-    assert.deepEqual(row.reviewThreads, [thread]);
-    assert.doesNotMatch(row.attentionOwner!.next!, /master decide/, 'status offers no rework the loop deferred');
-    assert.match(row.attentionOwner!.next!, new RegExp(`Request no rework yet: the review of ${head.slice(0, 12)} judges these threads first`));
-    assert.equal(row.attentionOwner!.approvedBy, null);
-    assert.equal(report.attentionItems.find(entry => entry.subject === 'GY-130')?.next, row.attentionOwner!.next, 'the attention item says the same');
-  }
-  // Once the review settled without resolving them, the loop and the status name the same rework.
-  const settled = item(approvedAt(threadResolutionGraceMs + 1));
-  assert.equal(routineDecision(settled, { autoMerge: true }, now.getTime())?.action, 'rework');
-  assert.match(status(settled, now).work[0].attentionOwner!.next!, /^graphyard master decide GY-130 rework /);
+  const settledReview = [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: 7, submittedAt: new Date(now.getTime() - threadResolutionGraceMs - 1).toISOString() }];
+  const botFinding: { id: string; author: string; bot?: boolean; path: string; line: number; outdated: boolean } = { id: 'PRRT_bot', author: 'chatgpt-codex-connector', bot: true, path: 'src/claims.ts', line: 42, outdated: false };
+  const personFinding = { id: 'PRRT_person', author: 'maintainer', path: 'src/claims.ts', line: 9, outdated: false };
+  const item = (rounds: number, threads: typeof botFinding[], reviews: Observation['reviews'] = settledReview) =>
+    ({ ...candidate({ ...observation(threads, now), reviews }), pipeline: { attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds: rounds, interventions: { blocked: 0, requirements: 0 } } } as unknown as Work);
+  const decide = (work: Work) => routineDecision(work, { autoMerge: true }, now.getTime());
+  assert.equal(botThreadReworkRounds, 2);
+  assert.equal(decide(item(0, [botFinding]))?.action, 'rework', 'round 0: a bot finding the review left open is sent back');
+  assert.equal(decide(item(1, [botFinding]))?.action, 'rework', 'round 1: still');
+  assert.equal(decide(item(2, [botFinding])), null, 'after two rework rounds the bot finding is advisory');
+  assert.equal(decide(item(5, [{ ...botFinding, bot: undefined, author: 'chatgpt-codex-connector[bot]' }])), null, 'a bot known by its login alone is advisory too');
+  const person = decide(item(2, [botFinding, personFinding]))!;
+  assert.equal(person.action, 'rework', "a person's thread still sends the item back");
+  assert.match(person.reason, /1 review thread is still open .*maintainer on src\/claims\.ts:9/);
+  assert.doesNotMatch(person.reason, /chatgpt-codex-connector/, 'the advisory bot thread is not a ground');
+  // The reviewer's own verdict is never advisory.
+  const refused = decide(item(4, [botFinding], [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'CHANGES_REQUESTED', id: 8, submittedAt: now.toISOString() }]));
+  assert.equal(refused?.action, 'rework');
+  assert.match(refused!.binding, /:verdict:/);
 });
 
 test('a thread rework request stays within the control plane\'s reason bound however many threads, and however long their paths', () => {
@@ -240,7 +232,7 @@ test('a thread rework request stays within the control plane\'s reason bound how
   const work = { ...candidate(observation(threads, now)), policy: { checks: ['test'], review: false } } as unknown as Work;
   const decision = routineDecision(work, { autoMerge: true }, now.getTime())!;
   assert.equal(decision.action, 'rework');
-  assert.match(decision.reason, /40 review threads are unresolved/);
+  assert.match(decision.reason, /40 review threads are still open/);
   assert.match(decision.reason, /and 35 more on the pull request/);
   assert.ok(threads.every(thread => decision.binding.includes(thread.id)), 'the binding still names every thread');
   // What the requester sends: the observation it decided from and every refusal it answers, kept whole.

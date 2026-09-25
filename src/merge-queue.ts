@@ -40,32 +40,42 @@ export interface QueueSpeculation {
 }
 /**
  * One unresolved review thread on a candidate's pull request: who opened it (the author of its
- * first comment), and the path and line it is anchored to. `line` is null for a thread on a file
- * rather than a line; `outdated` threads sit on code the head has since changed and still block.
- * `id` is the thread's GraphQL node id — what `scripts/resolve-thread.mjs` takes — so whoever may
- * resolve it can do so without a raw GraphQL read to rediscover it.
+ * first comment, and whether GitHub reports that author as a bot), and the path and line it is
+ * anchored to. `line` is null for a thread on a file rather than a line; `outdated` threads sit on
+ * code the head has since changed. `id` is the thread's GraphQL node id — what
+ * `scripts/resolve-thread.mjs` takes — so whoever may resolve it can do so without a raw GraphQL
+ * read to rediscover it.
  */
-export interface ReviewThread { id?: string; author: string; path: string; line: number | null; outdated: boolean; url?: string }
+export interface ReviewThread { id?: string; author: string; bot?: boolean; path: string; line: number | null; outdated: boolean; url?: string }
 /**
- * Review conversations as a gate input (GY-139). `required` is the managed branch's
- * `required_conversation_resolution`; `unresolved` is read only when it is set, since a thread
- * blocks nothing otherwise. Absent on observations recorded before threads were observed.
+ * Review conversations as a gate input. `required` is the managed branch's
+ * `required_conversation_resolution`, which Graphyard's desired protection no longer sets: the
+ * review gate is the configured reviewer's verdict on the exact head, and unresolved threads are
+ * that reviewer's inputs, not merge blockers (the reviewer reads them itself at launch).
+ * `unresolved` is read only while `required` is set — the one case GitHub itself refuses a merge
+ * over them — so the observation spends no GraphQL read otherwise. Absent on observations recorded
+ * before threads were observed.
  */
 export interface ConversationResolution { required: boolean; unresolved: ReviewThread[] }
 declare module './model/work.js' { interface Observation { conversations?: ConversationResolution } }
 
-/** One single-quoted shell argument: nothing inside it is expanded, whatever a contributor named a file. */
-const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 /** `author on path:line`, the way every refusal and attention line names a thread. */
 export const describeThread = (thread: ReviewThread) => `${thread.author} on ${thread.path}${thread.line === null ? '' : `:${thread.line}`}${thread.outdated ? ' (outdated)' : ''}`;
+/** A thread opened by an automatic reviewer (a GitHub App or other bot account), not a person. */
+export const botThread = (thread: ReviewThread) => thread.bot === true || /\[bot\]$/i.test(thread.author);
+/** The unresolved threads observed on the current candidate's head: none unless the observation is of that head and it is unmerged. */
+export function openThreads(work: Pick<Work, 'candidate' | 'observation'>): ReviewThread[] {
+  const observation = work.observation, candidate = work.candidate;
+  if (!candidate || !observation?.conversations || observation.candidate?.sha !== candidate.sha || observation.merged) return [];
+  return observation.conversations.unresolved;
+}
 /**
- * The unresolved threads that block the current candidate's merge: none unless the observation is
- * of the current head and branch protection requires conversation resolution.
+ * The unresolved threads GitHub itself would refuse the merge over: only where the managed
+ * branch's protection still requires conversation resolution — protection drift from what
+ * `graphyard master protection --apply` writes. Graphyard's own gate never refuses on a thread.
  */
 export function blockingThreads(work: Pick<Work, 'candidate' | 'observation'>): ReviewThread[] {
-  const observation = work.observation, candidate = work.candidate;
-  if (!candidate || !observation?.conversations?.required || observation.candidate?.sha !== candidate.sha || observation.merged) return [];
-  return observation.conversations.unresolved;
+  return work.observation?.conversations?.required ? openThreads(work) : [];
 }
 /** How long after an approval of the current head the loop's thread resolution is waited for. */
 export const threadResolutionGraceMs = 300_000;
@@ -87,35 +97,30 @@ export function threadsAwaitReview(work: Work, observedAt: number): boolean {
   return Number.isFinite(approvedAt) && !(observedAt - approvedAt >= threadResolutionGraceMs);
 }
 /**
- * The merge refusal for those threads, or null. Each thread is a reviewer's finding: the remedy
- * is rework that addresses it, never resolving or dismissing a thread somebody else wrote.
+ * The merge refusal for protection drift, or null: the branch still requires conversation
+ * resolution and threads are open, so GitHub would refuse the merge whatever Graphyard's gate says.
+ * The remedy is the desired protection, not rework: the reviewer's verdict is the review gate.
  */
-export function unresolvedThreadRefusal(work: Pick<Work, 'candidate' | 'observation'>): string | null {
+export function conversationProtectionRefusal(work: Pick<Work, 'candidate' | 'observation'>): string | null {
   const threads = blockingThreads(work);
   if (!threads.length) return null;
-  return `Branch protection requires conversation resolution and ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} unresolved on ${work.candidate!.sha.slice(0, 12)}: ${threads.map(describeThread).join('; ')}. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
+  return `Branch protection still requires conversation resolution, which Graphyard's review gate does not use: GitHub refuses the merge of ${work.candidate!.sha.slice(0, 12)} while ${threads.length} thread${threads.length === 1 ? '' : 's'} stay${threads.length === 1 ? 's' : ''} open (${threads.map(describeThread).join('; ')}). graphyard master protection --apply removes the requirement; the reviewer's approval of the head is the review gate`;
 }
 /**
- * `master status` for candidates GitHub will not merge over unresolved threads: each row lists
- * them under `reviewThreads`, is never `mergeable`, and its attention names the remedy — a rework
- * decision that addresses the findings — unless the threads still wait on the current head's review
- * (`threadsAwaitReview`), when the loop defers that rework and the status names the wait instead: a
- * rework requested then invalidates the review that would resolve them. The row's attention and its
- * attention item are rewritten together, so both say the same thing.
+ * `master status` for candidates' review threads: each row lists its open threads under
+ * `reviewThreads` for the record. They are the reviewer's inputs, not merge blockers, so a row is
+ * demoted from `mergeable` and given attention only for protection drift — a branch that still
+ * requires conversation resolution — whose remedy is `graphyard master protection --apply`. The
+ * row's attention and its attention item are rewritten together, so both say the same thing.
  */
 export function nameUnresolvedThreads<S extends { work: { key: string; mergeable: boolean; attention: string | null; attentionOwner: unknown }[]; attentionItems: { subject: string; text: string }[]; counts: { attention: number; mergeable: number } }, O extends object>(status: S, work: Work[], owner: (role: 'master', next: string, approvedBy: 'approver' | null) => O): Omit<S, 'work'> & { work: (S['work'][number] & { reviewThreads: ReviewThread[] })[] } {
   const rewritten = new Map<string, { previous: string | null; item: S['attentionItems'][number] }>();
   const rows = status.work.map(row => {
     const item = work.find(candidate => candidate.key === row.key);
-    const threads = item ? blockingThreads(item) : [];
-    if (!threads.length) return { ...row, reviewThreads: [] as ReviewThread[] };
-    const text = unresolvedThreadRefusal(item!)!;
-    // The thread's path and author are contributor-controlled text, so the reason is one quoted
-    // argument and the command is the whole of `next`: nothing in it can end the argument or run.
-    const reason = `Address the unresolved review threads: ${threads.map(describeThread).join('; ')}. Fix each finding; resolving or dismissing a thread the master did not write is not the master's call`;
-    const attentionOwner = threadsAwaitReview(item!, Date.parse(item!.observation?.at ?? ''))
-      ? owner('master', `Request no rework yet: the review of ${item!.candidate!.sha.slice(0, 12)} judges these threads first — an approval names the ones fixed and the loop resolves them, and the loop requests the rework itself if the review settles without resolving them`, null)
-      : owner('master', `graphyard master decide ${row.key} rework ${shellQuote(reason)}`, 'approver');
+    const threads = item ? openThreads(item) : [];
+    const text = item ? conversationProtectionRefusal(item) : null;
+    if (!text) return { ...row, reviewThreads: threads };
+    const attentionOwner = owner('master', 'graphyard master protection --apply: the desired protection does not require conversation resolution; the reviewer\'s verdict on the head is the review gate', null);
     rewritten.set(row.key, { previous: row.attention, item: { subject: row.key, text, ...attentionOwner } as S['attentionItems'][number] });
     return { ...row, mergeable: false, reviewThreads: threads, attention: text, attentionOwner };
   });
@@ -660,9 +665,9 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [])
   });
   if (check) return `Required CI check ${check} did not pass on speculative tip ${tip}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
-  // An unresolved review thread GitHub will not merge over is a finding like a change request:
-  // the entry leaves rather than holding the head of the queue with a merge that cannot land.
-  const threads = unresolvedThreadRefusal(work);
+  // Unresolved threads are the reviewer's inputs, not a reason to eject; only a branch that still
+  // requires conversation resolution (protection drift) makes a merge GitHub cannot land.
+  const threads = conversationProtectionRefusal(work);
   if (threads) return threads;
   // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
   // failure or a withdrawal of it is an adverse conclusion about this tip.

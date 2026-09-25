@@ -13,7 +13,7 @@ import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scope
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, queueSequencingReason, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
+import { baseRefreshConflict, botThread, describeThread, openThreads, pendingBaseRefresh, queueSequencingReason, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
 export { threadResolutionGraceMs, threadsAwaitReview } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
@@ -805,12 +805,14 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
-  // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
-  // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a human.
-  // The review of the current head judges those threads first: its approval names the ones fixed and
-  // the loop resolves them, so a rework requested before it settles invalidated the review that
-  // would have cleared them, and the same open threads carried to the next head — without end.
-  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? blockingThreads(work) : [];
+  // Unresolved review threads block no merge: the reviewer's verdict on the head is the review
+  // gate and the threads are its inputs. A thread still open once the review of the current head
+  // has settled — one it was not shown, or a policy with no review — is a finding the loop sends
+  // back for, early on. The review judges threads first: its approval names the ones fixed or
+  // overridden and the loop resolves them, so a rework requested before it settles would invalidate
+  // the review that clears them. After `botThreadReworkRounds` rework rounds a bot's thread is
+  // advisory: bot findings alone had kept items cycling round after round on the same head family.
+  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
   if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
     binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   // A lease-loss the control plane raised is operational: once the lost attempt can no longer act,
@@ -881,6 +883,17 @@ export function resolveCovers(standing: { input: any; pin?: { escalations?: { tr
 }
 /** The control plane's bound on a decision's reason (`src/model/approval.ts`); a longer one is refused on every retry. */
 export const decisionReasonMax = 2000;
+/** How many rework rounds an item takes before a bot's review thread stops being grounds for another. */
+export const botThreadReworkRounds = 2;
+/**
+ * The open threads on the current head the loop requests rework for: every one within the first
+ * `botThreadReworkRounds` rework rounds, and after that only a person's — a bot's thread is then
+ * advisory, and only the reviewer's own CHANGES_REQUESTED sends the item back.
+ */
+export function reworkThreads(work: Work): ReviewThread[] {
+  const threads = openThreads(work);
+  return (work.pipeline?.reworkRounds ?? 0) >= botThreadReworkRounds ? threads.filter(thread => !botThread(thread)) : threads;
+}
 /** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
 const reworkThreadsNamed = 5;
 /**
@@ -891,7 +904,7 @@ const reworkThreadsNamed = 5;
 export function threadReworkSummary(sha: string, threads: ReviewThread[]): string {
   const named = threads.slice(0, reworkThreadsNamed).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
   const more = threads.length - named.length;
-  return `Branch protection requires conversation resolution and ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} unresolved on ${sha.slice(0, 12)}: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
+  return `${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} still open on ${sha.slice(0, 12)} after its review settled: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. Rework the candidate to address the findings, never dismiss them`;
 }
 /**
  * A decision reason within the control plane's bound. What the requester adds around the loop's own
@@ -2086,9 +2099,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
 
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
-  //    An item whose planned files overlap a claimed or unmerged item is not claimable (the
-  //    loop never overrides that; `master dispatch --allow-overlap` is the operator's call), and
-  //    the smallest planned scope within a priority is offered first.
+  //    Planned-file overlap never holds an item (dispatch is optimistic: the merge queue and a
+  //    sync round integrate whichever lands second); only exclusive resources do. The smallest
+  //    planned scope within a priority is offered first.
   const claimable = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }).sort(dispatchOrder);
