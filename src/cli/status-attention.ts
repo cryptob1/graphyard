@@ -72,3 +72,14 @@ export function stalledItemAttention(snapshot: { work: Work[]; now: string }, th
 
 /** Direct-merge mode (src/direct-merge.ts), first in master status and in one line while it is on: gated merging is bypassed. */
 export const directMergeLine = (coordinator: any): { directMerge?: string } => coordinator?.directMerge?.line ? { directMerge: coordinator.directMerge.line } : {};
+
+/**
+ * The worker scope requests the loop has routed to the independent approver (GY-176), as the
+ * `(key, epoch, at)` that identifies each ask. A routed request is the approver's to judge and the
+ * worker's to be told about; naming `master scope` for it would send a master to decide what is
+ * already being decided, so the scope attention leaves these out.
+ */
+export function routedScopeRequests(approvals: readonly { work: string; action: string; scope?: { epoch: number; at: string } | null }[] = []) {
+  const routed = new Set(approvals.filter(watch => watch.action === 'requirements' && watch.scope).map(watch => `${watch.work}:${watch.scope!.epoch}:${watch.scope!.at}`));
+  return (work: { key: string; scopeRequest?: { epoch: number; at: string } | null }) => !!work.scopeRequest && routed.has(`${work.key}:${work.scopeRequest.epoch}:${work.scopeRequest.at}`);
+}
