@@ -11,7 +11,7 @@ import { assertSessionName, distinctSessionName, nameForLaunch, sessionName, ses
 export { assertSessionName, distinctSessionName, nameForLaunch, sessionName, sessionNameDigestLength, sessionNameDistinguisher, sessionNameDistinguisherLimit, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, sessionNameRule, suffixedSessionName } from './session-name.js';
 import { assertRepository, discover, localDirectory, saveDiscovery } from './onboarding.js';
 import { launchAuthorization, loadConnection, managedInstructions, serverOrigin } from './repository-setup.js';
-import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, dispatchOrder, dispatchOverlap, dispatchable, effectiveConcurrency, inFlight, resourceConflicts, scopeBreadth, type DispatchHold } from './coordination.js';
+import { broadScopeRefusals, concurrentOverlap, dispatchOrder, dispatchable, inFlight, resourceConflicts, scopeBreadth } from './coordination.js';
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
@@ -25,7 +25,7 @@ import { containmentAttestation, containmentGraceMs, containmentSettlementRefusa
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
 import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, settingsWarning, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
-import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, unresolvedThreadRefusal, type QueuePlacement } from './merge-queue.js';
+import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, conversationProtectionRefusal, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention, missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
@@ -1915,7 +1915,7 @@ export function installationOwner(source: 'app-permissions' | 'held-jobs' | 'del
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'hold-overdue' | 'contaminated' | 'merge-base-dismissed' | 'gate'): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: 'human-request' | 'containment-settleable' | 'containment-grace' | 'containment' | 'session' | 'proof-gap' | 'reviewer-exhausted' | 'launch-review' | 'launch-producer' | 'base-conflict' | 'merged-unauthorized' | 'merged-reverted' | 'contaminated' | 'merge-base-dismissed' | 'gate'): AttentionOwner {
   const key = work.key;
   if (cause === 'merge-base-dismissed') return agentOwner('master', missingBaseAncestry(work)
     ? `Nothing to run: the merge queue republishes ${key}'s tip onto the base branch tip and the merge broker refuses it until then; graphyard master status shows the new head`
@@ -1961,7 +1961,6 @@ export function workAttentionOwner(work: Work, cause: 'human-request' | 'contain
   // A system-driven item is never pushed by hand (GY-175): the owner text names the loop step, not a command the CLI refuses.
   const driven = work.systemDriven === true;
   if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, ${driven ? `the loop's dispatcher launches ${key} again` : `graphyard master dispatch ${key} PROFILE`}`);
-  if (cause === 'hold-overdue') return agentOwner('master', `Nothing to decide: the loop dispatches ${key} over the overlap on its next cycle with a free worker${driven ? '' : `; graphyard master dispatch ${key} PROFILE does it now`}`);
   if (cause === 'proof-gap') return agentOwner('master', `graphyard master decide ${key} grant '{"principal":"PRODUCER","patterns":["${(work.proofGaps ?? [])[0] ?? 'PROOF'}"]}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   const reviewNext = driven ? `the loop relaunches the review on its own; graphyard master review ${key} only once the loop has stopped relaunching its request` : `graphyard master review ${key}`;
   if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then ${reviewNext}`);
@@ -2477,10 +2476,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
       : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];
-    const held = scheduling.held.find(entry => entry.key === work.key) ?? null, overdueHold = scheduling.overdue.find(entry => entry.key === work.key) ?? null;
-    // An item in flight beside another it overlaps — dispatched over a hold, past the bound or by
-    // --allow-overlap — shows what it runs concurrently with, so the overlap stays recorded.
-    const concurrent = !held && !overdueHold && (active || work.submission) ? dispatchOverlap(work, snapshot.work, now) : [];
+    // Planned-file overlap holds nothing (dispatch is optimistic); an item beside another on the
+    // same files shows what it runs concurrently with, so the overlap stays on the record.
+    const concurrent = concurrentOverlap(work, snapshot.work, now);
     const conflictReport = candidateConflicts.report[work.key];
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
@@ -2539,9 +2537,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // used to be the commonest attention line on this list — one per open candidate, every
       // merge — and answering it cost a rework round for a change that was a clean fast-forward.
       : baseRefresh && !work.blocker ? [null, null]
-      // A hold past its bound is no longer holding: the loop offers the item over the overlap on its
-      // next cycle, so it is raised only while nothing has taken it, naming the chain it waited behind.
-      : overdueHold ? [`${work.key} has been held ${hours(overdueHold.hold.ageMs)} behind ${describeChain(overdueHold.hold.chain)}, past the ${hours(overdueHold.hold.boundMs)} bound; it is offered over the overlap and waits only for a free worker`, 'hold-overdue']
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
@@ -2561,7 +2556,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
       // an approval GitHub dismissed for a merge-base change that the control plane restored.
       contamination, restoredApproval: approvalRestored,
-      scope: scopeBreadth(work.plannedFiles), overlap: held ? { held: true, ahead: held.ahead, reason: held.reason, hold: held.hold, concurrent: [] } : overdueHold ? { held: false, ahead: overdueHold.ahead, reason: overdueHold.reason, hold: overdueHold.hold, concurrent: [] } : { held: false, ahead: [], reason: null, hold: null, concurrent }, conflicts,
+      scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now) };
   });
@@ -2587,14 +2582,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
-  // The fleet's effective concurrency beside its idle workers: how many items the overlap graph
-  // lets run at once, so eleven free workers and a concurrency of one is read as serialization,
-  // not as a shortage of anything.
-  const graph = effectiveConcurrency(snapshot.work, now);
+  // The fleet's concurrency beside its idle workers: every open item in flight or dispatchable may
+  // run at once — planned-file overlap holds nothing — so idle workers beside dispatchable items is
+  // a dispatch shortfall, not serialization.
+  const inFlightCount = snapshot.work.filter(work => inFlight(work, now)).length;
   const idle = workerSessions.filter(session => session.mode === 'launch' && session.credential.available && (session.state === 'offline' || session.state === 'idle') && !rows.some(row => row.owner === session.principal));
-  const fleet = { ...graph, inFlight: snapshot.work.filter(work => inFlight(work, now)).length, dispatchable: scheduling.order.length, held: scheduling.held.length, overdue: scheduling.overdue.length,
-    idleWorkers: idle.length, workers: workerSessions.filter(session => session.mode === 'launch').length, boundMs: scheduling.boundMs,
-    statement: `${graph.effective} item${graph.effective === 1 ? '' : 's'} could be in flight at once over ${graph.nodes} open item${graph.nodes === 1 ? '' : 's'} (${graph.edges} overlap${graph.edges === 1 ? '' : 's'}${graph.exact ? '' : ', greedy estimate'}); ${idle.length} of ${workerSessions.filter(session => session.mode === 'launch').length} launch profile${workerSessions.filter(session => session.mode === 'launch').length === 1 ? '' : 's'} idle; ${scheduling.held.length} held, ${scheduling.overdue.length} past the ${hours(scheduling.boundMs)} hold bound` };
+  const launchProfiles = workerSessions.filter(session => session.mode === 'launch').length;
+  const fleet = { effective: inFlightCount + scheduling.order.length, inFlight: inFlightCount, dispatchable: scheduling.order.length, idleWorkers: idle.length, workers: launchProfiles,
+    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; planned-file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle` };
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
   const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
@@ -2609,7 +2604,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
-      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: graph.effective, idleWorkers: idle.length, held: scheduling.held.length, holdsOverdue: scheduling.overdue.length,
+      humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: fleet.effective, idleWorkers: idle.length,
       contaminatedBranches: rows.filter(row => row.contamination && row.contamination.source.length).length, restoredApprovals: rows.filter(row => row.restoredApproval).length,
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
       closed: snapshot.work.filter(isClosed).length },
@@ -2617,7 +2612,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
     // What waits on the human, longest first, with how to answer; the roles out of capacity; each
     // role's sessions against its concurrency limit with the longest wait for a slot; the
-    // fleet's effective concurrency — what the overlap graph lets run at once — beside its idle workers;
+    // fleet's concurrency — every open item in flight or dispatchable — beside its idle workers;
     // and the blockers whose remedy no launched session may run.
     humanRequests, capacity, concurrency, effectiveConcurrency: fleet, unrunnableRemedies: remedies,
     closed: closedHistory(snapshot.work),
@@ -2647,25 +2642,14 @@ export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work'])
 }
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
- * would be offered (smallest planned scope first within a priority), the ones held behind a
- * claimed or unmerged item whose changed files (or, before a candidate, planned files) they
- * overlap, with the age of each hold and the chain it waits behind, the holds past the bound —
- * offered over the overlap — and the broad scopes that will overlap nearly everything.
+ * would be offered (smallest planned scope first within a priority), and the broad scopes that
+ * make a weak change-scope contract. Nothing is held for planned-file overlap: dispatch is
+ * optimistic, and the merge queue and a sync round integrate whichever overlapping item lands second.
  */
-export function dispatchSchedule(work: Work[], now: number, boundMs = dispatchHoldBoundMs) {
+export function dispatchSchedule(work: Work[], now: number) {
   const ready = work.filter(item => dispatchable(item, now)).sort(dispatchOrder);
-  const holds = ready.flatMap(item => { const hold = dispatchHold(item, work, now, boundMs); return hold ? [{ key: item.key, ahead: hold.ahead, hold, reason: holdReason(hold) }] : []; });
-  const held = holds.filter(entry => !entry.hold.overdue), overdue = holds.filter(entry => entry.hold.overdue);
-  const heldKeys = new Set(held.map(entry => entry.key)), overdueKeys = new Set(overdue.map(entry => entry.key));
-  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles), held: heldKeys.has(item.key), overdue: overdueKeys.has(item.key) })), held, overdue,
-    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })), boundMs };
-}
-/** The one sentence a hold reads as, before and after the bound: who is ahead, on which files, since when, and what lifts it. */
-export function holdReason(hold: DispatchHold) {
-  const chain = hold.chain.length > hold.ahead.length ? `; the chain it waits behind: ${describeChain(hold.chain)}` : '';
-  return hold.overdue
-    ? `Held by planned-file overlap with ${describeOverlap(hold.ahead)} since ${hold.since} (${hours(hold.ageMs)}), past the ${hours(hold.boundMs)} bound${chain}; dispatched over the overlap: whichever lands second re-integrates the other`
-    : `Held by planned-file overlap with ${describeOverlap(hold.ahead)} since ${hold.since} (${hours(hold.ageMs)} of the ${hours(hold.boundMs)} bound)${chain}; dispatch with --allow-overlap to override, or the bound lifts it`;
+  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles) })),
+    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })) };
 }
 /** Fewest conflicts first: the order that forces the fewest re-integration rounds on the rest. */
 export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[]) {
@@ -2977,7 +2961,7 @@ type WorkerPreparer = (root: string, key: string, profileName: string, run?: Wor
  * always probed; a worktree an injected preparer supplies is probed only when a runner is given.
  */
 export interface DispatchOptions {
-  allowOverlap?: boolean; holdBoundMs?: number; probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
   claimBy?: number;
 }
@@ -2986,8 +2970,8 @@ export function assertClaimDeadline(key: string, claimBy: number | undefined, no
   if (claimBy !== undefined && now >= claimBy)
     throw new Error(`${key}: the hand launch did not reach its lease claim before the item's backed-off dispatch action is offered to the executor again, so it claims nothing; the loop's dispatcher launches the item`);
 }
-export const describeOverlap = (overlap: ReturnType<typeof dispatchOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
-export function assertDispatchable(work: Work, allWork: Work[], observedAt: string, options: DispatchOptions = {}) {
+export const describeOverlap = (overlap: ReturnType<typeof concurrentOverlap>) => overlap.map(ahead => `${ahead.key} (${ahead.state}, ${ahead.stage}) on ${ahead.paths.join(', ')}`).join('; ');
+export function assertDispatchable(work: Work, allWork: Work[], observedAt: string) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
@@ -3000,14 +2984,12 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (work.submission && !work.reworkRequested) throw new Error('Dispatch requires operator-authorized rework for a submitted item');
   const conflicts = resourceConflicts(work, allWork, now);
   if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map(conflict => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
-  // Overlap is a soft exclusive resource: advisory, bounded in time, with an operator override.
-  const hold = dispatchHold(work, allWork, now, options.holdBoundMs);
-  if (hold && !hold.overdue && !options.allowOverlap) throw new Error(`Dispatch held by planned-file overlap with ${describeOverlap(hold.ahead)}; whichever lands second re-integrates the other. Held since ${hold.since} (${hours(hold.ageMs)} of the ${hours(hold.boundMs)} bound)${hold.chain.length > hold.ahead.length ? `; the chain it waits behind: ${describeChain(hold.chain)}` : ''}. Wait for it to merge, or pass --allow-overlap to dispatch anyway`);
-  return hold;
+  // Planned-file overlap holds nothing: dispatch is optimistic, and the merge queue and a sync
+  // round integrate whichever of two overlapping items lands second.
 }
 
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs = 30_000, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
-  assertDispatchable(work, allWork, observedAt, options);
+  assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
@@ -3045,15 +3027,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       }
     }
   }
-  const hold = dispatchHold(work, allWork, Date.parse(observedAt), options.holdBoundMs);
+  const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox,
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
-    // The overlap a dispatch went over is recorded with the dispatch: by operator override, or
-    // because the hold outlived its bound — the note says which, and the chain the item waited behind.
-    overlap: hold ? { allowed: true, ahead: hold.ahead, hold, note: `Dispatched over a planned-file overlap with ${describeOverlap(hold.ahead)}${hold.overdue ? ` after a hold of ${hours(hold.ageMs)}, past the ${hours(hold.boundMs)} bound${hold.chain.length > hold.ahead.length ? `, behind ${describeChain(hold.chain)}` : ''}` : ' by operator override'}; expect a sync → review → proof round for whichever lands second` } : null };
+    // Planned-file overlap is recorded with the dispatch, never held on: the item runs beside the
+    // in-flight items that touch the same files and whichever lands second is re-integrated.
+    overlap: concurrent.length ? { concurrent, note: `Dispatched beside ${describeOverlap(concurrent)}; the merge queue orders them and whichever lands second is re-integrated by base refresh, or sent back for a sync on a real conflict` } : null };
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
@@ -3220,9 +3202,10 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
     && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
     && work.mergeExecution!.policyRevision === work.policyRevision;
   if (activeMerge && !resumable) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization for this executor: merge execution ${work.mergeExecution!.id} is held by ${work.mergeExecution!.owner} until ${work.mergeExecution!.expiresAt}; this executor stands down without cancelling it`);
-  // Unresolved review threads on a branch that requires conversation resolution are a merge
-  // GitHub will refuse (GY-139): refused here, naming them, before any execution is issued.
-  const threads = activeMerge ? null : unresolvedThreadRefusal(work);
+  // Unresolved review threads never refuse a merge by themselves; a branch that still requires
+  // conversation resolution (protection drift) is a merge GitHub will refuse, so that is refused
+  // here, naming the threads, before any execution is issued.
+  const threads = activeMerge ? null : conversationProtectionRefusal(work);
   if (threads) throw new Error(`${work.key} was refused before any merge execution was issued: ${threads}`);
   // An unresolved escalation, a standing blocking lead ruling, and trusted
   // evidence whose producer has since implemented the item each refuse delivery

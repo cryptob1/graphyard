@@ -866,7 +866,9 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   assert.equal(new Set(assigned.map(item => item.id)).size, assigned.length, 'no item was handed to two workers');
   // The offer order is the dispatch order the control plane already uses: priority, then the
   // narrowest planned scope, then age. Nothing about worker liveness enters into it.
-  assert.equal(assigned[0].priority, 0, 'the highest priority item is offered first');
+  // Earlier tests leave dispatchable items of their own (planned-file overlap no longer holds them);
+  // among this test's items, the highest priority is offered first.
+  assert.equal(assigned.filter(item => offered.some(entry => entry.id === item.id))[0].priority, 0, 'the highest priority item is offered first');
   for (const item of assigned) await engine.execute(item.lease!.owner === worker.id ? worker : otherWorker, 'release', item.id, { epoch: item.lease!.epoch }, randomUUID());
 
   // An item another worker already holds is never offered twice: a racing pull skips it.
