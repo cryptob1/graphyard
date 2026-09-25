@@ -12,7 +12,7 @@ const controlToken = process.env.GRAPHYARD_PROBE_CONTROL_TOKEN;
 const store = new Store(process.env.DATABASE_URL); await store.init();
 const engine = new Engine(store, [15368], 120, 'graphyard-probe/candidate');
 let snapshot = null;
-const github = { config: { repository: 'graphyard-probe/candidate', base: 'main', appId: 1, installationId: 1, privateKey: '' }, verify: async () => structuredClone(snapshot), serverTime: async () => Date.now(), reviewRepository: async () => null, reviewPermissions: async () => ({}) };
+const github = { config: { repository: 'graphyard-probe/candidate', base: 'main', appId: 1, installationId: 1, privateKey: '' }, verify: async () => structuredClone(snapshot), reviewRepository: async () => null, reviewPermissions: async () => ({}) };
 server(engine, principals, github).listen(4310, '0.0.0.0');
 createServer(async (request, response) => {
   response.setHeader('Content-Type', 'application/json');

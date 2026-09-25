@@ -40,7 +40,7 @@ export interface ControlPlaneEffects {
   dispatchWorker: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<any>;
   launchReview: (work: Work, request: DispatchRequest, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<any>;
-  /** The guarded merge: the same broker `master run` uses, never a direct provider merge. */
+  /** The merge step `master run` uses: requests that GitHub merge the authorized head (GY-258); never a provider merge call. */
   merge: (work: Work) => Promise<unknown>;
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /** Records a launched session's durable handle on the item (AC-8). */
@@ -48,14 +48,12 @@ export interface ControlPlaneEffects {
 }
 
 /**
- * The merge execution instance one executor process owns.
+ * The executor instance one executor process names on its merge requests.
  *
- * A merge execution is owned by the executor instance that acquired it, never by the coordinator
- * principal alone (GY-92): an execution another instance holds is refused rather than resumed, so
- * a `master run` loop, an interactive `master merge` and any number of executors sharing one
- * credential never drive the same merge between them. An executor mints its instance once per
- * process, exactly as the daemon does, so nothing it starts can be resumed by anything else —
- * including a later executor on the same host, which stands down until the execution lapses.
+ * GitHub executes merges (GY-258), so the merge action only records the request that GitHub merge
+ * the authorized head; the instance is the requester the ledger names. An executor mints it once per
+ * process, exactly as the daemon does. A merge execution recorded before GY-258 stays owned by the
+ * instance that acquired it (GY-92) and no other instance resumes it.
  */
 export const executorMergeExecutor = (principal: string, instance = `executor-${randomUUID()}`): MergeExecutor => ({ principal, instance });
 
@@ -172,10 +170,10 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     },
     merge: async action => {
       const { work } = await find(action);
-      // The broker throws when it does not hand the merge to the provider, so reaching here means
-      // it did. What it returns is its own account of what happened — a merge requested and not
-      // yet observed, or an execution it retained until GitHub reconciles — and the row records
-      // that verbatim rather than a word of the executor's own: only the observation says merged.
+      // The step throws when it does not record the merge request, so reaching here means GitHub
+      // now holds the authorized head (GY-258). What it returns is its own account — requested and
+      // not yet observed, or already merged — and the row records that verbatim rather than a word
+      // of the executor's own: only the observation says merged.
       const result = await effects.merge(work) as { result?: string } | undefined;
       return `${work.key}: ${result?.result ?? 'the guarded merge returned without a result of its own'}`;
     },

@@ -24,12 +24,12 @@ import { registeredLaunch, sessionView } from './model/session-state.js';
 import { liveReviewRequest } from './model/dispatch.js';
 import { automatableProof } from './model/mechanical-proofs.js';
 import { documentationWorkerSection } from './model/documentation.js';
-import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, providerDelayAfterVerification, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
+import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTriggers, deliveryState, deploySmokeRequired, describeQueueBinding, evidenceIndependenceRefusals, exhaustedReviewerProfiles, implementerIdentities, nativeReviewRequired, postDeployMs, productionLatencyMs, reviewerProfileFor, reviewProviderOf, rollbackGuidance, standingEscalations, type CarriedApproval, type QueueBindingReport, type Work } from './model.js';
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
 import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, settingsWarning, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
 import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
-import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, conversationProtectionRefusal, type QueuePlacement } from './merge-queue.js';
+import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, describeGitHubQueue, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, conversationProtectionRefusal, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention, missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import { attentionLines, type ProductionReport } from './production-watch.js';
@@ -2515,7 +2515,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
   const placements = predictQueue(snapshot.work, now);
-  const queueRows = placements.map(placement => queueRow(placement, describeQueueBinding(snapshot.work.find(work => work.id === placement.id)!, snapshot.work, new Date(now), placement)));
+  // Each queued item's place in GitHub's own merge queue, as the control plane last read it (GY-258):
+  // GitHub performs the merge, so this is where a queued item waits once every gate passes.
+  const githubQueueRow = (work: Work) => work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {};
+  const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement)), ...githubQueueRow(work) }; });
   // The cause each row's attention was raised for, which is the fault kind its attention item carries.
   const causes = new Map<string, WorkAttentionCause>();
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
@@ -2530,8 +2533,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
-    const activeMerge = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now;
-    const mergeable = !activeMerge && freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
+    const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
       && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
       && work.mergeAuthorization.policyRevision === work.policyRevision
       && work.gates.every(gate => gate.passed) && !work.violations.length;
@@ -3269,13 +3271,10 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
 /**
  * One merge executor instance: the coordinator principal and the instance minted for one daemon
  * process or one interactive `master merge` request (its request id, so a replay under
- * `GRAPHYARD_REQUEST_ID` is the same instance). The engine records the execution owner as
- * `principal#instance` (Engine.acquireMerge), so two executors under one credential never read
- * each other's execution as their own: the executor presents the same owner to
- * assertMergeCandidate and the same instance to every merge step.
+ * `GRAPHYARD_REQUEST_ID` is the same instance). The engine records who requested a merge as
+ * `principal#instance` (Engine.requestEnqueue); GitHub performs the merge itself.
  */
 export interface MergeExecutor { principal: string; instance: string }
-export const mergeExecutionOwner = (executor: MergeExecutor) => `${executor.principal}#${executor.instance}`;
 /**
  * The durable loop's executor instance, minted once per daemon process: an execution this loop
  * acquires is resumed by this loop alone, and an interactive `master merge` under the same
@@ -3286,22 +3285,14 @@ export const daemonExecutor = (principal: string): MergeExecutor => ({ principal
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
 /** True for an item held at the merge stage by an observed merge no execution authorized (GY-92). */
 export const mergedWithoutAuthorization = (work: Work) => work.stage !== 'done' && !!work.observation?.merged && work.violations.includes(unauthorizedMergeViolation);
-export function assertMergeCandidate(work: Work, observedAt?: string, executionOwner?: string) {
+export function assertMergeCandidate(work: Work, observedAt?: string) {
   const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
   const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
-  const activeMerge = !!observedAt && !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > Date.parse(observedAt);
-  // Only the executor instance that acquired an execution resumes it. Another instance — the
-  // daemon beside an interactive merge, or a second daemon — is not a candidate for this item
-  // while it stands, and stands down here, before any authority is acquired or cancelled.
-  const resumable = activeMerge && !!executionOwner && work.mergeExecution!.owner === executionOwner && !work.mergeExecution!.fenced
-    && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
-    && work.mergeExecution!.policyRevision === work.policyRevision;
-  if (activeMerge && !resumable) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization for this executor: merge execution ${work.mergeExecution!.id} is held by ${work.mergeExecution!.owner} until ${work.mergeExecution!.expiresAt}; this executor stands down without cancelling it`);
   // Unresolved review threads never refuse a merge by themselves; a branch that still requires
   // conversation resolution (protection drift) is a merge GitHub will refuse, so that is refused
-  // here, naming the threads, before any execution is issued.
-  const threads = activeMerge ? null : conversationProtectionRefusal(work);
-  if (threads) throw new Error(`${work.key} was refused before any merge execution was issued: ${threads}`);
+  // here, naming the threads, before GitHub is asked to merge.
+  const threads = conversationProtectionRefusal(work);
+  if (threads) throw new Error(`${work.key} was refused before GitHub was asked to merge it: ${threads}`);
   // An unresolved escalation, a standing blocking lead ruling, and trusted
   // evidence whose producer has since implemented the item each refuse delivery
   // in the broker as well as in the gate, so a stale snapshot can never present
@@ -3311,12 +3302,12 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
 }
 // Merge order is recomputed from current dependencies and conflicts on every
 // batch; registration order carries no authority.
-export function currentMergeCandidates(work: Work[], observedAt: string, executionOwner?: string) {
+export function currentMergeCandidates(work: Work[], observedAt: string) {
   const observed = Date.parse(observedAt);
   const order = mergeOrder(work, Number.isFinite(observed) ? observed : Date.now());
   const rank = (item: Work) => order.indexOf(item.key) + 1 || Number.MAX_SAFE_INTEGER;
   return work.filter(item => {
-    try { assertMergeCandidate(item, observedAt, executionOwner); return true; }
+    try { assertMergeCandidate(item, observedAt); return true; }
     catch { return false; }
   }).sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
@@ -3328,7 +3319,6 @@ export async function continueMergeBatch<T extends { key: string }, R>(items: T[
   }
   return results;
 }
-type MergeExecution = { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null };
 export function assertMergeProtection(protection: any, config: MasterConfig, work: Work) {
   const nativeReview = nativeReviewRequired(work.policy);
   const reviews = protection?.required_pull_request_reviews;
@@ -3426,109 +3416,6 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
   if (posted?.state !== 'APPROVED' || posted?.commit_id !== candidate.sha || String(posted?.user?.login ?? '').toLowerCase() !== identity.toLowerCase() || !Number.isSafeInteger(posted?.id)) throw new Error(`GitHub did not record the re-posted approval for ${work.key} as ${identity} on ${candidate.sha.slice(0, 12)}`);
   return { posted: true, reviewId: posted.id, reason: `re-posted the carried approval of ${carried.originalSha.slice(0, 12)} as ${identity} on tip ${candidate.sha.slice(0, 12)}` };
 }
-export function githubProviderDelay(verifiedTime: number, serverDelayMs: number, response: string, providerToDatabaseOffsetMin = 0) {
-  const header = /^Date:\s*(.+?)\r?$/gmi.exec(response);
-  const githubTime = header ? Date.parse(header[1]) : Number.NaN;
-  if (!Number.isFinite(verifiedTime) || !Number.isInteger(serverDelayMs) || serverDelayMs < 0 || !Number.isFinite(githubTime) || !Number.isFinite(providerToDatabaseOffsetMin)) throw new Error('GitHub did not provide a valid server time for merge ordering');
-  // GitHub's Date and merged_at values have whole-second precision. Waiting from
-  // the lower bound of GitHub's reported second remains conservative when the
-  // database clock is ahead of GitHub's clock.
-  // Delivery compares the lower bound of GitHub's whole-second merged_at interval,
-  // translated into the database clock domain by offset.min.  Therefore the provider
-  // clock must cross (database time - offset.min), not merely database time.
-  const verifiedBoundary = Math.ceil((verifiedTime - providerToDatabaseOffsetMin + 1) / 1000) * 1000;
-  return Math.max(serverDelayMs, verifiedBoundary - githubTime, 0);
-}
-/**
- * The engine's answer when a merge step was already taken on the execution: `already verified`
- * (merge-verify) and `already committed` (merge-commit), each a confirmed refusal that tells
- * the caller to retry with the original idempotency key. From any executor but the one holding
- * that key, it means the execution is being driven by someone else.
- */
-export function stepAlreadyPerformed(error: unknown) {
-  return !!(error as { confirmedRefusal?: boolean } | null)?.confirmedRefusal && /Merge execution was already (verified|committed)/.test(error instanceof Error ? error.message : String(error));
-}
-function recordedVerification(execution: MergeExecution) {
-  const verifiedAt = Date.parse(execution.verifiedAt ?? '');
-  if (!Number.isFinite(verifiedAt) || !execution.clockOffset) throw Object.assign(new Error('Resumed merge execution carries an incomplete verification record'), { confirmedRefusal: true });
-  return { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt!, providerDelayMs: providerDelayAfterVerification(verifiedAt, execution.clockOffset), clockOffset: execution.clockOffset };
-}
-/** The engine's execution bound from its observation (engine.ts acquireMerge). */
-const mergeExecutionWindowMs = 120_000;
-/** The provider reserve (~92 s) plus the verify, protection and commit round trips before it. */
-export const mergeWindowFloorMs = 108_000;
-/** An observation older than this is re-read before a merge attempt acquires authority. */
-export const mergeObservationFreshMs = 8_000;
-const mergeObservationWaitSteps = 20;
-const commitMarginMs = 5_000;
-const observationAgeMs = (item: Work, now: string) => Date.parse(now) - Date.parse(item.observation?.at ?? '');
-/** A gh failure that carries a GitHub 4xx status: GitHub answered and did not merge. */
-export function definiteProviderRefusal(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  const status = /\(HTTP (4\d\d)\)/.exec(message)?.[1];
-  if (!status) return null;
-  const line = message.split('\n').find(entry => entry.includes(`(HTTP ${status})`)) ?? '';
-  return `${line.replace(/^gh:\s*/, '').trim() || `HTTP ${status}`}`.slice(0, 500);
-}
-/**
- * The latest `Graphyard / merge` run on the head must have succeeded before the provider is asked.
- * Only runs published by the control plane's own GitHub App count: branch protection binds the
- * required check to that App, so a same-named run from another App or workflow neither satisfies
- * nor defers the merge.
- */
-export function assertMergeCheckPublished(payload: any, key: string, sha: string, appId: number) {
-  // Read with `--paginate --slurp`, the answer is the list of pages; GitHub filters check runs by
-  // name but not by App, so every page is read before the App's own runs are picked out.
-  const pages = Array.isArray(payload) ? payload : [payload];
-  if (!pages.length || pages.some(page => !Array.isArray(page?.check_runs))) throw new Error(`${key} merge deferred: GitHub's check runs on ${sha.slice(0, 12)} could not be read; retry`);
-  const runs = pages.flatMap(page => page.check_runs).filter((entry: any) => entry?.name === CHECK_NAME && entry?.app?.id === appId)
-    .sort((a: any, b: any) => Date.parse(b?.started_at ?? b?.completed_at ?? '') - Date.parse(a?.started_at ?? a?.completed_at ?? ''));
-  const latest = runs[0];
-  if (latest?.status !== 'completed' || latest?.conclusion !== 'success')
-    throw new Error(`${key} merge deferred: GitHub does not yet show ${CHECK_NAME} as passed on ${sha.slice(0, 12)} (${latest ? `${latest.status}${latest.conclusion ? `/${latest.conclusion}` : ''}` : 'not published'}); retry once it is`);
-}
-/** What mergeWork reports for a retained execution: pending until GitHub shows the merge (GY-195). */
-type RetainedMergeOutcome = { key: string; pr: number; sha: string; method: MasterConfig['mergeMethod']; result: string; pending?: boolean; merged?: boolean; mergeSha?: string; carriedApproval?: CarriedApprovalRepost };
-/**
- * A committed execution whose provider outcome is unknown is one GitHub read away from an answer
- * (GY-202). The pull request itself says whether it merged; waiting for the execution to expire
- * only delayed the answer by up to two minutes and stranded the candidate if nobody asked again.
- *
- * - merged: the control plane is asked to observe it now, which records the delivery from
- *   merge_commit_sha and closes the execution; no provider call is made.
- * - open at the execution's head: the provider did not merge, as far as this one read can tell.
- *   This executor cancels its own execution and fails the attempt; the guarded merge is retried
- *   on the next cycle, never in this one: a read served by a lagging replica can say open for a pull request the
- *   provider already merged, and a fresh execution acquired on it would be the one the merged
- *   observation is bound to. A cycle later the pull request answers for itself.
- * - anything else — an unreadable answer, a moved head, a closed pull request, or an execution
- *   another executor instance holds — stays pending, and the control plane is asked to observe.
- */
-async function settleRetainedMerge(config: MasterConfig, current: Work, authorization: ReturnType<typeof assertMergeCandidate>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: ChildRun, executionOwner?: string, refresh?: (work: Work) => Promise<unknown>): Promise<RetainedMergeOutcome> {
-  const execution = current.mergeExecution!;
-  const outcome = { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod };
-  // A refresh that fails is not a failed settlement — the observation job still runs on its own
-  // cadence — but what it failed with is part of what the pending outcome reports.
-  let refreshError: string | null = null;
-  const observe = async () => { try { await refresh?.(current); } catch (error) { refreshError = (error instanceof Error ? error.message : String(error)).slice(0, 200); } };
-  if (current.observation?.merged) return { ...outcome, merged: true, ...(current.observation.mergeSha ? { mergeSha: current.observation.mergeSha } : {}), result: 'GitHub shows the pull request merged under the retained execution; Graphyard delivers it from that observation without another provider call' };
-  const pending = (why: string) => ({ ...outcome, pending: true, result: `the provider outcome of merge execution ${execution.id} is unknown; ${why}; Graphyard retained it until ${execution.expiresAt} and asks GitHub again next cycle${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}` });
-  let pr: { merged?: unknown; merge_commit_sha?: unknown; state?: unknown; head?: { sha?: unknown } } | null = null;
-  try { pr = JSON.parse(await run('gh', ['api', `repos/${config.repository}/pulls/${authorization.pr}`])); }
-  catch (error) { return pending(`GitHub could not be read (${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'})`); }
-  if (pr?.merged === true && typeof pr.merge_commit_sha === 'string') {
-    await observe();
-    return { ...outcome, merged: true, mergeSha: pr.merge_commit_sha, result: `GitHub shows pull request #${authorization.pr} merged as ${pr.merge_commit_sha.slice(0, 12)} under the retained execution; the control plane observes it and records the delivery from that merge commit without another provider call` };
-  }
-  if (pr?.merged !== false || typeof pr.state !== 'string') return pending('GitHub did not say whether the pull request merged');
-  if (pr.state !== 'open' || pr.head?.sha !== execution.sha) { await observe(); return pending(`GitHub shows the pull request ${pr.state} at head ${String(pr.head?.sha ?? 'unknown').slice(0, 12)}, not open at ${execution.sha.slice(0, 12)}`); }
-  if (!executionOwner || execution.owner !== executionOwner) { await observe(); return pending(`GitHub shows the pull request open and unmerged, and the execution belongs to ${execution.owner}, which this executor never cancels`); }
-  await cancel(current, execution, `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)} after the provider call; the merge is retried next cycle`);
-  await observe();
-  // Thrown, not returned: nothing was merged by this attempt, so the executor's row and the loop's
-  // action record a failed attempt and retry it on their short backoff rather than settle it.
-  throw new Error(`${authorization.key}: GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)}, so merge execution ${execution.id} was cancelled; the guarded merge is retried next cycle, once a fresh reading can show a merge this one missed${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}`);
-}
 /**
  * What a guarded merge is bound to: the candidate head, its base, the policy revision, the published
  * queue tip and the all-gates authorization for exactly those. The whole-document revision is not
@@ -3548,198 +3435,59 @@ export function mergeBinding(work: Work) {
  */
 export function transientMergeRace(error: unknown) {
   const text = error instanceof Error ? error.message : String(error);
-  return /(changed (before|after) GitHub verification|changed while GitHub was re-read before merging|Task changed before merge execution); retry\b/.test(text);
+  return /(changed (before|after) GitHub verification|Task changed before (the merge was requested|merge execution)); retry\b/.test(text);
 }
-export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: ChildRun = defaultChildRun, executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>, refresh?: (work: Work) => Promise<unknown>) {
-  let before = await freshSnapshot(); let current = before.work.find(item => item.id === work.id);
+/** What the merge step reports: the request GitHub now holds, or the merge GitHub already performed. */
+export type MergeOutcome = { key: string; pr: number; sha: string; result: string; pending?: boolean; enqueued?: boolean; merged?: boolean; mergeSha?: string; carriedApproval?: CarriedApprovalRepost };
+/**
+ * The merge step (GY-258). GitHub executes merges; Graphyard only gates them. The step re-reads the
+ * item, confirms every gate still passes for exactly the candidate, and records the coordinator's
+ * request that GitHub merge it. The control plane's App then publishes `Graphyard / merge` on that
+ * head and enqueues the pull request in GitHub's merge queue (auto-merge where the base branch has
+ * none), and dequeues it if authorization is withdrawn. The outcome is pending until the merged
+ * observation, from which the delivery is recorded; no Graphyard code calls the merge endpoint.
+ */
+export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, enqueue: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ enqueue?: { sha: string; at: string } }>, run: ChildRun = defaultChildRun, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>): Promise<MergeOutcome> {
+  const before = await freshSnapshot(); const current = before.work.find(item => item.id === work.id);
   // The attempt is bound to what it merges, not to the revision it was read at (GY-192).
   if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed before GitHub verification; retry`);
-  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
-  // have called GitHub. That retained execution is a pending outcome, never a merge (GY-195), and
-  // it is settled by reading the pull request (GY-202): merged is delivered from the observation
-  // without another provider call; open at the same head cancels it, and the guarded merge runs
-  // again next cycle. A verified execution that never reached the commit resumes below; the
-  // provider was not attempted.
-  if (current.mergeExecution?.committingAt) return settleRetainedMerge(config, current, assertMergeCandidate(current, before.now, executionOwner), cancel, run, executionOwner, refresh);
-  // The engine bounds a merge execution by the GitHub observation it was granted on (two minutes
-  // from observation.at), and the provider call needs about 92 s of it. An attempt that starts
-  // on an observation already ~20 s old runs out of window after committing (GY-159, 2026-09-24),
-  // so a fresh reading is asked for first and the attempt continues on it.
-  if (refresh && !current.mergeExecution && observationAgeMs(current, before.now) > mergeObservationFreshMs) {
-    const seen = current.observation?.at;
-    await refresh(current);
-    for (let step = 0; step < mergeObservationWaitSteps; step++) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      before = await freshSnapshot(); current = before.work.find(item => item.id === work.id);
-      if (!current || current.observation?.at !== seen) break;
-    }
-    if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed while GitHub was re-read before merging; retry`);
-  }
-  const authorization = assertMergeCandidate(current, before.now, executionOwner);
+  if (current.observation?.merged && current.candidate) return { key: current.key, pr: current.candidate.pr, sha: current.candidate.sha, merged: true, ...(current.observation.mergeSha ? { mergeSha: current.observation.mergeSha } : {}),
+    result: 'GitHub shows the pull request merged; Graphyard records the delivery from that observation' };
+  const authorization = assertMergeCandidate(current, before.now);
   // The pull request answers for its own head, base branch name and state; the base tip is read
   // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
   const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
   await assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
   // A head without the base tip in its history is refused before any approval is re-posted: GitHub
-  // would dismiss it again as a merge-base change on this very attempt (GY-145).
+  // would dismiss it again as a merge-base change (GY-145).
   const unancestored = missingBaseAncestry(current);
   if (unancestored) throw new Error(`${work.key} merge refused: ${missingAncestryReason(unancestored)}`);
-  // An approval the control plane carried onto its authored tip is re-posted through the
-  // reviewer App before any authority is acquired, so a native review requirement that GitHub
-  // re-armed on the tip publication is met by the same identity that gave the approval.
+  // An approval the control plane carried onto its authored tip is re-posted through the reviewer
+  // App first, so a native review requirement GitHub re-armed on the tip does not hold the queue.
   const carried = carriedApproval(current);
   const reposted = carried && repost ? await repost(current, carried) : null;
-  const authorityBudgetStartedAt = performance.now();
   const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
-  // What GitHub was just verified against must still be what is merged; an unrelated write in
-  // between (an observation refresh, a dispatch record) is not a reason to refuse.
   if (!latest || mergeBinding(latest) !== mergeBinding(current)) throw new Error(`${work.key} changed after GitHub verification; retry`);
   let latestAuthorization: ReturnType<typeof assertMergeCandidate>;
-  try { latestAuthorization = assertMergeCandidate(latest, after.now, executionOwner); }
+  try { latestAuthorization = assertMergeCandidate(latest, after.now); }
   catch (error) { throw new Error(`${work.key} changed after GitHub verification and no longer qualifies: ${error instanceof Error ? error.message : String(error)}`); }
-  const resumed = latest.mergeExecution && Date.parse(latest.mergeExecution.expiresAt) > Date.parse(after.now) && latest.mergeExecution.owner === executionOwner;
-  // No execution is acquired that cannot cover the provider call: it would only expire, or be
-  // retained as an unknown outcome, and block the next attempt until it lapses.
-  if (!resumed) {
-    const window = Math.min(Date.parse(latest.observation?.at ?? '') + mergeExecutionWindowMs, Date.parse(after.now) + mergeExecutionWindowMs) - Date.parse(after.now);
-    if (!(window >= mergeWindowFloorMs)) throw new Error(`${work.key} merge deferred: the GitHub observation leaves ${Number.isFinite(window) ? Math.round(window / 1000) : 0} s of merge window, under the ${mergeWindowFloorMs / 1000} s a provider call needs; retry on a fresh observation`);
-  }
-  const granted = resumed ? { execution: latest.mergeExecution } : await acquire(latest, latestAuthorization);
-  if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || !resumed && !(granted.execution.authorizationRevision >= latestAuthorization.revision)) throw new Error(`${work.key} received an invalid merge execution authority`);
-  const remainingAtSnapshot = Date.parse(granted.execution.expiresAt) - Date.parse(after.now);
-  let providerStarted = false; let cancelled = false;
-  let verificationStarted = false; let verificationCompleted = false;
-  try {
-    const lockedPr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
-    if (lockedPr.headRefOid !== authorization.sha || lockedPr.baseRefName !== config.baseBranch || lockedPr.state !== 'OPEN' || lockedPr.isDraft) throw new Error(`${work.key} changed on GitHub after merge authority was acquired`);
-    await assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
-    const remaining = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
-    if (!Number.isFinite(remaining) || remaining <= 90_000) throw new Error(`${work.key} merge execution does not remain valid for the provider timeout; refresh gate inputs and retry`);
-    const protection = JSON.parse(await run('gh', ['api', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`]));
-    assertMergeProtection(protection, config, latest);
-    // A broker that stopped between merge-verify and merge-commit resumes here holding a verified
-    // execution. The verification is a durable fact of that execution — the record carries its
-    // verifiedAt and bounded clock offset — so the resumed attempt rebuilds it rather than asking
-    // the engine to verify again, which it refuses, and then runs the same clock wait, pre-commit
-    // revalidation, transactional commit and pre-provider checks as a first attempt.
-    verificationStarted = true; const verified = granted.execution.verifiedAt ? recordedVerification(granted.execution) : await verify(latest, granted.execution); verificationCompleted = true;
-    const verifiedTime = Date.parse(verified.verifiedAt);
-    if (verified.executionId !== granted.execution.id || verified.sha !== authorization.sha || !Number.isFinite(verifiedTime) || !Number.isInteger(verified.providerDelayMs) || verified.providerDelayMs < 0 || verified.providerDelayMs > 21_000
-      || !verified.clockOffset || !Number.isFinite(verified.clockOffset.min) || !Number.isFinite(verified.clockOffset.max) || verified.clockOffset.min > verified.clockOffset.max || verified.clockOffset.max - verified.clockOffset.min > 20_000) throw new Error(`${work.key} received an invalid final GitHub gate verification`);
-    // Delivery attribution accepts a merge only when GitHub's whole-second merged_at interval,
-    // translated into the database clock by the verified offset bound, ends before the execution
-    // expires. The remaining authority must therefore cover the provider timeout plus that
-    // timestamp interval and the accepted offset width, or a slow but successful provider merge
-    // just inside the deadline would be permanently classified as unauthorized.
-    const providerReserve = 90_000 + 1000 + (verified.clockOffset.max - verified.clockOffset.min);
-    const githubClock = await run('gh', ['api', '--include', 'rate_limit']);
-    const delay = githubProviderDelay(verifiedTime, verified.providerDelayMs, githubClock);
-    if (delay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - delay <= providerReserve) throw new Error('Clock uncertainty leaves insufficient merge authority; refresh and retry');
-    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-    const remainingAfterProtection = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
-    // The margin covers the commit round trip and the post-commit clock wait, so a window that is
-    // already too short is refused here, before commit, where the execution is released.
-    if (!Number.isFinite(remainingAfterProtection) || remainingAfterProtection <= providerReserve + commitMarginMs) throw new Error(`${work.key} merge execution no longer has enough time for the provider call after verifying branch protection; retry`);
-    // Verification and the provider call are separated by the clock-ordering
-    // delay, and a lead escalation or blocking ruling can land inside it. The
-    // last thing Graphyard reads before handing the merge to GitHub is the
-    // record itself: the execution must still stand unfenced, and every gate
-    // must still pass. Pinned inputs are not re-aged here, so this adds a
-    // refusal for concerns raised mid-flight without adding a freshness race.
-    const settled = await freshSnapshot(); const final = settled.work.find(item => item.id === work.id);
-    const execution = final?.mergeExecution;
-    if (!final || !execution || execution.id !== granted.execution.id || execution.fenced || Date.parse(execution.expiresAt) <= Date.parse(settled.now))
-      throw new Error(`${work.key} merge execution was fenced, cancelled, or expired after final verification: ${execution?.fenced?.reason ?? 'execution is no longer current'}`);
-    const refusals = [...standingEscalations(final).map(entry => `Unresolved ${entry.trigger} escalation: ${entry.reason}`),
-      ...(final.leadHold ? [`Slice lead ${final.leadHold.leadId} ruled ${final.leadHold.action} under rule ${final.leadHold.ruleId}`] : []),
-      ...final.gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons), ...final.violations];
-    if (refusals.length || !final.mergeAuthorization || final.mergeAuthorization.sha !== authorization.sha
-      || final.mergeAuthorization.baseSha !== authorization.baseSha || final.mergeAuthorization.policyRevision !== authorization.policyRevision
-      || final.candidate?.sha !== authorization.sha || final.candidate.baseSha !== authorization.baseSha)
-      throw new Error(`${work.key} no longer passes every gate after final verification: ${refusals.join('; ') || 'merge authorization was invalidated'}`);
-    // GitHub refuses the merge while the published `Graphyard / merge` check lags the gates it
-    // reports (HTTP 405, GY-159 2026-09-24). Read it before committing, while a refusal still
-    // releases the execution.
-    assertMergeCheckPublished(JSON.parse(await run('gh', ['api', `repos/${config.repository}/commits/${authorization.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=all&per_page=100`, '--paginate', '--slurp'])), work.key, authorization.sha, config.githubAppId);
-    if (!commit) throw new Error(`${work.key} merge broker commit callback is unavailable`);
-    const committed = await commit(latest, granted.execution);
-    const committingTime = Date.parse(committed.committingAt);
-    if (committed.executionId !== granted.execution.id || committed.sha !== authorization.sha || !Number.isFinite(committingTime)) throw new Error(`${work.key} received an invalid provider commit authority`);
-    // From this transactional boundary onward revocation refuses: the broker has won
-    // serialization and must treat any provider error as an unknown merge outcome.
-    providerStarted = true;
-    // GitHub reports merged_at only to whole-second precision. Cross a provider-clock
-    // boundary after the transactional commit so a fast successful merge cannot appear
-    // to predate the authority that serialized it against revocation.
-    const commitClock = await run('gh', ['api', '--include', 'rate_limit']);
-    const commitDelay = githubProviderDelay(committingTime, 0, commitClock, verified.clockOffset.min);
-    if (commitDelay > 21_000 || remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt) - commitDelay <= providerReserve) throw new Error('Clock uncertainty leaves insufficient committed merge authority; wait for observation or expiry');
-    if (commitDelay) await new Promise(resolve => setTimeout(resolve, commitDelay));
-    // A suspended broker can resume after its execution expired: reconciliation then
-    // clears the execution, the revocation window reopens, and this stale SHA could
-    // merge before the asynchronously published GitHub check changes. Revalidate the
-    // committed authority and its remaining lifetime immediately before the provider
-    // mutation; the mutation is refused on any missing, fenced or expired authority. The base
-    // branch is re-read from its ref for the same reason: a base that advanced outside the
-    // queue during the wait would land a different tree than the one the tip was tested on.
-    await assertQueuedLanding(latest, authorization, config.baseBranch, config.repository, run);
-    const preProvider = await freshSnapshot();
-    const finalExecution = preProvider.work.find(item => item.id === work.id)?.mergeExecution;
-    const remainingBeforeProvider = remainingAtSnapshot - (performance.now() - authorityBudgetStartedAt);
-    if (!finalExecution || finalExecution.id !== granted.execution.id || !finalExecution.committingAt || finalExecution.fenced
-      || finalExecution.sha !== authorization.sha || Date.parse(finalExecution.expiresAt) <= Date.parse(preProvider.now)
-      || !Number.isFinite(remainingBeforeProvider) || remainingBeforeProvider <= providerReserve)
-      throw new Error(`${work.key} merge execution expired, was fenced or was superseded during the provider clock wait; the provider merge is refused${finalExecution?.fenced ? `: ${finalExecution.fenced.reason}` : ''}`);
-    let answer: string;
-    try { answer = await run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/pulls/${authorization.pr}/merge`, '-f', `sha=${authorization.sha}`, '-f', `merge_method=${config.mergeMethod}`]); }
-    catch (error) {
-      // A 4xx answer is GitHub refusing the merge, not an unknown outcome: the execution is
-      // released so the next attempt is not held until it lapses.
-      const refusal = definiteProviderRefusal(error);
-      if (refusal) { await cancel(latest, granted.execution, refusal); cancelled = true; throw new Error(`GitHub refused the merge of ${work.key}: ${refusal}`); }
-      throw error;
-    }
-    const provider = JSON.parse(answer);
-    if (provider.merged !== true || typeof provider.sha !== 'string') {
-      await cancel(latest, granted.execution, provider.message || 'GitHub confirmed that it did not merge the candidate'); cancelled = true;
-      throw new Error(provider.message || 'GitHub did not merge the candidate');
-    }
-  }
-  catch (error) {
-    // A confirmed refusal that says the step was already performed on this execution means
-    // another executor — or an earlier attempt of this one, read from a stale snapshot — is
-    // ahead of this attempt. The execution is theirs to finish: this executor stands down and
-    // leaves it intact for its owner or for observation to reconcile. It never cancels an
-    // execution it did not just acquire, whatever the refusal (GY-92).
-    if (stepAlreadyPerformed(error)) throw new Error(`${work.key}: ${error instanceof Error ? error.message : 'merge step refused'}; another executor already performed that step on merge execution ${granted.execution.id}, so this executor stands down and leaves the execution intact`);
-    if (!providerStarted && verificationStarted && !verificationCompleted && !(error as any)?.confirmedRefusal) throw new Error(`${error instanceof Error ? error.message : 'Final GitHub verification failed'}; the verification outcome is unknown, so Graphyard retained execution ${granted.execution.id} for an idempotent retry`);
-    if (!providerStarted) try { await cancel(latest, granted.execution, error instanceof Error ? error.message : 'GitHub merge failed before provider invocation'); }
-    catch { throw new Error(`${work.key} GitHub merge failed before provider invocation and Graphyard could not cancel execution ${granted.execution.id}`); }
-    if (providerStarted && !cancelled) throw new Error(`${error instanceof Error ? error.message : 'GitHub merge call failed'}; the merge outcome is unknown, so Graphyard retained execution ${granted.execution.id} until observation or expiry`);
-    throw error;
-  }
-  return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'merge requested; Graphyard will mark Done only after observing the merge', ...(reposted ? { carriedApproval: reposted } : {}) };
+  const requested = await enqueue(latest, latestAuthorization);
+  if (requested.enqueue?.sha !== authorization.sha) throw new Error(`${work.key} merge request was not recorded for ${authorization.sha.slice(0, 12)}`);
+  return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, pending: true, enqueued: true,
+    result: `merge requested for ${authorization.sha.slice(0, 12)}: the control plane publishes ${CHECK_NAME} on it and enqueues pull request #${authorization.pr} in GitHub's merge queue; GitHub performs the merge and Graphyard marks Done only after observing it`,
+    ...(reposted ? { carriedApproval: reposted } : {}) };
 }
 
 /**
- * One guarded merge attempt, with the idempotency keys that make an interrupted attempt safe to
- * repeat. The interactive command and the durable loop share it so neither can drift into a
- * different merge path.
+ * One merge step, with the idempotency key that makes an interrupted request safe to repeat. The
+ * interactive command and the durable loop share it so neither can drift into a different path.
  */
 export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ work: Work[]; now: string }>, mutation: (path: string, data: unknown, requestId?: string) => Promise<any>, executor: MergeExecutor, outerRequest: string, run?: ChildRun) {
-  const stepKey = (item: Work, step: string, executionId = '') => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}\0${executionId}`).digest('hex');
-  // Every step names the executor instance; the engine binds it to the principal and refuses a
-  // step — cancel above all — from any other instance, so the owner the broker resumes on is
-  // exactly the one the engine recorded.
-  const instance = executor.instance;
+  const stepKey = (item: Work, step: string) => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}`).digest('hex');
   return (item: Work) => mergeWork(config, item, snapshot,
-    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, ...(latest.queue?.speculation?.tip ? { queueTip: latest.queue.speculation.tip } : {}), executor: instance }, stepKey(latest, 'acquire')),
-    (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason, executor: instance }, stepKey(latest, 'cancel', execution.id)),
-    (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id, executor: instance }, stepKey(latest, 'verify', execution.id)), run, mergeExecutionOwner(executor),
-    (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id, executor: instance }, stepKey(latest, 'commit', execution.id)),
-    (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? defaultChildRun }),
-    latest => mutation(`work/${latest.id}/resync`, {}, stepKey(latest, `refresh:${latest.observation?.at ?? ''}`)));
+    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { enqueue: true, expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, ...(latest.queue?.speculation?.tip ? { queueTip: latest.queue.speculation.tip } : {}), executor: executor.instance }, stepKey(latest, 'enqueue')),
+    run, (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? defaultChildRun }));
 }
 
 // ---- Autonomy ----------------------------------------------------------------------------------

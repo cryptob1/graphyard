@@ -1,11 +1,11 @@
 <!-- page: Operate Graphyard | 2 | the App, protection, the merge queue, CI proofs. -->
 # GitHub enforcement
 
-The installer-created GitHub App observes the repository and publishes **`Graphyard / merge`** on the exact PR head.
+The installer-created App observes the repository, publishing **`Graphyard / merge`** on the exact PR head.
 
 ## App permissions
 
-Every permission is declared once in `src/github-permissions.ts`. The control-plane App holds:
+The control-plane App holds (declared in `src/github-permissions.ts`):
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ Every permission is declared once in `src/github-permissions.ts`. The control-pl
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 
-A reviewer App is never granted Contents: write, Checks, or Administration, and worker identities are not Apps at all. A reviewer App holds:
+A reviewer App is never granted Contents: write, Checks, or Administration, and worker identities are not Apps at all. It holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration, and 
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-Granted permissions are compared with the declaration every five minutes and after any 403; a shortfall appears under `appPermissions` and the jobs needing it are **held, not retried** (`integration-held`). The master fixes them with `master browser app-permissions` and `master browser installation-accept`.
+Grants are checked every five minutes and after any 403; a shortfall shows under `appPermissions` and its jobs are **held, not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
 ## The reviewer App
 
@@ -33,29 +33,29 @@ Review uses a separate reviewer App, created by `graphyard master reviewer setup
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` bound to this App, leave "require up to date" (`strict`) **off**, enforce for administrators, forbid force pushes and deletion, and remove bypass rights from worker identities. `master browser protection` reconciles it.
+On the base branch require `Graphyard / merge` bound to this App, leave "require up to date" (`strict`) **off**, enforce for administrators, forbid force pushes and deletion, and remove bypass rights from worker identities. `master browser protection` reconciles it; `master protection --apply` also adds a merge queue requiring it (CI must run on `merge_group`).
 
 The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval of the current head, trusted evidence with executed > 0 and skipped 0, a mergeable non-draft PR, and the queue head.
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over until revalidated.
+A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over until revalidated. Graphyard never merges: once requested, the App passes the check for an authorized head and its merge group and enqueues it (auto-merge without a queue); withdrawal fails and dequeues it.
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. When the base moves, reconciliation merges it into the branch; on that Graphyard-authored merge the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. When the base moves, reconciliation merges it into the branch; on that merge the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
 ### Proofs in CI
 
-A protected workflow runs on every push to a `graphyard/*` PR branch via `pull_request_target`, so workflow and secrets come from the default branch: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips get the same run; dependencies are cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow runs on every push to a `graphyard/*` PR branch, taking workflow and secrets from the default branch: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips get the same run; dependencies are cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
-With `"deploySmoke": true` in the policy, the master dispatches the smoke workflow (`master init --smoke-workflow deploy-smoke.yml`) once the release serves the merge; `scripts/deploy-smoke.mjs` publishes `e2e:deploy-smoke`, and a failure marks the item [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+With `"deploySmoke": true`, the master dispatches the smoke workflow (`master init --smoke-workflow deploy-smoke.yml`) once the release serves the merge; `scripts/deploy-smoke.mjs` publishes `e2e:deploy-smoke`, and a failure marks the item [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Enforcement boundary
 
-No transaction spans GitHub and Postgres: a single-use merge execution and final re-observation narrow the gap, and [revocation](protocol/evidence.md#revocation) cancels an execution until its commit point. An unknown merge outcome is settled next tick from the pull request. Restrict other merge identities; a worker can still push its own branch after losing its lease.
+No transaction spans GitHub and Postgres: GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker can still push its own branch after losing its lease.
 
 ## Identity-bound agent review
 

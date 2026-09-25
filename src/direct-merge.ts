@@ -93,7 +93,7 @@ export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows:
     if (!window) continue;
     const record = directMergeAuthorization(window, { sha: observation.mergeSha, at: observation.mergedAt }, work.revision, observation.mergedAt, work.gates.filter(gate => !gate.passed).map(gate => `gate ${gate.name} had not passed: ${gate.reasons.join('; ')}`));
     work.violations = work.violations.filter(entry => entry !== unauthorizedMergeViolation && !entry.startsWith(reconciliationRefusalPrefix));
-    work.stage = 'done'; work.stageEnteredAt = now.toISOString(); work.mergeExecution = null;
+    work.stage = 'done'; work.stageEnteredAt = now.toISOString();
     work.delivery = Object.assign({ mergedAt: observation.mergedAt, mergeSha: observation.mergeSha, authorizationRevision: work.revision }, { operatorAuthorization: record });
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, window.setBy, 'merge.operator-authorized',
       JSON.stringify({ details: { ...record, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision: work.revision, evidenceAsOf: null, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);

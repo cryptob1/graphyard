@@ -19,7 +19,7 @@ test('unit:merge-version-skew — a server behind the CLI is reported as "deploy
   // Matching protocols never refuse, whatever the commits are: routine deploys move the commit without changing the exchange.
   assert.equal(mergeProtocolSkew({ build: { commit: SERVER, protocol: MERGE_PROTOCOL } }, { commit: CLI }), null);
   assert.equal(mergeProtocolSkew({ build: { commit: null, protocol: MERGE_PROTOCOL } }, { commit: null }), null);
-  assert.equal(MERGE_PROTOCOL, 2, 'the merge-verify clock offset and merge-commit step are protocol 2');
+  assert.equal(MERGE_PROTOCOL, 3, 'GitHub executes merges and the merge step requests one with enqueue: protocol 3');
 });
 
 test('unit:merge-version-skew — the build identity comes from the deployment environment and the CLI commit from its checkout', () => {
