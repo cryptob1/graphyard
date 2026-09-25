@@ -13,7 +13,8 @@ import { createSchema, type Evidence, type Observation, type Principal, type Wor
 import { automatableOutcomes, automatableProof, dispatchIneligibility, dispatchRequestsFor, reconcileAutoDispatch, reviewNeed, type DispatchRequest } from '../src/model/dispatch.js';
 import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, observedExhaustions, paneLastLine, producerProfileSchema, readEnvironmentLog, saveProducerProfile, SessionStartError, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
+import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, saveReviewLedger, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { assertProducerCandidate, independentProducerProfiles, launchProducer, producerIdleGraceMs, producerPrompt, proofOutcome, readProducerLedger, reconcileProducers, summarizeProducers, type ProducerRecord } from '../src/producer.js';
 import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, watchInstantExit, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { exhaustionReportSchema } from '../src/model/capacity.js';
@@ -977,5 +978,174 @@ test('a launch takes a turn only on the agent name of the profile it is launchin
     assert.ok(reviewedAt >= 0 && reviewedAt < slow, `the reviewer never waits on the producer launch holding its failover profile's name (${slow}ms): launched at ${reviewedAt}ms`);
     assert.deepEqual(tick.refused, [], 'nothing is refused');
     assert.ok(log.some(entry => entry.startsWith('producer:') && entry.endsWith(':producer-a')), `the producer launches on producer-a: ${JSON.stringify(log)}`);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+// ---- GY-193: every request ends in a verdict or an automatic next attempt ------------------------
+// unit:settled-unanswered-retried, unit:reviewer-reminded-before-retry, unit:non-exercising-evidence-reworked,
+// unit:failed-proof-reworked-before-review.
+
+/** Two reviewer profiles, the first the configured one, so a relaunch has another profile to prefer. */
+const twoReviewers = (token: string) => {
+  const config = masterConfig(token, { run: { reviewerProfile: 'claude-reviewer' } });
+  config.reviewers.push({ ...config.reviewers[0], name: 'codex-reviewer', agentName: 'review-codex-1', kind: 'codex' });
+  return config;
+};
+
+test('unit:settled-unanswered-retried — a reviewer session that settled without a verdict while its request stands is attempted again on another profile, up to the dispatch failure limit, then raised once as attention and never launched again', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-settled-retry-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const config = twoReviewers(token), log: string[] = [], item = requestedWork(), review = item.autoDispatch!.review!;
+    let clockMs = clock;
+    const records: any[] = [];
+    const effects = stubEffects(() => [item], log, {
+      reconcileReviews: async () => ({ reviews: records }),
+      launchReview: async (target, request, profile) => { log.push(`review:${target.key}:${profile.name}`); records.push({ requestId: request.id, state: 'pending', requestedAt: new Date(clockMs).toISOString(), profile: profile.name, attempt: records.filter(record => record.requestId === request.id).length + 1 }); },
+    });
+    const cursor = emptyDispatchCursor(config);
+    const reviews = () => log.filter(entry => entry.startsWith('review:'));
+    await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.deepEqual(reviews(), ['review:GY-64:claude-reviewer'], 'the first attempt runs on the configured profile');
+    // The session ends — it completed, vanished or exited — and nothing answered the request, which still stands for the same head.
+    Object.assign(records[0], { state: 'completed', closedAt: new Date(clockMs + 1000).toISOString() });
+    clockMs += 10_000;
+    const second = await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.deepEqual(reviews(), ['review:GY-64:claude-reviewer', 'review:GY-64:codex-reviewer'], `the next cycle launches a fresh attempt on another profile: ${JSON.stringify(second.waiting)}`);
+    assert.equal(second.launched.find(launch => launch.kind === 'review')?.profile, 'codex-reviewer');
+    // Every attempt up to the limit settles unanswered in turn; each is followed by the next.
+    while (records.length < dispatchFailureLimit) {
+      Object.assign(records.at(-1), { state: 'completed', closedAt: new Date(clockMs + 1000).toISOString(), resolution: `attempt ${records.length} ended without a verdict` });
+      clockMs += 10_000;
+      await runDispatchTick(config, cursor, effects, () => clockMs);
+    }
+    assert.equal(reviews().length, dispatchFailureLimit, 'one launch per settled attempt, up to the limit');
+    assert.deepEqual(reviews().slice(0, 4), ['review:GY-64:claude-reviewer', 'review:GY-64:codex-reviewer', 'review:GY-64:claude-reviewer', 'review:GY-64:codex-reviewer'], 'each relaunch leaves the profile that just settled for last');
+    // The last attempt settles too: no launch follows, and one attention item names the request and every attempt.
+    Object.assign(records.at(-1), { state: 'completed', closedAt: new Date(clockMs + 1000).toISOString(), resolution: 'the last attempt ended without a verdict' });
+    clockMs += 10_000;
+    const stopped = await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.equal(reviews().length, dispatchFailureLimit, 'nothing is launched past the limit');
+    assert.match(stopped.waiting.find(entry => entry.kind === 'review')!.reason, /no further automatic attempt, raised as attention/);
+    assert.equal(cursor.abandoned[review.id].attempts.length, dispatchFailureLimit);
+    const attention = dispatchFailureAttention(dispatchSummary(cursor, clockMs, 10_000));
+    assert.equal(attention.length, 1, 'one attention item for the request');
+    assert.equal(attention[0].subject, 'GY-64');
+    assert.ok(attention[0].text.includes(review.id), 'it names the request');
+    assert.match(attention[0].text, /attempt 1 on claude-reviewer: completed; attempt 2 on codex-reviewer: completed/);
+    assert.match(attention[0].text, /the last attempt ended without a verdict/);
+    // Later cycles neither launch nor raise it again; the request resolving clears it.
+    clockMs += 60_000;
+    await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.equal(reviews().length, dispatchFailureLimit);
+    assert.equal(dispatchFailureAttention(dispatchSummary(cursor, clockMs, 10_000)).length, 1);
+    await runDispatchTick(config, cursor, { ...effects, snapshot: async () => ({ work: [work()], now: new Date(clockMs).toISOString() }) }, () => clockMs);
+    assert.deepEqual(cursor.abandoned, {}, 'a request the control plane resolved is no longer attention');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:reviewer-reminded-before-retry — a reviewer that judged but did not post is reminded once, and relaunched only when no verdict follows within two minutes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'graphyard-reminded-retry-'));
+  try {
+    await mkdir(join(root, '.graphyard'), { recursive: true });
+    const token = join(root, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    // A second reviewer profile has room while the reminded session's pane is still listed.
+    const config = twoReviewers(token), item = requestedWork(), review = item.autoDispatch!.review!;
+    let clockMs = clock;
+    // The session took up its request (acknowledged) and is now idle without a verdict.
+    await saveReviewLedger(root, { version: 1, reviews: [{ id: randomUUID(), key: 'GY-64', pr: 64, sha: H, baseSha: B, policyRevision: 1, profile: 'claude-reviewer', agentName: 'review-claude-1', pane: null,
+      sessionDirectory: join(root, 'session'), requestedAt: iso(-600_000), tokenExpiresAt: iso(3_600_000), requestId: review.id, attempt: 1, state: 'pending', acknowledgedAt: iso(-500_000) }] });
+    const reminders: string[] = [], launches: number[] = [];
+    const effects = stubEffects(() => [item], [], {
+      agents: () => [{ name: 'review-claude-1', pane_id: 'pane-1', agent_status: 'idle' }],
+      reconcileReviews: async (target, agents) => reconcileReviews(root, config, { run: () => '', work: target, agents, observe: () => null, now: () => new Date(clockMs), retry: (_record, message) => { reminders.push(message); } }),
+      launchReview: async (_target, _request, profile) => { launches.push(clockMs); profiles.push(profile.name); },
+    });
+    const profiles: string[] = [];
+    const cursor = emptyDispatchCursor(config);
+    await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.equal(reminders.length, 1, 'the post-your-verdict reminder goes to the still-open session');
+    assert.match(reminders[0], /You stopped before posting the verdict for GY-64/);
+    assert.deepEqual(launches, [], 'nothing is relaunched while the reminder has its time');
+    for (const offset of [60_000, 119_000]) {
+      clockMs = clock + offset;
+      await runDispatchTick(config, cursor, effects, () => clockMs);
+      assert.equal(reminders.length, 1, `the reminder is sent once (at +${offset / 1000}s)`);
+      assert.deepEqual(launches, [], `no relaunch inside the two-minute bound (at +${offset / 1000}s)`);
+    }
+    clockMs = clock + 121_000;
+    await runDispatchTick(config, cursor, effects, () => clockMs);
+    assert.deepEqual(launches, [clockMs], 'no verdict followed within the bound, so the request is relaunched at once');
+    assert.deepEqual(profiles, ['codex-reviewer'], 'on the profile whose session did not just stop');
+    assert.equal(reminders.length, 1);
+    const settled = (await readReviewLedger(root)).reviews[0];
+    assert.equal(settled.state, 'failed');
+    assert.match(settled.resolution!, /without posting a verdict/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+/** The loop's routine-decision effects, recording every request and approver launch. */
+function decisionLoop(items: () => Work[], decided: { action: string; reason: string }[], approvers: string[], now: string) {
+  return {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: items(), now, jobs: [] }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: now, reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    decide: async (_work: Work, action: string, reason: string) => { decided.push({ action, reason }); return { id: '5d8a8b9e-0000-4000-8000-000000000193' }; },
+    decisions: async () => ({ decisions: decided.map(entry => ({ id: '5d8a8b9e-0000-4000-8000-000000000193', action: entry.action, state: 'requested', input: {}, approvedBy: null })) }),
+    approver: async (_work: Work, decision: string) => { approvers.push(decision); return { agentName: 'graphyard-approver-gy-64', pane: 'pane-approver' }; },
+    persist: async () => {},
+  } as unknown as DaemonEffects;
+}
+const loopConfig = (token: string) => masterConfigSchema.parse({ ...masterConfig(token), autoMerge: true, workers: [] });
+
+test('unit:non-exercising-evidence-reworked — evidence recorded as not exercising its criterion is sent back to the worker: a rework decision quoting the producer finding is requested within one cycle, and no producer is launched for that head again', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-unexercised-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const finding = 'unit:auto-dispatch-binding still passed with the change removed: the mutation that drops the head binding from the request id left every assertion green';
+    const unexercised = evidence('unit:auto-dispatch-binding', { id: 'ev-unexercised', trusted: false, unexercised: finding });
+    const item = requestedWork({ evidence: [unexercised] });
+    const unit = item.autoDispatch!.producers.find(request => request.group === 'unit')!;
+    assert.ok(unit, 'the untrusted pass leaves the unit request standing');
+    // The dispatcher: the unit group is never launched again for this head, whatever its sessions did.
+    const log: string[] = [], config = masterConfig(token);
+    const effects = stubEffects(() => [item], log);
+    effects.producers.push({ requestId: unit.id, state: 'completed', requestedAt: iso(-60_000), closedAt: iso(-1_000), resolution: `evidence does not exercise its criterion: ${finding}`, profile: 'producer-a' });
+    const cursor = emptyDispatchCursor(config);
+    for (const offset of [0, 60_000, 600_000]) {
+      const tick = await runDispatchTick(config, cursor, effects, () => clock + offset);
+      assert.ok(!log.some(entry => entry.includes(':unit:')), `no unit producer is launched (+${offset / 1000}s): ${JSON.stringify(log)}`);
+      assert.match(tick.waiting.find(entry => entry.requestId === unit.id)!.reason, /does not exercise its criterion .*rework decision/);
+    }
+    assert.ok(log.some(entry => entry.includes(':integration:')), 'the other group is launched as usual');
+    // The loop: the rework decision is requested on the first cycle, its reason quoting the finding.
+    const decided: { action: string; reason: string }[] = [], approvers: string[] = [];
+    const submitted = work({ evidence: [unexercised], observation: observation({ sha: H, baseSha: B }, { at: iso(0) }) });
+    await runCycle(loopConfig(token), emptyDaemonState(loopConfig(token)), decisionLoop(() => [submitted], decided, approvers, iso(1_000)), () => clock + 1_000);
+    assert.equal(decided.length, 1, JSON.stringify(decided));
+    assert.equal(decided[0].action, 'rework');
+    assert.ok(decided[0].reason.includes(finding), `the reason quotes the producer finding: ${decided[0].reason}`);
+    assert.match(decided[0].reason, /does not exercise its criterion/);
+    assert.equal(approvers.length, 1, 'an independent approver is launched for it');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:failed-proof-reworked-before-review — a failed trusted proof on a head with unresolved review threads is sent back to its worker on the next cycle, the reason naming the proof and the threads', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-failed-proof-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const threads = { required: true, unresolved: [{ id: 'PRRT_open01', author: 'chatgpt-codex-connector[bot]', path: 'src/claims.ts', line: 42, outdated: false }] };
+    const failed = evidence('unit:auto-dispatch-binding', { id: 'ev-failed', result: 'fail' });
+    const item = work({ evidence: [failed], observation: observation({ sha: H, baseSha: B }, { at: iso(0), conversations: threads } as Partial<Observation>) });
+    // No reviewer has judged this head, so the thread rule alone would wait for a review that a failed head never gets.
+    const decided: { action: string; reason: string }[] = [], approvers: string[] = [];
+    await runCycle(loopConfig(token), emptyDaemonState(loopConfig(token)), decisionLoop(() => [item], decided, approvers, iso(1_000)), () => clock + 1_000);
+    assert.equal(decided.length, 1, JSON.stringify(decided));
+    assert.equal(decided[0].action, 'rework');
+    assert.match(decided[0].reason, /unit:auto-dispatch-binding failed on a1ffffffffff/);
+    assert.match(decided[0].reason, /1 review thread is also unresolved .*src\/claims\.ts:42/);
+    assert.equal(approvers.length, 1);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
