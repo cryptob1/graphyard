@@ -1258,7 +1258,7 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
       add('scope', item, boundDetail(`${item.key}: ${request.requestedBy} is waiting for a decision on ${namePaths(request.paths, 300)}`, 500));
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed') add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
     if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
-    if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} is waiting for the control plane to bring its candidate onto the moved base`);
+    if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} conflicts with the moved base and is waiting for the control plane to try bringing its candidate onto it`);
     // The same heads step 5 shepherds: one a verdict stands against is going back to a worker,
     // so nothing asks for its proofs and nothing is waiting on them.
     if (item.submission && item.candidate && !item.reworkRequested && !standingVerdict(item) && config.run.proofWorkflow) {
@@ -2680,11 +2680,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     }
   }) === 'stop') break;
 
-  // 4b. A base branch that moved under an in-flight candidate. Nobody is asked to do anything
-  //     about it: the control plane merges the new base into the candidate's own branch and
-  //     decides what the review and each proof carry (see merge-queue.ts). The cycle reports
-  //     what that refresh did — or the conflict that stopped it — so a pass that brought six
-  //     stalled items forward is an action rather than a "0 actions" line.
+  // 4b. A base branch that moved under an in-flight candidate GitHub reports conflicting with it
+  //     (GY-292: a clean one keeps its head, CI, review and proofs, and only the queue head is
+  //     brought onto the base, by its speculative tip). Nobody is asked to do anything first: the
+  //     control plane tries the merge into the candidate's own branch and decides what the review
+  //     and each proof carry (see merge-queue.ts `baseRefreshNeeded`). The cycle reports what
+  //     that refresh did — or the conflict that stopped it — so the pass is an action rather
+  //     than a "0 actions" line.
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested)) await isolate('refresh', item, item.key, async () => {
     const refresh = item.baseRefresh, pending = pendingBaseRefresh(item);
     // One action per head, base tip and policy revision: opened when the branch moves under the
@@ -2695,7 +2697,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
-        detail: `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)}; the control plane is bringing ${item.candidate!.sha.slice(0, 12)} onto it. No rework round, no review round and no proof round is requested for the move.`,
+        detail: `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)} and GitHub reports ${item.candidate!.sha.slice(0, 12)} conflicting with it; the control plane is trying to bring it onto the new tip. No rework round, no review round and no proof round is requested unless that merge conflicts.`,
         attempts: 1, cycle: state.cycle }, now(), effects.persist));
       return;
     }
