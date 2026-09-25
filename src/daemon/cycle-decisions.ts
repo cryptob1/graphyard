@@ -102,7 +102,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       await effects.persist(state);
       return `left it pending for an approver slot, launched on the first cycle one frees: ${full}`;
     }
-    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, account: launched?.account ?? null, runtime: launched?.runtime ?? null, session: launched?.session ?? null, capacity: null });
+    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, account: launched?.account ?? null, runtime: launched?.runtime ?? null, session: launched?.session ?? null, capacity: null, run: launched?.run ?? null });
+    // A headless approver (GY-169) reports its run when it ends; the watch keeps it, and the next
+    // cycle reads the verdict it applied back from the control plane like any other.
+    launched?.settled?.then(async record => { if (watch.agentName === launched.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
     return `launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   /**
