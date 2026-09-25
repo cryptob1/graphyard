@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { Store } from './store.js';
+import { advisoryLocks } from './store/locks.js';
 import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
 
@@ -277,7 +278,7 @@ export async function projectFlow(store: Store, options: { batch?: number; batch
     const db = await store.pool.connect();
     try {
       await db.query('BEGIN');
-      if (!(await db.query('SELECT pg_try_advisory_xact_lock(71490322) AS ok')).rows[0].ok) { await db.query('ROLLBACK'); break; }
+      if (!(await db.query('SELECT pg_try_advisory_xact_lock($1) AS ok', [advisoryLocks.flowProjection])).rows[0].ok) { await db.query('ROLLBACK'); break; }
       checkpoint = Number((await db.query('SELECT last_event FROM flow_projection WHERE id=1 FOR UPDATE')).rows[0]?.last_event ?? 0);
       const events: LedgerEvent[] = (await db.query(`SELECT seq,work_id,actor,kind,created_at,
         CASE WHEN payload ? 'delta' THEN (payload - 'delta') || jsonb_build_object('work', graphyard_event_work(work_id, payload)) ELSE payload END AS payload

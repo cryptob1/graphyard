@@ -136,7 +136,7 @@ test('branch protection is read-modify-write and matches the chosen review polic
   assert.equal(payload.required_status_checks.checks.find(check => check.context === CHECK_NAME)!.app_id, 4242);
   assert.equal(payload.required_status_checks.checks.find(check => check.context === 'lint')!.app_id, 77);
   assert.equal(payload.enforce_admins, true);
-  assert.equal(payload.required_conversation_resolution, true);
+  assert.equal(payload.required_conversation_resolution, false, 'the review gate is the verdict; threads block nothing');
   assert.equal(payload.allow_force_pushes, false);
   assert.equal(payload.required_pull_request_reviews.require_code_owner_reviews, true);
   assert.deepEqual(payload.restrictions, { users: ['release-manager'], teams: [], apps: [] });

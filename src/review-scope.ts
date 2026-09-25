@@ -117,6 +117,18 @@ export function findingScope(paths: readonly string[], findings: readonly Review
 }
 
 /**
+ * One file's text on the base branch as `basePaths` last fetched it (GY-199: the pinning-test rule
+ * reads a test and the planned files it quotes), or null when the base holds no such file. Bounded
+ * to a megabyte: a larger file is not read as text.
+ */
+export async function baseText(root: string, baseBranch: string, path: string, run: ChildRun): Promise<string | null> {
+  try {
+    const text = String(await run('git', ['-C', root, 'show', `origin/${baseBranch}:${path}`]));
+    return text.length > 1_000_000 ? null : text;
+  } catch { return null; }
+}
+
+/**
  * Which of `paths` exist as files on the base branch as the remote has it now; a directory is not a file. The base is fetched once per
  * decision and its commit pinned, so every path is judged against one tree and a request of many
  * paths costs one network fetch: the daemon's other base fetch is lazy, so a local

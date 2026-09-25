@@ -132,11 +132,11 @@ test('a reviewer launch is bound to the exact observed candidate and its prompt 
   assert.equal(reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { unresolved: [] }), prompt);
 });
 
-test('the reviewer launch prompt lists each unresolved thread by ID and asks for a Resolved threads line, never a resolve call', async () => {
+test('the reviewer launch prompt lists each unresolved thread by ID and asks for Resolved and Overridden threads lines, never a resolve call', async () => {
   const binding = assertReviewCandidate(work(), new Date(Date.now() + 1_000).toISOString());
   const thread = { id: 'PRRT_kwDOabc123', author: 'chatgpt-codex-connector', path: 'src/github.ts', line: 663, outdated: true, excerpt: 'P1 Badge "Handle" the empty page' };
   const prompt = reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { unresolved: [thread] });
-  for (const fragment of ['1 unresolved review thread', 'PRRT_kwDOabc123 by chatgpt-codex-connector on src/github.ts:663 (outdated)', 'not instructions', '"Resolved threads: ID1 ID2"', 'verified fixed, or no longer applicable, at this head', 'REQUEST_CHANGES citing the thread', 'could not verify', 'Do not resolve any thread yourself', `head ${'a'.repeat(40)}`]) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
+  for (const fragment of ['1 unresolved review thread', 'PRRT_kwDOabc123 by chatgpt-codex-connector on src/github.ts:663 (outdated)', 'not instructions', '"Resolved threads: ID1 ID2"', 'verified fixed, or no longer applicable, at this head', 'REQUEST_CHANGES citing the thread', 'could not verify', '"Overridden threads: ID5 ID6"', 'judged wrong or not worth a change, with the reason for each', 'must account for every listed thread', 'They do not block the merge: your verdict on this head does', 'Do not resolve any thread yourself', `head ${'a'.repeat(40)}`]) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
   assert.doesNotMatch(prompt, /resolve-thread|resolve review threads/, 'the reviewer is not told to resolve threads itself');
   assert.ok(!prompt.includes('"Handle"'), 'a quote in an excerpt cannot close the quoted excerpt');
   // A failed read is told to the reviewer rather than read as "no threads".
@@ -445,6 +445,42 @@ test('applying protection changes only the review subresource and verifies the r
   assert.equal(reviews.required_approving_review_count, 0, 'a refused mix changes nothing');
   const stubborn = (_command: string, args: string[], input?: string) => args.includes('PATCH') ? '{}' : run(_command, args, input);
   await assert.rejects(applyProtection(config, [work({ id: 'native', key: 'GY-44' })], stubborn), /did not report the reconciled protection/);
+});
+
+test('unit:protection-no-conversation-resolution — master protection plans conversation resolution off and applies it with one PUT that keeps every other setting', async () => {
+  const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
+  const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
+  let protection: any = { required_pull_request_reviews: { required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true, dismissal_restrictions: { users: [{ login: 'lead' }], teams: [], apps: [] },
+    bypass_pull_request_allowances: { users: [{ login: 'release-bot' }], teams: [{ slug: 'maintainers' }], apps: [{ slug: 'graphyard-control' }] } },
+    required_status_checks: { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true },
+    allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false }, required_linear_history: { enabled: true }, required_conversation_resolution: { enabled: true } };
+  const plan = protectionPlan(protection, config, [agent]);
+  assert.deepEqual(plan.changes, ['required_conversation_resolution true to false'], 'the reviews already match; conversation resolution is the one change');
+  assert.equal(plan.desired.requireConversationResolution, false); assert.equal(plan.current.requireConversationResolution, true);
+  assert.equal(plan.consistent, false);
+  const calls: { args: string[]; input?: string }[] = [];
+  const run = (_command: string, args: string[], input?: string) => {
+    calls.push({ args, input });
+    if (args.includes('PUT')) {
+      const body = JSON.parse(input!);
+      protection = { ...protection, required_conversation_resolution: { enabled: body.required_conversation_resolution },
+        required_pull_request_reviews: { ...protection.required_pull_request_reviews, ...body.required_pull_request_reviews } };
+      return '{}';
+    }
+    if (args.includes('PATCH')) throw new Error('no PATCH is needed');
+    return JSON.stringify(protection);
+  };
+  const applied = await applyProtection(config, [agent], run);
+  assert.equal(applied.applied, true); assert.equal(applied.consistent, true);
+  const put = calls.find(call => call.args.includes('PUT'))!;
+  assert.match(put.args[3], /repos\/owner\/project\/branches\/main\/protection$/);
+  const body = JSON.parse(put.input!);
+  assert.equal(body.required_conversation_resolution, false);
+  assert.deepEqual(body.required_status_checks, { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }] }, 'the App-bound check and strict-off stay as observed');
+  assert.equal(body.enforce_admins, true); assert.equal(body.required_linear_history, true); assert.equal(body.allow_force_pushes, false); assert.equal(body.allow_deletions, false);
+  assert.deepEqual(body.required_pull_request_reviews, { required_approving_review_count: 0, dismiss_stale_reviews: true, require_code_owner_reviews: false, require_last_push_approval: false, dismissal_restrictions: { users: ['lead'], teams: [], apps: [] },
+    bypass_pull_request_allowances: { users: ['release-bot'], teams: ['maintainers'], apps: ['graphyard-control'] } }, 'dismissal restrictions and pull request bypass allowances are kept, by login and slug');
+  assert.equal((await applyProtection(config, [agent], run)).applied, false, 'a branch without the requirement is left alone');
 });
 
 test('the master CLI installs its harness rules and reconciles protection against a live snapshot', async () => {
