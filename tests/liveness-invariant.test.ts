@@ -145,8 +145,14 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   // refused scope request a scope decision naming the command, the stale wait an escalation.
   const reading = (await judge(retained)).violation!.successor!;
   assert.equal(reading.binding, `reconcile-merge:execution-${retained.key}`);
+  // The live attempt's additive request is the independent approver's to judge (GY-176 routes it);
+  // one the loop cannot route (here it also asks for a criteria change) names the master's command.
   const decision = (await judge(scope)).violation!.successor!;
-  assert.ok(decision.inputs.kind === 'escalate' && decision.inputs.trigger === 'scope' && decision.inputs.detail.includes(`graphyard master scope ${scope.key}`), JSON.stringify(decision));
+  assert.ok(decision.inputs.kind === 'escalate' && decision.inputs.trigger === 'scope' && decision.inputs.detail.includes(`graphyard master decisions ${scope.key}`) && !decision.inputs.detail.includes('graphyard master scope'), JSON.stringify(decision));
+  const everything = await store.list(), stored = everything.find(item => item.id === scope.id)!;
+  const unroutable = { ...stored, scopeRequest: { ...stored.scopeRequest!, criteria: [{ id: 'AC-9', text: 'A new criterion' }] } } as Work;
+  const master = livenessOf(unroutable, everything.map(item => item.id === scope.id ? unroutable : item), new Date()).violation!.successor!;
+  assert.ok(master.inputs.kind === 'escalate' && master.inputs.detail.includes(`graphyard master scope ${scope.key}`), JSON.stringify(master));
   const escalation = (await judge(stale)).violation!.successor!;
   assert.ok(escalation.inputs.kind === 'escalate' && escalation.inputs.trigger === 'stale-wait', JSON.stringify(escalation));
 

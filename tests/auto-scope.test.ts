@@ -676,14 +676,14 @@ test('unit:refused-scope-goes-to-approver — a request the widening rule refuse
   assert.equal(work.scopeRequest!.decision!.state, 'refused', 'the widening rule refuses it');
   assert.ok(work.blocker?.startsWith(scopeRefusalBlocker));
   assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)), 'it is not left to a master session');
-  // Within one cycle: a scope decision is requested with the master's own identity and an approver launched.
-  await cycle(state, overrides);
+  // In the same cycle (GY-176 routes a request the rule refused at once): a scope decision is
+  // requested with the master's own identity, answering this very request, and an approver launched.
   assert.equal(decided.length, 1, JSON.stringify(decided));
   assert.equal(decided[0].action, 'requirements');
-  assert.deepEqual(decided[0].input, { plannedFiles: [layout, route] }, 'it widens by exactly the requested file');
+  assert.deepEqual(decided[0].input, { plannedFiles: [layout, route], answers: { epoch: work.scopeRequest!.epoch, at: work.scopeRequest!.at } }, 'it widens by exactly the requested file');
   assert.match(decided[0].reason, /PRRT_route01/, 'the approver reads the request and the thread it cites');
-  assert.match(decided[0].reason, /AC-1 The widget layout renders/, 'and the item\'s criteria');
-  assert.match(decided[0].reason, /The widening rule refused it/);
+  assert.match(decided[0].reason, /AC-1: The widget layout renders/, 'and the item\'s criteria');
+  assert.match(decided[0].reason, /Rule refusal: /);
   assert.deepEqual(approvers, [decided[0].id], 'an independent approver is launched for it');
   assert.equal(widened.length, 0, 'nothing is widened without the approver');
   // The approver grants it: the control plane applies it to the live attempt and the blocker clears.
@@ -709,7 +709,8 @@ test('unit:refused-scope-goes-to-approver — a request the widening rule refuse
   assert.ok(!work.plannedFiles.includes(other));
   assert.ok(work.blocker?.startsWith(scopeRefusalBlocker), 'the item stays blocked on the recorded refusal');
   assert.equal(decided.length, 2, 'a refused decision is not requested again');
-  assert.ok(escalations(state).some(entry => entry.key === `escalation:decision-refused:${decided[1].id}`), 'the refusal stands for the master to answer');
+  // A refused widening is the worker's answer (GY-176): recorded as the request's outcome, read with scope-request --wait.
+  assert.match(state.actions[`scope:outcome:${decided[1].id}`]?.detail ?? '', /^Refused /, 'the refusal is recorded as the request\'s outcome for its worker');
 });
 
 test('unit:review-named-and-pinning-tests-granted — a file an unresolved review finding names, and a test whose failing assertion quotes text a planned file holds, are granted without an approver; an unrelated source file still goes to the approver', async () => {
@@ -750,9 +751,8 @@ test('unit:review-named-and-pinning-tests-granted — a file an unresolved revie
   assert.ok(pinnedAction.detail.includes(`${pinning} pins "${heading}", which planned file ${layout} holds`), pinnedAction.detail);
   assert.ok(!unpinned.plannedFiles.includes('tests/unrelated.test.ts'), 'a test whose quote no planned file holds is not granted');
   assert.ok(!unrelated.plannedFiles.includes('src/server/routes/work.ts'), 'an unrelated source file is not granted');
-  assert.equal(decided.length, 0, 'no decision was needed for the granted files');
-  // The next cycle puts the two the rule could not grant to the approver, and nothing else.
-  await cycle(state, overrides);
+  // The same cycle puts the two the rule could not grant to the approver, and nothing else (GY-176);
+  // the granted files needed no decision.
   assert.deepEqual(decided.map(entry => entry.action), ['requirements', 'requirements']);
   assert.deepEqual(decided.map(entry => (entry.input.plannedFiles as string[]).at(-1)).sort(), ['src/server/routes/work.ts', 'tests/unrelated.test.ts']);
   assert.equal(approvers.length, 2);

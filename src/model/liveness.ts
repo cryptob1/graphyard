@@ -3,7 +3,7 @@ import { actionAccount } from './next-action.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { producerGroupDecisions } from './mechanical-proofs.js';
-import { redecidableScopeRefusal, scopeRefusalBlocker } from './scope.js';
+import { redecidableScopeRefusal, routableScopeRequest, scopeRefusalBlocker } from './scope.js';
 import type { Work } from './work.js';
 
 /**
@@ -96,15 +96,21 @@ function stalledConversion(work: Work, action: NextAction): NextAction | null {
     `${action.kind} failed ${run.failures} times since ${run.since}: ${run.reason}`, binding, action.gate, action.refusal);
 }
 
-/** A refused scope request is owed a scope decision: the rule again when it would now approve, the operator's otherwise. */
+/**
+ * A refused scope request is owed a scope decision: the rule again when it would now approve;
+ * otherwise one escalation row, the only one. For an additive request of the live attempt the loop
+ * routes that row's judgement to an independent approver as a requirements decision (GY-176), so it
+ * names that owner rather than a master; anything else is the master's.
+ */
 function scopeDecision(work: Work, action: NextAction, now: Date): NextAction | null {
   const request = work.scopeRequest;
   if (action.kind !== 'escalate' || action.gate !== 'ready' || !action.refusal?.startsWith(scopeRefusalBlocker) || request?.decision?.state !== 'refused') return null;
   if (redecidableScopeRefusal(work) && liveLease(work, now) && work.lease!.epoch === request.epoch)
     return { ...action, kind: 'approve-scope', reason: `${work.key}'s refused scope request would be approved by the rules as they stand; the control plane decides it again`,
       inputs: { kind: 'approve-scope', epoch: request.epoch, paths: [...request.paths], requestedBy: request.requestedBy, detail: request.reason }, llmRole: null, binding: `scope:${request.epoch}:${request.at}:redecide` };
+  const decides = routableScopeRequest(work, now.getTime()) ? `the independent approver judges the requirements decision the loop requests for it (graphyard master decisions ${work.key}), which` : `graphyard master scope ${work.key}`;
   return escalate(work, 'scope', `${request.requestedBy}'s scope request on ${work.key} was refused and is owed a scope decision: ${request.decision.reason}`,
-    `graphyard master scope ${work.key} decides ${request.paths.join(', ')} (${request.reason}); refused because ${request.decision.reason}`, `scope-refused:${request.epoch}:${request.at}`, action.gate, action.refusal);
+    `${decides} decides ${request.paths.join(', ')} (${request.reason}); refused because ${request.decision.reason}`, `scope-refused:${request.epoch}:${request.at}`, action.gate, action.refusal);
 }
 
 /** When a wait is due, or null when what it names is gone. A wait on another item is due when that item's own step is. */
