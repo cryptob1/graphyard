@@ -147,12 +147,18 @@ An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
 
-Check the automatic-merge preference in master status. When disabled, each merge
-needs an approved merge decision: request it with `graphyard master decide GY-N
-merge`, and `graphyard master merge` refuses a candidate the approver agent has not
-approved. Otherwise routine merges may use `graphyard master merge --all`. The command
-rechecks the exact current candidate, every configured gate, and GitHub state
-immediately before merging. Unapproved decisions, stale observations, failures, and
+Items are system-driven unless created with `"systemDriven": false`: for them
+`graphyard master run` dispatches, launches review and proof producers, requests
+merge decisions and performs the guarded merge, and the master CLI refuses those hand
+actions, naming the loop step. The loop drives an item created `"systemDriven": false`
+the same way; opting out only also allows the hand actions, so check master status
+for the loop's pending decision or merge before taking one and never request a second.
+Check the automatic-merge preference in master status. When disabled, each merge needs
+an approved merge decision, which the loop requests; a hand
+`graphyard master decide GY-N merge` is only for an opted-out item the loop has not
+requested it for, and `graphyard master merge` refuses a candidate the approver agent
+has not approved. Otherwise opted-out items may also use `graphyard master merge --all`. The guarded merge rechecks the exact current
+candidate, every configured gate, and GitHub state immediately before merging. Unapproved decisions, stale observations, failures, and
 changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.

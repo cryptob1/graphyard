@@ -130,6 +130,32 @@ export const actionRetryAt = (row: ActionRow, now: Date) => {
   return new Date(now.getTime() + (stall ? actionStallDelay(stall.failures) : actionRetryDelay(row.attempts))).toISOString();
 };
 
+/**
+ * The refusals `launchProducer` (src/producer.ts) gives a request it will never launch again,
+ * whatever time passes: one of its sessions did not fail or expire ("one session per request"), or
+ * it has had `sessionRetryLimit` sessions ("no further automatic attempt"). Both begin with the
+ * request id (`Request <id> ...`), and an executor settles its row failed with that message.
+ */
+export const producerLaunchStops = ['; one session per request', '; no further automatic attempt'] as const;
+
+/**
+ * Why no executor may launch a producer request again, read from the durable action rows rather
+ * than from any host's producer ledger: an attempt of the request's dispatch row — open or retired
+ * — was refused by the launcher with a stop (`producerLaunchStops`). The ledger that refusal comes
+ * from is local to the host whose executor claimed the row, and an executor on another host sees
+ * none of its sessions and would launch the request afresh; so once one executor has recorded the
+ * stop, the request's dispatch is no longer offered to any executor (`proofStep`) and the proof
+ * is left to the attestation the stop names. Null while no attempt was so refused.
+ */
+export function producerLaunchStop(work: Pick<Work, 'actionQueue'>, requestId: string): ActionRecord | null {
+  const prefix = `Request ${requestId} `;
+  const rows = [...(work.actionQueue?.actions ?? []), ...(work.actionQueue?.history ?? [])]
+    .filter(row => row.kind === 'dispatch' && row.inputs.kind === 'dispatch' && row.inputs.target === 'proof');
+  for (const row of rows) for (const entry of row.history)
+    if (entry.event === 'failed' && entry.reason.startsWith(prefix) && producerLaunchStops.some(stop => entry.reason.includes(stop))) return entry;
+  return null;
+}
+
 /** Whether an executor still holds this row: a claim that has not expired on the reading clock. */
 export const claimLive = (row: ActionRow, now: Date) => !!row.claim && Date.parse(row.claim.expiresAt) > now.getTime();
 export const settling = (row: ActionRow, now: Date) => row.state === 'done' && !!row.resolvedAt && now.getTime() - Date.parse(row.resolvedAt) < actionSettleMs;
