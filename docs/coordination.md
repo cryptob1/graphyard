@@ -17,7 +17,7 @@ A criterion states an outcome and its proofs:
 
 ## Schedule by overlap, smallest scope first
 
-`plannedFiles` holds paths or directory prefixes ending in `/`. Overlap holds *dispatch* behind in-flight items of equal or higher priority, comparing `plannedFiles` until a candidate exists, then its changed files; an item whose pull request is open never waits. The hold lapses into attention after two hours; `master dispatch GY-N PROFILE --allow-overlap` overrides it. Ready items dispatch smallest planned scope first. Name files, not directories: a root-level directory is flagged `highConflict` and refused without `--allow-broad-scope`. `master status` lists open candidates `git merge-tree` cannot merge together.
+`plannedFiles` holds paths or directory prefixes ending in `/`. Overlap holds *dispatch* behind in-flight items of equal or higher priority, comparing `plannedFiles` until a candidate exists, then its changed files; no hold stands once either pull request is open. The hold lapses into attention after 30 minutes; `master dispatch GY-N PROFILE --allow-overlap` overrides it. Ready items dispatch smallest planned scope first. Name files, not directories: a root-level directory is flagged `highConflict` and refused without `--allow-broad-scope`. `master status` lists open candidates `git merge-tree` cannot merge together.
 
 `exclusiveResources` are reserved atomically at claim.
 
