@@ -1038,19 +1038,26 @@ export type BatchStep =
   | { kind: 'eject'; member: string; check: string };
 /**
  * The next step for a batch, from the verdicts on record. `verdict(prefix)` answers for the combined
- * tip of the batch's base and exactly that prefix, or undefined when it has not run. An entry that
- * fails on a prefix known to pass (or on the base) is isolated and ejected; otherwise a passing
+ * tip of the batch's base and exactly that prefix, or undefined when it has not run; `before` is the
+ * verdict of that base itself (null when not yet judged) — a pass for the head batch, whose base is the base branch, and the
+ * combined tip of the batches ahead for any other. An entry that fails on a prefix known to pass
+ * (or on a base known to pass) is isolated and ejected; otherwise a passing
  * prefix merges at once, the untested whole batch is tested first, and a failing prefix is halved
  * until a single entry fails on the prefix before it. A prefix of the whole batch that is known to fail is never run
  * again, which is what keeps the bisection to one run per halving.
  */
-export function batchStep(members: string[], verdict: (prefix: string[]) => TipVerdict | undefined): BatchStep {
+export function batchStep(members: string[], verdict: (prefix: string[]) => TipVerdict | undefined, before: TipVerdict | null = { result: 'pass' }): BatchStep {
   if (!members.length) throw new Error('A batch has at least one member');
   const results = members.map((_, index) => verdict(members.slice(0, index + 1)));
   const failing = results.findIndex(result => result?.result === 'fail');
-  // A member whose tip fails where the prefix before it passed (or on the base) is isolated: it is
-  // ejected at once, before the passing prefix merges, so the entries behind rebuild without it.
-  if (failing !== -1 && (failing === 0 || results[failing - 1]?.result === 'pass')) return { kind: 'eject', member: members[failing], check: (results[failing] as { check: string }).check };
+  // A member whose tip fails where the prefix before it passed (or on a base known to pass) is
+  // isolated: it is ejected at once, before the passing prefix merges, so the entries behind
+  // rebuild without it. The first member of a batch behind the head sits on the batches ahead,
+  // whose failure its tip inherits (CI runs on every published tip), so it is isolated only once
+  // their combined tip passed; until then it waits for that tip to be judged.
+  const prior = (index: number) => index === 0 ? before : results[index - 1];
+  if (failing !== -1 && prior(failing)?.result === 'pass') return { kind: 'eject', member: members[failing], check: (results[failing] as { check: string }).check };
+  if (failing === 0) return { kind: 'test', combination: members.slice(0, 1) };
   const below = failing === -1 ? members.length : failing;
   for (let index = below - 1; index >= 0; index--) if (results[index]?.result === 'pass') return { kind: 'merge', members: members.slice(0, index + 1) };
   if (failing === -1) return { kind: 'test', combination: members };
@@ -1124,7 +1131,10 @@ export function describeMergeBatches(all: Work[], placements: QueuePlacement[], 
     const members = chain.slice(start, start + size).map(placement => placement.key);
     const tipOf = (key: string) => placed.get(key)?.tip ?? null;
     const verdict = (prefix: string[]) => { const last = byKey.get(prefix.at(-1)!); return last && tipOf(last.key) ? tipVerdict(last, ciAppIds) : undefined; };
-    const step = batchStep(members, verdict);
+    // The batches ahead are this batch's base: their combined tip is the tip of the entry just before it.
+    const ahead = start > 0 ? byKey.get(chain[start - 1].key) : undefined;
+    const before: TipVerdict | null = start === 0 ? { result: 'pass' } : ahead && tipOf(ahead.key) ? tipVerdict(ahead, ciAppIds) ?? null : null;
+    const step = batchStep(members, verdict, before);
     const head = batch === 1;
     const state: MergeBatchView['state'] = !head ? 'waiting' : step.kind === 'merge' ? 'merging' : step.kind === 'eject' ? 'ejecting' : step.combination.length === members.length ? 'testing' : 'bisecting';
     const underTest = step.kind === 'test' ? { members: step.combination, tip: tipOf(step.combination.at(-1)!) } : null;

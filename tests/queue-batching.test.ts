@@ -27,7 +27,7 @@ const keys = ['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5'];
  * queue requires and nothing else. A tip's tree is named by the entries it holds, so a republished
  * tip holding the same entries binds the entries behind it unchanged, as GY-100 binds them.
  */
-function driveQueue(batchSize: number, failing: string) {
+function driveQueue(batchSize: number, failing: string, everyTip = false) {
   const now = new Date('2026-09-25T09:00:00.000Z'), at = '2026-09-25T08:00:00.000Z';
   const trees = new Map<string, string>(), holds = new Map<string, string[]>();
   let published = 0, base = { sha: sha40('b0'), tree: sha40('e0') };
@@ -81,7 +81,10 @@ function driveQueue(batchSize: number, failing: string) {
     // CI runs on exactly the tips the merge gates say the queue is validating.
     const named = new Set(queued().flatMap(item => item.gates.find(gate => gate.name === 'merge')!.reasons)
       .filter(reason => reason.startsWith(tipValidationPrefix)).map(reason => reason.slice(tipValidationPrefix.length, tipValidationPrefix.length + 12)));
-    for (const prefix of named) {
+    // With `everyTip`, CI runs on every published tip instead, as this repository's workflows do on
+    // each push to a candidate branch: a tip the queue never asked about is still judged.
+    const judged = everyTip ? queued().filter(item => item.queue!.speculation?.tip === item.candidate!.sha).map(item => item.candidate!.sha.slice(0, 12)) : named;
+    for (const prefix of judged) {
       const item = queued().find(entry => entry.candidate!.sha.startsWith(prefix))!;
       if (item.observation!.checks.length) continue;
       const holding = holds.get(item.candidate!.sha)!;
@@ -113,6 +116,15 @@ test('unit:queue-batching-bisects — five entries, batch size 4, a failure in t
   assert.match(single.ejected[0].reason, /^Required CI check test did not pass on speculative tip [0-9a-f]{12}$/);
   // A clean queue of five costs two runs at batch size 4.
   assert.equal(driveQueue(4, 'none').runs.length, 2);
+
+  // CI on every published tip: GY-5 heads batch 2, and its tip, which holds GY-3, fails before GY-3
+  // is isolated. That failure is inherited from the batch ahead, whose combined tip has not passed,
+  // so GY-5 waits instead of being ejected; only GY-3 leaves the queue.
+  const eager = driveQueue(4, 'GY-3', true);
+  assert.ok(eager.runs.some(run => run.join() === keys.join()), 'GY-5\'s tip holding GY-3 was run and failed');
+  assert.deepEqual(eager.ejected.map(entry => entry.key), ['GY-3']);
+  assert.equal(eager.items.find(item => item.key === 'GY-5')!.queueEjection ?? null, null);
+  assert.deepEqual(eager.merged.map(entry => entry.key), ['GY-1', 'GY-2', 'GY-4', 'GY-5']);
 });
 
 test('the batch plan the live queue follows: halves a failing batch, isolates the failing entry, merges passing prefixes, never re-runs a judged combination', () => {
@@ -141,6 +153,10 @@ test('the batch plan the live queue follows: halves a failing batch, isolates th
   assert.deepEqual(batchStep(keys.slice(0, 4), failed({ 'GY-1,GY-2,GY-3,GY-4': { result: 'fail', check: 'test' } })), { kind: 'test', combination: ['GY-1', 'GY-2'] });
   assert.deepEqual(batchStep(keys.slice(0, 4), failed({ 'GY-1,GY-2,GY-3,GY-4': { result: 'fail', check: 'test' }, 'GY-1,GY-2': { result: 'pass' } })), { kind: 'merge', members: ['GY-1', 'GY-2'] });
   assert.deepEqual(batchStep(['GY-3'], failed({ 'GY-3': { result: 'fail', check: 'typecheck' } })), { kind: 'eject', member: 'GY-3', check: 'typecheck' });
+  // A batch behind the head whose first tip fails is isolated only once the batches ahead passed.
+  assert.deepEqual(batchStep(['GY-5'], failed({ 'GY-5': { result: 'fail', check: 'test' } }), null), { kind: 'test', combination: ['GY-5'] });
+  assert.deepEqual(batchStep(['GY-5'], failed({ 'GY-5': { result: 'fail', check: 'test' } }), { result: 'fail', check: 'test' }), { kind: 'test', combination: ['GY-5'] });
+  assert.deepEqual(batchStep(['GY-5'], failed({ 'GY-5': { result: 'fail', check: 'test' } }), { result: 'pass' }), { kind: 'eject', member: 'GY-5', check: 'test' });
 
   // Master config: `mergeQueue.batchSize`, default 4.
   const base = { version: 1, url: 'http://x', credentialFile: '/c', cliPath: '/cli', repository: 'o/r', baseBranch: 'main', githubAppId: 1, hostId: 'h', masterAgentName: 'graphyard-master' };
