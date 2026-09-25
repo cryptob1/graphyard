@@ -945,7 +945,7 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * A role the registry does not define yet launches from the profile's own accounts, as before.
  */
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
-export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void> }
+export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void>; /** Pairs the registry session with the Herdr session the launch started (GY-190). */ record?: (agentName: string) => Promise<void> }
 export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string }, probe: FleetProbe = {}): Promise<LaunchSelection> {
   const fleet = await selectFleetSession(config, role, profile, probe);
   if (fleet) {
@@ -990,9 +990,14 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
  * that never ran would otherwise count against its account and its role for as long as the
  * request it answers stands: two hours for a reviewer, a day for a producer.
  */
-export async function onSelectedSession<T>(selected: LaunchSelection, failed: string, launch: () => Promise<T>): Promise<T> {
-  try { return await launch(); }
+export async function onSelectedSession<T>(selected: LaunchSelection, failed: string, launch: () => Promise<T>, agentName?: string): Promise<T> {
+  let result: T;
+  try { result = await launch(); }
   catch (error) { await selected.release?.(`${failed}: ${failureText(error).slice(0, 300)}`); throw error; }
+  // A launched session is paired with its registry session, so the loop ends that one when the
+  // runtime session is gone instead of leaving it to hold a seat of its role (GY-190).
+  if (agentName) await selected.record?.(agentName);
+  return result;
 }
 
 /**
@@ -3884,7 +3889,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // The approver's runtime and account come from the registry's approver role. An explicit
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
   // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
-  const selected = explicitKind ? null : await selectFleetSession(config, 'approver', { name, principal: config.approver!.id }, { ...probe, work: work.key });
+  const selected = explicitKind ? null : await selectFleetSession(config, 'approver', { name, principal: config.approver!.id }, { agents, ...probe, work: work.key });
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
   const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
@@ -3903,6 +3908,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
+  // Paired, so the loop ends the registry session once this one is judged or gone (GY-190).
+  await selected?.record(name);
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped } : null };
 }

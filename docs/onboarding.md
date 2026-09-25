@@ -75,6 +75,8 @@ node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a 
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --reason "Review on a different model than the author"
 ```
 
+A role's `--concurrency` counts only sessions that are running. Each launch pairs its registry session with the Herdr session it started, and every `master run` cycle ends the registry sessions whose Herdr session is gone, plus an approver's as soon as its decision is judged. An approver launch refused because its role is at the limit does not count against the decision's launch bound, so the first cycle after a slot frees launches it.
+
 ### Size review and proof capacity
 
 Each candidate needs one review and one producer session per proof group; a profile runs `"concurrency"` sessions at once, changed without a restart:

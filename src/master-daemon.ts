@@ -17,6 +17,7 @@ import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefres
 export { threadResolutionGraceMs, threadsAwaitReview } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
 import { describeReclaim, dispatchRefusal, reclaimResources, type ResourceReclaimReport } from './master-resources.js';
+import { reconcileFleetSessions, roleAtCapacity } from './fleet.js';
 import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
 import { stalledItems } from './model/action-account.js';
@@ -1459,6 +1460,12 @@ export interface DaemonEffects {
    * holding profile names, and releases the slots of stuck sessions. Runs every cycle.
    */
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
+  /**
+   * Ends the agent-registry sessions this host launched that no longer run (GY-190): every one whose
+   * Herdr session is gone from `agents`, and every one whose Herdr session is named in `finished`.
+   * Returns what it ended. A loop wired without it leaves each to the registry's own outer window.
+   */
+  endFleetSessions?: (agents: HerdrAgent[], finished: { agentName: string; reason: string }[]) => Promise<{ session: string; role: string; work: string | null; reason: string }[]>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
   /**
@@ -1997,6 +2004,22 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     }
   }
 
+  // 3a'. End the registry sessions whose runtime session is gone (GY-190). A finished session that
+  //      stays live in the agent registry holds a seat of its role until its outer window passes, so
+  //      a role fills to its concurrency limit with sessions nothing runs and refuses every launch.
+  //      Ended here, before dispatch and the decisions step, a freed seat is launched on this cycle.
+  if (effects.endFleetSessions) {
+    try {
+      const inventory = await effects.herdr?.() ?? { agents, available: true };
+      // An unreadable Herdr lists nothing; ending on that would end every session this host runs.
+      const ended = inventory.available ? await effects.endFleetSessions(inventory.agents, []) : [];
+      if (ended.length) performed.push(await record(state, `reclaim:fleet-sessions:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'done',
+        detail: boundDetail(`Ended ${ended.length} agent-registry session(s) no runtime session runs: ${ended.map(entry => `${entry.role}${entry.work ? ` on ${entry.work}` : ''} (${entry.reason})`).join('; ')}`, 1000), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, `reclaim:fleet-sessions:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Could not end finished agent-registry sessions: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    }
+  }
+
   // 3b. Reclaim the items whose sessions died. A supervised launch fences its worker in a scope
   //     unit; when that session dies the fence outlives it and the item cannot be claimed again
   //     until somebody settles the quarantine. This host is the only one that can verify the
@@ -2206,10 +2229,23 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   /** Close the approver session a watch names, if Herdr still lists it. False only when it could not be closed. */
   const closeApprover = async (item: Work, watch: ApprovalWatch, why: string) => {
     const session = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
-    if (!session?.pane_id) return true;
+    if (!session?.pane_id) { await endRegistrySession(item, watch, why); return true; }
     const key = `close:approver:${watch.decision}:${session.pane_id}`;
-    try { await effects.closeSession(session.pane_id); inventory = null; await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true; }
+    try { await effects.closeSession(session.pane_id); inventory = null; await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); }
     catch (error) { inventory = null; watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
+    await endRegistrySession(item, watch, why);
+    return true;
+  };
+  /**
+   * The approver's agent-registry session ends with it (GY-190): judged, gone or closed, it no longer
+   * holds a seat of the approver role, so the next decision's approver is not refused for capacity.
+   */
+  const endRegistrySession = async (item: Work, watch: ApprovalWatch, why: string) => {
+    if (!effects.endFleetSessions || !watch.agentName) return;
+    const seen = await sessions();
+    if (!seen.available) return;
+    try { await effects.endFleetSessions(seen.agents, [{ agentName: watch.agentName, reason: `approver session ${watch.agentName} finished: ${why}` }]); }
+    catch (error) { await note(`fleet-session:approver:${watch.decision}`, item, 'close', 'failed', `Could not end the agent-registry session of approver ${watch.agentName}: ${message(error)}`); }
   };
   /** Put a watched decision to an approver session. The launch is counted before it is made. */
   const launch = async (item: Work, watch: ApprovalWatch, adopt: boolean) => {
@@ -2220,7 +2256,15 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}, already judging it`;
     inventory = null;
-    const launched = await effects.approver!(item, watch.decision);
+    let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
+    try { launched = await effects.approver!(item, watch.decision); }
+    catch (error) {
+      // A role at its concurrency limit is a seat to wait for, not a failed session (GY-190): the
+      // launch is not counted against the decision's bound and names no session, so the next cycle
+      // — the first after a seat frees — launches it again instead of escalating it as unjudged.
+      if (roleAtCapacity(error)) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null }); await effects.persist(state); }
+      throw error;
+    }
     Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null });
     return `launched independent approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
@@ -3128,6 +3172,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     snapshot: deps.snapshot,
     closeSession: pane => closeHerdrPane(pane, run),
+    endFleetSessions: (agents, finished) => reconcileFleetSessions(current(), agents, finished),
     reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
