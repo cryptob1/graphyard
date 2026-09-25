@@ -13,6 +13,7 @@ import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/p
 import { dispatchSummary, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { atomicPrivateWrite } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
+import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 
@@ -295,7 +296,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.equal(produceStart.kind, 'codex', 'the session runs the account\'s runtime, not the profile\'s');
     const produceTail = produceStart.args;
     assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', await sharedGitDirectory(root)]);
-    assert.match(produceTail.at(-1)!, /^You are an independent Graphyard proof producer/, 'the request is the positional prompt (GY-93)');
+    assert.ok(produceTail.at(-1)!.startsWith(`${autonomyContract} You are an independent Graphyard proof producer`), 'the request is the positional prompt (GY-93), led by the autonomy contract since Codex loads no role file (GY-184)');
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
     const review = { id: 'request-review', kind: 'review', provider: 'github', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
@@ -325,8 +326,9 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
 });
 
 test('integration:prompt-delivery-confirmed — a launch counts only once the runtime visibly accepted its prompt; a dropped prompt is redelivered, or the session is closed and relaunched', async () => {
-  // GY-93: a runtime with a request contract starts on its request and is never prompted; the
-  // confirmed paste delivery below is the path for a runtime without one (Muse here).
+  // GY-93: a runtime with a request contract starts on its request and is never prompted. Since
+  // GY-184 every launched runtime has one, so the confirmed paste delivery below is the path for the
+  // loop's re-prompt and the reviewer's reminder only; a launch never pastes.
   // Herdr's own confirmation: the prompt must move the agent out of idle.
   const stalled = { error: { code: 'agent_prompt_stalled', message: 'agent did not start working within 5000ms' } };
   let prompts = 0; const calls: string[][] = [];
@@ -346,13 +348,11 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
 
   const { root, credentialDirectory, cleanup } = await master({ reviewer: true });
   try {
-    // A reviewer whose runtime never takes the prompt is closed with its credential, not left idle.
+    // A reviewer on Muse, once prompted after start, starts on its own request: nothing is pasted, so no prompt can drop.
     await saveReviewerProfile(root, { name: 'review-muse', agentName: 'review-muse', kind: 'muse' });
     const reviewCalls: string[][] = [];
-    await assert.rejects(launchReview(root, work(), 'review-muse', [], new Date().toISOString(), { run: herdr(reviewCalls, args => args[1] === 'prompt' ? stalled : undefined), mint: async () => ({ token: 'ghs_x', expiresAt: future(3_000_000) }), prompt: fast }), (error: any) => error.promptDropped === true);
-    assert.deepEqual(reviewCalls.filter(args => args[1] === 'prompt').length, 3);
-    assert.ok(reviewCalls.some(args => args[0] === 'pane' && args[1] === 'close' && args[2] === 'pane-1'), 'the idle session is closed');
-    assert.deepEqual((await readReviewLedger(root)).reviews, [], 'no launch is recorded for a prompt nobody accepted');
+    const reviewed = await launchReview(root, work(), 'review-muse', [], new Date().toISOString(), { run: herdr(reviewCalls, args => args[1] === 'prompt' ? stalled : undefined), mint: async () => ({ token: 'ghs_x', expiresAt: future(3_000_000) }), prompt: fast });
+    assert.equal(reviewed.delivery, 'request'); assert.equal(reviewCalls.filter(args => args[1] === 'prompt').length, 0);
 
     // The loop relaunches such a session once before it records a refusal.
     const config = await loadMasterConfig(root);
@@ -371,16 +371,12 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
     // A worker: the dropped launch releases its claim and closes the pane, then a fresh claim relaunches it.
     const credential = await token(credentialDirectory, 'workers', 'worker-oc', 'worker-oc-token-');
     const profile = { name: 'muse-worker', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch' as const, kind: 'muse' as const, credentialFile: credential, agentArgs: [], approvals: 'auto' as const, environment: {} };
-    const workerCalls: string[][] = []; const claims: number[] = [], released: number[] = []; let workerPrompts = 0;
-    const result = await dispatchWork(root, ready(), profile, [], herdr(workerCalls, args => args[1] === 'prompt' && ++workerPrompts <= 3 ? stalled : undefined), [ready()],
-      async () => { claims.push(claims.length + 1); return { epoch: claims.length, path: join(root, `assigned-${claims.length}`), base: 'c'.repeat(40) }; }, async (_root, _key, epoch) => { released.push(epoch); }, 5_000, new Date().toISOString(), { prompt: fast });
-    assert.deepEqual(claims, [1, 2]); assert.deepEqual(released, [1], 'the first claim is released before the relaunch');
-    assert.equal(result.relaunched, 1); assert.equal(workerCalls.filter(args => args[0] === 'pane' && args[1] === 'close').length, 1);
-    assert.deepEqual(workerCalls.at(-1)!.slice(0, 5), ['agent', 'prompt', 'eng-oc', workerCalls.at(-1)![3], '--wait']);
-    // Twice dropped: the item is released, never left with an idle session.
-    const stuck: number[] = [];
-    await assert.rejects(dispatchWork(root, ready(), profile, [], herdr([], args => args[1] === 'prompt' ? stalled : undefined), [ready()], async () => ({ epoch: 7, path: join(root, 'stuck'), base: 'c'.repeat(40) }), async (_root, _key, epoch) => { stuck.push(epoch); }, 5_000, new Date().toISOString(), { prompt: fast }), (error: any) => error.promptDropped === true);
-    assert.deepEqual(stuck, [7, 7]);
+    // A worker on Muse likewise: one claim, one launch, its request on the command line and never pasted.
+    const workerCalls: string[][] = []; const claims: number[] = [];
+    const result = await dispatchWork(root, ready(), profile, [], herdr(workerCalls, args => args[1] === 'prompt' ? stalled : undefined), [ready()],
+      async () => { claims.push(claims.length + 1); return { epoch: claims.length, path: join(root, `assigned-${claims.length}`), base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { prompt: fast });
+    assert.deepEqual(claims, [1]); assert.equal(result.delivery, 'request'); assert.equal(result.relaunched, 0);
+    assert.equal(workerCalls.filter(args => args[0] === 'agent' && args[1] === 'prompt').length, 0);
   } finally { await cleanup(); }
 });
 
@@ -390,7 +386,8 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
   assert.deepEqual(agentLaunchPlan('cursor', 'auto').args, ['--force', '--trust']);
   const opencode = JSON.parse(agentLaunchPlan('opencode', 'auto').environment.OPENCODE_PERMISSION);
   for (const permission of ['*', 'edit', 'bash', 'webfetch', 'external_directory', 'doom_loop']) assert.equal(opencode[permission], 'allow', `opencode ${permission} is allowed`);
-  assert.equal(agentLaunchPlan('opencode', 'prompt').applied, false, 'an explicit opt-out is still honoured');
+  assert.equal(agentLaunchPlan('opencode', 'prompt').applied, false, 'an explicit opt-out plans no recipe');
+  assert.throws(() => accountLaunch({ kind: 'opencode', approvals: 'prompt', agentArgs: [], environment: {} }, null), /refuses to launch the opencode runtime with approvals "prompt"/, 'and is refused at launch (GY-184)');
   // Codex keeps its sandbox, widened to what the role needs: network, and the shared Git directory.
   const codex = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: {} }, null, { writable: ['/repo/.git'] });
   assert.deepEqual(codex.args.slice(-4), ['-c', 'sandbox_workspace_write.network_access=true', '--add-dir', '/repo/.git']);
