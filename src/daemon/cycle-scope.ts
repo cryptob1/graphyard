@@ -63,6 +63,13 @@ export async function scopeStep(cycle: Cycle) {
   //     The reads take seconds; the widening names the request it answers, so a claim or lease
   //     end that clears that request meanwhile makes the control plane refuse it, never apply it.
   //     It answers with the time the control plane recorded the widening, or null when it did not widen.
+  // What an automatic widening stood on, in the audit detail: the grounds it actually used.
+  const widenedOn = (grounds: { ground: string }[], count: number): string => {
+    const successors = grounds.filter(entry => entry.ground.startsWith('successor of ')).length;
+    if (successors === grounds.length) return `the base branch's split or rename of a planned file`;
+    if (successors) return `a review finding and the base branch's split or rename of a planned file`;
+    return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
+  };
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<string | null> => {
     if (!(effects.reviewFindings || effects.baseSuccessions) || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return null;
@@ -79,7 +86,7 @@ export async function scopeStep(cycle: Cycle) {
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
       const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText, baseSuccessors(effects, item));
       if ('refusal' in scoped) {
-        const detail = boundDetail(`Not widened on a review finding: ${scoped.refusal}`);
+        const detail = boundDetail(`Not widened on a review finding or a planned file's successor: ${scoped.refusal}`);
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
         // An unchanged refusal is the same decision read again, not a new action.
         if (judged && previous.detail !== detail) performed.push(entry);
@@ -92,10 +99,10 @@ export async function scopeStep(cycle: Cycle) {
       // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
       const recorded = widened?.scopeDecision;
       const at = recorded?.epoch === request.epoch && recorded.requestedAt === request.at ? recorded.at : new Date(now()).toISOString();
-      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${scoped.grounds.every(entry => entry.ground.startsWith('successor of ')) ? `the base branch's split or rename of a planned file` : `the review finding that names ${paths.length === 1 ? 'it' : 'them'}`}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding or a planned file's successor: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return null;
     }
   };

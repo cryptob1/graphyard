@@ -11,11 +11,11 @@
 
 ## Items, scope and human waits
 
-A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`. Documentation, files the criteria name and, for items planning `docs/`, single files under `web/` and `browser-tests/` widen automatically; so do existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes), and tests whose quoted failing assertion a planned file holds. The independent approver judges the rest (`--allow-broad-scope` needs a stated reason); the worker keeps its lease, reading the outcome via `scope-request GY-N EPOCH --wait`. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+An unplanned file needs `scope-request GY-N EPOCH PATH… -- REASON`. Automatic: documentation; files the criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests whose quoted failing assertion a planned file holds; planned files' successors (git renames, copies, `Graphyard-Successor: OLD -> NEW` trailers), which the loop also adds, audited, to open items. The approver judges the rest (`--allow-broad-scope` needs a reason); the worker keeps its lease (`scope-request GY-N EPOCH --wait` reads the outcome). A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports candidate conflicts under `conflicts` ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
+Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports candidate conflicts (`conflicts`) ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
 
 ### Speculative tips and branch protection
 
@@ -45,11 +45,11 @@ Each flow records `record.json` under `.graphyard/master-actions/` and appends t
 
 ## Harness permissions
 
-A harness classifier refuses routine administration; `master harness claude --apply` (Codex: `master harness codex`) writes allow and deny rules to `.claude/settings.local.json`.
+A harness classifier refuses routine administration; `master harness claude --apply` (Codex: `master harness codex`) writes allow/deny rules to `.claude/settings.local.json`.
 
 ## Typed actions and executors
 
-The control plane names one typed action per item (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`).
+Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`).
 
 Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
