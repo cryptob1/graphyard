@@ -19,6 +19,7 @@ import { actionableSubjects } from '../src/master-daemon.js';
 import { actionlessCards, stalledCards } from '../web/pages/actionless.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
+import { boardFromStatus } from '../src/model/board.js';
 
 /**
  * GY-106: an item may not hold a failing gate with no action computed and nobody told.
@@ -369,6 +370,8 @@ test('unit:actionless-item-visible — an item with no action and nothing moving
     events: [], operatorAgentsError: null, features: {}, editingRequirements: false, setEditingRequirements: () => {},
     codexAvailable: false, queue: [], sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {},
     action: async () => {}, setError: () => {}, signOut: () => {},
+    // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
+    board: boardFromStatus(computed, now.getTime(), null),
   } as unknown as Dashboard;
   const markup = renderToStaticMarkup(createElement(OverviewPage, dashboard));
   assert.match(markup, /Nothing is happening/);

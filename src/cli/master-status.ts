@@ -26,6 +26,7 @@ import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, 
 import { contextOverflows } from '../model/escalation-context.js';
 import { interventionSummary } from './intervention-status.js';
 import { terminalDecisions } from './decision-report.js';
+import { masterBoard } from '../model/board.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { throughputStatus } from '../throughput.js';
 
@@ -133,10 +134,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.push(...setupItems);
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
-  // Everything the control plane will take from the operator's own credential alone, derived by
-  // the server from the human-only rule table and answered where it is listed — the dashboard's
-  // Needs you page, in the operator's signed-in session. `humanRequests` above is the parked
-  // half of that table; this is the whole of it, approvals included (GY-102).
+  // Everything the control plane takes from the operator's own credential alone, from the
+  // human-only rule table, answered on the dashboard's Needs you page (GY-102).
   const humanOnly = (coordinator?.humanOnly ?? []) as HumanRequestRow[];
   // A standing ledger refusal is attributed first (GY-131); what still reads as a symptom of a
   // resource at its bound is then rewritten to name that resource (GY-132).
@@ -147,6 +146,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
+    // The board (GY-200): what the master owes first, with commands, then the rest.
+    board: await masterBoard(masterApi, snapshot, coordinator, decisions.unanswered),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.

@@ -1,5 +1,17 @@
 import { readFileSync } from 'node:fs';
-import { test, expect, type Locator, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
+import { boardFromStatus } from '../src/model/board';
+
+// GET /api/board (GY-200): the Work page renders the groups the server serves. The fixture builds it
+// with the server's own module over the snapshot the page is served, read back through the page's
+// routes, so a test that overrides the snapshot is served that snapshot's board.
+// A read that fails (offline) or is still in flight when its test ends is aborted rather than left hanging.
+async function serveBoard(page: Page, route: Route) {
+  try {
+    const snapshot = await page.evaluate(() => fetch('/api/work-snapshot', { headers: { Authorization: 'Bearer browser-fixture' } }).then(response => response.json()));
+    await route.fulfill({ json: boardFromStatus(snapshot?.work ?? [], Date.parse(snapshot?.now ?? new Date().toISOString()), null) });
+  } catch { await route.abort().catch(() => {}); /* the read failed (offline) or the page closed under it: settle the request so polling does not stall */ }
+}
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
 const work = { dependencies: [], plannedFiles: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef1234567890abcdef1234567890abcdef12' } };
@@ -13,6 +25,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().headers().authorization !== 'Bearer browser-fixture' || state.unauthorized) return route.fulfill({ status: 401, json: { error: 'Rejected' } });
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/board')) return serveBoard(page, route);
     return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : path === '/api/proof-grants' ? proofGrants : [] });
   });
   await page.goto('/'); return state;
@@ -164,6 +177,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
       const path = new URL(route.request().url()).pathname;
       if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'fixture', role: 'admin' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] } });
       if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: items, now: new Date().toISOString() } });
+      if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(items as any, Date.now(), null) });
       return route.fulfill({ json: [] });
     });
     await page.goto('/'); await login(page);
@@ -197,6 +211,7 @@ test('every moving row carries how long it has held its status, in red past thir
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'fixture', role: 'admin' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] } });
     if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: items, now: new Date().toISOString() } });
+    if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(items as any, Date.now(), null) });
     return route.fulfill({ json: [] });
   });
   await page.goto('/'); await login(page);
@@ -748,7 +763,8 @@ test('merge queue shows each entry with its position in line, and its predicted 
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role: 'admin' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] }
-      : path.endsWith('/work-snapshot') ? { work: [head, next], now: new Date().toISOString() } : path.endsWith('/work') ? [head, next] : [] });
+      : path.endsWith('/work-snapshot') ? { work: [head, next], now: new Date().toISOString() } : path.endsWith('/work') ? [head, next]
+      : path.endsWith('/board') ? boardFromStatus([head, next] as any, Date.now(), null) : [] });
   });
   await page.goto('/'); await login(page);
   // GY-161: the queue is the Merge step of each moving row, in plain words, with the row's own clock.

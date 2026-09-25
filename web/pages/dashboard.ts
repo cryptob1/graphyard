@@ -1,6 +1,6 @@
 import type { RefObject } from 'react';
 import type { Work } from '../../src/model';
-import type { OpenGroup } from '../groups';
+import type { Board, OpenGroup } from '../groups';
 import type { IntegrationJob } from '../../src/coordination';
 import type { predictQueue } from '../../src/merge-queue';
 import type { Features } from '../features';
@@ -11,7 +11,12 @@ import type { StepTransition } from '../flow-replay';
  * web/main.tsx owns the state; pages under web/pages/ render one view of it each.
  */
 export interface Dashboard {
-  token: string; work: Work[]; status: any; error: string; connected: boolean; lastUpdated: string | null;
+  token: string; work: Work[]; status: any;
+  /**
+   * The board as `GET /api/board` last served it (GY-200): the Work page's groups, each item's next
+   * actor and command. Null or absent until the first read answers; the page derives no groups of its own.
+   */
+  board?: Board | null; error: string; connected: boolean; lastUpdated: string | null;
   view: string; setView(view: string): void;
   /** The Work page's group filter: the tile last pressed, or null for every group. */
   filter: OpenGroup | null; setFilter(filter: OpenGroup | null): void;
