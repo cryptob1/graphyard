@@ -35,7 +35,7 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /logi
 node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
 ```
 
-Profiles default to `"approvals": "auto"` so sessions never block on a permission prompt (the trade-off: an unattended session); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
+Profiles default to `"approvals": "auto"` so sessions never block on a permission prompt (trade-off: unattended sessions); `"prompt"` is refused at launch ([approval modes](master-agent-sessions.md#approval-modes)).
 
 ### Configure the fleet
 
@@ -58,7 +58,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-An account is one login, held by reference, never the credential:
+An account is one login, held by reference, not the credential:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
@@ -85,7 +85,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-When adding workers, for worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
+For worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
