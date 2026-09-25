@@ -5,7 +5,7 @@ import { dispatchOrder } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
-import { assertDispatchable, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
+import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { message } from './state.js';
@@ -119,7 +119,8 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const key = dispatchKey(item);
     if (state.actions[key] && state.actions[key].state !== 'failed') return;
     const free = await effects.agents();
-    const choice = health.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
+    const pick = () => health.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
+    let choice = pick();
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no
       // profile could take work even if it were free.
@@ -131,23 +132,41 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       }
       return 'stop';
     }
-    taken.add(choice.profile.name);
-    await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-    try {
-      // The session is registered before its runtime starts (GY-172), where every Graphyard reader
-      // looks, and its pane written once it has: watching this specific agent never means asking
-      // this loop to relay its pane id, and the session report observes it from its first tick.
-      const dispatched = await registeredLaunch(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
-        id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal, runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
-        ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-        subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-      }, async () => await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined,
-      launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
-      clearProfileFailure(state, choice.profile);
-      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      recordProfileFailure(state, choice.profile, message(error), now());
-      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${choice.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+    const previous = state.actions[key];
+    for (;;) {
+      const current = choice;
+      taken.add(current.profile.name);
+      await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${current.profile.name}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+      try {
+        // The session is registered before its runtime starts (GY-172), where every Graphyard reader
+        // looks, and its pane written once it has: watching this specific agent never means asking
+        // this loop to relay its pane id, and the session report observes it from its first tick.
+        await registeredLaunch(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
+          id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
+          ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+          subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined,
+        launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
+        clearProfileFailure(state, current.profile);
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      } catch (error) {
+        // Another dispatcher — an executor, or a hand dispatch — holds the profile or the item
+        // (GY-273). Nothing was claimed and nothing is wrong with the profile: a held profile is
+        // passed over for the next free one, and a held item is left to the launch holding it.
+        if (dispatchReserved(error)) {
+          const next = error.resource === 'profile' ? pick() : undefined;
+          if (next) { choice = next; continue; }
+          // The profile this item did not use is still free for the next item.
+          if (error.resource === 'work') taken.delete(current.profile.name);
+          if (previous) state.actions[key] = previous; else delete state.actions[key];
+          await effects.persist(state);
+          return error.resource === 'profile' ? 'stop' : undefined;
+        }
+        recordProfileFailure(state, current.profile, message(error), now());
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
     }
   }) === 'stop') break;
 
