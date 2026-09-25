@@ -1,6 +1,6 @@
 import { createSign } from 'node:crypto';
 import type { Transport } from './transport.js';
-import { mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState } from '../protection.js';
+import { enableAutoMergeArgs, mergeMode, mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState, queueRulesetRefused, repositoryMergeSettings, type RepositoryMergeSettings } from '../protection.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
 export const VERIFICATION_CHECK = 'Graphyard / install verification';
@@ -114,13 +114,35 @@ export interface ProtectionInputs { repository: string; branch: string; required
 
 export async function readProtection(gh: GitHubCli, repository: string, branch: string): Promise<any | null> {
   const protection = await ghJson(gh, ['api', `repos/${repository}/branches/${branch}/protection`], null) as any;
-  // GitHub executes merges through its merge queue (GY-258), which lives in the branch's rules.
-  if (protection && typeof protection === 'object') Object.defineProperty(protection, installBranchRules, { value: await ghJson(gh, ['api', `repos/${repository}/rules/branches/${branch}`], null), enumerable: false });
+  if (protection && typeof protection === 'object') await attachMergeFacts(gh, repository, branch, protection);
   return protection;
 }
+/**
+ * How GitHub merges on the branch, read whether or not it is protected yet: its merge queue
+ * (GY-258) lives in the branch's rules, and a user-owned repository cannot have one and merges
+ * through auto-merge instead (GY-310). Answers what `mergeQueueSatisfied` and `installMergeMode` read.
+ */
+export async function readMergeFacts(gh: GitHubCli, repository: string, branch: string) {
+  return attachMergeFacts(gh, repository, branch, {});
+}
+async function attachMergeFacts<T extends object>(gh: GitHubCli, repository: string, branch: string, target: T) {
+  Object.defineProperty(target, installBranchRules, { value: await ghJson(gh, ['api', `repos/${repository}/rules/branches/${branch}`], null), enumerable: false });
+  Object.defineProperty(target, installRepositoryMerge, { value: repositoryMergeSettings(await ghJson(gh, ['api', `repos/${repository}`], null)), enumerable: false });
+  return target;
+}
 const installBranchRules = Symbol.for('graphyard.install.branchRules');
-/** Whether the branch's merge queue requires the App's check; null when the rules were not read. */
+const installRepositoryMerge = Symbol.for('graphyard.install.repositoryMerge');
+/** How GitHub merges on the protected branch: its merge queue, or auto-merge where the repository cannot have a queue. */
+export function installMergeMode(current: any | null) {
+  return mergeMode(current?.[installRepositoryMerge] ?? null, current?.[installBranchRules]);
+}
+/**
+ * Whether GitHub is set up to merge: the branch's merge queue requires the App's check, or, in
+ * auto-merge mode, the repository allows auto-merge; null when the rules were not read.
+ */
 export function mergeQueueSatisfied(current: any | null, graphyardAppId: number | null): boolean | null {
+  const settings: RepositoryMergeSettings | null = current?.[installRepositoryMerge] ?? null;
+  if (installMergeMode(current) === 'auto-merge') return settings!.allowAutoMerge;
   const state = graphyardAppId ? mergeQueueState(current?.[installBranchRules], graphyardAppId) : null;
   return state ? state.queue && state.requiredCheck : null;
 }
@@ -222,16 +244,32 @@ export async function applyProtection(gh: GitHubCli, inputs: ProtectionInputs) {
   const payload = protectionPayload(inputs, current);
   const result = await gh(['api', '--method', 'PUT', `repos/${inputs.repository}/branches/${inputs.branch}/protection`, '--input', '-'], { input: JSON.stringify(payload), allowFailure: true });
   if (result.code !== 0) throw new Error(`Branch protection could not be applied; run "gh auth status" and confirm the account administers ${inputs.repository}`);
-  if (inputs.graphyardAppId && mergeQueueSatisfied(current, inputs.graphyardAppId) === false) await applyMergeQueue(gh, inputs.repository, inputs.branch, inputs.graphyardAppId);
+  // A fresh repository's branch is unprotected (GitHub answers 404), so its merge settings are read
+  // on their own: the first install must set the merge mode, not only a re-run (GY-310).
+  const merge = current ?? await readMergeFacts(gh, inputs.repository, inputs.branch);
+  if (mergeQueueSatisfied(merge, inputs.graphyardAppId) === false) {
+    if (installMergeMode(merge) === 'auto-merge') await enableAutoMerge(gh, inputs.repository);
+    else if (inputs.graphyardAppId && !await applyMergeQueue(gh, inputs.repository, inputs.branch, inputs.graphyardAppId)) await enableAutoMerge(gh, inputs.repository);
+  }
   return payload;
 }
-/** Write Graphyard's merge-queue ruleset on the base branch (GY-258): replace the one it wrote before by name, or create it. */
-export async function applyMergeQueue(gh: GitHubCli, repository: string, branch: string, githubAppId: number) {
+/** Let the repository auto-merge pull requests: GitHub's merge path where it has no merge queue (GY-310). */
+export async function enableAutoMerge(gh: GitHubCli, repository: string) {
+  const result = await gh(enableAutoMergeArgs(repository), { allowFailure: true });
+  if (result.code !== 0) throw new Error(`Auto-merge could not be enabled on ${repository}, which cannot have a merge queue; confirm the account administers it`);
+}
+/**
+ * Write Graphyard's merge-queue ruleset on the base branch (GY-258): replace the one it wrote before
+ * by name, or create it. False when GitHub refuses merge queues on the repository (HTTP 422).
+ */
+export async function applyMergeQueue(gh: GitHubCli, repository: string, branch: string, githubAppId: number): Promise<boolean> {
   const rulesets = await ghJson(gh, ['api', `repos/${repository}/rulesets?includes_parents=false`], []) as any[];
   const existing = Array.isArray(rulesets) ? rulesets.find(ruleset => ruleset?.name === mergeQueueRulesetName) : undefined;
   const result = await gh(['api', '--method', existing ? 'PUT' : 'POST', existing ? `repos/${repository}/rulesets/${existing.id}` : `repos/${repository}/rulesets`, '--input', '-'],
     { input: JSON.stringify(mergeQueueRuleset({ baseBranch: branch, githubAppId })), allowFailure: true });
+  if (result.code !== 0 && queueRulesetRefused(`${result.stderr}\n${result.stdout}`)) return false;
   if (result.code !== 0) throw new Error(`The merge queue could not be configured on ${branch}; confirm the account administers ${repository} and that its plan offers merge queues`);
+  return true;
 }
 
 /** CI identities are discovered from the checks GitHub actually published on the base branch. */

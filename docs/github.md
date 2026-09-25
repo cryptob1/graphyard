@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 2 | the App, protection, the merge queue, CI proofs. -->
 # GitHub enforcement
 
-The installer-created App observes the repository, publishing **`Graphyard / merge`** on the exact PR head.
+The installer-created App publishes **`Graphyard / merge`** on the exact PR head.
 
 ## App permissions
 
@@ -16,7 +16,7 @@ The control-plane App holds (declared in `src/github-permissions.ts`):
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 
-A reviewer App is never granted Contents: write, Checks, or Administration, and worker identities are not Apps at all. It holds:
+A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -25,21 +25,21 @@ A reviewer App is never granted Contents: write, Checks, or Administration, and 
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-Grants are checked every five minutes and after any 403; a shortfall shows under `appPermissions` and its jobs are **held, not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
+Grants are checked every five minutes and after any 403; a shortfall shows under `appPermissions`, its jobs **held, not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
 ## The reviewer App
 
-Review uses a separate reviewer App, created by `graphyard master reviewer setup` (Pull requests write, reads otherwise); binding refuses an installation that can write code. Each review session's token lasts one hour; an approval by `SLUG[bot]` on the exact head satisfies both GitHub and Graphyard.
+A separate reviewer App, created by `graphyard master reviewer setup` (Pull requests write, reads otherwise), reviews; binding refuses one that can write code. Review tokens last one hour; an approval by `SLUG[bot]` on the exact head satisfies GitHub and Graphyard.
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` bound to this App, leave `strict` ("require up to date") **off**, enforce for administrators, forbid force pushes and deletion, and give workers no bypass. `master browser protection` reconciles it; `master protection --apply` also adds a merge queue requiring it (CI must run on `merge_group`).
+On the base branch require `Graphyard / merge` bound to this App, leave `strict` ("require up to date") **off**, enforce for administrators, forbid force pushes and deletion, and give workers no bypass. `master browser protection` reconciles it; `master protection --apply`, `install --apply` and `init --scan --apply` set the merge mode: organization repositories get a merge queue requiring it (CI runs on `merge_group`), user-owned ones (or a 422) `allow_auto_merge`.
 
 The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, approval of the current head, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head.
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
+A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof binds it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
 
 ### Bindings and carry
 
@@ -55,7 +55,7 @@ With `"deploySmoke": true`, the master dispatches the smoke workflow (`master in
 
 ## Enforcement boundary
 
-No transaction spans GitHub and Postgres: GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker can still push its own branch after losing its lease.
+GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker can still push its branch after losing its lease.
 
 ## Identity-bound agent review
 
