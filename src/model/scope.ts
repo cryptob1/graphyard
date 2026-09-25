@@ -1,3 +1,4 @@
+import { documentationGlobMatches } from './documentation-glob.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
 // Unsupported glob expressions are not interpreted as semantic dependency knowledge.
 export function pathScope(value: string) {
@@ -79,12 +80,18 @@ export interface ScopeDecision {
 }
 
 /**
- * Documentation this repository requires updating when behaviour changes (AGENTS.md: "Update the
- * relevant guide under `docs/` when behavior changes"), plus the agent contract itself. A request
- * for one of these files is implied by any behaviour change, so it needs no operator. Directory
+ * The documentation paths of a repository that configures none (GY-215): Graphyard's own layout.
+ * A repository names its own in its committed `graphyard.json` (model/documentation.ts), and each
+ * item carries the paths it was created under, which are what the rules below read. A request for
+ * a documentation file is implied by any behaviour change, so it needs no operator. Directory
  * scopes are not: the implication covers the guide a change touches, never the whole tree.
  */
 export const documentationScopes = ['docs/', 'AGENTS.md', 'README.md'] as const;
+/** The documentation an item carries: the paths and changelog its repository configured at create time. */
+export interface ItemDocumentation { paths: readonly string[]; changelog?: string | null }
+/** The documentation paths an item's scope rules read: its own, or the default for an item created before GY-215. */
+export const itemDocumentationPaths = (item: { documentation?: ItemDocumentation | null }) =>
+  item.documentation ? [...new Set([...item.documentation.paths, ...(item.documentation.changelog ? [item.documentation.changelog] : [])])] : [...documentationScopes];
 /**
  * The surfaces that render, test or point users at the documentation: the web app that links to
  * and embeds doc pages, the browser tests that pin their text, and the integrations whose messages
@@ -127,7 +134,8 @@ export function impliedScopes(criteria: readonly ScopeCriterion[], documentation
  */
 export function scopeImplication(path: string, implied: readonly ScopeImplication[]) {
   const breadth = pathScope(path).prefix;
-  const found = implied.find(entry => pathScopeContains(entry.scope, path) && !(breadth && entry.kind !== 'criteria')) ?? null;
+  const covers = (entry: ScopeImplication) => entry.kind === 'documentation' ? documentationGlobMatches(entry.scope, path) : pathScopeContains(entry.scope, path);
+  const found = implied.find(entry => covers(entry) && !(breadth && entry.kind !== 'criteria')) ?? null;
   return found?.kind === 'documentation-consumer' ? { ...found, why: `${path} renders or tests the documentation this item rewrites` } : found;
 }
 
@@ -149,7 +157,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[] },
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null },
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {
@@ -161,7 +169,7 @@ export function decideScopeRequest(
   if (request.remove?.length) return refused(`the request drops planned paths (${request.remove.join(', ')}); only additive scope is decided automatically, and narrowing containment is an operator requirements revision`);
   if (request.criteria?.length) return refused('the request rewrites criteria or proofs; requirements are decided by an operator and approved by an independent agent, never by the loop');
   if (!paths.length) return refused('the request names no path outside the planned scope; nothing is left to widen');
-  const implied = [...impliedScopes(item.criteria, options.documentation),
+  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item)),
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : [])];
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) }));
   const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
@@ -217,7 +225,7 @@ export function pinningTestGround(path: string, reason: string, testText: string
  * decide it again rather than leave the item blocked on a verdict the rules no longer give.
  * Only a refusal that is still the item's blocker qualifies; an approval is never re-decided.
  */
-export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; blocker?: string | null; scopeRequest?: ScopeRequestState | null }) {
+export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; blocker?: string | null; scopeRequest?: ScopeRequestState | null }) {
   const request = item.scopeRequest;
   return !!request && request.decision?.state === 'refused' && !!item.blocker?.startsWith(scopeRefusalBlocker)
     && decideScopeRequest(item, request).state === 'approved';
