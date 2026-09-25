@@ -9,7 +9,7 @@ The master acts without asking. Only three decisions are human-only: goals and p
 
 ## Operate
 
-Keep cycling: status, dispatch ready work, shepherd review and proof collection, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Keep cycling: status, dispatch, review and proofs, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
 
 1. `master status` at startup and after events.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -55,7 +55,7 @@ When a candidate passes the build gate, `autoDispatch` records one producer requ
 
 **Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles as `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`; close its pane.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after a refused launch.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching that review.
 
 ### Proofs must exercise their criterion
 

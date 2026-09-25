@@ -306,8 +306,8 @@ test('unit:system-driven-items master review stays open only as the recovery of 
   const retired = await masterHarness({ work: [underReview({ actionQueue: { actions: [], history: [{ ...stalledRow(reviewRow), resolvedAt: iso(-1_000), resolution: 'retired' }] } })] });
   try {
     await retired.reviewSessions([1, 2, 3, 4].map(n => reviewSession('failed', -n * 3_600_000, 5 - n)));
-    // Past the guard the launch itself runs, which this checkout has no reviewer App for.
-    assert.match(await retired.refusal(['review', 'GY-7']), /Register the reviewer GitHub App/, 'an exhausted request whose row was retired reaches the launch');
+    // Past the guard the launch itself runs; what it then refuses on depends on the host (no reviewer App, no herdr), never on the guard.
+    assert.doesNotMatch(await retired.refusal(['review', 'GY-7']), /is system-driven/, 'an exhausted request whose row was retired reaches the launch');
   } finally { await retired.close(); }
 });
 
