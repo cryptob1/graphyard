@@ -227,7 +227,7 @@ test('integration:store-bounded-waits — the store pool bounds the wait for a c
     // records the SQL dropped are still counted as left out.
     const full = (await read('work-snapshot')).body as { work: Work[] };
     const whole = full.work.find(item => item.id === first.id)!;
-    assert.deepEqual(trimmed.evidence.map(entry => entry.id), coordinationWork(whole, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0 }).evidence.map(entry => entry.id));
+    assert.deepEqual(trimmed.evidence.map(entry => entry.id), coordinationWork(whole, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 }).evidence.map(entry => entry.id));
     assert.ok(trimmed.evidence.length > 0, 'the candidate\'s own evidence is kept');
     assert.equal(view.omitted.evidence, trimInProcess(full).omitted.evidence, 'the records the SQL dropped are counted as the in-process trim would count them');
     // The full view is untouched: it still carries every row.

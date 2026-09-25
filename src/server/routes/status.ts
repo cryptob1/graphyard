@@ -115,7 +115,7 @@ export const statusRoutes = defineRoutes('status', [
       const trimmedView = coordinationSnapshot(scope(snapshot));
       for (const work of trimmedView.work) {
         const cut = trimmed.get(work.id);
-        if (cut) { trimmedView.omitted.evidence += cut.evidence; trimmedView.omitted.dispatchHistory += cut.dispatchHistory; trimmedView.omitted.queueHistory += cut.queueHistory; trimmedView.omitted.actionHistory += cut.actionHistory; }
+        if (cut) { trimmedView.omitted.evidence += cut.evidence; trimmedView.omitted.dispatchHistory += cut.dispatchHistory; trimmedView.omitted.queueHistory += cut.queueHistory; trimmedView.omitted.actionHistory += cut.actionHistory; trimmedView.omitted.sessions += cut.sessions; }
       }
       return trimmedView;
     },

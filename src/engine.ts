@@ -17,7 +17,9 @@ import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeD
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
-import { claimAction, claimCandidatesParams, claimCandidatesSql, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
+import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
+import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
+import { livenessFallback, livenessOf, livenessRepairEntry, repairLiveness } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -130,7 +132,7 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 // provider merge the first one already committed. The instance is minted by the executor and
 // bound here to the principal that authenticates it, so no instance can name another principal's.
 const executorInstance = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
-const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), executor: executorInstance.optional() }).strict();
+const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000), executor: executorInstance.optional() }).strict();
 const mergeVerifySchema = z.object({ executionId: z.string().uuid(), executor: executorInstance.optional() }).strict();
 /**
@@ -1161,7 +1163,13 @@ export class Engine {
           && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, fenced, or superseded');
         return receipt.result;
       }
-      demand(work.revision === data.expectedRevision, 'Task changed before merge execution; retry');
+      // The grant is bound to what it merges, not to the document revision the caller read (GY-192):
+      // observations and bookkeeping bump the revision constantly without changing the candidate.
+      // A revision from the future was never read; any other change is re-validated below, in this
+      // transaction, against the binding — head, base, policy revision, the queue tip the caller
+      // verified, and the all-gates authorization for exactly those.
+      demand(data.expectedRevision <= work.revision, 'Task changed before merge execution; retry');
+      demand(data.queueTip === undefined || work.queue?.speculation?.tip === data.queueTip && work.queue.speculation.base === data.baseSha, 'Task changed before merge execution; retry');
       if (work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
       demand(!work.mergeExecution, work.mergeExecution?.committingAt ? 'A committed merge execution awaits GitHub reconciliation; no new execution can be granted until it is observed' : 'A merge execution is already active');
       this.evaluate(work, all, now);
@@ -1590,7 +1598,8 @@ export class Engine {
     // One computation answers both: the queue reconciles against it and the item carries it, so
     // two readers of the same evaluation cannot disagree about what this item needs.
     const computed = nextAction(work, all, now);
-    reconcileActions(work, all, now, { next: computed });
+    // An open item the derivation names nothing for and nothing moves is owned by an escalation (GY-201).
+    reconcileActions(work, all, now, { next: computed ?? livenessFallback(work, all, now) });
     // Only a different decision is written: an identical action rebuilt in source order would
     // differ from the stored one by key order alone, and the reconciliation tick would rewrite
     // every item on every pass.
@@ -1620,6 +1629,9 @@ export class Engine {
           continue;
         }
         const before = JSON.stringify(work);
+        // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
+        // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
+        const stranded = livenessOf(work, all, now).violation;
         preserveAssignment(work); retainQuarantineFence(work);
         const executing = holdsMergeExecution(work, now.getTime());
         const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
@@ -1627,8 +1639,16 @@ export class Engine {
         // loss: that escalation must reach the record and fence the execution
         // rather than wait for it, so delivery cannot outrun the concern. A
         // committed execution is retired only by the GitHub observation that
-        // settles its provider outcome, never by reconciliation.
-        if (executing && !leaseLost) continue;
+        // settles its provider outcome, never by reconciliation — but one that outlived its
+        // authority with the pull request open is owed a fresh reading, queued here.
+        if (executing && !leaseLost) {
+          if (repairLiveness(work, all, now).length && JSON.stringify(work) !== before) {
+            const entry = stranded ? livenessRepairEntry(stranded, work, all, now) : null;
+            if (entry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+            await save(db, work, 'graphyard', 'reconciled', now, entry ? { ledger: [entry.kind] } : undefined);
+          }
+          continue;
+        }
         if (!executing && work.mergeExecution) work.mergeExecution = null;
         const ledger: { kind: string; details: Record<string, unknown> }[] = [];
         // The ledger explains a lapse: the epoch's own blocked report or the admin's stopped-worker
@@ -1663,6 +1683,9 @@ export class Engine {
         // behind it are woken to predict against the real base.
         const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
         if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
+        // Every violation found at the start of the tick is repaired by the evaluation above — the
+        // derivation names its successor and the queue opens its row — and the ledger says so.
+        if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
         if (JSON.stringify(work) !== before) {
           for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
           await this.recordDispatch(db, work, now);
@@ -1715,7 +1738,14 @@ export class Engine {
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
         const acquired = (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1`, [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
-        const boundedExecution = activeExecution ?? acquired ?? null;
+        // The execution that called the provider for this head is the one that bounds its merge: a
+        // later execution acquired on a lagging read that still showed the pull request open never
+        // committed, and binding the merge to it would record a merge its predecessor authorized as
+        // unauthorized (GY-202). So the latest committed execution for the observed head is preferred.
+        const commits = (candidate: Work['mergeExecution'] | undefined) => !!candidate?.committingAt && candidate.sha === observation.candidate.sha && candidate.baseSha === observation.candidate.baseSha;
+        const committed = commits(activeExecution) ? activeExecution : (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind='merge.execution.committed' AND ${eventWorkSql()}->'mergeExecution'->>'sha'=$2 AND ${eventWorkSql()}->'mergeExecution'->>'baseSha'=$3 ORDER BY seq DESC LIMIT 1`,
+          [id, observation.candidate.sha, observation.candidate.baseSha])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        const boundedExecution = (commits(committed) ? committed : null) ?? activeExecution ?? acquired ?? null;
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
         // The lower bound of the offset, so the recorded instant is the earliest the merge
@@ -1739,7 +1769,7 @@ export class Engine {
           && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
           && Date.parse(boundedExecution.verifiedAt) <= Date.parse(boundedExecution.committingAt)
           && Date.parse(boundedExecution.committingAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
-        if (activeExecution && executionValid && work.mergeAuthorization
+        if (activeExecution && activeExecution.id === boundedExecution?.id && executionValid && work.mergeAuthorization
           && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
           && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
           && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision

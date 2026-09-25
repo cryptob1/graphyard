@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { demand } from './refusal.js';
-import { actionRetryAt, actionSettleMs, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
+import { actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
 
@@ -204,24 +204,6 @@ export function settleDelivered(work: Work, all: Work[], now: Date): boolean {
   if (work.queue) { work.queue = null; changed = true; }
   return changed;
 }
-
-/**
- * The ids of the items holding a row an executor may take now, found in SQL without loading a
- * document: the SQL form of `openActions` (`claimable`, the delivered-item rule, the kinds and the
- * item filter) over the stored rows, read at the database clock. An idle poll answers from this
- * alone; a poll that finds candidates loads only those documents, and `claimAction` decides again
- * under the lock, so a row that changed in between is simply not taken.
- */
-export const claimCandidatesSql = `SELECT w.id FROM work_items w
-  WHERE ($1::text IS NULL OR w.id::text = $1 OR w.document->>'key' = $1)
-    AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(w.document->'actionQueue'->'actions') = 'array' THEN w.document->'actionQueue'->'actions' ELSE '[]'::jsonb END) AS a(entry)
-      WHERE (w.document->>'stage' IS DISTINCT FROM 'done' OR entry->>'kind' = 'verify-deployment')
-        AND ($2::text[] IS NULL OR entry->>'kind' = ANY($2::text[]))
-        AND (entry->>'retryAt' IS NULL OR (entry->>'retryAt')::timestamptz <= clock_timestamp())
-        AND NOT (entry->>'state' = 'done' AND entry->>'resolvedAt' IS NOT NULL AND (entry->>'resolvedAt')::timestamptz > clock_timestamp() - make_interval(secs => $3::double precision / 1000))
-        AND (entry->>'state' = 'pending' OR jsonb_typeof(entry->'claim') IS DISTINCT FROM 'object' OR (entry->'claim'->>'expiresAt')::timestamptz <= clock_timestamp()))
-  ORDER BY w.number`;
-export const claimCandidatesParams = (work: string | undefined, kinds: readonly NextActionKind[] | undefined) => [work ?? null, kinds ? [...kinds] : null, actionSettleMs];
 
 /**
  * Every row an executor may take now, oldest request first, so the queue is served fairly.
