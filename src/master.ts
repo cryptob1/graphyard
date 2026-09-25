@@ -15,7 +15,8 @@ import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, d
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
-import { harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule } from './harness.js';
+import { assertLaunchable, assertNoApprovalOptOut, LaunchRefusedError, nonInteractiveLaunch, requestPlaceholder, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule, type RegisteredLaunch } from './harness.js';
+import { withAutonomyContract } from './autonomy.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
 import { automatableProof } from './model/mechanical-proofs.js';
@@ -43,8 +44,9 @@ const safeEnvironment = z.record(
 
 export const agentKindSchema = z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki', 'muse']);
 const profileName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/);
-// 'auto' installs the runtime's own non-interactive startup contract; 'prompt' keeps the
-// runtime's approval prompts and requires a human in the session tab.
+// 'auto' installs the runtime's own non-interactive startup contract. 'prompt' would keep the
+// runtime's approval prompts for a human in the session tab, so a profile that sets it is still
+// read but refused at launch (GY-184, assertNoApprovalOptOut).
 const approvalMode = z.enum(['auto', 'prompt']).default('auto');
 
 // An agent environment is one isolated config and login home for one agent CLI account, such as
@@ -1009,10 +1011,20 @@ export async function onSelectedSession<T>(selected: LaunchSelection, failed: st
  * still stop a session to ask, and are allowed here too.
  */
 export const openCodeAllowAll = { '*': 'allow', edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow', doom_loop: 'allow' };
+/**
+ * An operator's own OpenCode permission document that asks nothing (the recipe's `permits`) is laid
+ * over the allow-all rather than replacing it: a key it leaves out (`external_directory`,
+ * `doom_loop`, …) keeps Graphyard's `allow` instead of falling back to OpenCode's default, which asks.
+ */
+function openCodePermission(operator: string | undefined) {
+  if (operator === undefined) return JSON.stringify(openCodeAllowAll);
+  const document: unknown = JSON.parse(operator);
+  return document && typeof document === 'object' && !Array.isArray(document) ? JSON.stringify({ ...openCodeAllowAll, ...document }) : operator;
+}
 export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'prompt' = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
   const plan = launchPlan(kind, approvals, agentArgs, environment);
   if (!plan.applied || kind !== 'opencode') return plan;
-  return { ...plan, environment: { ...plan.environment, OPENCODE_PERMISSION: JSON.stringify(openCodeAllowAll) }, prompts: 'every permission prompt, including edits, shell commands, fetches, and paths outside the worktree',
+  return { ...plan, environment: { ...plan.environment, OPENCODE_PERMISSION: openCodePermission(environment.OPENCODE_PERMISSION) }, prompts: 'every permission prompt, including edits, shell commands, fetches, and paths outside the worktree',
     tradeoff: 'opencode edits files, runs shell commands, fetches URLs, and reaches outside its worktree without asking.' };
 }
 
@@ -1031,8 +1043,14 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   const kind = account?.kind ?? profile.kind;
   const own = !account || account.kind === profile.kind ? profile.agentArgs : [];
   const model = contract?.modelFlag && account && 'fleet' in account && account.fleet.modelId && !own.includes(contract.modelFlag) && !contract.args.includes(contract.modelFlag) ? [contract.modelFlag, account.fleet.modelId] : [];
+  // An approvals opt-out is refused, naming the runtime, before any session starts (GY-184).
+  assertNoApprovalOptOut(kind ?? 'unnamed', profile.approvals);
   const plan = agentLaunchPlan(kind, profile.approvals, [...(contract?.args ?? []), ...model, ...own], { ...contract?.environment, ...profile.environment });
-  const environment: Record<string, string> = { ...plan.environment, ...contract?.environment, ...profile.environment };
+  // So is an effective launch whose own arguments or environment still let the runtime ask.
+  if (plan.refusal) throw new LaunchRefusedError(kind ?? 'unnamed', plan.refusal);
+  // The plan's variables come last: they are the recipe's, where the profile set none, or the
+  // profile's own OpenCode permissions laid over the allow-all.
+  const environment: Record<string, string> = { ...contract?.environment, ...profile.environment, ...plan.environment };
   if (account) {
     const variable = contract ? contract.homeVariable : environmentVariable[account.kind as EnvironmentKind];
     if (variable && account.home) environment[variable] = account.home;
@@ -1043,7 +1061,7 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
     }
   }
   const extra = kind === 'codex' && plan.applied ? ['-c', 'sandbox_workspace_write.network_access=true', ...(reach.writable ?? []).flatMap(path => ['--add-dir', path])] : [];
-  return { kind, args: [...plan.args, ...extra], environment, plan, account: account?.name ?? null };
+  return { kind, args: [...plan.args, ...extra], environment, plan, account: account?.name ?? null, contract };
 }
 
 /** The Git directory every worktree of the repository commits into. */
@@ -1154,21 +1172,29 @@ export async function preservePartialWork(path: string, label: string, run: Chil
  */
 export const launchRequestContracts: Record<string, (reference: string) => string> = {
   claude: reference => reference, codex: reference => reference, cursor: reference => reference, opencode: reference => `--prompt ${reference}`,
+  pi: reference => reference, muse: reference => reference, gemini: reference => `--prompt-interactive ${reference}`, qwen: reference => `--prompt-interactive ${reference}`, copilot: reference => `--interactive ${reference}`,
 };
+export { requestPlaceholder };
 /** How a runtime loads the launch authorization from a file; only Claude Code, which leaves AGENTS.md out under a role file, needs one. */
 export const launchRoleContracts: Record<string, (reference: string) => string> = { claude: reference => `--append-system-prompt-file ${reference}` };
 export type RequestDelivery = 'request' | 'paste';
-export const launchDelivery = (kind: string | undefined): RequestDelivery => kind && launchRequestContracts[kind] ? 'request' : 'paste';
+export const launchDelivery = (kind: string | undefined, args: string[] = []): RequestDelivery => kind && (launchRequestContracts[kind] || args.includes(requestPlaceholder)) ? 'request' : 'paste';
+/**
+ * A session's instruction is its own first request, on the runtime's command line, never a paste
+ * (GY-93): a runtime without a way to take it there is refused before launch, naming the runtime
+ * and the fix, rather than started and handed text it may rightly treat as untrusted (GY-184).
+ */
+export const requestContractRefusal = (kind: string) => `Graphyard refuses to launch the ${kind} runtime: it has no way to take the session's first request on its command line, and a launched session's instruction is never pasted into it. Register where ${kind} takes its first prompt with graphyard master registry runtime set NAME --kind ${kind} --arg=${requestPlaceholder} (or --arg=FLAG --arg=${requestPlaceholder}) --reason REASON.`;
 /** The most bytes a launch command line may hold: the runtime, its flags and two file paths, never the request. */
 export const launchCommandLimit = 512;
 export const launchDirectory = (directory: string) => resolve(directory, '.graphyard/launch');
-/** The session's launch files: `stem` is `DIR/.graphyard/launch/NAME`, and each file present is `STEM.role` or `STEM.request`. */
+/** The session's launch files: `stem` is `DIR/.graphyard/launch/NAME`, and each file present is `STEM.role` or `STEM.request` (and `STEM.launch`, the runtime's words, for a line that would exceed the bound). */
 export interface LaunchFiles { stem: string; role: string | null; request: string | null }
 /** A word for the pane's shell: bare when it needs no quoting, single-quoted otherwise. */
 export const shellWord = (value: string) => /^[A-Za-z0-9_./:=@%+,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 /** The shell variable the command line binds to the stem, so each file is referenced once and the line stays short. */
 export const launchVariable = 'GY';
-const roleReference = `"$${launchVariable}.role"`, requestReference = `"$(cat "$${launchVariable}.request")"`;
+const roleReference = `"$${launchVariable}.role"`, requestReference = `"$(cat "$${launchVariable}.request")"`, launchScriptReference = `"$${launchVariable}.launch"`;
 /**
  * Writes the session's request and role authorization where its command line reads them: private
  * files under the checkout's own `.graphyard/launch/`, holding the exact text, replaced on every
@@ -1188,11 +1214,24 @@ export function writeLaunchFiles(directory: string, name: string, text: { role?:
 /** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), the runtime, its arguments and the file references. */
 export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = []) {
   const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
-  const request = files.request ? launchRequestContracts[kind]?.(requestReference) : undefined;
-  const binding = role || request ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
-  const command = [...binding, ...prefix.map(shellWord), kind, ...args.map(shellWord), ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  const own = launchRequestContracts[kind];
+  const request = files.request && own ? own(requestReference) : undefined;
+  // A registry runtime's request goes where its contract places `{request}`; a built-in one drops the marker.
+  const placed = args.map(argument => argument !== requestPlaceholder ? shellWord(argument) : files.request && !own ? requestReference : null).filter((word): word is string => word !== null);
+  const binding = role || request || placed.includes(requestReference) ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
+  const runtime = [...prefix.map(shellWord), kind, ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  let command = [...binding, runtime].join(' ');
+  // The runtime's flags can name long paths (a producer's checkout and the shared Git directory as
+  // Codex writable roots), so a line over the bound moves them into `STEM.launch`, beside the other
+  // launch files, and the typed line only binds the stem and sources it: the pane's own shell still
+  // starts the runtime on the same words, and the request is still its first argument. Only a stem
+  // too long to leave room for that is refused.
+  if (Buffer.byteLength(command) > launchCommandLimit) {
+    command = `${launchVariable}=${shellWord(files.stem)}; . ${launchScriptReference}`;
+    if (Buffer.byteLength(command) <= launchCommandLimit) { writeFileSync(`${files.stem}.launch`, `${runtime}\n`, { mode: 0o600 }); chmodSync(`${files.stem}.launch`, 0o600); return command; }
+  }
   const bytes = Buffer.byteLength(command);
-  if (bytes > launchCommandLimit) throw new Error(`the launch command line is ${bytes} bytes, over the ${launchCommandLimit}-byte bound; it holds only the runtime, its flags and the paths of the session's request and role files, so shorten the repository path, the managed worktree root or the profile's agent arguments: ${command.slice(0, 160)}…`);
+  if (bytes > launchCommandLimit) throw new Error(`the launch command line is ${bytes} bytes, over the ${launchCommandLimit}-byte bound; it holds only the path of the session's launch files, so shorten the repository path or the managed worktree root: ${command.slice(0, 160)}…`);
   return command;
 }
 
@@ -1325,22 +1364,36 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
 /**
  * Start a session on its request: its files are written, the short command line is typed into the
  * pane, and the pane is read until the runtime is ready (awaitRuntimeStart), when Herdr's record
- * of it takes the session's name. Only a runtime without a request contract is prompted after it
- * starts, through the confirmed paste delivery below.
+ * of it takes the session's name. A runtime with no way to take its request on the command line is
+ * refused before anything is typed (GY-184); the paste delivery below is only for the loop's
+ * re-prompt and the reviewer's reminder, never a session's instruction.
  *
  * The name goes in before the runtime does. A name the runtime would refuse — too long, or built
  * from characters it does not take — is refused here as that refusal, naming the limit, the name
  * attempted and the command that retries the launch, rather than reaching the caller as whatever
  * the runtime says about its arguments (GY-101).
  */
-export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string }
+export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null;
+  /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
   assertSessionName(name, options.retry);
-  const delivery = launchDelivery(kind);
-  const files = writeLaunchFiles(options.directory, name, { role: options.role, request: delivery === 'request' ? text : null });
+  // A runtime Graphyard cannot start without its own approval prompts is refused here, before
+  // anything is typed, rather than launched into a session that waits for a keypress (GY-184).
+  // A registry runtime's own launch contract is its recipe when it registers one.
+  assertLaunchable(kind, options.contract);
+  const delivery = launchDelivery(kind, args);
+  if (delivery !== 'request') throw new LaunchRefusedError(kind, requestContractRefusal(kind));
+  // A runtime whose trust prompt no flag suppresses has its working directory recorded as trusted
+  // first, or the launch is refused naming it (GY-184): nothing is typed into a session that would wait.
+  const trust = await nonInteractiveLaunch[kind]?.trust?.(options.cwd ?? options.directory, options.environment ?? {}, args);
+  // Every session carries the autonomy contract: in its role file when the runtime loads one,
+  // otherwise at the start of its first request (GY-184).
+  const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
+  text = carried.request;
+  const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
   const command = launchCommand(kind, args, files, options.prefix);
   await herdrRun(['pane', 'run', pane, command], run);
-  const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: delivery === 'request' ? startedStates : promptableStates });
+  const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates });
   let named = true;
   try { await herdrJson(['agent', 'rename', pane, name], run); }
   catch (error) {
@@ -1353,11 +1406,9 @@ export async function startAgentSession(name: string, kind: string, pane: string
     if (!started.awaiting) throw error;
     named = false;
   }
-  // A session awaiting consent has not read its request, so a paste would land in the dialog: the
-  // request waits in its launch file instead, for whoever clears the hold to deliver.
-  if (delivery === 'paste' && !started.awaiting) await deliverPrompt(name, text, run, options);
-  const pending = delivery === 'paste' && started.awaiting ? writeLaunchFiles(options.directory, name, { request: text }).request : null;
-  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: pending, named } : undefined,
+  // The request is already the runtime's own first argument, so nothing waits to be pasted: a
+  // session held on a consent dialog reads it once the dialog is answered.
+  return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
@@ -2887,12 +2938,12 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   const harness = await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run));
-    pane = created.pane; tabId = created.tab;
     // The master runs with its runtime's broadest approval mode too; the harness rules above, not
     // runtime prompts, say what it may do. Codex's sandbox is widened to the private state the
-    // master's own commands write beside its credential.
+    // master's own commands write beside its credential, and its tab carries the recipe's variables.
     const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment: {} }, null, { writable: [dirname(config.credentialFile)] });
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    pane = created.pane; tabId = created.tab;
     const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and leave dispatch, review, proof production and routine merge of system-driven items (every item not created with "systemDriven": false) to node ${config.cliPath} master run, whose loop performs each; the master CLI refuses those hand actions on them. The loop drives an item created with "systemDriven": false the same way; opting out only also allows those hand actions, so take one only where master status shows the loop has not, and merge by hand only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`;
     const reviewInstruction = config.reviewer
       ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery of a review request the loop has stopped relaunching: its session settled without answering it, its automatic sessions are exhausted, or its launch reached the dispatch failure limit with no request-review row still queued; on a system-driven item it is refused before then.`
@@ -2902,10 +2953,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       : `Automatic merging is disabled, so every merge needs explicit operator approval given by an agent. For every item the loop requests the merge decision, launches its approver and merges on the approval. Only for an item created with "systemDriven": false, and only when master status shows no merge decision the loop requested for it, may you request it with node ${config.cliPath} master decide GY-N merge REASON and launch the approver; master merge refuses a candidate without an approved merge decision. Never wait on a human for it.`;
     const administrationInstruction = config.browser
       ? `GitHub administration of ${config.repository} is yours: reconcile protection with node ${config.cliPath} master protection --apply, and when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions, installation-accept, or protection, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
-      : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes still need the operator; ask them to rerun node ${config.cliPath} master init --browser-profile PROFILE so those become yours.`;
+      : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes are not yet yours: master status records that as a setup attention item owned by the operator, naming node ${config.cliPath} master init --token-stdin --browser-profile PROFILE as what makes them yours. Never ask the operator for it in chat; leave that item to master status and keep routing the rest of the work.`;
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
@@ -2970,11 +3021,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   } else {
     await readCredentialFile(profile.credentialFile!);
     if (target) throw new Error('Launch profile agent name is already visible in Herdr');
+    // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
+    assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // The account is chosen before anything is claimed: a profile whose accounts are all logged out
     // or out of quota claims nothing, and the refusal names every account it skipped and why.
     selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });
     // The Git directories the worker writes are granted once its worktree exists (launchWorker).
-    const launch = accountLaunch(profile, selected.account);
+    // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
+    const chosen = selected;
+    const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
     launched = launch;
     // A prompt the runtime never accepted closes the session and releases the claim; the launch is
     // then made once more from a fresh claim, rather than leaving an idle session holding the item.
@@ -3030,7 +3085,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true });
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment });
     // A worker stopped on a prompt the launcher does not answer is held for a human rather than
     // closed: its record beside the launch files is what master status raises and what the watch
     // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
@@ -3884,8 +3939,14 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
   const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
-  if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
-  const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
+  // A launch refused for its runtime gives the chosen session back at once (GY-184).
+  const plan = () => {
+    if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
+    return accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null);
+  };
+  let launch: ReturnType<typeof accountLaunch>;
+  try { launch = plan(); }
+  catch (error) { await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
   const cli = `node ${config.cliPath}`;
   let delivery: RequestDelivery | undefined;
   const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
@@ -3893,7 +3954,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment }));
   } catch (error) {
     if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
@@ -3936,7 +3997,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment }));
   } catch (error) {
     if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;
