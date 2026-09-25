@@ -223,10 +223,18 @@ export function decideIdentityCarry(input: IdentityCarryInput): QueueCarry {
   });
   return { ...base, approval, evidence };
 }
-export interface QueueEjection { at: string; sequence: number; reason: string; sha: string | null; policyRevision: number }
+export interface QueueEjection {
+  at: string; sequence: number; reason: string; sha: string | null; policyRevision: number;
+  /**
+   * For a speculative-merge conflict (GY-321): the keys of the entries the prediction held, the
+   * predecessors the conflicting tip was built behind, or [] when the merge was onto the base
+   * branch tip itself. Absent on other ejections and on records that predate the rule.
+   */
+  predecessors?: string[];
+}
 export interface QueueHistoryEntry {
   at: string; event: 'enqueued' | 'predicted' | 'ejected'; sequence: number; reason?: string; tip?: string;
-  /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. */
+  /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
   predecessors?: string[]; from?: string;
 }
 
@@ -667,7 +675,7 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
  * Kept beside the messages above so a wording change is visible here.
  */
 export function queueSequencingReason(reason: string) {
-  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: )/.test(reason);
+  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: )/.test(reason) || !!predecessorWaitReason(reason);
 }
 export function queuePlacement(work: Work, all: Work[], now: number) {
   return predictQueue(all, now).find(placement => placement.id === work.id) ?? null;
@@ -815,6 +823,48 @@ export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: stri
   const contamination = branchContamination(work, all);
   if (!contamination) return null;
   return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
+}
+
+/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
+export const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
+/**
+ * GY-321. The predecessors a speculative-merge conflict of exactly the current head was found
+ * behind, or null when the ejection is anything else: another reason, another head or policy, or a
+ * merge onto the base branch tip itself ([] recorded, or a record that predates the rule). Such a
+ * conflict is with work that has not landed, which no sync with the base can resolve: GitHub's
+ * merge queue and bors re-test the entry once the conflicting one resolves, and so does this one.
+ */
+export function predecessorConflict(work: Pick<Work, 'candidate' | 'queue' | 'queueEjection' | 'policyRevision'>): string[] | null {
+  const ejection = work.queueEjection, candidate = work.candidate;
+  if (work.queue || !ejection || !candidate || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return null;
+  if (!speculativeConflictReason.test(ejection.reason) || !ejection.predecessors?.length) return null;
+  return ejection.predecessors;
+}
+/**
+ * The predecessors a predecessor-conflict ejection still waits for: those named in it that are
+ * still queued ahead of where the entry stood. One that landed, or left the queue (and any that
+ * re-entered since, now behind it), no longer holds the conflict; once any has, the prediction the
+ * entry conflicted with is gone and the same head re-enters at the back. Null when the ejection
+ * is not a predecessor conflict; [] when it no longer waits.
+ */
+export function predecessorWait(work: Work, all: Work[]): string[] | null {
+  const named = predecessorConflict(work);
+  if (!named) return null;
+  const sequence = work.queueEjection!.sequence;
+  const queued = named.filter(key => {
+    const item = all.find(entry => entry.key === key);
+    return !!item && item.stage !== 'done' && !item.observation?.merged && !!item.queue && item.queue.sequence < sequence;
+  });
+  return queued.length === named.length ? queued : [];
+}
+/** The merge-gate reason for an entry that waits on its predecessors (see `predecessorWait`). */
+export function predecessorWaitText(work: Work, waiting: string[]) {
+  return `Waiting for ${waiting.join(', ')} to land or leave the merge queue: candidate ${work.candidate!.sha.slice(0, 12)} was ejected because its speculative merge behind ${waiting.length === 1 ? 'it' : 'them'} conflicts (${work.queueEjection!.reason}); no sync with the base resolves that, so the same head re-enters at the back of the queue once ${waiting.length === 1 ? 'it has' : 'any of them has'} landed or left`;
+}
+/** The predecessors a merge-gate reason names as waited on, or null for any other reason. */
+export function predecessorWaitReason(reason: string): string[] | null {
+  const match = reason.match(/^Waiting for (\S+(?:, \S+)*) to land or leave the merge queue: /);
+  return match ? match[1].split(', ') : null;
 }
 
 // ---- GitHub executes merges (GY-258) -------------------------------------------------------------
