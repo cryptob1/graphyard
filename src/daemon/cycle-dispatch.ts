@@ -5,17 +5,18 @@ import { dispatchOrder } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
-import { assertDispatchable, type RoleCapacity, roleCapacity } from '../master.js';
+import { assertDispatchable, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
+import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { message } from './state.js';
-import { dispatchKey } from './reconcile.js';
+import { decisionKey, dispatchKey } from './reconcile.js';
 import { clearProfileFailure, profileHealth, recordProfileFailure } from './sessions.js';
-import { detailChanged } from './decisions.js';
-import { capacityKey, record } from './effects.js';
+import { detailChanged, routineDecision } from './decisions.js';
+import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
-export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>) {
+export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
@@ -35,11 +36,22 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const capacities: RoleCapacity[] = [roleCapacity('worker', config.workers.filter(worker => worker.mode === 'launch'), credentials)];
   if (effects.reportCapacity) {
     const others = await effects.roleHealth?.().catch(() => null) ?? {};
-    for (const role of ['reviewer', 'producer'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
+    for (const role of ['reviewer', 'producer', 'approver', 'escalation-handler'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
+    // A waiting record whose escalation no longer stands waits on nothing: step 1 drops it.
+    const waitingEscalations = new Set((await effects.escalationSessions?.().catch(() => [] as EscalationSession[]) ?? [])
+      .filter(session => session.waiting && open.some(item => item.key === session.work && standingEscalations(item).some(entry => entry.trigger === session.trigger))).map(session => session.work));
+    // An item waits on the approver role while it needs a decision no approver session is judging.
+    const unjudged = new Set(open.filter(item => {
+      const decision = effects.approver ? routineDecision(item, config, clock, assessments[item.id]) : null, watch = decision ? state.approvals[decisionKey(item, decision)] : undefined;
+      return !!decision && !watch?.settledAt && !watch?.exhaustedAt && !agents.some(agent => agent.name === watch?.agentName && !stoppedStates.includes(agent.agent_status ?? ''));
+    }).map(item => item.key));
     const needs: Record<CapacityRole, Work[]> = {
       worker: claimable,
       reviewer: open.filter(item => item.autoDispatch?.review?.state === 'requested'),
       producer: open.filter(item => item.autoDispatch?.producers.some(request => request.state === 'requested')),
+      approver: open.filter(item => unjudged.has(item.key)),
+      // An item waits on the escalation-handler role while a handler for it ended on spent quota with no account left.
+      'escalation-handler': open.filter(item => waitingEscalations.has(item.key)),
     };
     for (const capacity of capacities) {
       const key = capacityKey(capacity.role), previous = state.actions[key];
@@ -64,6 +76,8 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     }
   }
   const workersSpent = !!effects.reportCapacity && capacities[0].exhausted;
+  // With every approver account spent no approver is launched before the first reset (GY-182).
+  const approversSpent = !!effects.reportCapacity && !!capacities.find(capacity => capacity.role === 'approver')?.exhausted;
 
   // 4b-human. An item parked on a decision only a human may make holds no lease and is not
   //     claimable, so there is nothing to dispatch and nothing to escalate to an agent: the loop
@@ -137,11 +151,13 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     }
   }) === 'stop') break;
 
-  // 4b. A base branch that moved under an in-flight candidate. Nobody is asked to do anything
-  //     about it: the control plane merges the new base into the candidate's own branch and
-  //     decides what the review and each proof carry (see merge-queue.ts). The cycle reports
-  //     what that refresh did — or the conflict that stopped it — so a pass that brought six
-  //     stalled items forward is an action rather than a "0 actions" line.
+  // 4b. A base branch that moved under an in-flight candidate GitHub reports conflicting with it
+  //     (GY-292: a clean one keeps its head, CI, review and proofs, and only the queue head is
+  //     brought onto the base, by its speculative tip). Nobody is asked to do anything first: the
+  //     control plane tries the merge into the candidate's own branch and decides what the review
+  //     and each proof carry (see merge-queue.ts `baseRefreshNeeded`). The cycle reports what
+  //     that refresh did — or the conflict that stopped it — so the pass is an action rather
+  //     than a "0 actions" line.
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested)) await isolate('refresh', item, item.key, async () => {
     const refresh = item.baseRefresh, pending = pendingBaseRefresh(item);
     // One action per head, base tip and policy revision: opened when the branch moves under the
@@ -152,7 +168,7 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
-        detail: `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)}; the control plane is bringing ${item.candidate!.sha.slice(0, 12)} onto it. No rework round, no review round and no proof round is requested for the move.`,
+        detail: `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)} and GitHub reports ${item.candidate!.sha.slice(0, 12)} conflicting with it; the control plane is trying to bring it onto the new tip. No rework round, no review round and no proof round is requested unless that merge conflicts.`,
         attempts: 1, cycle: state.cycle }, now(), effects.persist));
       return;
     }
@@ -166,4 +182,5 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   });
+  return { capacities, approversSpent };
 }

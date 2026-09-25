@@ -85,10 +85,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   const assessments = await reclaimStep(cycle);
   spent('close');
 
-  await dispatchStep(cycle, health);
+  const capacity = await dispatchStep(cycle, health, assessments);
   spent('dispatch');
 
-  await decisionStep(cycle, settled, assessments);
+  await decisionStep(cycle, settled, assessments, capacity);
   spent('decisions');
 
   await shepherdStep(cycle);

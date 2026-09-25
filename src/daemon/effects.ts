@@ -16,10 +16,10 @@ import { type ReviewFinding, readReviewFindings, basePaths, baseText } from '../
 import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, decisionInput, launchApprover, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
-import { reconcileFleetSessions } from '../fleet.js';
+import { httpFleetClient, reconcileFleetSessions } from '../fleet.js';
 import { clampCount, type ContainmentRetention, type DaemonAction, daemonActionSchema, type DaemonState, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
@@ -30,6 +30,8 @@ import { observeDeployment } from './deployment.js';
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
 /** A session only says its account is spent once it has stopped; while it works, its output is its own prose. */
 export const stoppedStates = ['idle', 'done', 'blocked'];
+/** The wait an escalation launch refused for spent capacity already computed: the earliest reset among every account it skipped. */
+export const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 
@@ -99,7 +101,15 @@ export interface DaemonEffects {
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
    * Never the requester.
    */
-  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; session?: string | null }>;
+  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null; session?: string | null }>;
+  /** The account and runtime a listed approver session was launched on, so an adopted session's exhaustion holds the account it spent. */
+  approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null; session?: string | null } | null>;
+  /**
+   * Ends an agent registry session whose runtime ran out of quota, so the role's slot is free for
+   * the replacement launched in the same cycle (GY-182). The registry would otherwise count it live
+   * until its decision window passes.
+   */
+  endRegistrySession?: (session: string, reason: string) => Promise<void>;
   /**
    * Ends the agent-registry sessions that no longer run (GY-190): every live one whose runtime
    * session is gone from this host's Herdr, and every one `finished` names, with its reason.
@@ -156,8 +166,18 @@ export interface DaemonEffects {
   endSession?: (session: LaunchedSession, resolution: string) => Promise<void>;
   /** Launches the session's request again on another account or runtime; throws `accountsExhausted` when none is left. */
   relaunch?: (session: LaunchedSession, work: Work, snapshot: { work: Work[]; now: string }) => Promise<{ profile: string }>;
-  /** Account health of the reviewer and producer profiles, as the worker profiles' arrives in `credentials`. */
-  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
+  /**
+   * The escalation handlers this host launched (GY-182), how one that ran out of quota is ended,
+   * and how its escalation is launched again on another account; the last throws `accountsExhausted`
+   * when none is left.
+   */
+  escalationSessions?: () => Promise<EscalationSession[]>;
+  endEscalation?: (session: EscalationSession, resolution: string, waiting: EscalationSession['waiting']) => Promise<void>;
+  /** Write an escalation handler's record back as given (the loop notes when it first saw the handler stopped). */
+  markEscalation?: (session: EscalationSession) => Promise<void>;
+  relaunchEscalation?: (session: EscalationSession) => Promise<{ agentName: string; account: string | null }>;
+  /** Account health of the reviewer, producer and approver profiles, as the worker profiles' arrives in `credentials`. */
+  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer' | 'approver' | 'escalation-handler', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
@@ -213,6 +233,8 @@ export const preserveKey = (work: Pick<Work, 'id'>, epoch: number) => `preserve:
 export const findingRecheckMs = 120_000;
 /** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
 export const launchAppearanceMs = 120_000;
+/** How long an escalation handler stays stopped with no limit notice before it is taken as finished. */
+export const handlerSettleMs = 180_000;
 /**
  * A session blocked on its runtime's own prompt (GY-197). A known prompt is answered on the cycle
  * that sees it — within one loop interval, well inside two minutes — and answered at most
@@ -361,7 +383,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run, {}, handle => deps.mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, session: launched.session }; };
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run, {}, handle => deps.mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime, session: launched.session }; };
+  const endRegistrySession: DaemonEffects['endRegistrySession'] = async (session, reason) => {
+    const config = current();
+    if (config.url) await httpFleetClient({ url: config.url, credentialFile: config.credentialFile }).end(session, reason);
+  };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
@@ -401,9 +427,31 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       producer: (profile, request, agents) => launchProducer(root, work, request, profile, agents, snapshot.now, { run }),
       record: handle => deps.mutate(`work/${work.id}/session`, handle),
     }),
+    escalationSessions: () => readEscalationSessions(root),
+    approverLaunch: agentName => readApproverLaunch(root, agentName),
+    endRegistrySession,
+    endEscalation: async (session, resolution, waiting) => {
+      if (session.session) await endRegistrySession(session.session, resolution.slice(0, 500));
+      try { if (session.pane) await closeHerdrPane(session.pane, run); } catch (error) { if (!paneAlreadyGone(error)) throw error; }
+      await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, pane: null, session: null, waiting, idleSince: undefined } : null);
+    },
+    markEscalation: session => saveEscalationSession(root, session.work, session.trigger, session),
+    relaunchEscalation: async session => {
+      // A registry session a failed launch could not end is ended first, so the relaunch has its slot.
+      if (session.session) {
+        await endRegistrySession(session.session, `escalation handler for ${session.work} (${session.trigger}) is launched again`);
+        await saveEscalationSession(root, session.work, session.trigger, { ...session, session: null });
+      }
+      // The same escalation, from a context assembled again now: the one the ended handler read may be stale.
+      const context = verifiedContext(await asOperatorAgent('GET', `work/${encodeURIComponent(session.work)}/context?trigger=${encodeURIComponent(session.trigger)}`));
+      const launched = await launchEscalationHandler(root, current(), context, session.kind as NonNullable<WorkerProfile['kind']>, await listHerdrAgents(run), run, handle => deps.mutate(`work/${encodeURIComponent(session.work)}/session`, handle));
+      return { agentName: launched.agentName, account: launched.account };
+    },
     roleHealth: async () => {
       const config = current();
       return {
+        ...(config.approver && config.operatorAgent ? { approver: await approverRoleHealth(config) } : {}),
+        ...(config.operatorAgent ? { 'escalation-handler': await escalationRoleHealth(config, {}, (await readEscalationSessions(root).catch(() => [] as EscalationSession[])).filter(session => session.waiting).map(session => session.runtime ?? session.kind)) } : {}),
         ...(config.reviewers.length ? { reviewer: { profiles: config.reviewers, health: await inspectProfileAccounts(config, 'reviewer', config.reviewers, Object.fromEntries(config.reviewers.map(profile => [profile.name, { available: true, reason: null as string | null }]))) } } : {}),
         ...(config.producers.length ? { producer: { profiles: config.producers, health: await inspectProducerCredentials(root, config.producers) } } : {}),
       };

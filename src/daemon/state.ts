@@ -214,14 +214,23 @@ export const approvalWatchSchema = z.object({
   closeAttempts: z.number().int().min(0).default(0),
   /** The GitHub observation a rework request was decided from (GY-144): its time and candidate head. */
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
+  /** The account and runtime the current session was launched on, so its exhaustion holds the right account (GY-182). */
+  account: z.string().max(200).nullable().default(null), runtime: z.string().max(40).nullable().default(null),
   /** The worker scope request a `requirements` decision answers (GY-176): whose, and for what. */
   scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
-  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged. */
+  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged,
+   * or as soon as its quota is spent so the replacement has the slot (GY-182). */
   session: z.string().max(200).nullable().default(null),
   /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
   capacity: z.string().max(500).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
+/**
+ * What a re-keyed watch takes over from the one it retires: the session goes on, and so does what
+ * it runs on, so a retained session's exhaustion holds the account it spent (GY-182).
+ */
+export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
+  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session });
 
 /**
  * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a

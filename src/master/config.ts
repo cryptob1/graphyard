@@ -97,7 +97,7 @@ export async function inspectWorkerCredentials(root: string, profiles: WorkerPro
 }
 // A profile's accounts are part of whether it can launch, so status and the durable loop read them
 // with its credential: a profile none of whose accounts is logged in with quota left is unavailable.
-async function withAccountHealth<T extends { available: boolean; reason: string | null }>(root: string, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe?: EnvironmentProbe) {
+async function withAccountHealth<T extends { available: boolean; reason: string | null }>(root: string, role: LaunchRole, profiles: { name: string; accounts?: string[]; kind?: string; environment?: Record<string, string> }[], health: Record<string, T>, probe?: EnvironmentProbe) {
   // A profile that names no accounts can still be held by an exhaustion one of its own sessions
   // reported (GY-89), so the log is read for those too; only a named account needs the configuration.
   const named = profiles.some(profile => profile.accounts?.length);

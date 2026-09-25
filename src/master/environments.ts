@@ -7,8 +7,8 @@ import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
-import { type CapacityRole, type CapacityAccount, capacityRetryAt } from '../model/capacity.js';
-import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth } from '../fleet.js';
+import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
+import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, readCredentialFile } from './config.js';
 import { failureText } from './worktrees.js';
@@ -165,7 +165,8 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   return health;
 }
 
-export type LaunchRole = 'worker' | 'reviewer' | 'producer';
+/** Every launched role selects its account the same way and skips the same spent accounts (GY-182). */
+export type LaunchRole = CapacityRole;
 /**
  * Why a launch passed an account over. Only `exhausted` — a quota read as spent, or one a session
  * itself reported — is the provider's capacity and waits for a reset. A logged-out account or a
@@ -191,13 +192,13 @@ export class NoHealthyAccountError extends Error {
 const environmentLogSchema = z.object({
   version: z.literal(1),
   environments: z.record(z.string(), z.any()).default({}),
-  skipped: z.array(z.object({ at: z.string(), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
+  skipped: z.array(z.object({ at: z.string(), role: z.enum(quotaRoles), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
     // Logs written before GY-89 carry no cause; they read as the exhaustion the flag then meant.
     cause: z.enum(['exhausted', 'logged-out', 'unconfigured']).default('exhausted') }).strict()).max(50).default([]),
   // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
-  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(['worker', 'reviewer', 'producer']), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
+  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(quotaRoles), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
 }).strict();
 /**
  * An account a running session exhausted. The provider's own usage endpoint may lag behind the
@@ -211,6 +212,23 @@ export interface AccountSelection { environment: string | null; kind: string | n
 export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
 /** A profile that names no accounts launches on whatever its own environment selects; its exhaustion is held under this name. */
 export const profileAccount = (profile: string) => `profile:${profile}`;
+/**
+ * The runtime's own login (GY-182): a session launched on `kind` with no named account and no home
+ * of its own runs on it, whichever role it serves, so its exhaustion is held under this name as
+ * well and every such launch of every role is refused until the reset.
+ */
+export const runtimeLogin = (kind: string) => `runtime:${kind}`;
+/** Whether a profile that names no accounts launches on its runtime's own login, rather than a home its environment selects. */
+const sharesRuntimeLogin = (profile: { kind?: string; environment?: Record<string, string> }) =>
+  !!profile.kind && !Object.hasOwn(profile.environment ?? {}, environmentVariable[profile.kind as EnvironmentKind] ?? '');
+/** The names a session on no named account is held under: the profile's own and, when it shares it, the runtime's own login. */
+export const ownLoginAccounts = (profile: { name: string; kind?: string; environment?: Record<string, string> }) =>
+  [profileAccount(profile.name), ...(sharesRuntimeLogin(profile) ? [runtimeLogin(profile.kind!)] : [])];
+/** The hold, if any, that bars a launch of `profile` on no named account. */
+export function ownLoginHold(held: Record<string, ObservedExhaustion>, profile: { name: string; kind?: string; environment?: Record<string, string> }) {
+  const key = ownLoginAccounts(profile).find(name => held[name]);
+  return key ? { key, held: held[key] } : null;
+}
 export const selectionKey = (role: LaunchRole, profile: string) => `${role}:${profile}`;
 export function environmentLogPath(config: Pick<MasterConfig, 'credentialFile'>) {
   return resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.environments.json`);
@@ -256,9 +274,24 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * A role the registry does not define yet launches from the profile's own accounts, as before.
  */
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
-export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void> }
-export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string }, probe: FleetProbe = {}): Promise<LaunchSelection> {
-  const fleet = await selectFleetSession(config, role, profile, probe);
+export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed; false when the registry could not be told. */ release?: (reason: string) => Promise<boolean> }
+/**
+ * The registry chooses from what this host reports of each login, so an account a session here saw
+ * spent is reported spent (GY-182): whichever role found out, the registry hands it to no role
+ * before its reset, and records the hold for every other executor too. Nothing changes while no
+ * account is held.
+ */
+export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, probe: FleetProbe = {}): Promise<FleetProbe> {
+  const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
+  if (!Object.keys(held).length) return probe;
+  const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000) : null);
+  if (!client) return probe;
+  return { ...probe, registry: { document: () => client.document(), end: (session, reason) => client.end(session, reason),
+    select: request => client.select({ ...request, observations: request.observations.map(entry => !held[entry.account] ? entry
+      : { account: entry.account, quota: { ...entry.quota, state: 'exhausted', resetsAt: held[entry.account].until, reason: describeObservedExhaustion(entry.account, held[entry.account]).slice(0, 500) } }) }) } };
+}
+export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string; kind?: string; environment?: Record<string, string> }, probe: FleetProbe = {}): Promise<LaunchSelection> {
+  const fleet = await selectFleetSession(config, role, profile, await heldAwareProbe(config, probe));
   if (fleet) {
     await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped).catch(() => {});
     return fleet;
@@ -267,9 +300,9 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
   const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
   const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
   if (!profile.accounts?.length) {
-    const own = held[profileAccount(profile.name)];
+    const own = ownLoginHold(held, profile);
     if (own) {
-      const skip: AccountSkip = { at, role, profile: profile.name, environment: profileAccount(profile.name), reason: describeObservedExhaustion(`${profile.name}'s own account`, own), work: probe.work ?? null, cause: 'exhausted' };
+      const skip: AccountSkip = { at, role, profile: profile.name, environment: own.key, reason: describeObservedExhaustion(`${profile.name}'s own account`, own.held), work: probe.work ?? null, cause: 'exhausted' };
       await recordEnvironmentLog(config, [], [skip]).catch(() => {});
       throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skip.reason}`, [skip]);
     }
@@ -381,7 +414,7 @@ export async function sharedGitDirectory(root: string) {
  * with each account's reason.
  */
 export interface ProfileAccountHealth { environment: string; healthy: boolean; reason: string | null; quota: string; resetsAt: string | null }
-export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profiles: { name: string; accounts?: string[] }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
+export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profiles: { name: string; accounts?: string[]; kind?: string; environment?: Record<string, string> }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
   const result: Record<string, T & { accounts?: ProfileAccountHealth[] }> = { ...health };
   const now = probe.now?.() ?? Date.now(), held = await observedExhaustions(config, now);
   // A role the agent registry defines is judged from the registry: every profile of the role
@@ -389,14 +422,17 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
   const fleet = await fleetRoleHealth(config, role, probe).catch(() => null);
   for (const profile of profiles) {
     if (fleet) {
-      if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: fleet.available, reason: fleet.reason, accounts: fleet.accounts };
+      // What a session on this host printed outranks the registry's last probe (GY-182).
+      const accounts = withHeldAccounts(fleet.accounts, held), usable = fleet.available && accounts.some(account => account.healthy);
+      if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: usable,
+        reason: usable ? null : !fleet.available ? fleet.reason : `No eligible account for ${role}: ${accounts.map(account => account.reason).filter(Boolean).join('; ')}`, accounts };
       continue;
     }
     if (result[profile.name]?.available === false) continue;
     if (!profile.accounts?.length) {
-      const own = held[profileAccount(profile.name)];
-      if (own) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: false, reason: `No healthy agent account: ${describeObservedExhaustion(`${profile.name}'s own account`, own)}`,
-        accounts: [{ environment: profileAccount(profile.name), healthy: false, reason: describeObservedExhaustion(`${profile.name}'s own account`, own), quota: 'exhausted', resetsAt: own.resetsAt }] };
+      const own = ownLoginHold(held, profile);
+      if (own) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: false, reason: `No healthy agent account: ${describeObservedExhaustion(`${profile.name}'s own account`, own.held)}`,
+        accounts: [{ environment: own.key, healthy: false, reason: describeObservedExhaustion(`${profile.name}'s own account`, own.held), quota: 'exhausted', resetsAt: own.held.resetsAt }] };
       continue;
     }
     const accounts: ProfileAccountHealth[] = [];
@@ -416,6 +452,11 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
   return result;
 }
 
+/** Registry accounts as this host knows them: one a session here saw spent is spent, whatever the registry last read. */
+export function withHeldAccounts(accounts: ProfileAccountHealth[], held: Record<string, ObservedExhaustion>): ProfileAccountHealth[] {
+  return accounts.map(account => held[account.environment] ? { ...account, healthy: false, reason: describeObservedExhaustion(account.environment, held[account.environment]), quota: 'exhausted', resetsAt: held[account.environment].resetsAt } : account);
+}
+
 /**
  * Whether a role has any account left. A role is out of capacity only when every launch profile
  * it has is unavailable for one reason — each of its accounts is spent — so a logged-out account
@@ -425,7 +466,9 @@ export interface RoleCapacity { role: CapacityRole; exhausted: boolean; accounts
 export function roleCapacity(role: CapacityRole, profiles: { name: string }[], health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>): RoleCapacity {
   const spent = profiles.map(profile => ({ profile, accounts: health[profile.name]?.accounts ?? [], available: health[profile.name]?.available !== false }));
   const exhausted = spent.length > 0 && spent.every(entry => !entry.available && entry.accounts.length > 0 && entry.accounts.every(account => account.quota === 'exhausted'));
-  const accounts: CapacityAccount[] = exhausted ? spent.flatMap(entry => entry.accounts.map(account => ({ account: account.environment, profile: entry.profile.name, resetsAt: account.resetsAt, reason: (account.reason ?? 'quota exhausted').slice(0, 500) }))) : [];
+  // Profiles the registry decides share its accounts; each account is named once.
+  const accounts: CapacityAccount[] = exhausted ? spent.flatMap(entry => entry.accounts.map(account => ({ account: account.environment, profile: entry.profile.name, resetsAt: account.resetsAt, reason: (account.reason ?? 'quota exhausted').slice(0, 500) })))
+    .filter((account, index, all) => all.findIndex(other => other.account === account.account) === index) : [];
   return { role, exhausted, accounts, retryAt: capacityRetryAt(accounts) };
 }
 

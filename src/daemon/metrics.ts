@@ -2,6 +2,7 @@
 import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
 import { routableScopeRequest, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal } from '../model/scope.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
+import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
 import { type DaemonAction, type DaemonActionKind, type DaemonState, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
@@ -97,7 +98,8 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // to make an item disappear from the one measure built to notice it.
     const decision = routineDecision(item, config, now, context.assessments?.[item.id]);
     const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
-    if (decision && !watch?.settledAt) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
+    // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
+    if (decision && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
       : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} is unjudged after ${watch.launches} approver session(s)`
         : `${item.key}'s ${decision.action} decision ${watch.decision} is requested and waiting for approver session ${watch.agentName ?? '(not launched)'} to judge it`);
     const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
@@ -111,7 +113,7 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
       add('scope', item, boundDetail(`${item.key}: ${request.requestedBy} is waiting for a decision on ${namePaths(request.paths, 300)}`, 500));
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed') add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
     if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
-    if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} is waiting for the control plane to bring its candidate onto the moved base`);
+    if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} conflicts with the moved base and is waiting for the control plane to try bringing its candidate onto it`);
     // The same heads step 5 shepherds: one a verdict stands against is going back to a worker,
     // so nothing asks for its proofs and nothing is waiting on them.
     if (item.submission && item.candidate && !item.reworkRequested && !standingVerdict(item) && config.run.proofWorkflow) {

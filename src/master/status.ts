@@ -1,7 +1,7 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
 import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchOrder } from '../coordination.js';
 import type { ConflictReport } from '../conflicts.js';
-import { standingCapacity, describeCapacity } from '../model/capacity.js';
+import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
 import { type Work, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
@@ -277,7 +277,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const speed = pipelineSpeedSummary(snapshot.work, now);
   // Capacity, one line per spent role: the accounts, their resets, and every item that waits on it.
   const open = snapshot.work.filter(work => work.stage !== 'done');
-  const capacity = (['worker', 'reviewer', 'producer'] as const).flatMap(role => {
+  const capacity = quotaRoles.flatMap(role => {
     const waiting = open.filter(work => standingCapacity(work, role).length);
     if (!waiting.length) return [];
     const latest = waiting.map(work => standingCapacity(work, role)[0]).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
