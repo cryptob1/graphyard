@@ -11,11 +11,11 @@
 
 ## Items, scope and human waits
 
-A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`. Documentation, files the criteria name and, for items planning `docs/`, single files under `web/` and `browser-tests/` widen automatically; so do existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (never negated; rechecked every two minutes). The independent approver judges the rest (`--allow-broad-scope` needs a stated reason); the worker keeps its lease, reading the outcome via `scope-request GY-N EPOCH --wait`. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`. Documentation, files the criteria name and, for items planning `docs/`, single files under `web/` and `browser-tests/` widen automatically; so do existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes), and tests whose quoted failing assertion a planned file holds. The independent approver judges the rest (`--allow-broad-scope` needs a stated reason); the worker keeps its lease, reading the outcome via `scope-request GY-N EPOCH --wait`. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
-Dispatch takes smallest planned scope first and holds overlapping items (`--allow-overlap` overrides); `git merge-tree` reports real conflicts between open candidates under `conflicts` ([rules](coordination.md#schedule-by-overlap-smallest-scope-first)).
+Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports conflicts between candidates under `conflicts` ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
 
 ### Speculative tips and branch protection
 
@@ -51,11 +51,11 @@ A harness classifier refuses routine administration, so `master harness claude -
 
 The control plane names one typed action per item (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements, listed under `actions.needsHuman`.
 
-Three consecutive failures with an unchanged reason mark a row stalled rather than retrying: the signal for a fleet that reads as idle and is not. Once in no count and no list, it shows in `actions.stalled` and on the item's own card, rechecking every minute: backoff never outlives its cause.
+Three failures with an unchanged reason mark a row stalled rather than retrying: a fleet that looks idle and is not. Once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff never outlives it, doubling from one minute. Eight escalate it, retried half-hourly; ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
-A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action. Over-long state is truncated when written.
+A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
 ### Running executors under supervision
 

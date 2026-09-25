@@ -13,6 +13,7 @@ import { executorFleet } from './cli/executor-report.js';
 import { stuckRequestReport } from './cli/stuck-requests.js';
 import { stalledItemAttention } from './cli/status-attention.js';
 import { stalledActionAttention } from './cli/stalled-actions.js';
+import { actorlessAttention } from './cli/actorless-submissions.js';
 import { overlongSessionAttention } from './cli/overlong-sessions.js';
 import { githubBudgetAttention } from './cli/github-budget-attention.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './cli/unanswered-requests.js';
@@ -183,6 +184,8 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const unobtainable = unobtainableReviewAttention(rows, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(rows);
   const stalledItems = stalledItemAttention(snapshot);
+  // A submitted item with no review, producer or rework request and no named wait (GY-191).
+  const actorless = actorlessAttention(snapshot, observed.approvals as Parameters<typeof actorlessAttention>[1]);
   // An action no live executor can claim is not queued behind other work (GY-105); it is named with its wait and the unit to start.
   const executors = await executorFleet(root, masterApi, snapshot);
   // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
@@ -205,6 +208,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)])
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
-  return { scopeRequests, unobtainable, unanswered, stalledItems, executors, conflicted, stalled, owed, budget, overlong,
-    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...stalledItems, ...stalled, ...overlong, ...budget, ...owed.items] };
+  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong,
+    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...owed.items] };
 }

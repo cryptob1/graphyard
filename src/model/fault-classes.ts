@@ -66,7 +66,7 @@ export const faultCatalogue = {
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
   'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
-  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action'],
+  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
   'unclassified': ['unclassified'],
 } as const satisfies Record<FaultClass, readonly string[]>;
 export type FaultKind = typeof faultCatalogue[FaultClass][number];
@@ -102,6 +102,7 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['approver-launch', (_, text) => /is awaiting an approver for/.test(text)],
   ['stalled-action', (_, text) => /action is stalled, not retrying/.test(text)],
   ['stalled-item', (_, text) => /has held its \S+ gate for .+ with no action named/.test(text)],
+  ['actorless', (_, text) => /no rework request and no named wait/.test(text)],
   ['unanswered-request', (_, text) => /has stood unanswered for/.test(text)],
   ['stuck-request', (_, text) => /^\S+ request \S+ on \S+ \(session \S+\) is pending/.test(text)],
   ['overlong-session', (_, text) => /past the .+ maximum for its role/.test(text)],
@@ -285,9 +286,9 @@ export function noteFault(record: FaultRecord, observation: FaultObservation, at
  * A loop action's outcome. The action history keeps every failure it saw, so none is read back from it: an
  * action failing opens one instance, its further failures before a success are that instance, a success ends it.
  */
-export function noteActionOutcome(record: FaultRecord, action: string, outcome: 'started' | 'done' | 'failed' | 'indeterminate', observation: FaultObservation, at: string): FaultInstance | null {
+export function noteActionOutcome(record: FaultRecord, action: string, outcome: 'started' | 'done' | 'failed' | 'indeterminate' | 'waiting', observation: FaultObservation, at: string): FaultInstance | null {
   if (outcome === 'done') { delete record.failing[action]; return null; }
-  if (outcome === 'started') return null;
+  if (outcome === 'started' || outcome === 'waiting') return null;
   const standing = record.failing[action] ? record.instances.find(entry => entry.id === record.failing[action]) : undefined;
   if (standing) { standing.lastSeenAt = at; return null; }
   const instance = noteFault(record, observation, at);

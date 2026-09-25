@@ -544,8 +544,6 @@ test('unit:system-driven-items the master\'s own next steps name the loop step f
   assert.match(workAttentionOwner(atMerge(true), 'gate').next, /the loop's merge step performs the guarded merge of GY-7/);
   assert.doesNotMatch(workAttentionOwner(atMerge(true), 'gate').next, /master merge/);
   assert.equal(workAttentionOwner(atMerge(false), 'gate').next, 'graphyard master merge GY-7');
-  assert.doesNotMatch(workAttentionOwner(item({ systemDriven: true }), 'hold-overdue').next, /master dispatch/);
-  assert.match(workAttentionOwner(item({ systemDriven: false }), 'hold-overdue').next, /graphyard master dispatch GY-7 PROFILE does it now/);
   assert.match(workAttentionOwner(item({ systemDriven: true }), 'session').next, /the loop's dispatcher launches GY-7 again/);
   const produced = item({ systemDriven: true, producerProofs: ['manual:produced-review'], gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1: manual:produced-review needs trusted passing evidence'] }] as any });
   assert.match(workAttentionOwner(produced, 'gate').next, /The loop's producer session produces manual:produced-review/);

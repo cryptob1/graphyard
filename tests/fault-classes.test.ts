@@ -66,7 +66,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
-      'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet']],
+      'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'actorless']],
     ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker']],
   ];
   for (const [source, kinds] of sources) for (const kind of kinds) {
@@ -91,9 +91,11 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
     { subject: 'GY-5', text: 'Review of GY-5 head 0123456789ab (PR #9) is conflicted: two verdicts' },
     { subject: 'github', text: 'GitHub requests are paused until 12:00' },
     { subject: 'GY-6', text: 'GY-6 has held its review gate for 3 hours with no action named and nothing moving it: x' },
+    { subject: 'GY-6', text: 'GY-6 candidate 0123456789ab has been submitted for 9m with no review request, no producer request, no rework request and no named wait; missing a reviewer' },
     { subject: 'somewhere', text: 'A line nobody catalogued' },
   ]);
-  assert.deepEqual(worded.map(entry => entry.faultClass), ['scope', 'review-convergence', 'observation', 'stalled-gate', 'unclassified']);
+  assert.deepEqual(worded.map(entry => entry.faultClass), ['scope', 'review-convergence', 'observation', 'stalled-gate', 'stalled-gate', 'unclassified']);
+  assert.equal(worded[4].kind, 'actorless');
   // Escalations on an item, one class per trigger.
   const escalated = item('GY-7', { escalations: escalationTriggers.map(trigger => ({ trigger, reason: `${trigger} raised`, actor: 'graphyard', at: iso(0) })) } as Partial<Work>);
   assert.deepEqual(workFaults(escalated, clock).map(entry => entry.faultClass), ['session-liveness', 'proof', 'review-convergence', 'scope']);
