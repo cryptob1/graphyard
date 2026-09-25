@@ -11,7 +11,7 @@ import { live } from '../browser-tests/ui-board.js';
 import { buildMasterStatus, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { sessionReport } from '../src/cli/master-status.js';
 import { workersView } from '../web/workers-view.js';
-import { classify, groupMeaning, nextActor, upNextMeaning } from '../web/groups.js';
+import { boardFromStatus, classify, groupMeaning, nextActor, upNextMeaning } from '../web/groups.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import WorkersPage from '../web/pages/workers.js';
 import OverviewPage from '../web/pages/overview.js';
@@ -56,7 +56,7 @@ function board(): Work[] {
 }
 function dashboard(work: Work[], overrides: Partial<Dashboard> = {}): Dashboard {
   return {
-    token: 'fixture', work, status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop,
+    token: 'fixture', work, board: boardFromStatus(work, NOW, fixtureStatus('admin')), status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop,
     filter: null, setFilter: noop, selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop,
     observedAt: NOW, jobs: [], query: '', setQuery: noop, operatorAgents: [], operatorAgentsError: null, features: {} as any,
     events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
