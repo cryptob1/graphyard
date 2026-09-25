@@ -13,7 +13,7 @@ These need judgement:
 
 ## Items, scope and human waits
 
-A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`. Documentation, files the criteria name and, for items planning `docs/`, single files under `web/` and `browser-tests/` widen automatically; so do existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes), and tests whose quoted failing assertion a planned file holds. The independent approver judges the rest (`--allow-broad-scope` needs a stated reason); the worker keeps its lease, reading the outcome via `scope-request GY-N EPOCH --wait`. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`. Documentation, files the criteria name and, for items planning `docs/`, single files under `web/` and `browser-tests/` widen automatically; so do base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes), and tests whose quoted failing assertion a planned file holds. The independent approver judges the rest from the request, criteria, cited threads and diffs (`--allow-broad-scope` needs a reason); the worker, still leased, waits on `scope-request GY-N EPOCH --wait`. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 

@@ -258,16 +258,24 @@ export const scopeDecisionBinding = (request: Pick<ScopeRequestState, 'epoch' | 
  * criteria. A widening that introduces a root-level directory carries the broad-scope exception
  * (`broad`, the text `guardBroadScope` records): the approver may grant it only with a stated
  * reason, which the control plane writes into the applied revision beside this one.
+ * `context` (GY-199) adds the review threads the loop read, cited ones first, and the requested files'
+ * diffs, each within a third of the room left; the criteria take the rest, and a cut is read from `status`.
  */
-export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState, 'requestedBy' | 'reason' | 'decision'>, criteria: readonly ScopeCriterion[], paths: readonly string[], broad: string | null, max = 2000) {
-  const cut = (text: string, room: number) => text.length <= room ? text : `${text.slice(0, Math.max(0, room - 1))}…`;
-  const rules = ` The implication rule refused it and no review finding on the item's own change names it, so it is the approver's judgement: approve an additive widening the item's criteria justify (the worker keeps its lease), refuse with the reason otherwise.`;
+export interface ScopeDecisionContext { threads?: readonly { ground: string; text: string }[]; diffs?: readonly { path: string; diff: string }[] }
+export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState, 'requestedBy' | 'reason' | 'decision'>, criteria: readonly ScopeCriterion[], paths: readonly string[], broad: string | null, context: ScopeDecisionContext = {}, max = 2000) {
+  const cut = (text: string, room: number) => text.length <= room ? text : room <= 0 ? '' : `${text.slice(0, Math.max(0, room - 1))}…`;
+  const flat = (text: string) => text.replace(/\s+/g, ' ').trim();
+  const rules = ` The implication rule refused it and neither a review finding on the item's own change nor a test pinning a planned file's text grounds it, so it is the approver's judgement: approve an additive widening the item's criteria justify (the worker keeps its lease), refuse with the reason otherwise.`;
   const exception = broad ? ` ${cut(broad, 300)} It needs the broad-scope flag (--allow-broad-scope): grant it only with a stated reason why narrower paths will not do.` : '';
   const asked = cut(`${key}: ${request.requestedBy} asks to widen plannedFiles with ${cut(paths.join(', '), 400)} because ${request.reason}.`, 800);
   const refusal = cut(` Rule refusal: ${request.decision?.reason ?? 'none recorded'}.`, 250);
   const named = ` Criteria: ${criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
   const head = asked + rules + exception + refusal;
-  return head + cut(named, max - head.length);
+  const share = Math.max(0, Math.floor((max - head.length) / 3));
+  const threads = context.threads?.length ? cut(` Review threads: ${context.threads.map(thread => `${thread.ground}: ${flat(thread.text)}`).join(' | ')}.`, share) : '';
+  const diffs = context.diffs?.length ? cut(` Diffs: ${context.diffs.map(entry => `${entry.path}: ${entry.diff.trim().replace(/\n/g, ' ⏎ ')}`).join(' | ')}`, share) : ''; // ⏎ keeps a diff's hunks legible
+  const body = head + threads + diffs;
+  return body + cut(named, max - body.length);
 }
 
 /**

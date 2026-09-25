@@ -12,7 +12,7 @@ import { Store } from '../src/store.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import { actionDetailMax, emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, answeringWidening, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
 import { decisionInput, masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, pinningTestGround, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
+import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, pinningTestGround, redecidableScopeRefusal, scopeDecisionReason, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
@@ -452,7 +452,7 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.ok(recorded.every(([, action]) => action.detail.length <= actionDetailMax), 'every action detail is within its bound');
   const widenedMany = recorded.find(([key]) => key.includes(':finding:'))![1];
   assert.equal(widenedMany.state, 'done', widenedMany.detail);
-  assert.match(widenedMany.detail, new RegExp(`^Widened ${many.key} with 50 files \\(src/00-x+…, src/01-x+… and 48 more\\) on the review finding that names them: src/00-`));
+  assert.match(widenedMany.detail, new RegExp(`^Widened ${many.key} with 50 files \\(src/00-x+…, src/01-x+… and 48 more\\) on the review finding or pinned text that grounds them: src/00-`));
   assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${many.id}`)), 'a widened request is not escalated');
 
   // A file the base lacks is a creation: however plainly a finding asks for it, the loop never grants
@@ -662,28 +662,36 @@ const widenAsMaster = (widened: string[][]) => async (item: Work, asked: ScopeRe
   return ok(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
 };
 
-test('unit:refused-scope-goes-to-approver — a request the widening rule refuses becomes a scope decision within one cycle, put to an independent approver whose grant widens the item and clears its blocker, and whose refusal alone keeps it blocked', async () => {
+test('unit:refused-scope-goes-to-approver — a request the widening rule refuses becomes a scope decision within one cycle, put to an independent approver with the request, criteria, cited threads and diffs, whose grant widens the item and clears its blocker, and whose refusal alone keeps it blocked', async () => {
   await ensureScopeApprover();
   let work = await claimed('refused scope goes to an approver');
   const state = emptyDaemonState(loopConfig());
-  const decided: Decided[] = [], approvers: string[] = [], widened: string[][] = [];
-  const overrides: Partial<DaemonEffects> = { ...scopeDecisionEffects(decided, approvers, () => [work.id]), reviewFindings: async () => [], basePaths: async paths => new Set(paths), widenScope: widenAsMaster(widened) };
+  const decided: Decided[] = [], approvers: string[] = [], widened: string[][] = [], diffed: { epoch: number; paths: readonly string[] }[] = [];
   const route = 'src/server/routes/work.ts';
-  // The thread the request cites is not a trusted finding the loop could grant on, so the rule refuses it.
+  // The request cites a review thread naming the file, but the file is new — absent from the base —
+  // so no finding can grant it: the rule refuses, and the judgement is the approver's.
+  const thread = { ground: 'review thread PRRT_route01', text: `${route} should own the stale-revision check rather than the model` };
+  const overrides: Partial<DaemonEffects> = { ...scopeDecisionEffects(decided, approvers, () => [work.id]), reviewFindings: async () => [thread], basePaths: async () => new Set(),
+    widenScope: widenAsMaster(widened),
+    scopeDiffs: async (item, epoch, paths) => { if (item.id === work.id) diffed.push({ epoch, paths }); return [{ path: route, diff: '@@ -0,0 +1,2 @@\n+export const staleRevision = true;\n+export default staleRevision;' }]; } };
   await request(work, { paths: [route], reason: `Review thread PRRT_route01 names ${route}: the route still returns the stale revision` });
   await cycle(state, overrides);
   work = await reload(work.id);
   assert.equal(work.scopeRequest!.decision!.state, 'refused', 'the widening rule refuses it');
-  assert.ok(work.blocker?.startsWith(scopeRefusalBlocker));
-  assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)), 'it is not left to a master session');
-  // In the same cycle (GY-176 routes a request the rule refused at once): a scope decision is
-  // requested with the master's own identity, answering this very request, and an approver launched.
+  assert.equal(work.scopeRequest!.decision!.decidedBy, 'graphyard');
+  assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)), 'it is not left as a blocker for a master session');
+  // Within that one cycle a scope decision is requested with the master's own identity, answering
+  // this very request, and an independent approver is launched for it.
   assert.equal(decided.length, 1, JSON.stringify(decided));
   assert.equal(decided[0].action, 'requirements');
   assert.deepEqual(decided[0].input, { plannedFiles: [layout, route], answers: { epoch: work.scopeRequest!.epoch, at: work.scopeRequest!.at } }, 'it widens by exactly the requested file');
-  assert.match(decided[0].reason, /PRRT_route01/, 'the approver reads the request and the thread it cites');
+  assert.match(decided[0].reason, /asks to widen plannedFiles with src\/server\/routes\/work\.ts because Review thread PRRT_route01/, 'the approver reads the request');
   assert.match(decided[0].reason, /AC-1: The widget layout renders/, 'and the item\'s criteria');
+  assert.match(decided[0].reason, /Review threads: review thread PRRT_route01: src\/server\/routes\/work\.ts should own the stale-revision check/, 'and the review thread it cites, as the loop read it');
+  assert.match(decided[0].reason, /Diffs: src\/server\/routes\/work\.ts: @@ -0,0 \+1,2 @@ ⏎ \+export const staleRevision = true;/, 'and the file\'s diff');
   assert.match(decided[0].reason, /Rule refusal: /);
+  assert.ok(decided[0].reason.length <= 2000);
+  assert.deepEqual(diffed, [{ epoch: work.epoch, paths: [route] }], 'the diff is read for the asking attempt');
   assert.deepEqual(approvers, [decided[0].id], 'an independent approver is launched for it');
   assert.equal(widened.length, 0, 'nothing is widened without the approver');
   // The approver grants it: the control plane applies it to the live attempt and the blocker clears.
@@ -707,13 +715,18 @@ test('unit:refused-scope-goes-to-approver — a request the widening rule refuse
   await cycle(state, overrides);
   work = await reload(work.id);
   assert.ok(!work.plannedFiles.includes(other));
-  assert.ok(work.blocker?.startsWith(scopeRefusalBlocker), 'the item stays blocked on the recorded refusal');
+  assert.ok(work.blocker?.startsWith(`${scopeRefusalBlocker} by the independent approver ${scopeApprover.id}`), `the item stays blocked on the approver's recorded refusal: ${work.blocker}`);
   assert.equal(decided.length, 2, 'a refused decision is not requested again');
-  // A refused widening is the worker's answer (GY-176): recorded as the request's outcome, read with scope-request --wait.
   assert.match(state.actions[`scope:outcome:${decided[1].id}`]?.detail ?? '', /^Refused /, 'the refusal is recorded as the request\'s outcome for its worker');
+
+  // The approver's reason stays within the control plane's bound however much context there is.
+  const long = scopeDecisionReason('GY-1', { requestedBy: 'w', reason: 'r'.repeat(3000), decision: null }, criteria, [route], null,
+    { threads: Array.from({ length: 30 }, (_, index) => ({ ground: `review thread T${index}`, text: 't'.repeat(500) })), diffs: [{ path: route, diff: '+x\n'.repeat(2000) }] });
+  assert.ok(long.length <= 2000, `${long.length}`);
+  assert.match(long, /Review threads: /); assert.match(long, /Diffs: /); assert.match(long, /Criteria: AC-1/);
 });
 
-test('unit:review-named-and-pinning-tests-granted — a file an unresolved review finding names, and a test whose failing assertion quotes text a planned file holds, are granted without an approver; an unrelated source file still goes to the approver', async () => {
+test('unit:review-named-and-pinning-tests-granted — a file an unresolved review thread names, and a test whose failing assertion quotes text a planned file holds, are granted without an approver; an unrelated source file still goes to the approver', async () => {
   await ensureScopeApprover();
   const state = emptyDaemonState(loopConfig());
   const decided: Decided[] = [], approvers: string[] = [], widened: string[][] = [];
@@ -728,7 +741,7 @@ test('unit:review-named-and-pinning-tests-granted — a file an unresolved revie
   const overrides: Partial<DaemonEffects> = { ...scopeDecisionEffects(decided, approvers, () => mine), reviewFindings: async () => findings, basePaths: async paths => new Set(paths),
     baseText: async path => texts[path] ?? null, widenScope: async (item, asked, paths, reason) => mine.includes(item.id) ? widenAsMaster(widened)(item, asked, paths, reason) : null };
 
-  // Named by an unresolved review finding on the head: granted by the loop, no approver.
+  // Named by an unresolved review thread on the head: granted by the loop, no approver.
   let named = await claimed('review-named file granted');
   await request(named, { paths: ['src/merge-queue.ts'], reason: 'The reviewer thread names src/merge-queue.ts:85' });
   // A test that pins text the item changes: its failing assertion quotes a planned file's text.
@@ -751,8 +764,8 @@ test('unit:review-named-and-pinning-tests-granted — a file an unresolved revie
   assert.ok(pinnedAction.detail.includes(`${pinning} pins "${heading}", which planned file ${layout} holds`), pinnedAction.detail);
   assert.ok(!unpinned.plannedFiles.includes('tests/unrelated.test.ts'), 'a test whose quote no planned file holds is not granted');
   assert.ok(!unrelated.plannedFiles.includes('src/server/routes/work.ts'), 'an unrelated source file is not granted');
-  // The same cycle puts the two the rule could not grant to the approver, and nothing else (GY-176);
-  // the granted files needed no decision.
+  // The same cycle puts the two the rules could not grant to the approver, and nothing else; the
+  // granted files needed no decision.
   assert.deepEqual(decided.map(entry => entry.action), ['requirements', 'requirements']);
   assert.deepEqual(decided.map(entry => (entry.input.plannedFiles as string[]).at(-1)).sort(), ['src/server/routes/work.ts', 'tests/unrelated.test.ts']);
   assert.equal(approvers.length, 2);
