@@ -5,9 +5,10 @@ import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../coordination.js';
 import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, continueMergeBatch, runAutonomyCommand, currentMergeCandidates, daemonExecutor, dispatchWork, listHerdrAgents, liveMasterConfig, loadMasterConfig, masterHarness, masterSettingsFromArgs, mergeExecutor, mergeProtocolSkew, producerCommand, readCredentialFile, readWorkerCredential, saveMasterSettings, saveWorkerProfile, snapshotWithClock, startMaster, verifyContainmentDeath, workerProfileSchema } from '../master.js';
 import { cliCommit } from '../protocol-version.js';
-import { daemonEffects, readDaemonState, runDaemon } from '../master-daemon.js';
+import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { reviewCommand } from '../reviewer.js';
+import { readReviewLedger, reviewCommand } from '../reviewer.js';
+import { readProducerLedger } from '../producer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -24,6 +25,7 @@ import { reviewerCommand } from './master-reviewer.js';
 import { registryCommand, registryHelp } from './master-registry.js';
 import { executorsCommand, executorsHelp } from './master-executors.js';
 import { closeHelp, closeRequest } from './master-close.js';
+import { assertHandAction, assertHandDispatch, assertHandReview, handDecision, systemDriven } from './hand-actions.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -113,8 +115,14 @@ export const masterCommands = defineCommands([
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
       if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
+      // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175),
+      // judged on the same work document the decision is built from.
+      const assertDecision = async (work: any, action: string, input: unknown, now: number) => {
+        const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now, requestsDecisions: !!master.operatorAgent };
+        const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
+      };
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
-        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
+        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision }));
       if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
       if (id === 'start') {
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
@@ -129,7 +137,13 @@ export const masterCommands = defineCommands([
       if (id === 'reviewer') return reviewerCommand(root, master, args, print);
       // The fleet on this host against the CLI checkout's commit: the release a restart would load.
       if (id === 'executors') return print(await executorsCommand(master, args, { actions: () => masterApi('actions'), coordinatorCommit: cli.commit }));
-      if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), await listHerdrAgents()));
+      // A system-driven item's reviewer is the loop's to launch, save the recovery it sends the master to (GY-175),
+      // judged on the same snapshot the launch reads its review request from.
+      if (id === 'review') {
+        const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+        if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
+        return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
+      }
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
         const snapshot = await masterApi('work-snapshot');
@@ -178,16 +192,18 @@ export const masterCommands = defineCommands([
       if (id === 'dispatch') {
         const { values, positionals } = parseArgs({ args, options: { 'allow-overlap': { type: 'boolean' } }, allowPositionals: true });
         if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE [--allow-overlap]');
-        const snapshot = await masterApi('work-snapshot');
+        const requestedAt = Date.now(), snapshot = await masterApi('work-snapshot');
         const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
         const profile = master.workers.find(item => item.name === positionals[1]);
-        if (!work) throw new Error(`Unknown work item ${positionals[0]}`); if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
+        if (!work) throw new Error(`Unknown work item ${positionals[0]}`);
+        const { claimBy } = await assertHandDispatch(work, snapshot.now, master.run.dispatchIntervalSeconds, path => masterApi(path), requestedAt);
+        if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
         const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
         if (profile.credentialFile) {
           const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
           if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
         }
-        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'] }));
+        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'], claimBy }));
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
@@ -196,6 +212,9 @@ export const masterCommands = defineCommands([
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
+        // `--all` merges the candidates that are not system-driven and leaves the rest to the loop; a named item is refused (GY-175).
+        if (args[0] === '--all') { const hand = selected.filter((item: any) => !systemDriven(item)); if (!hand.length) assertHandAction(selected[0], 'merge'); selected.splice(0, selected.length, ...hand); }
+        else for (const item of selected) assertHandAction(item, 'merge');
         if (!master.autoMerge) selected.splice(0, selected.length, ...await approvedMerges(selected, item => masterApi(`work/${item.id}/decisions`), args[0] !== '--all'));
         // One executor instance per request id (see MergeExecutor in master.ts).
         const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
@@ -247,7 +266,7 @@ export const masterCommands = defineCommands([
         const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
         const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
         const executor = daemonExecutor(coordinator.actor.id);
-        const effects = daemonEffects(root, current, { snapshot: () => coordinationSnapshot(), mutate: masterMutation, executor });
+        const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation, executor });
         const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => masterApi('work-snapshot'), masterMutation, executor, randomUUID())(work);
         // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
         effects.merge = async work => { assertProtocol(await masterApi('status')); return guardedMerge(work); };
