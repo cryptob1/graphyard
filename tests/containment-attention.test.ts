@@ -115,12 +115,12 @@ function stranded(overrides: Partial<Work> = {}) {
   return { ...lapsed, containmentQuarantine: { ...lapsed.containmentQuarantine!, scope }, sessions: [session(pane)], ...overrides } as Work;
 }
 /** What the host probe reports for the pane shell, with the recorded scope in the given state. */
-function paneShellProbe(options: { activeState?: string; children?: number; command?: string; inScope?: boolean; paneShell?: ContainmentVerification['paneShell'] } = {}): ContainmentVerification {
-  const { activeState = 'not-found', children = 0, command = '/usr/bin/bash', inScope = false, paneShell = { pane, pid: shellPid, foregroundGroup: shellPid } } = options;
+function paneShellProbe(options: { activeState?: string; children?: number; command?: string; inScope?: boolean; stdinTerminal?: boolean; paneShell?: ContainmentVerification['paneShell'] } = {}): ContainmentVerification {
+  const { activeState = 'not-found', children = 0, command = '/usr/bin/bash', inScope = false, stdinTerminal = true, paneShell = { pane, pid: shellPid, foregroundGroup: shellPid } } = options;
   return { ...clean, host: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 },
     processes: [{ pid: shellPid, evidence: 'workspace' }],
     scopes: inScope ? [{ unit: scope.unit, activeState, processes: [shellPid], attributed: [] }] : [],
-    held: [{ pid: shellPid, command, cwd: workspace.path, unit: inScope ? scope.unit : null, children }],
+    held: [{ pid: shellPid, command, cwd: workspace.path, unit: inScope ? scope.unit : null, children, stdinTerminal }],
     recordedScope: { ...scope, activeState }, paneShell } as ContainmentVerification;
 }
 /** What `herdr pane process-info --pane` answers for the recorded pane. */
@@ -177,12 +177,18 @@ test('unit:idle-pane-shell-not-a-worker the loop counts each held process\'s liv
     readCommand: pid => present(pid).argv.join('\0'), processOwner: () => 1000, readCwd: pid => present(pid).cwd, readParent: pid => present(pid).ppid, readCgroup: () => '',
     run: (_command, args) => args.includes('show') ? 'LoadState=not-found\nActiveState=inactive\n' : args.includes('show-environment') ? 'LANG=C\n' : '',
   });
-  const table$ = { listProcesses: () => Object.keys(table), readParent: (pid: number) => present(pid).ppid };
+  const stdin: Record<number, string> = { [shellPid]: '/dev/pts/7', 4300: '/dev/pts/8' };
+  const table$ = { listProcesses: () => Object.keys(table), readParent: (pid: number) => present(pid).ppid, readStdin: (pid: number) => stdin[pid] ?? '/dev/null' };
   const report = countHeldChildren(probed, table$);
-  assert.deepEqual(report.held.map(entry => [entry.pid, entry.children]), [[shellPid, 0], [4300, 1]]);
+  assert.deepEqual(report.held.map(entry => [entry.pid, entry.children, entry.stdinTerminal]), [[shellPid, 0, true], [4300, 1, true]]);
   // A parent that cannot be read leaves every count out: nothing is proven idle.
   const unread = countHeldChildren(probed, { ...table$, readParent: pid => { if (pid === 4301) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return present(pid).ppid; } });
   assert.deepEqual(unread.held.map(entry => entry.children), [undefined, undefined]);
+  // `bash < script` reads a file, not its terminal; an unreadable fd 0 proves nothing (review of a1939bd7).
+  const redirected = countHeldChildren(probed, { ...table$, readStdin: pid => pid === shellPid ? `${workspace.path}/script.sh` : stdin[pid] });
+  assert.deepEqual(redirected.held.map(entry => entry.stdinTerminal), [false, true]);
+  const unreadable = countHeldChildren(probed, { ...table$, readStdin: () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } });
+  assert.deepEqual(unreadable.held.map(entry => entry.stdinTerminal), [undefined, undefined]);
   assert.equal(report.recordedScope?.activeState, 'not-found');
   const verification = { ...report, host: 'coordinator-host', observedAt, clockOffset: { min: 0, max: 1 }, paneShell: paneShellReport(pane, herdrProcessInfo(shellPid, shellPid)) } as ContainmentVerification;
   assert.deepEqual(refusals(stranded(), verification), [`Process 4300 of the contained worker is still present on coordinator-host (matched by assigned workspace); pid 4300 cmdline "/usr/bin/bash" cwd ${workspace.path}`],
@@ -206,6 +212,11 @@ test('unit:idle-pane-shell-not-a-worker a shell with a child process, a live sco
   assert.match(refusals(work, paneShellProbe({ paneShell: null })).join('\n'), still, 'a pane Herdr could not read proves nothing');
   assert.match(refusals(stranded({ sessions: [] } as Partial<Work>), paneShellProbe()).join('\n'), still, 'without a recorded session pane nothing ties the shell to the worker');
   assert.match(refusals(work, paneShellProbe({ command: 'bash -s' })).join('\n'), still, 'a shell reading a script from stdin is not idle');
+  // `bash < script` shows a bare `bash` command line; only a terminal on fd 0 makes it a prompt (review of a1939bd7).
+  assert.match(refusals(work, paneShellProbe({ stdinTerminal: false })).join('\n'), still, 'a shell executing a script redirected into its stdin is not idle');
+  const unreadStdin = paneShellProbe();
+  delete unreadStdin.held[0].stdinTerminal;
+  assert.match(refusals(work, unreadStdin).join('\n'), still, 'a probe that could not read the shell\'s stdin proves nothing about idleness');
   assert.equal(paneShellReport(pane, herdrProcessInfo(shellPid, shellPid, 'w1V:pOTHER')), null, 'an answer about another pane is ignored');
   assert.equal(paneShellReport(pane, { process_info: { pane_id: pane, shell_pid: 'x' } }), null);
   assert.deepEqual(paneShellReport(pane, herdrProcessInfo(shellPid, shellPid)), { pane, pid: shellPid, foregroundGroup: shellPid });
@@ -299,7 +310,7 @@ test('unit:ended-worker-pane-closed only a pane the host probe found idle in thi
   assert.deepEqual(foreign.settled, []);
   const unread = await loop(stranded(), { containment: probedBy(paneShellProbe({ paneShell: null })) });
   assert.deepEqual(unread.closed, [], 'a pane Herdr could not read is not proven to be this worker\'s');
-  for (const busy of [{ children: 1 }, { command: 'bash -c sleep 100' }, { paneShell: { pane, pid: shellPid, foregroundGroup: 6000 } }]) {
+  for (const busy of [{ children: 1 }, { command: 'bash -c sleep 100' }, { stdinTerminal: false }, { paneShell: { pane, pid: shellPid, foregroundGroup: 6000 } }]) {
     const running = await loop(stranded(), { containment: probedBy(paneShellProbe(busy)) });
     assert.deepEqual(running.closed, [], `a pane shell running something is left for the fence to report: ${JSON.stringify(busy)}`);
   }

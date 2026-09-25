@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { ContainmentScope, Work, Workspace } from './model.js';
@@ -177,7 +177,9 @@ export const containmentVerificationSchema = z.object({
    */
   held: z.array(z.object({ pid: z.number().int().positive(), command: z.string().max(500), cwd: z.string().max(1000).nullable(), unit: z.string().max(200).nullable(),
     /** How many live processes name this one as their parent; absent from a probe before GY-189. */
-    children: z.number().int().min(0).optional() }).strict()).max(400).default([]),
+    children: z.number().int().min(0).optional(),
+    /** Whether its standard input is a terminal; absent when fd 0 could not be read, and from a probe before GY-189. */
+    stdinTerminal: z.boolean().optional() }).strict()).max(400).default([]),
   /** The scope the quarantine recorded at launch and how systemd reports it now. */
   recordedScope: z.object({ unit: z.string().min(1).max(200), pid: z.number().int().positive(), activeState: z.string().min(1).max(40) }).strict().nullable().default(null),
   /**
@@ -226,14 +228,19 @@ export function paneShellReport(pane: string, result: unknown): NonNullable<Cont
   if (!info || info.pane_id !== pane || !positive(info.shell_pid)) return null;
   return { pane, pid: info.shell_pid as number, foregroundGroup: positive(info.foreground_process_group_id) ? info.foreground_process_group_id as number : null };
 }
-export interface ProcessTableDeps { listProcesses?: () => string[]; readParent?: (pid: number) => number }
+export interface ProcessTableDeps { listProcesses?: () => string[]; readParent?: (pid: number) => number; readStdin?: (pid: number) => string }
+/** A terminal device a shell reads its prompt from: a pseudo-terminal or a console tty. */
+const terminalDevice = /^\/dev\/(pts\/\d+|tty[A-Za-z]*\d+)$/;
 /**
  * Counts, on the probing host, the live children of every process a verification reports holding
- * the fence, so settlement can tell an idle pane shell from a shell still running something. The
- * whole process table must be read: a parent that could not be read leaves every count out, which
- * settlement reads as 'not proven idle'. Parentage is world-readable, as the probe's ancestry is.
+ * the fence, and records whether its standard input is a terminal, so settlement can tell an idle
+ * pane shell from a shell still running something, including one executing a script redirected
+ * into it (`bash < script` names no argument). The whole process table must be read: a parent
+ * that could not be read leaves every count out, which settlement reads as 'not proven idle'.
+ * Parentage is world-readable, as the probe's ancestry is; fd 0 is readable for the probing
+ * user's own processes, and one that cannot be read is left out, again 'not proven idle'.
  */
-export function countHeldChildren<T extends { held: { pid: number }[] }>(verification: T, deps: ProcessTableDeps = {}): Omit<T, 'held'> & { held: (T['held'][number] & { children?: number })[] } {
+export function countHeldChildren<T extends { held: { pid: number }[] }>(verification: T, deps: ProcessTableDeps = {}): Omit<T, 'held'> & { held: (T['held'][number] & { children?: number; stdinTerminal?: boolean })[] } {
   if (!verification.held.length) return verification;
   const listProcesses = deps.listProcesses ?? (() => readdirSync('/proc'));
   // The parent is the second field after the command name, which may itself hold spaces or ')'.
@@ -242,6 +249,8 @@ export function countHeldChildren<T extends { held: { pid: number }[] }>(verific
     if (!stat.includes(') ') || !Number.isSafeInteger(parent)) throw new Error(`Process ${pid} reported an unreadable status line`);
     return parent;
   });
+  const readStdin = deps.readStdin ?? ((pid: number) => readlinkSync(`/proc/${pid}/fd/0`));
+  const stdinTerminal = (pid: number) => { try { return { stdinTerminal: terminalDevice.test(readStdin(pid)) }; } catch { return {}; } };
   const parents: number[] = [];
   try {
     for (const pid of listProcesses().filter(name => /^\d+$/.test(name)).map(Number)) {
@@ -249,18 +258,19 @@ export function countHeldChildren<T extends { held: { pid: number }[] }>(verific
       catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as { code?: string }).code ?? '')) return verification; }
     }
   } catch { return verification; }
-  return { ...verification, held: verification.held.map(entry => ({ ...entry, children: parents.filter(parent => parent === entry.pid).length })) };
+  return { ...verification, held: verification.held.map(entry => ({ ...entry, children: parents.filter(parent => parent === entry.pid).length, ...stdinTerminal(entry.pid) })) };
 }
 /**
  * The launch pane's own shell, left in the worktree after `watch` exited (GY-189): the process
  * Herdr reports as the shell of the recorded implementation session's pane, holding its
  * terminal's foreground (no job runs in front of it), matched only by its working directory,
- * outside every containment scope, an interactive shell with no child processes, while systemd
- * reports the recorded supervisor scope ended. The worker ran inside that scope and the pane's
- * shell never did, so with the scope gone and nothing running under the shell there is no
- * worker left for it to be. Any other shell in the worktree, a shell with a child or a
- * foreground job, a shell a live scope holds, a probe that did not count children or read the
- * pane, or a quarantine without a recorded scope still holds the fence.
+ * outside every containment scope, an interactive shell reading its terminal with no child
+ * processes, while systemd reports the recorded supervisor scope ended. The worker ran inside
+ * that scope and the pane's shell never did, so with the scope gone and nothing running under the
+ * shell there is no worker left for it to be. Any other shell in the worktree, a shell with a
+ * child or a foreground job, a shell reading anything but a terminal (a script redirected into
+ * it), a shell a live scope holds, a probe that did not count children, read its stdin or read
+ * the pane, or a quarantine without a recorded scope still holds the fence.
  */
 function paneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verification: ContainmentVerification, process: ContainmentVerification['processes'][number]) {
   const quarantine = work.containmentQuarantine;
@@ -270,7 +280,7 @@ function paneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verif
   const shell = verification.paneShell, pane = recordedPane(work);
   if (!shell || !pane || shell.pane !== pane || shell.pid !== process.pid || shell.foregroundGroup !== process.pid) return false;
   const found = verification.held.find(entry => entry.pid === process.pid);
-  return !!found && found.unit === null && found.children === 0 && isInteractiveShell(found.command)
+  return !!found && found.unit === null && found.children === 0 && found.stdinTerminal === true && isInteractiveShell(found.command)
     && !verification.scopes.some(scope => scope.processes.includes(process.pid) || scope.attributed.includes(process.pid));
 }
 /**
