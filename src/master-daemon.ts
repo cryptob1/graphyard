@@ -1582,7 +1582,7 @@ export interface DaemonEffects {
    * `attribute` is the report's last step over the whole list — a ledger refusal in place of the launch symptoms
    * it causes, a resource at its bound named in place of its symptom — so one cause is tracked as the report shows it, once.
    */
-  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
+  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
 }
 
 /**
@@ -1624,6 +1624,10 @@ export interface FaultSources {
   reported?: AttentionItem[];
   /** The report's final attribution (ReportedAttention.attribute), run over the derived and reported lines together. */
   attribute?: ReportedAttention['attribute'];
+  /** The loop's own health lines (loopAttention over this cycle's daemonSummary), which master status puts first. */
+  loop?: AttentionItem[];
+  /** Herdr could not be read this cycle: every kind read from its inventory (herdrFaultKinds) goes unobserved. */
+  herdrUnavailable?: boolean;
 }
 /**
  * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
@@ -1652,8 +1656,9 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     } catch (error) {
       derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
     }
-    const listed = { work: status.work, attentionItems: [...status.attentionItems, ...(sources.reported ?? [])] };
-    for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems)) if (item.kind !== 'gate') derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+    const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
+    for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
+      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))) derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
@@ -1692,6 +1697,8 @@ export function onceAnnotations(read: CheckAnnotations, bound = 200): CheckAnnot
     return entry;
   };
 }
+/** The kinds read from Herdr's session inventory: an unreadable Herdr lists none, so they go unobserved rather than read as missing sessions. */
+export const herdrFaultKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['session', 'overlong-session', 'concurrency-starved']);
 /**
  * The derived lines that restate a fault the item's own record holds under another kind: a fence's settle or grace line
  * is the fence, an exhausted reviewer is the item's spent account, a missing session is its lost lease, and a gate with
@@ -2778,13 +2785,21 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   //     A read that fails makes the cycle partial: faults its source would have shown were not
   //     observed, so none standing ends this cycle (and none reopens as a new instance next cycle).
+  //     A Herdr that cannot be read lists no sessions, which would make every live lease a missing
+  //     session: the kinds read from its inventory are neither opened nor ended that cycle.
   let partial = false, reported: ReportedAttention | undefined;
+  const herdrRead = effects.herdr ? await Promise.resolve(effects.herdr()).catch(() => ({ agents: [] as HerdrAgent[], available: false })) : { agents, available: true };
+  const seen = herdrRead.available ? herdrRead.agents : [];
   const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => { partial = true; return null; }) : null;
-  const summary = controlPlane && effects.reportedAttention ? daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId) : null;
-  if (summary) reported = await effects.reportedAttention!(snapshot.work, controlPlane!, { agents, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
+  const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId);
+  if (controlPlane && effects.reportedAttention) reported = await effects.reportedAttention(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
     .catch(error => { partial = true; return { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] }; });
+  // The loop's own health lines, as master status puts them first: its cost, silence and delivery budget. The loop reading
+  // them is cycling, so its liveness is not in question here, and a failed cycle is noted once as it happens (noteCycleFailure).
+  const loop = loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost });
   endFailingRuns(state, effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), clock);
-  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute }), new Date(clock).toISOString(), partial);
+  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }),
+    new Date(clock).toISOString(), partial || (herdrRead.available ? false : herdrFaultKinds));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
 
   spent('deployment');
@@ -3381,10 +3396,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // the faults it counts are read with the coordinator's visibility, with or without that identity,
     // so an installation that has not provisioned it yet still counts every recurrence.
     controlPlane: coordinatorStatus,
-    reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
+    reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
       // Imported when first read: the status report imports this module, so a static import would be a cycle.
       const reported = await (await import('./cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
-        runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true });
+        runtime: { available: observed.available ?? true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true });
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },

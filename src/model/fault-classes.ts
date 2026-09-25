@@ -259,9 +259,9 @@ const wording = (text: string) => (text.toLowerCase().replace(/\d+/g, '#').match
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
  * the same instance (its `lastSeenAt` moves); one not seen before, or seen again after it cleared,
- * is a new instance (n of one kind on one subject are n); one no longer observed has ended — unless the cycle's reads were `partial`, when an unread source ends nothing. Returns what opened. A fault is its kind, subject and wording less the figures that move while it stands (ages, counts, times): one fixed while another of its kind appears on the subject ends, and the other opens.
+ * is a new instance (n of one kind on one subject are n); one no longer observed has ended — unless the cycle's reads were `partial` (all of them, or a set of kinds), when an unread source ends nothing. Returns what opened. A fault is its kind, subject and wording less the figures that move while it stands (ages, counts, times): one fixed while another of its kind appears on the subject ends, and the other opens.
  */
-export function trackFaults(record: FaultRecord, observations: readonly FaultObservation[], at: string, partial = false): FaultInstance[] {
+export function trackFaults(record: FaultRecord, observations: readonly FaultObservation[], at: string, partial: boolean | ReadonlySet<string> = false): FaultInstance[] {
   const opened: FaultInstance[] = [], seen = new Set<string>(), repeats = new Map<string, number>();
   for (const observation of observations) { // identical faults on one subject stand as that many instances, as the dashboard counts them
     const subject = observation.subject.slice(0, 200), base = `${observation.kind}|${subject}|${wording(observation.text)}`, nth = repeats.get(base) ?? 0, key = nth ? `${base}#${nth}` : base;
@@ -271,7 +271,7 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
     const instance = instanceOf(observation, at, opened.filter(entry => entry.kind === observation.kind && entry.subject === subject).length);
     record.instances.push(instance); record.open[key] = instance.id; opened.push(instance);
   }
-  if (!partial) for (const key of Object.keys(record.open)) if (!seen.has(key)) delete record.open[key];
+  if (partial !== true) for (const key of Object.keys(record.open)) if (!seen.has(key) && !(partial && partial.has(key.slice(0, key.indexOf('|'))))) delete record.open[key];
   retain(record);
   return opened;
 }

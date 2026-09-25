@@ -1,8 +1,8 @@
-import { agentOwner, buildMasterStatus, inventoryWorktrees, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
+import { agentOwner, buildMasterStatus, concurrencyAttention, inventoryWorktrees, roleConcurrency, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import type { ActionRow } from './model/actions.js';
-import { classifyAttention, groupFaults } from './model/fault-classes.js';
+import { classified, classifyAttention, groupFaults } from './model/fault-classes.js';
 import type { Work } from './model.js';
-import { producerLedgerSpec, summarizeProducers, type ProducerRecord } from './producer.js';
+import { producerLedgerSpec, sessionRetries, summarizeProducers, type ProducerRecord } from './producer.js';
 import { reviewLedgerSpec, sessionLedgerRefusal, sessionLedgerRemedy, summarizeReviews, type ReviewRecord } from './reviewer.js';
 import { reviewConflictAttention } from './model/review-conflict.js';
 import type { SettledReviewSession } from './model/dispatch.js';
@@ -198,7 +198,12 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const host: AttentionItem[] = [];
   if (observed.standalone) {
     const cursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
-    host.push(...dispatchFailureAttention('error' in cursor ? cursor : dispatchSummary(cursor, now, master.run.dispatchIntervalSeconds * 1000)), ...(await setupHealth(root, master)).attention);
+    const dispatch = 'error' in cursor ? cursor : dispatchSummary(cursor, now, master.run.dispatchIntervalSeconds * 1000);
+    host.push(...dispatchFailureAttention(dispatch), ...(await setupHealth(root, master)).attention);
+    // A starved reviewer or producer role (GY-107), which the report's own buildMasterStatus raises from the role profiles.
+    const sessions = { producers: summarizeProducers(observed.producers), failures: 'error' in dispatch ? [] : dispatch.failures, retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] };
+    host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)])
+      .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
   return { scopeRequests, unobtainable, unanswered, stalledItems, executors, conflicted, stalled, owed, budget, overlong,
     items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...stalledItems, ...stalled, ...overlong, ...budget, ...owed.items] };

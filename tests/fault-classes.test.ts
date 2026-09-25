@@ -11,7 +11,7 @@ import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultCla
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
 import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
+import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import type { ResourceReading } from '../src/master-resources.js';
 import { predictQueue } from '../src/merge-queue.js';
@@ -769,4 +769,71 @@ test('unit:recurring-class-item — a guarded merge the gate refused is no fault
   // A merge whose outcome is unknown is still the merge fault it was.
   storeAction(state, 'merge:work-GY-44:1', { kind: 'merge', work: 'GY-44', principal: null, state: 'indeterminate', detail: 'Resumed: interrupted', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
   assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'merge').map(entry => entry.subject), ['GY-44']);
+});
+
+test('unit:recurring-class-item — a starved reviewer or producer role reaches the loop, so its capacity item can be filed', async () => {
+  const waiting = (key: string, id: string) => item(key, { stage: 'review', autoDispatch: { review: { id, state: 'requested', provider: 'github', requestedAt: iso(-hour) }, producers: [], history: [] } } as unknown as Partial<Work>);
+  const work = [waiting('GY-1', 'r1'), waiting('GY-2', 'r2')];
+  const master = { ...config(), reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }] } as unknown as MasterConfig;
+  // The one reviewer slot is held by a live session while two requests have waited an hour for it.
+  const derived = await derivedAttention('/nonexistent', master, async () => ({}), { github: true }, { work, now: iso(0) },
+    { reviews: [], producers: [], runtime: { available: true, agents: [{ name: 'review-claude', agent_status: 'working' }] as never }, trees: [], standalone: true });
+  const starved = classifyAttention(derived.items).filter(entry => entry.kind === 'concurrency-starved');
+  assert.deepEqual(starved.map(entry => [entry.subject, entry.faultClass]), [['reviewer concurrency', 'capacity']], JSON.stringify(derived.items));
+  const state = emptyDaemonState(master);
+  trackFaults(state.faults, cycleFaults(state, work, clock, { config: master, reported: derived.items }), iso(0));
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'concurrency-starved').map(entry => entry.faultClass), ['capacity'], 'the starved role is a tracked capacity instance');
+});
+
+test('unit:recurring-class-item — the loop tracks its own cost, silence and delivery-budget lines', async () => {
+  const state = emptyDaemonState(config());
+  const lines = loopAttention({ liveness: { state: 'running', detail: 'ok', restart: 'restart' } as never, budget: { met: false, reasons: ['approval→merge p90 is 3h, over 1h'] } as never,
+    silence: { breached: true, budgetMs: 30 * 60_000, actionable: 2, longest: { work: 'GY-9', detail: 'GY-9 merge', idleMs: 45 * 60_000 } } as never });
+  assert.deepEqual(lines.map(line => line.kind).sort(), ['delivery-budget', 'loop-silence']);
+  trackFaults(state.faults, cycleFaults(state, [], clock, { config: config(), loop: lines }), iso(0));
+  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]).sort(), [['delivery-budget', 'loop'], ['loop-silence', 'loop']]);
+  // The running loop passes them itself: a latency budget it misses is a loop instance without any report read.
+  const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }), faultClassPolicy: policy, persist: async () => {} } as unknown as DaemonEffects;
+  const cycling = emptyDaemonState(config());
+  // The previous cycle's own work overran the interval: the next cycle records that cost.
+  cycling.metrics.push({ cycle: 0, at: iso(-60_000), durationMs: 10 * config().run.intervalSeconds * 1000, childWaitMs: 0, open: 0, actions: 0 } as never);
+  await runCycle(config(), cycling, effects, () => clock);
+  assert.deepEqual(cycling.faults.instances.filter(entry => entry.kind === 'loop-cost').map(entry => [entry.subject, entry.faultClass]), [['loop', 'loop']], JSON.stringify(cycling.faults.instances));
+  assert.ok(!cycling.faults.instances.some(entry => entry.kind === 'loop-liveness'), 'a cycling loop never records itself as absent');
+});
+
+test('unit:recurring-class-item — a Herdr outage opens no session faults and ends none that stand', async () => {
+  const master = { ...config(), workers: [{ name: 'claude-worker', principal: 'worker-a', agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto', agentArgs: [], environment: {} }] } as unknown as MasterConfig;
+  const leased = item('GY-1', { stage: 'build', ready: true, epoch: 1, lease: { owner: 'worker-a', epoch: 1, expiresAt: iso(hour) } } as Partial<Work>);
+  const state = emptyDaemonState(master);
+  // Herdr unreadable: the assigned session is not reported, which is no evidence it is gone.
+  assert.ok(!cycleFaults(state, [leased], clock, { config: master, agents: [], herdrUnavailable: true }).some(entry => herdrFaultKinds.has(entry.kind)), 'no session-derived fault is observed while Herdr is unread');
+  // A session fault that stands is kept through the outage, and ends on a full read that no longer sees it.
+  const missing = cycleFaults(state, [leased], clock, { config: master, agents: [] }).filter(entry => entry.kind === 'session');
+  assert.equal(missing.length, 1);
+  trackFaults(state.faults, missing, iso(0));
+  trackFaults(state.faults, [], iso(60_000), herdrFaultKinds);
+  assert.equal(trackFaults(state.faults, missing, iso(120_000)).length, 0, 'the outage ended nothing, so its return is no new instance');
+  trackFaults(state.faults, [{ kind: 'held-jobs', faultClass: 'configuration', subject: 'installation', text: 'held' }], iso(180_000), herdrFaultKinds);
+  assert.equal(Object.values(state.faults.open).length, 2, 'only the unread kinds are kept; a full read of the rest still tracks them');
+  // The loop's wiring: a failed Herdr read reaches the report as unavailable, and three live leases file nothing.
+  const filed: unknown[] = [], observed: unknown[] = [];
+  const work = ['GY-1', 'GY-2', 'GY-3'].map((key, index) => item(key, { stage: 'build', ready: true, epoch: 1, lease: { owner: `worker-${index}`, epoch: 1, expiresAt: iso(hour) } } as Partial<Work>));
+  const three = { ...master, workers: [0, 1, 2].map(index => ({ ...master.workers[0], name: `worker-${index}`, principal: `worker-${index}`, agentName: `work-${index}`, mode: 'existing' })) } as MasterConfig;
+  const effects = { agents: () => [], herdr: async () => ({ agents: [], available: false }), credentials: async () => ({}), snapshot: async () => ({ work, now: iso(0) }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }), faultClassPolicy: policy, persist: async () => {},
+    controlPlane: async () => ({ github: true }), reportedAttention: async (_work: Work[], _coordinator: unknown, seen: { available?: boolean }) => { observed.push(seen.available); return { items: [] }; },
+    fileFaultClass: async (input: unknown) => { filed.push(input); return item('GY-99'); } } as unknown as DaemonEffects;
+  const outage = emptyDaemonState(three);
+  for (let round = 0; round < 3; round++) await runCycle(three, outage, effects, () => clock + round * 60_000);
+  assert.ok(observed.length && observed.every(value => value === false), 'the report reads Herdr as unavailable');
+  assert.ok(!outage.faults.instances.some(entry => entry.kind === 'session'), JSON.stringify(outage.faults.instances));
+  assert.deepEqual(filed, [], 'a Herdr outage files no session-liveness item');
+  // A missing session read with Herdr up stands through a cycle Herdr cannot be read, as the same instance.
+  let up = true;
+  const one = { ...three, workers: [three.workers[0]] } as MasterConfig, standing = emptyDaemonState(one);
+  const flapping = { ...effects, herdr: async () => ({ agents: [], available: up }), snapshot: async () => ({ work: [work[0]], now: iso(0) }) } as unknown as DaemonEffects;
+  for (const [round, available] of [true, false, true].entries()) { up = available; await runCycle(one, standing, flapping, () => clock + round * 60_000); }
+  assert.equal(standing.faults.instances.filter(entry => entry.kind === 'session').length, 1, `the outage cycle ended nothing: ${JSON.stringify(standing.faults.instances)}`);
 });
