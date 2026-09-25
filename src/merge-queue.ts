@@ -295,6 +295,12 @@ export interface QueuePlacement {
   predecessors: string[]; predictedBase: string | null; tip: string | null;
   /** Entries ahead by sequence that are not validated (see `validatedQueueEntry`): passed over, never predicted on (GY-196). */
   skipped?: string[];
+  /**
+   * Set only on an entry that is not validated itself: the validated entries behind it by sequence,
+   * which pass over it and may land first until it is revalidated (GY-196). `size` counts the
+   * validated entries, and this one too while it is passed over.
+   */
+  passedOver?: string[];
   /** The base-branch commit the chain of predictions rests on, as the head entry observed it. */
   base: { sha: string; tree: string | null } | null;
   /** How a current entry binds its predicted base: the exact commit, or a tree-identical advance of it. */
@@ -564,12 +570,14 @@ export function validatedQueueEntry(work: Pick<Work, 'queue' | 'stage' | 'violat
 export function predictQueue(all: Work[], now: number): QueuePlacement[] {
   const entries = queueOrder(all);
   const placements: QueuePlacement[] = [];
+  const validated = entries.map(validatedQueueEntry), validatedCount = validated.filter(Boolean).length;
   for (const [index, work] of entries.entries()) {
     const entry = work.queue!, candidate = work.candidate, speculation = entry.speculation;
     // The entries ahead that this one is predicted on: the validated ones only (GY-196). Its
     // position is its place in that chain, so an entry behind only unvalidated ones is the head.
-    const ahead = entries.slice(0, index).filter(validatedQueueEntry);
-    const skipped = entries.slice(0, index).filter(item => !validatedQueueEntry(item)).map(item => item.key);
+    const ahead = entries.slice(0, index).filter((_, at) => validated[at]);
+    const skipped = entries.slice(0, index).filter((_, at) => !validated[at]).map(item => item.key);
+    const passedOver = validated[index] ? null : entries.slice(index + 1).filter((_, at) => validated[index + 1 + at]).map(item => item.key);
     const position = ahead.length;
     const previous = position === 0 ? null : placements.find(placement => placement.id === ahead[position - 1].id)!;
     // The chain's head predicts against the observed base branch; every other entry predicts
@@ -601,15 +609,18 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     // though the candidate branch is deliberately behind the base branch while it waits its turn.
     const current = published && (onPrediction || treeEquivalent || carriedToPrediction);
     const reasons: string[] = [];
-    const size = entries.length - skipped.length;
-    if (position > 0) reasons.push(`Merge queue position ${position + 1} of ${size}: ${ahead[position - 1].key} is ahead`);
+    // The chain this entry is counted in: the validated entries, and itself while passed over. A
+    // passed-over entry says so, naming the validated entries behind it that may land before it.
+    const size = validatedCount + (passedOver ? 1 : 0);
+    const passed = passedOver?.length ? `passed over until revalidated, so ${passedOver.join(', ')} behind may merge first` : null;
+    if (position > 0 || passed) reasons.push(`Merge queue position ${position + 1} of ${size}: ${[position > 0 ? `${ahead[position - 1].key} is ahead` : null, passed].filter(Boolean).join('; ')}`);
     if (!current) reasons.push(predictedBase
       ? unancestored ? `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published onto that exact commit: ${missingAncestryReason(unancestored)}`
       : `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published and validated for this candidate`
       : `Waiting for ${ahead[position - 1]?.key ?? 'the queue head'} to publish its speculative tip`);
     placements.push({
       id: work.id, key: work.key, position, size, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
-      waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: ahead.map(item => item.key), skipped,
+      waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: ahead.map(item => item.key), skipped, ...(passedOver ? { passedOver } : {}),
       predictedBase, tip: current && candidate ? candidate.sha : null, base, binding: current ? treeEquivalent || carriedToPrediction ? 'tree-equivalent' : 'exact' : null,
       tipTree: current && candidate ? speculation!.tipTree ?? null : null, current,
       publishable: !current && !!predictedBase && !!candidate, reasons,

@@ -39,7 +39,7 @@ The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval o
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry that leaves validation (awaiting re-approval) keeps its sequence but no longer holds back, rebases or ejects those behind until revalidated.
+A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over (never predicted on) until revalidated.
 
 ### Bindings and carry
 

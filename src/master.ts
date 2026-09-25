@@ -2675,7 +2675,7 @@ export function latencyPercentiles(values: number[]) {
 function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null) {
   return { key: placement.key, position: placement.position + 1, size: placement.size, predictedBase: placement.predictedBase,
     predictedTip: placement.tip, validated: placement.current, waitMs: placement.waitMs, waitMinutes: Math.floor(placement.waitMs / 60_000),
-    enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, reasons: placement.reasons, binding };
+    enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, skipped: placement.skipped ?? [], passedOver: placement.passedOver ?? null, reasons: placement.reasons, binding };
 }
 /**
 /**

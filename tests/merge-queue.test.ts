@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ejectionReason, nextQueueSequence, predictQueue, queueOrder, queuePlacement, queueRef, type QueueEntry } from '../src/merge-queue.js';
+import { ejectionReason, nextQueueSequence, predictQueue, queueOrder, queuePlacement, queueRef, queueSequencingReason, type QueueEntry } from '../src/merge-queue.js';
 import { decideCarry } from '../src/model/carry.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { buildMasterStatus, unauthorizedMergeViolation } from '../src/master.js';
@@ -348,7 +348,14 @@ test('an entry passed over shares its chain position with the entry behind it, a
   const c = enqueue(work('GY-C', { candidate: { sha: commit('GYChead'), baseSha: commit('main'), pr: 3, branch: 'graphyard/GY-C', author: 'agent' } }), 3);
   const placements = predictQueue([a, m, c], now.getTime());
   assert.deepEqual(placements.map(entry => [entry.key, entry.position, entry.sequence]), [['GY-A', 0, 1], ['GY-M', 0, 2], ['GY-C', 1, 3]], 'A is passed over, so M heads the chain beside it');
-  const row = buildMasterStatus({ work: [a, m, c], now: now.toISOString() }, [], []).work.find(entry => entry.key === 'GY-M')!;
+  // The passed-over entry says so: it names the validated entries that may land before it, and
+  // counts itself only beside the validated chain, never as a place those entries wait behind.
+  assert.deepEqual(placements.map(entry => [entry.key, entry.size, entry.passedOver]), [['GY-A', 3, ['GY-M', 'GY-C']], ['GY-M', 2, undefined], ['GY-C', 2, undefined]]);
+  assert.deepEqual(placements[0].reasons.filter(reason => reason.startsWith('Merge queue position')), ['Merge queue position 1 of 3: passed over until revalidated, so GY-M, GY-C behind may merge first']);
+  assert.ok(placements[0].reasons.every(reason => !reason.startsWith('Merge queue position') || queueSequencingReason(reason)), 'the pass-over is sequencing, not a refusal');
+  const status = buildMasterStatus({ work: [a, m, c], now: now.toISOString() }, [], []);
+  assert.deepEqual(status.queue.map(entry => [entry.key, entry.skipped, entry.passedOver]), [['GY-A', [], ['GY-M', 'GY-C']], ['GY-M', ['GY-A'], null], ['GY-C', ['GY-A'], null]], 'master status carries the pass-over');
+  const row = status.work.find(entry => entry.key === 'GY-M')!;
   assert.deepEqual(row.merged?.queue, { sequence: 2, position: 1, size: 2, unpublishable: true, behind: ['GY-C'] }, 'neither M itself nor the passed-over A waits behind M');
   assert.match(row.attention!, /GY-C wait behind it/);
 });
