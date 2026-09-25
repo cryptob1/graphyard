@@ -38,9 +38,9 @@ From the `x-ratelimit-remaining`, `-limit` and `-reset` headers the plane projec
 | Band | State | Cadence |
 | --- | --- | --- |
 | `merge` | heads the queue or passes every other gate | 20 seconds |
-| `active` | waiting on a check, review or base refresh | 5 minutes |
+| `active` | waiting on a check, review, base refresh or rework | 1 minute |
 | `steady` | unchanged since the last observation | 5 minutes, stretched by the fleet bound |
-| `idle` | next action is dispatch, rework or escalation | 5 minutes, stretched when unchanged |
+| `idle` | next action is dispatch or escalation | 5 minutes, stretched when unchanged |
 
 Unchanged non-merge candidates together spend **at most 40%** (`steadyStateShare`) of the hourly limit.
 

@@ -33,21 +33,21 @@ Review uses a separate reviewer App, created by `graphyard master reviewer setup
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` bound to this App, leave "require up to date" (`strict`) **off**, enforce for administrators, forbid force pushes and deletion, and remove bypass rights from worker identities. `master browser protection` reconciles it; `master protection --apply`, `install --apply` and `init --scan --apply` set the merge mode: a merge queue ruleset requiring it on organization repositories (CI runs on `merge_group`), else `allow_auto_merge` (user-owned repositories get no queue; HTTP 422 also falls back).
+On the base branch require `Graphyard / merge` bound to this App, leave `strict` ("require up to date") **off**, enforce for administrators, forbid force pushes and deletion, and give workers no bypass. `master browser protection` reconciles it; `master protection --apply`, `install --apply` and `init --scan --apply` set the merge mode: a merge queue ruleset requiring it on organization repositories (CI runs on `merge_group`), else `allow_auto_merge` (user-owned repositories get no queue; HTTP 422 also falls back).
 
-The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval of the current head, trusted evidence with executed > 0 and skipped 0, a mergeable non-draft PR, and the queue head.
+The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, approval of the current head, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head.
 
 ## Merge queue
 
-Once its gates pass, a candidate's speculative tip (predicted base plus candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over until revalidated. Graphyard never merges: once requested, the App passes the check for an authorized head and its merge group and enqueues it (auto-merge without a queue); withdrawal fails and dequeues it.
+A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. When the base moves, reconciliation merges it in; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow runs on every push to a `graphyard/*` PR branch, with the default branch's workflow and secrets: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips get the same run; dependencies are cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow runs on every push to a `graphyard/*` PR branch, with workflow and secrets from the default branch: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips get the same run; dependencies are cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
