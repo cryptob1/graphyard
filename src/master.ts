@@ -3410,7 +3410,38 @@ export function assertMergeCheckPublished(payload: any, key: string, sha: string
     throw new Error(`${key} merge deferred: GitHub does not yet show ${CHECK_NAME} as passed on ${sha.slice(0, 12)} (${latest ? `${latest.status}${latest.conclusion ? `/${latest.conclusion}` : ''}` : 'not published'}); retry once it is`);
 }
 /** What mergeWork reports for a retained execution: pending until GitHub shows the merge (GY-195). */
-type RetainedMergeOutcome = { key: string; pr: number; sha: string; method: MasterConfig['mergeMethod']; result: string; pending?: boolean; merged?: boolean; carriedApproval?: CarriedApprovalRepost };
+type RetainedMergeOutcome = { key: string; pr: number; sha: string; method: MasterConfig['mergeMethod']; result: string; pending?: boolean; merged?: boolean; mergeSha?: string; carriedApproval?: CarriedApprovalRepost };
+/**
+ * A committed execution whose provider outcome is unknown is one GitHub read away from an answer
+ * (GY-202). The pull request itself says whether it merged; waiting for the execution to expire
+ * only delayed the answer by up to two minutes and stranded the candidate if nobody asked again.
+ *
+ * - merged: the control plane is asked to observe it now, which records the delivery from
+ *   merge_commit_sha and closes the execution; no provider call is made.
+ * - open at the execution's head: the provider did not merge. This executor cancels its own
+ *   execution and the caller retries the guarded merge in the same tick (`null`).
+ * - anything else — an unreadable answer, a moved head, a closed pull request, or an execution
+ *   another executor instance holds — stays pending, and the control plane is asked to observe.
+ */
+async function settleRetainedMerge(config: MasterConfig, current: Work, authorization: ReturnType<typeof assertMergeCandidate>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: ChildRun, executionOwner?: string, refresh?: (work: Work) => Promise<unknown>): Promise<RetainedMergeOutcome | null> {
+  const execution = current.mergeExecution!;
+  const outcome = { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod };
+  const observe = async () => { try { await refresh?.(current); } catch { /* the observation job still runs on its own cadence */ } };
+  if (current.observation?.merged) return { ...outcome, merged: true, ...(current.observation.mergeSha ? { mergeSha: current.observation.mergeSha } : {}), result: 'GitHub shows the pull request merged under the retained execution; Graphyard delivers it from that observation without another provider call' };
+  const pending = (why: string) => ({ ...outcome, pending: true, result: `the provider outcome of merge execution ${execution.id} is unknown; ${why}; Graphyard retained it until ${execution.expiresAt} and asks GitHub again next cycle` });
+  let pr: { merged?: unknown; merge_commit_sha?: unknown; state?: unknown; head?: { sha?: unknown } } | null = null;
+  try { pr = JSON.parse(await run('gh', ['api', `repos/${config.repository}/pulls/${authorization.pr}`])); }
+  catch (error) { return pending(`GitHub could not be read (${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'})`); }
+  if (pr?.merged === true && typeof pr.merge_commit_sha === 'string') {
+    await observe();
+    return { ...outcome, merged: true, mergeSha: pr.merge_commit_sha, result: `GitHub shows pull request #${authorization.pr} merged as ${pr.merge_commit_sha.slice(0, 12)} under the retained execution; the control plane observes it and records the delivery from that merge commit without another provider call` };
+  }
+  if (pr?.merged !== false || typeof pr.state !== 'string') return pending('GitHub did not say whether the pull request merged');
+  if (pr.state !== 'open' || pr.head?.sha !== execution.sha) { await observe(); return pending(`GitHub shows the pull request ${pr.state} at head ${String(pr.head?.sha ?? 'unknown').slice(0, 12)}, not open at ${execution.sha.slice(0, 12)}`); }
+  if (!executionOwner || execution.owner !== executionOwner) { await observe(); return pending(`GitHub shows the pull request open and unmerged, and the execution belongs to ${execution.owner}, which this executor never cancels`); }
+  await cancel(current, execution, `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)} after the provider call; the merge is retried`);
+  return null;
+}
 /**
  * What a guarded merge is bound to: the candidate head, its base, the policy revision, the published
  * queue tip and the all-gates authorization for exactly those. The whole-document revision is not
@@ -3436,6 +3467,19 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   let before = await freshSnapshot(); let current = before.work.find(item => item.id === work.id);
   // The attempt is bound to what it merges, not to the revision it was read at (GY-192).
   if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed before GitHub verification; retry`);
+  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
+  // have called GitHub. That retained execution is a pending outcome, never a merge (GY-195), and
+  // it is settled by reading the pull request (GY-202): merged is delivered from the observation
+  // without another provider call; open at the same head cancels it, and the guarded merge below
+  // runs again in this same call. A verified execution that never reached the commit resumes
+  // below; the provider was not attempted.
+  if (current.mergeExecution?.committingAt) {
+    const settled = await settleRetainedMerge(config, current, assertMergeCandidate(current, before.now, executionOwner), cancel, run, executionOwner, refresh);
+    if (settled) return settled;
+    before = await freshSnapshot(); current = before.work.find(item => item.id === work.id);
+    if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed before GitHub verification; retry`);
+    if (current.mergeExecution) throw new Error(`${work.key} merge execution ${current.mergeExecution.id} still stands after its cancellation; the next cycle asks GitHub again`);
+  }
   // The engine bounds a merge execution by the GitHub observation it was granted on (two minutes
   // from observation.at), and the provider call needs about 92 s of it. An attempt that starts
   // on an observation already ~20 s old runs out of window after committing (GY-159, 2026-09-24),
@@ -3451,16 +3495,6 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed while GitHub was re-read before merging; retry`);
   }
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
-  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
-  // have called GitHub, so nothing is retried until observation reconciles the execution. A
-  // verified execution that never reached the commit resumes below; the provider was not attempted.
-  // That retained execution is a pending outcome, never a merge (GY-195): the loop records it as
-  // waiting and asks again each cycle, so a merge GitHub shows is delivered from the observation
-  // without another provider call, and an execution that expires or is cleared while the pull
-  // request stays open leaves the next cycle free to attempt the guarded merge afresh.
-  if (current.mergeExecution?.committingAt) return current.observation?.merged
-    ? { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, merged: true, result: 'GitHub shows the pull request merged under the retained execution; Graphyard delivers it from that observation without another provider call' } as RetainedMergeOutcome
-    : { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, pending: true, result: `the provider outcome of merge execution ${current.mergeExecution.id} is unknown; Graphyard retained it until ${current.mergeExecution.expiresAt} and waits for GitHub to show the merge or for the execution to expire before a new attempt` } as RetainedMergeOutcome;
   // The pull request answers for its own head, base branch name and state; the base tip is read
   // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
   const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
