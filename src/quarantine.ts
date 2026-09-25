@@ -237,8 +237,7 @@ const terminalDevice = /^\/dev\/(pts\/\d+|tty[A-Za-z]*\d+)$/;
  * pane shell from a shell still running something, including one executing a script redirected
  * into it (`bash < script` names no argument). The whole process table must be read: a parent
  * that could not be read leaves every count out, which settlement reads as 'not proven idle'.
- * Parentage is world-readable, as the probe's ancestry is; fd 0 is readable for the probing
- * user's own processes, and one that cannot be read is left out, again 'not proven idle'.
+ * An fd 0 that cannot be read is left out too, again 'not proven idle'.
  */
 export function countHeldChildren<T extends { held: { pid: number }[] }>(verification: T, deps: ProcessTableDeps = {}): Omit<T, 'held'> & { held: (T['held'][number] & { children?: number; stdinTerminal?: boolean })[] } {
   if (!verification.held.length) return verification;
@@ -261,6 +260,18 @@ export function countHeldChildren<T extends { held: { pid: number }[] }>(verific
   return { ...verification, held: verification.held.map(entry => ({ ...entry, children: parents.filter(parent => parent === entry.pid).length, ...stdinTerminal(entry.pid) })) };
 }
 /**
+ * The loop's host probe, annotated for GY-189: each held process's children and stdin, and, when
+ * something still holds the fence, what Herdr reports for the recorded session's pane shell. A
+ * pane Herdr cannot read is left out, which settlement reads as 'not proven idle'.
+ */
+export async function annotatePaneShell<T extends { held: { pid: number }[] }>(verification: T, work: Pick<Work, 'containmentQuarantine' | 'sessions'> | undefined, readPane: (pane: string) => Promise<unknown>, deps?: ProcessTableDeps) {
+  const report = countHeldChildren(verification, deps);
+  const pane = work ? recordedPane(work) : null;
+  if (!pane || !report.held.length) return report;
+  const paneShell = await readPane(pane).then(result => paneShellReport(pane, result), () => null);
+  return paneShell ? { ...report, paneShell } : report;
+}
+/**
  * The launch pane's own shell, left in the worktree after `watch` exited (GY-189): the process
  * Herdr reports as the shell of the recorded implementation session's pane, holding its
  * terminal's foreground (no job runs in front of it), matched only by its working directory,
@@ -268,11 +279,11 @@ export function countHeldChildren<T extends { held: { pid: number }[] }>(verific
  * processes, while systemd reports the recorded supervisor scope ended. The worker ran inside
  * that scope and the pane's shell never did, so with the scope gone and nothing running under the
  * shell there is no worker left for it to be. Any other shell in the worktree, a shell with a
- * child or a foreground job, a shell reading anything but a terminal (a script redirected into
- * it), a shell a live scope holds, a probe that did not count children, read its stdin or read
- * the pane, or a quarantine without a recorded scope still holds the fence.
+ * child or a foreground job, a shell reading anything but a terminal, a shell a live scope holds,
+ * a probe that did not count children, read its stdin or read the pane, or a quarantine without a
+ * recorded scope still holds the fence.
  */
-function paneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verification: ContainmentVerification, process: ContainmentVerification['processes'][number]) {
+function idlePaneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verification: ContainmentVerification, process: ContainmentVerification['processes'][number]) {
   const quarantine = work.containmentQuarantine;
   if (process.evidence !== 'workspace' || !quarantine?.scope) return false;
   const recorded = verification.recordedScope;
@@ -287,13 +298,12 @@ function paneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verif
  * The pane the loop may close once its worker's supervisor ended (GY-189): the recorded session's
  * pane only when the host probe established that Herdr's shell for it is the idle shell sitting in
  * this item's worktree, the one settlement excuses. The recorded pane is a coordinate the worker
- * itself can write, so it alone never names a pane to close; another agent's pane has no shell in
- * this worktree, and a pane whose shell is running anything is left for the fence to report.
+ * itself can write, so it alone never names a pane to close.
  */
 export function closablePane(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verification: ContainmentVerification) {
   const shell = verification.paneShell;
   const process = shell ? verification.processes.find(entry => entry.pid === shell.pid) : undefined;
-  return shell && process && paneShell(work, verification, process) ? shell.pane : null;
+  return shell && process && idlePaneShell(work, verification, process) ? shell.pane : null;
 }
 /**
  * Pure refusal evaluation, shared by the verifying coordinator and the control plane.
@@ -344,7 +354,7 @@ export function containmentSettlementRefusals(
     refusals.push(`Host verification did not inspect recorded containment scope ${quarantine.scope.unit} (supervisor pid ${quarantine.scope.pid}) of epoch ${quarantine.epoch}`);
   for (const failure of verification.unverifiable) refusals.push(`Host verification was incomplete: ${failure}`);
   for (const process of verification.processes) {
-    if (paneShell(work, verification, process)) continue;
+    if (idlePaneShell(work, verification, process)) continue;
     refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})${heldDetail(verification, process.pid)}`);
   }
   for (const scope of verification.scopes.filter(entry => entry.processes.length))

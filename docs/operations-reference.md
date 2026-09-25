@@ -11,7 +11,7 @@ Restart `graphyard master run` freely: it reconciles and never dispatches twice.
 
 ## Lost worker before submission
 
-The lease expires 120 seconds after the last heartbeat; the next claim gets a higher epoch. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([who may settle what](delegation.md#who-may-settle-what)).
+The lease expires 120 seconds after the last heartbeat; the next claim gets a higher epoch; keep the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([who may settle what](delegation.md#who-may-settle-what)).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -70,7 +70,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Bootstrap mode for a self-proving change
 
-A change shipping its own proof harness cannot prove itself, so an admin or operator agent with `policy:bootstrap` adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply and `e2e:` proofs cannot be deferred; the next item touching those paths owes the proof (`graphyard obligations`).
+A change shipping its own proof harness cannot prove itself, so an operator or operator agent with `policy:bootstrap` adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes the proof (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
