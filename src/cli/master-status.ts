@@ -20,7 +20,7 @@ import { livenessStatus } from './liveness-report.js';
 import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js';
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
-import { nameUnresolvedThreads } from '../merge-queue.js';
+import { mergeStalls, nameUnresolvedThreads } from '../merge-queue.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
@@ -31,6 +31,10 @@ import { executorFleetReport, readCommit, readExecutorRegistrations } from '../e
 import { throughputStatus } from '../throughput.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
+
+/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
+export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
+  mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
 // from here, as does everything that was reading them from here before the split.
 export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
@@ -112,8 +116,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, executors and owed judgments come from derivedAttention, which the loop reads too.
-  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees });
+  // A merge pending on a head GitHub reports mergeable is named with the stalled items (GY-344).
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot)];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
