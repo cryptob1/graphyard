@@ -190,12 +190,16 @@ export function reconcileActions(work: Work, all: Work[], now: Date, options: { 
  * transaction: the next action is recomputed — the deployment it owes, or nothing — every row that
  * is not that action is retired, and the queue entry, which only an undelivered candidate holds, is
  * cleared. A row an executor holds a live claim on is kept until it settles, as everywhere else,
- * and the settlement calls this again. Returns whether anything changed.
+ * and the settlement calls this again. Returns whether anything changed, including a completed row
+ * retired to history, which reports no transition.
  */
 export function settleDelivered(work: Work, all: Work[], now: Date): boolean {
   if (work.stage !== 'done') return false;
   const computed = nextAction(work, all, now);
-  let changed = reconcileActions(work, all, now, { next: computed }).length > 0;
+  // A completed row is moved to history without a transition, so the rows themselves are compared:
+  // a cleanup that only retires completed rows must still be saved, or every pass repeats it.
+  const rows = (work.actionQueue?.actions ?? []).map(row => row.id).join();
+  let changed = reconcileActions(work, all, now, { next: computed }).length > 0 || actionQueue(work).actions.map(row => row.id).join() !== rows;
   if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) { work.nextAction = computed; changed = true; }
   if (work.queue) { work.queue = null; changed = true; }
   return changed;

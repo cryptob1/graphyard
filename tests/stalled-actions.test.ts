@@ -440,6 +440,20 @@ test('integration:done-rows-never-claimed — a done item\'s pending dispatch an
   await engine.reconcile();
   assert.equal((await reload(done)).revision, revision, 'a settled delivery is not rewritten on every tick');
 
+  // A delivery whose only leftover is a completed row, with the right next action and no queue
+  // entry: retiring it emits no transition, and it is saved all the same.
+  const completedAt = new Date(Date.now() - 3_600_000).toISOString();
+  const completed: ActionRow = { ...leftover(done, 'merge', 'merge:completed'), state: 'done', resolvedAt: completedAt, resolution: 'merged' };
+  await seed(done, [completed]);
+  await engine.reconcile();
+  const retiredCompleted = await reload(done);
+  assert.deepEqual(retiredCompleted.actionQueue!.actions.map(row => row.id), [], 'the completed row is retired');
+  assert.ok(retiredCompleted.actionQueue!.history.some(row => row.id === completed.id), 'to history');
+  assert.ok(retiredCompleted.revision > revision, 'and the cleanup is saved, not repeated on every pass');
+  const cleaned = retiredCompleted.revision;
+  await engine.reconcile();
+  assert.equal((await reload(done)).revision, cleaned, 'then left alone');
+
   // A row on an open item that keeps failing for one unchanged reason: never claimed inside its
   // backoff, and each identical failure past the threshold waits longer than the one before.
   const item = await release(await created());
