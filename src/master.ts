@@ -3231,6 +3231,33 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
   if (!fresh || standingEscalations(work).length || work.leadHold || evidenceIndependenceRefusals(work).length || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
   return { key: work.key, revision: work.revision, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
 }
+/**
+ * What a guarded merge is bound to (GY-192): the candidate head and base, the policy revision, the
+ * published queue tip and the all-gates authorization. The document revision is not part of it:
+ * every background write to the item — an observation refresh, action-queue or queue bookkeeping,
+ * evidence carry — moves the revision without changing what would be merged, and a merge compared
+ * on the revision lost to its own item's bookkeeping, each loss doubling its wait.
+ */
+export function mergeBinding(work: Work) {
+  const speculation = work.queue?.speculation; const authorization = work.mergeAuthorization;
+  const authorized = !!authorization && work.stage === 'merge' && !work.violations.length && work.gates.every(gate => gate.passed);
+  return { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, pr: work.candidate?.pr ?? null, policyRevision: work.policyRevision,
+    queueTip: speculation ? `${speculation.tip}@${speculation.base}` : null,
+    authorization: authorized ? `${authorization!.sha}@${authorization!.baseSha}#${authorization!.policyRevision}` : null };
+}
+/** The binding fields that differ between two reads of one item; none means the merge may proceed on the later read. */
+export function mergeBindingChanges(read: Work, current: Work) {
+  const before = mergeBinding(read), after = mergeBinding(current);
+  return (Object.keys(before) as (keyof typeof before)[]).filter(field => before[field] !== after[field]);
+}
+/**
+ * A refusal that says the item moved under the attempt, not that it may not merge: re-read and
+ * retried at once rather than backed off, since the next read carries the change that raced it.
+ */
+export function mergeRace(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /changed (before|after) GitHub verification|changed while GitHub was re-read before merging|(Merge binding|Task) changed before merge execution/.test(message) && /; retry\b/.test(message);
+}
 // Merge order is recomputed from current dependencies and conflicts on every
 // batch; registration order carries no authority.
 export function currentMergeCandidates(work: Work[], observedAt: string, executionOwner?: string) {
@@ -3411,7 +3438,8 @@ export function assertMergeCheckPublished(payload: any, key: string, sha: string
 }
 export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: ChildRun = defaultChildRun, executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>, refresh?: (work: Work) => Promise<unknown>) {
   let before = await freshSnapshot(); let current = before.work.find(item => item.id === work.id);
-  if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
+  const moved = current ? mergeBindingChanges(work, current) : ['item'];
+  if (!current || moved.length) throw new Error(`${work.key} changed before GitHub verification (${moved.join(', ')}); retry`);
   // The engine bounds a merge execution by the GitHub observation it was granted on (two minutes
   // from observation.at), and the provider call needs about 92 s of it. An attempt that starts
   // on an observation already ~20 s old runs out of window after committing (GY-159, 2026-09-24),
@@ -3424,7 +3452,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
       before = await freshSnapshot(); current = before.work.find(item => item.id === work.id);
       if (!current || current.observation?.at !== seen) break;
     }
-    if (!current || current.candidate?.sha !== work.candidate?.sha) throw new Error(`${work.key} changed while GitHub was re-read before merging; retry`);
+    if (!current || mergeBindingChanges(work, current).some(field => field !== 'authorization')) throw new Error(`${work.key} changed while GitHub was re-read before merging; retry`);
   }
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
   // Only a recorded provider commit marks an unknown provider outcome: the broker may already
@@ -3447,7 +3475,8 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   const reposted = carried && repost ? await repost(current, carried) : null;
   const authorityBudgetStartedAt = performance.now();
   const after = await freshSnapshot(); const latest = after.work.find(item => item.id === work.id);
-  if (!latest || latest.revision !== authorization.revision) throw new Error(`${work.key} changed after GitHub verification; retry`);
+  const shifted = latest ? mergeBindingChanges(current, latest) : ['item'];
+  if (!latest || shifted.length) throw new Error(`${work.key} changed after GitHub verification (${shifted.join(', ')}); retry`);
   const latestAuthorization = assertMergeCandidate(latest, after.now, executionOwner);
   const resumed = latest.mergeExecution && Date.parse(latest.mergeExecution.expiresAt) > Date.parse(after.now) && latest.mergeExecution.owner === executionOwner;
   // No execution is acquired that cannot cover the provider call: it would only expire, or be
@@ -3457,7 +3486,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!(window >= mergeWindowFloorMs)) throw new Error(`${work.key} merge deferred: the GitHub observation leaves ${Number.isFinite(window) ? Math.round(window / 1000) : 0} s of merge window, under the ${mergeWindowFloorMs / 1000} s a provider call needs; retry on a fresh observation`);
   }
   const granted = resumed ? { execution: latest.mergeExecution } : await acquire(latest, latestAuthorization);
-  if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || !resumed && granted.execution.authorizationRevision !== authorization.revision) throw new Error(`${work.key} received an invalid merge execution authority`);
+  if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision) throw new Error(`${work.key} received an invalid merge execution authority`);
   const remainingAtSnapshot = Date.parse(granted.execution.expiresAt) - Date.parse(after.now);
   let providerStarted = false; let cancelled = false;
   let verificationStarted = false; let verificationCompleted = false;
@@ -3585,7 +3614,7 @@ export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ wo
   // exactly the one the engine recorded.
   const instance = executor.instance;
   return (item: Work) => mergeWork(config, item, snapshot,
-    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, executor: instance }, stepKey(latest, 'acquire')),
+    (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, ...(latest.queue?.speculation ? { queueTip: latest.queue.speculation.tip } : {}), executor: instance }, stepKey(latest, 'acquire')),
     (latest, execution, reason) => mutation(`work/${latest.id}/merge-cancel`, { executionId: execution.id, reason, executor: instance }, stepKey(latest, 'cancel', execution.id)),
     (latest, execution) => mutation(`work/${latest.id}/merge-verify`, { executionId: execution.id, executor: instance }, stepKey(latest, 'verify', execution.id)), run, mergeExecutionOwner(executor),
     (latest, execution) => mutation(`work/${latest.id}/merge-commit`, { executionId: execution.id, executor: instance }, stepKey(latest, 'commit', execution.id)),
