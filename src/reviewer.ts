@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
-import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
+import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, unaccountedThreads, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -828,6 +828,12 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
    * master's operator-agent identity, none when `observe` is substituted and this is not.
    */
   createFollowUpItem?: CreateFollowUpItem;
+  /**
+   * Withdraws an approval that leaves listed threads unaccounted for, as the reviewer App: by
+   * default through GitHub's review dismissal with a freshly minted reviewer token, none when
+   * `observe` is substituted and this is not.
+   */
+  dismiss?: (record: ReviewRecord, reviewId: number, message: string) => Promise<void>;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0, threads: [] as string[] };
@@ -839,6 +845,9 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // session never visibly accepts throws, and the grace period records it failed as before.
   const retry = dependencies.retry ?? (async (record: ReviewRecord, message: string) => { await deliverPrompt(record.agentName, message, dependencies.run); });
   const ackMs = acknowledgementMs(config);
+  const threadsRun = dependencies.threadsRun ?? (dependencies.observe ? undefined : dependencies.run ?? defaultChildRun);
+  const reviewerApp = config.reviewer;
+  const dismiss = dependencies.dismiss ?? (dependencies.observe ? undefined : (record: ReviewRecord, reviewId: number, message: string) => dismissApproval(root, reviewerApp, config.repository, record.pr, reviewId, message));
   let changed = 0;
   for (const record of ledger.reviews) {
     if (record.state !== 'pending') continue;
@@ -887,6 +896,25 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
       } else if (record.idleSince) { delete record.idleSince; changed++; }
     }
     if (verdict && !record.acknowledgedAt) { record.acknowledgedAt = now.toISOString(); changed++; }
+    // An approval that leaves a listed thread off its Resolved, Follow-up and Overridden lines is an
+    // incomplete verdict, not an answer: it is withdrawn, so the review gate refuses again, and the
+    // session is recorded unanswered, so the request is relaunched as a dismissed approval's is.
+    // Until it is withdrawn the record stays pending and is judged again on the next pass.
+    if (verdict?.state === 'APPROVED' && !record.verdict && threadsRun && dismiss) {
+      const gaps = await approvalGaps(config.repository, record, verdict.reviewId, threadsRun);
+      if (typeof gaps === 'string' || gaps.length) {
+        const unaccounted = typeof gaps === 'string' ? null : gaps.join(', ');
+        const withdrawn = unaccounted === null ? gaps as string : await dismiss(record, verdict.reviewId, `Graphyard withdrew this approval: it does not account for listed review thread(s) ${unaccounted} on its Resolved, Follow-up or Overridden threads lines, so it is not a complete verdict; the review is asked again.`)
+          .then(() => null, error => `it could not be withdrawn (${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)})`);
+        if (withdrawn === null) {
+          record.verdict = { ...verdict, state: 'DISMISSED' };
+          await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: 'failed', force: true,
+            resolution: `the approval ${verdict.reviewId} of ${record.sha.slice(0, 12)} left listed threads unaccounted (${unaccounted}), so it was withdrawn and the request is relaunched`.slice(0, 900) });
+        } else record.resolution = `the approval ${verdict.reviewId} of ${record.sha.slice(0, 12)} is not yet a complete verdict: ${withdrawn}; judged again next pass`.slice(0, 900);
+        changed++;
+        continue;
+      }
+    }
     if (!verdict && !expired && !stale && !failed) continue;
     if (verdict) record.verdict = verdict;
     if (dismissed) await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: 'failed', resolution: dismissed, force: true });
@@ -916,7 +944,6 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // resolves exactly those, plus every thread on an outdated line, with its own GitHub access, once
   // it holds that approval of the current candidate — or of the head whose approval was carried
   // onto it. Nothing else is resolved.
-  const threadsRun = dependencies.threadsRun ?? (dependencies.observe ? undefined : dependencies.run ?? defaultChildRun);
   const threads = await resolveApprovedThreads(ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now);
   changed += threads.changed;
   // The threads the approval judged FOLLOW-UP become one backlog item, and each is answered with
@@ -928,6 +955,27 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
   if (changed) await saveChangedRecords(root, ledger.reviews, before);
   return { reviews: changed ? (await readReviewLedger(root)).reviews : ledger.reviews, changed, threads: [...threads.events, ...followUps.events] };
+}
+
+/**
+ * What an approval of this session leaves unaccounted for among the threads its launch listed
+ * (`unaccountedThreads`), read from the approval itself; a string when it could not be read.
+ */
+async function approvalGaps(repository: string, record: ReviewRecord, reviewId: number, run: ChildRun): Promise<string[] | string> {
+  if (!record.threadsListed?.length || record.threadReadFailure) return [];
+  try {
+    const review = JSON.parse(String(await run('gh', ['api', `repos/${repository}/pulls/${record.pr}/reviews/${reviewId}`])));
+    return unaccountedThreads(review?.body, record.threadsListed, !!record.criteriaOnly);
+  } catch (error) { return `the approval could not be read to check which listed threads it accounts for (${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)})`; }
+}
+/** Withdraw an approval as the reviewer App that gave it: GitHub's review dismissal, with a short-lived reviewer token. */
+async function dismissApproval(root: string, reviewerApp: MasterConfig['reviewer'], repository: string, pr: number, reviewId: number, message: string) {
+  if (!reviewerApp) throw new Error('no reviewer App is registered');
+  const { token } = await mintReviewerToken(await readReviewerCredential(root, reviewerApp.credentialFile), repository);
+  const response = await fetch(`https://api.github.com/repos/${repository}/pulls/${pr}/reviews/${reviewId}/dismissals`, { method: 'PUT', signal: AbortSignal.timeout(15_000),
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
+    body: JSON.stringify({ message, event: 'DISMISS' }) });
+  if (!response.ok) throw new Error(`GitHub refused to dismiss review ${reviewId} (${response.status})`);
 }
 
 /** The loop's create of a follow-up item, as the master's operator-agent identity, idempotent on `key`. */

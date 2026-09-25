@@ -62,12 +62,14 @@ const logins = (list: any[] | undefined, field: 'login' | 'slug') => (list ?? []
  * the review settings as desired.
  */
 export function conversationPayload(current: any, desired: ReviewProtection) {
-  const reviews = current?.required_pull_request_reviews, dismissal = reviews?.dismissal_restrictions, restrictions = current?.restrictions;
+  const reviews = current?.required_pull_request_reviews, dismissal = reviews?.dismissal_restrictions, bypass = reviews?.bypass_pull_request_allowances, restrictions = current?.restrictions;
   return {
     required_status_checks: { strict: current?.required_status_checks?.strict === true, checks: (current?.required_status_checks?.checks ?? []).map((check: any) => ({ context: String(check.context), app_id: check.app_id ?? null })) },
     enforce_admins: current?.enforce_admins?.enabled === true,
     required_pull_request_reviews: { required_approving_review_count: desired.requiredApprovals, dismiss_stale_reviews: desired.dismissStaleReviews, require_code_owner_reviews: reviews?.require_code_owner_reviews === true, require_last_push_approval: desired.requireLastPushApproval,
-      ...(dismissal ? { dismissal_restrictions: { users: logins(dismissal.users, 'login'), teams: logins(dismissal.teams, 'slug'), apps: logins(dismissal.apps, 'slug') } } : {}) },
+      ...(dismissal ? { dismissal_restrictions: { users: logins(dismissal.users, 'login'), teams: logins(dismissal.teams, 'slug'), apps: logins(dismissal.apps, 'slug') } } : {}),
+      // A PUT that omits the bypass list clears it; whoever may bypass the review requirement now still may.
+      ...(bypass ? { bypass_pull_request_allowances: { users: logins(bypass.users, 'login'), teams: logins(bypass.teams, 'slug'), apps: logins(bypass.apps, 'slug') } } : {}) },
     restrictions: restrictions ? { users: logins(restrictions.users, 'login'), teams: logins(restrictions.teams, 'slug'), apps: logins(restrictions.apps, 'slug') } : null,
     required_conversation_resolution: false,
     required_linear_history: current?.required_linear_history?.enabled === true,

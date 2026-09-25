@@ -1738,7 +1738,14 @@ export class Engine {
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
         const acquired = (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1`, [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
-        const boundedExecution = activeExecution ?? acquired ?? null;
+        // The execution that called the provider for this head is the one that bounds its merge: a
+        // later execution acquired on a lagging read that still showed the pull request open never
+        // committed, and binding the merge to it would record a merge its predecessor authorized as
+        // unauthorized (GY-202). So the latest committed execution for the observed head is preferred.
+        const commits = (candidate: Work['mergeExecution'] | undefined) => !!candidate?.committingAt && candidate.sha === observation.candidate.sha && candidate.baseSha === observation.candidate.baseSha;
+        const committed = commits(activeExecution) ? activeExecution : (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind='merge.execution.committed' AND ${eventWorkSql()}->'mergeExecution'->>'sha'=$2 AND ${eventWorkSql()}->'mergeExecution'->>'baseSha'=$3 ORDER BY seq DESC LIMIT 1`,
+          [id, observation.candidate.sha, observation.candidate.baseSha])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        const boundedExecution = (commits(committed) ? committed : null) ?? activeExecution ?? acquired ?? null;
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
         // The lower bound of the offset, so the recorded instant is the earliest the merge
@@ -1762,7 +1769,7 @@ export class Engine {
           && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
           && Date.parse(boundedExecution.verifiedAt) <= Date.parse(boundedExecution.committingAt)
           && Date.parse(boundedExecution.committingAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
-        if (activeExecution && executionValid && work.mergeAuthorization
+        if (activeExecution && activeExecution.id === boundedExecution?.id && executionValid && work.mergeAuthorization
           && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
           && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
           && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision

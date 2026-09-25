@@ -1,8 +1,9 @@
-import { actionId, actionIdleMs, actionSettleMs, actionStall, claimLive, reconcileActions, waitingToRetry, type ActionRow } from './actions.js';
+import { actionId, actionIdleMs, actionSettleMs, actionStall, actionStallMaxMs, claimLive, reconcileActions, waitingToRetry, type ActionRow } from './actions.js';
 import { actionAccount } from './next-action.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { producerGroupDecisions } from './mechanical-proofs.js';
+import { roleSessionMaximumMs } from './sessions.js';
 import { redecidableScopeRefusal, routableScopeRequest, scopeRefusalBlocker } from './scope.js';
 import type { Work } from './work.js';
 
@@ -70,29 +71,39 @@ const openRow = (work: Work, id: string) => (work.actionQueue?.actions ?? []).fi
 /** The newest record of a row: the open one, else the last retired copy. */
 const latestRow = (work: Work, id: string) => (work.actionQueue?.actions ?? []).find(row => row.id === id)
   ?? [...(work.actionQueue?.history ?? [])].reverse().find(row => row.id === id) ?? null;
-/** The unchanged run of failures a row ended on, read past the cancellation that retired it. */
-function failureRun(row: ActionRow) {
-  const history = [...row.history];
-  while (history.length && history[history.length - 1].event === 'cancelled') history.pop();
-  return actionStall({ ...row, history });
+/**
+ * The unchanged run of failures an action ended on, read across every copy of its row: a
+ * conversion retires the row and a lifted one opens it afresh, so the retired copies and the open
+ * one are one history, their cancellations and fresh requests set aside.
+ */
+function failureRun(work: Work, id: string) {
+  const copies = [...(work.actionQueue?.history ?? []), ...(work.actionQueue?.actions ?? [])].filter(row => row.id === id);
+  if (!copies.length) return null;
+  const history = copies.flatMap(row => row.history).filter(entry => entry.event !== 'cancelled' && entry.event !== 'requested');
+  const run = actionStall({ ...copies.at(-1)!, history });
+  return run && { ...run, lastAt: history.filter(entry => entry.event === 'failed').at(-1)!.at };
 }
 
 // ---- The derivation's liveness rules ----------------------------------------------------------
 
 /**
  * A row that failed `livenessRetryLimit` times for one unchanged reason is escalated instead of
- * retried. The escalation holds while the situation is the one that failed (same action id); it
- * lifts once its own row is completed after that run, or once the situation moves on.
+ * retried. The escalation holds while the situation is the one that failed (same action id) and its
+ * last failure is younger than the longest stall backoff (`actionStallMaxMs`); it lifts once its
+ * own row is completed after that run, once the situation moves on, or once that backoff has
+ * passed. A lifted conversion retries the action once: an identical failure escalates it again at
+ * once, anything else ends the run. So an escalated action is still attempted on the widest
+ * backoff, and a condition that clears — a deployment incident ending — is found by the retry.
  */
-function stalledConversion(work: Work, action: NextAction): NextAction | null {
+function stalledConversion(work: Work, action: NextAction, now: Date): NextAction | null {
+  if (action.kind === 'escalate') return null;
   const id = actionId(action.kind, work.id, action.binding);
-  const row = latestRow(work, id);
-  const run = row && action.kind !== 'escalate' ? failureRun(row) : null;
-  if (!run || run.failures < livenessRetryLimit) return null;
+  const run = failureRun(work, id);
+  if (!run || run.failures < livenessRetryLimit || now.getTime() - Date.parse(run.lastAt) >= actionStallMaxMs) return null;
   const binding = `stalled:${id}:${run.reason}`;
   const answered = latestRow(work, actionId('escalate', work.id, binding));
-  if (answered?.result === 'done' && Date.parse(answered.resolvedAt!) >= Date.parse(row!.history.filter(entry => entry.event === 'failed').at(-1)!.at)) return null;
-  return escalate(work, 'stalled-action', `${work.key}'s ${action.kind} failed ${run.failures} times in a row for one unchanged reason and is escalated rather than retried: ${run.reason}`,
+  if (answered?.result === 'done' && Date.parse(answered.resolvedAt!) >= Date.parse(run.lastAt)) return null;
+  return escalate(work, 'stalled-action', `${work.key}'s ${action.kind} failed ${run.failures} times in a row for one unchanged reason and is escalated rather than retried until ${iso(Date.parse(run.lastAt) + actionStallMaxMs)}: ${run.reason}`,
     `${action.kind} failed ${run.failures} times since ${run.since}: ${run.reason}`, binding, action.gate, action.refusal);
 }
 
@@ -123,7 +134,24 @@ function waitDueAt(work: Work, wait: ActionWait, all: Work[], now: Date): string
     const rows = (other.actionQueue?.actions ?? []).map(row => rowDueAt(row, now)).sort();
     return rows[0] ?? now.toISOString();
   }
-  return iso(Date.parse(heldSince(work)) + (wait.kind === 'human' ? 24 * 60 * 60_000 : livenessWaitBoundMs));
+  if (wait.kind === 'human') return iso(Date.parse(heldSince(work)) + 24 * 60 * 60_000);
+  return iso(Math.max(Date.parse(heldSince(work)) + livenessWaitBoundMs, ...sessionObligations(work).map(entry => Date.parse(entry.at) + roleSessionMaximumMs[entry.role])));
+}
+
+/**
+ * The review and proof obligations the head holds while the item waits: a request pending for it
+ * and a session running on it. Each has its own clock — from the request or the session's start,
+ * due by that role's session maximum (a producer's `producerTimeoutMinutes`) — so a wait they own
+ * is not stale merely because the item entered its stage more than `livenessWaitBoundMs` ago.
+ */
+function sessionObligations(work: Work): { at: string; role: 'review' | 'proof' }[] {
+  const head = work.candidate?.sha ?? null;
+  const requests = [work.autoDispatch?.review, ...(work.autoDispatch?.producers ?? [])]
+    .filter(request => !!request && request.state === 'requested' && request.sha === head)
+    .map(request => ({ at: request!.requestedAt, role: request!.kind === 'review' ? 'review' as const : 'proof' as const }));
+  const sessions = (work.sessions ?? []).filter(handle => handle.state === 'running' && (handle.kind === 'review' || handle.kind === 'proof') && (!handle.head || handle.head === head))
+    .map(handle => ({ at: handle.startedAt, role: handle.kind as 'review' | 'proof' }));
+  return [...requests, ...sessions].filter(entry => Number.isFinite(Date.parse(entry.at)));
 }
 const ownedWait = (wait: ActionWait) => wait.kind !== 'dependency' && wait.kind !== 'queue';
 
@@ -134,7 +162,7 @@ const ownedWait = (wait: ActionWait) => wait.kind !== 'dependency' && wait.kind 
  */
 export function livenessCarry(work: Work, computed: Computed, _all: Work[], now: Date): Computed {
   if (!computed.action) return computed;
-  const next = stalledConversion(work, computed.action) ?? scopeDecision(work, computed.action, now);
+  const next = stalledConversion(work, computed.action, now) ?? scopeDecision(work, computed.action, now);
   return next ? { ...computed, action: next } : computed;
 }
 

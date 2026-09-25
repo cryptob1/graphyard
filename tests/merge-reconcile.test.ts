@@ -11,8 +11,8 @@ import type { Work } from '../src/model.js';
 // GY-202: a retained merge execution with an unknown provider outcome waited up to two minutes for
 // its expiry although GitHub could answer in one read, and a refused guarded merge on an unchanged,
 // mergeable candidate backed off for up to thirty cycles. The pull request is read on the next tick:
-// merged is delivered from merge_commit_sha, open at the same head is cancelled and retried at once,
-// and a mergeable candidate is retried at least once a minute until GitHub shows it merged or its
+// merged is delivered from merge_commit_sha, open at the same head is cancelled and retried on the
+// next tick (never on the read that said open, which a lagging replica can serve), and a mergeable candidate is retried at least once a minute until GitHub shows it merged or its
 // head moves.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -135,21 +135,49 @@ test('unit:unknown-merge-reconciled-from-github — a retained unknown outcome G
   } finally { await cleanup(); }
 });
 
-test('unit:unknown-merge-reconciled-from-github — a retained unknown outcome GitHub shows open at the same head is cancelled and retried exactly once in the same tick', async () => {
+test('unit:unknown-merge-reconciled-from-github — a retained unknown outcome GitHub shows open at the same head is cancelled, and the guarded merge is retried exactly once on the next tick', async () => {
   const { config, cleanup } = await masterConfig();
   try {
     const gh = github({ merged: false, state: 'open', head: sha });
     const item = work({ mergeExecution: retained() });
     const control = plane(item, gh);
     const state = emptyDaemonState(config);
-    const cycle = await runCycle(config, state, loop(config, control, gh));
-    const merge = cycle.actions.find(action => action.kind === 'merge');
+    const start = Date.now();
+    const first = (await runCycle(config, state, loop(config, control, gh), () => start)).actions.find(action => action.kind === 'merge');
     assert.ok(Date.parse(item.mergeExecution!.expiresAt) > Date.now() + 60_000, 'the retained execution was nowhere near expiry');
     assert.equal(control.counts.cancelled, 1, 'the retained execution is cancelled');
-    assert.equal(control.counts.acquired, 1, 'a fresh execution is acquired in the same tick');
+    assert.equal(control.counts.acquired, 0, 'no fresh execution is acquired on the read that said open');
+    assert.equal(gh.providerCalls(), 0, 'and no provider call is made in that tick');
+    assert.equal(first?.state, 'waiting', first?.detail);
+    assert.match(first!.detail, /retried next cycle/);
+    const second = (await runCycle(config, state, loop(config, control, gh), () => start + 20_000)).actions.find(action => action.kind === 'merge');
+    assert.equal(control.counts.acquired, 1, 'the next tick acquires a fresh execution');
     assert.equal(gh.providerCalls(), 1, 'the guarded merge is retried exactly once');
-    assert.equal(merge?.state, 'done', merge?.detail);
-    assert.match(merge!.detail, /merge requested/);
+    assert.equal(second?.state, 'done', second?.detail);
+    assert.match(second!.detail, /merge requested/);
+
+    // The lagged read: the provider merged, and the first read of the pull request still says open.
+    // The execution is cancelled and nothing else happens; the next reading delivers the merge.
+    const lagging = github({ merged: true, state: 'closed', head: sha });
+    const lagRun = lagging.run; let lagged = true;
+    const replica = { ...lagging, run: (command: string, args: string[]) => {
+      if (args[1] === 'repos/owner/project/pulls/42' && lagged) { lagged = false; lagging.calls.push(args); return JSON.stringify({ number: 42, merged: false, merge_commit_sha: null, state: 'open', head: { sha } }); }
+      return lagRun(command, args);
+    } };
+    const raced = plane(work({ mergeExecution: retained() }), lagging);
+    const racedOutcome = await mergeWork(config, raced.item, raced.snapshot, raced.acquire, raced.cancel, raced.verify, replica.run, 'master', raced.commit, undefined, raced.refresh) as { pending?: boolean; result: string };
+    assert.equal(racedOutcome.pending, true, racedOutcome.result);
+    assert.deepEqual([raced.counts.cancelled, raced.counts.acquired, lagging.providerCalls()], [1, 0, 0], 'no execution is acquired for the lagging read, so none can be bound to the merge');
+    assert.equal(raced.counts.refreshed, 1, 'the control plane is asked to observe');
+    assert.equal(raced.item.stage, 'done', 'and its observation records the delivery');
+    assert.equal(raced.item.delivery?.mergeSha, mergeSha);
+
+    // A refresh that fails is reported with the pending outcome rather than swallowed.
+    const refusing = github({ merged: false, state: 'open', head: sha });
+    const failing = plane(work({ mergeExecution: retained() }), refusing);
+    const unobserved = await mergeWork(config, failing.item, failing.snapshot, failing.acquire, failing.cancel, failing.verify, refusing.run, 'master', failing.commit, undefined, async () => { throw new Error('control plane answered 503'); }) as { pending?: boolean; result: string };
+    assert.equal(unobserved.pending, true);
+    assert.match(unobserved.result, /asking the control plane to observe it failed: control plane answered 503/);
 
     // A lapsed execution another executor instance committed is never cancelled from here: it stays
     // pending, and the control plane is asked to observe it.

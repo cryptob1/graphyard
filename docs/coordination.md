@@ -21,7 +21,7 @@ A criterion states an outcome and its proofs:
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI. Threads are its inputs: the approval names each resolved, follow-up (filed as backlog) or overridden; the loop resolves them and outdated-line threads. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI. Threads are its inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 

@@ -10,9 +10,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { actionId } from '../src/model/actions.js';
+import type { NextAction } from '../src/model/action-kinds.js';
+import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction, settleDelivered } from '../src/model/actions.js';
 import { nextAction } from '../src/model/next-action.js';
-import { livenessOf, livenessRetryLimit, livenessViolations, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
+import { livenessCarry, livenessOf, livenessRetryLimit, livenessViolations, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
 import { livenessStatus } from '../src/cli/liveness-report.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
@@ -231,6 +232,147 @@ test('unit:violations-get-successor-actions — one reconciliation tick opens ex
   assert.equal((await engine.claimNextAction(coordinator, { host: 'host-1', kinds: ['dispatch'], work: item.key }, id())).action, null, 'no executor is offered the dispatch again');
   assert.equal((await judge(item)).violation, null, 'the escalation owns the item');
   assert.equal(actionId('escalate', item.id, rows(current)[0].binding), escalationId);
+});
+
+test('unit:violations-get-successor-actions — a stalled action is escalated, never abandoned: after N identical verify-deployment failures the row is retried once the widest stall backoff has passed, re-escalated at once on the same failure, and a deployment observed on a later attempt verifies the delivery', () => {
+  const t0 = Date.parse('2026-09-20T10:00:00.000Z');
+  let clock = t0;
+  const now = () => new Date(clock);
+  const at = new Date(t0).toISOString(), mergeSha = 'e'.repeat(40);
+  const work = { id: 'id-GY-DEPLOY', key: 'GY-DEPLOY', title: 'Deploy', type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'done', ready: true,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], plannedFiles: ['src/'], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+    submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true, deploySmoke: true }, gates: [],
+    delivery: { mergedAt: at, mergeSha, authorizationRevision: 1 } } as unknown as Work;
+  const executor = { id: 'executor-1', host: 'host-1', principal: 'coordinator' };
+  const reason = 'the deployment endpoint answered 503 Service Unavailable';
+  settleDelivered(work, [work], now());
+  assert.equal(work.nextAction?.kind, 'verify-deployment');
+  const verifyId = work.actionQueue!.actions[0].id;
+  /** One failed attempt, settled and reconciled at the instant it failed; the row's backoff is returned, not waited out. */
+  const attempt = () => {
+    const taken = claimAction([work], executor, now());
+    assert.equal(taken?.row.id, verifyId, `the verify-deployment row is offered at ${now().toISOString()}`);
+    clock += 1000;
+    const settled = settleAction(work, verifyId, { executor: executor.id, principal: executor.principal }, 'failed', reason, now());
+    settleDelivered(work, [work], now());
+    return Date.parse(settled.action.retryAt!);
+  };
+  for (let failure = 1; failure < livenessRetryLimit; failure++) {
+    const retryAt = attempt();
+    assert.equal(work.nextAction?.kind, 'verify-deployment', `failure ${failure} is retried`);
+    clock = retryAt;
+  }
+  attempt();
+  const lastFailure = clock;
+  assert.equal(work.nextAction?.kind, 'escalate', `the ${livenessRetryLimit}th identical failure escalates`);
+  assert.ok(work.nextAction!.inputs.kind === 'escalate' && work.nextAction!.inputs.trigger === 'stalled-action');
+  assert.equal(claimAction([work], executor, now()), null, 'nothing is offered while the escalation is fresh');
+  clock = lastFailure + actionStallMaxMs - 60_000;
+  settleDelivered(work, [work], now());
+  assert.equal(work.nextAction?.kind, 'escalate', 'the escalation holds inside the widest stall backoff');
+  clock = lastFailure + actionStallMaxMs;
+  settleDelivered(work, [work], now());
+  assert.equal(work.nextAction?.kind, 'verify-deployment', 'once it has passed, the action is owed again rather than abandoned');
+  assert.deepEqual(work.actionQueue!.actions.map(row => row.kind), ['verify-deployment'], 'the escalation row makes way for the retry');
+  attempt();
+  assert.equal(work.nextAction?.kind, 'escalate', 'the same failure on the retry escalates again at once');
+  clock += actionStallMaxMs;
+  settleDelivered(work, [work], now());
+  assert.equal(work.nextAction?.kind, 'verify-deployment', 'and is retried again after the next backoff');
+  // The incident ends: this attempt observes the deployment.
+  const taken = claimAction([work], executor, now());
+  assert.equal(taken?.row.id, verifyId);
+  work.delivery!.deployment = { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: now().toISOString() } as NonNullable<Work['delivery']>['deployment'];
+  settleAction(work, verifyId, { executor: executor.id, principal: executor.principal }, 'done', 'deployment observed', now());
+  settleDelivered(work, [work], now());
+  assert.notEqual(work.nextAction?.kind, 'verify-deployment', 'the delivery is verified');
+  assert.notEqual(work.nextAction?.kind, 'escalate');
+  assert.deepEqual(work.actionQueue!.actions.filter(row => row.state !== 'done').map(row => row.kind), [], 'nothing is left owed');
+});
+
+test('unit:violations-get-successor-actions — resync and request-review rows refused for one stable reason keep being retried on the widest backoff after they escalate', () => {
+  for (const kind of ['resync', 'request-review'] as const) {
+    const t0 = Date.parse('2026-09-20T10:00:00.000Z');
+    let clock = t0;
+    const now = () => new Date(clock);
+    const at = new Date(t0).toISOString();
+    const work = { id: `id-${kind}`, key: `GY-${kind.toUpperCase()}`, title: kind, type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'review', ready: true,
+      createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], plannedFiles: ['src/'], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+      submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true }, gates: [] } as unknown as Work;
+    const inputs = kind === 'resync' ? { kind, pr: 1, sha: null, baseSha: null, baseTip: null, observedAt: null }
+      : { kind, provider: 'reviewer', requestId: 'request-1', pr: 1, sha: 'a'.repeat(40), baseSha: base, policyRevision: 1 };
+    const base_: NextAction = { kind, work: work.id, key: work.key, gate: 'review', refusal: 'refused', reason: `${kind} is owed`, inputs: inputs as NextAction['inputs'], llmRole: null, binding: `${kind}:1` };
+    const next = () => livenessCarry(work, { gate: 'review', refusal: 'refused', action: base_, wait: null, defect: null }, [work], now()).action!;
+    const tick = () => reconcileActions(work, [work], now(), { next: next() });
+    const executor = { id: 'executor-1', host: 'host-1', principal: 'coordinator' };
+    const rowId = actionId(kind, work.id, base_.binding);
+    const reason = `${kind} refused: the provider says the pull request is locked`;
+    const fail = () => {
+      const taken = claimAction([work], executor, now(), { kinds: [kind] });
+      assert.equal(taken?.row.id, rowId, `${kind} is offered at ${now().toISOString()}`);
+      clock += 1000;
+      const settled = settleAction(work, rowId, { executor: executor.id, principal: executor.principal }, 'failed', reason, now());
+      tick();
+      return Date.parse(settled.action.retryAt!);
+    };
+    tick();
+    for (let failure = 1; failure < livenessRetryLimit; failure++) { clock = fail(); assert.equal(next().kind, kind, `${kind}: failure ${failure} is retried`); }
+    fail();
+    assert.equal(next().kind, 'escalate', `${kind}: escalated after ${livenessRetryLimit} identical refusals`);
+    for (let round = 1; round <= 3; round++) {
+      clock += actionStallMaxMs;
+      tick();
+      assert.equal(next().kind, kind, `${kind}: round ${round} retries it on the widest backoff`);
+      fail();
+      assert.equal(next().kind, 'escalate', `${kind}: round ${round} re-escalates on the unchanged refusal`);
+    }
+  }
+});
+
+test('unit:liveness-violations-detected — a pending producer request or a running proof session owns the wait on its own clock: a producer running 45 minutes inside its 120-minute timeout is not a violation, one past it is', async () => {
+  const stale = await staleWait();
+  assert.equal((await judge(stale)).violation?.class, 'stale-wait', 'with nothing running, an hour past stage entry is stale');
+  const started = Date.now() - 45 * 60_000;
+  const handle = { id: `proof-${stale.key}`, kind: 'proof', principal: 'proof-runner', epoch: null, runtime: 'claude', host: 'test', workspace: null, tab: null, pane: null, agentName: null,
+    role: 'proof:integration', head: head(stale), attach: null, transcript: null, subject: 'integration proofs', startedAt: new Date(started).toISOString(), updatedAt: new Date().toISOString(), endedAt: null, state: 'running', outcome: null };
+  await setDocument(stale, 'sessions', [handle]);
+  const all = await store.list(), item = all.find(entry => entry.id === stale.id)!;
+  const running = livenessOf(item, all, new Date());
+  assert.equal(running.violation, null, `the producer inside its timeout owns the wait: ${JSON.stringify(running.violation)}`);
+  assert.equal(running.obligation!.dueAt, new Date(started + 120 * 60_000).toISOString(), 'due at the end of the producer timeout, dated from the session start');
+  assert.equal(livenessOf(item, all, new Date(started + 121 * 60_000)).violation?.class, 'stale-wait', 'and past it, the wait is stale');
+  // A producer request pending for the head is the same obligation, dated from when it was requested.
+  const requestedAt = new Date(Date.now() - 45 * 60_000).toISOString();
+  await setDocument(stale, 'sessions', []);
+  await setDocument(stale, 'autoDispatch', { review: null, history: [], producers: [{ id: 'request-1', kind: 'producer', group: 'integration', proofs: [PROOF], sha: head(stale), baseSha: base, policyRevision: stale.policyRevision, pr: stale.submission!.pr, requestedAt, reason: 'unproven', state: 'requested' }] });
+  const requested = await judge(stale);
+  assert.equal(requested.violation, null, `the pending request owns the wait: ${JSON.stringify(requested.violation)}`);
+  assert.equal(requested.obligation!.dueAt, new Date(Date.parse(requestedAt) + 120 * 60_000).toISOString());
+});
+
+test('unit:unknown-merge-reconciled-from-github — a merge the provider made under a committed execution is delivered even when a lagging read cancelled that execution and a fresh one was acquired before the merged observation arrived', async () => {
+  let w = await candidate('pass', {}, true);
+  // Published at the head of the merge queue, as the queue leaves a candidate it is about to merge.
+  await setDocument(w, 'queue,speculation', { ref: `refs/graphyard/queue/${w.key.toLowerCase()}`, tip: head(w), base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() });
+  w = await engine.observe(w.id, (await reload(w)).revision, observation(w));
+  assert.ok(w.gates.every(gate => gate.passed), `authorized to merge: ${w.gates.flatMap(gate => gate.reasons).join('; ')}`);
+  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
+  await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, id());
+  const committed = await engine.commitMerge(coordinator, w.id, { executionId: granted.execution.id }, id());
+  // The provider merges; GitHub's replica still answers open, so the broker cancels its execution.
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await engine.cancelMerge(coordinator, w.id, { executionId: granted.execution.id, reason: 'GitHub shows the pull request open and unmerged' }, id());
+  // Another reading on the same lagging replica, and a fresh execution acquired on it.
+  await engine.observe(w.id, (await reload(w)).revision, observation(w));
+  const fresh = await engine.acquireMerge(coordinator, w.id, { expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
+  assert.notEqual(fresh.execution.id, granted.execution.id);
+  assert.ok(committed.committingAt, 'the first execution called the provider');
+  const merged = await engine.observe(w.id, (await reload(w)).revision, observation(w, { merged: true, mergedAt, mergeSha: sha(`merge-${w.key}`) }));
+  assert.equal(merged.stage, 'done', `delivered: ${merged.violations.join('; ')}`);
+  assert.ok(!merged.violations.some(entry => entry.startsWith('Merge observed without a prior authorization')), 'no false unauthorized-merge violation');
+  assert.equal(merged.delivery?.mergeSha, sha(`merge-${w.key}`), 'the delivery is recorded');
 });
 
 // ---- AC-3 ---------------------------------------------------------------------------------------

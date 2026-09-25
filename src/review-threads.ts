@@ -88,7 +88,7 @@ export function threadSection(sha: string, threads: LaunchThread[], total = thre
     + (unlisted > 0 ? `${unlisted} more unresolved thread${unlisted === 1 ? ' is' : 's are'} not listed here: do not name ${unlisted === 1 ? 'it' : 'them'}; a later review judges ${unlisted === 1 ? 'it' : 'them'}. ` : '')
     + `Check each thread against head ${sha}. A thread whose finding is fixed, or no longer applicable, goes on the Resolved threads line; one you could not verify fixed is never named there. `
     + 'A thread whose finding stands is BLOCKING — REQUEST_CHANGES citing the thread and the criterion it blocks — or FOLLOW-UP, named on the Follow-up threads line, which does not stop an approval. Name each thread whose finding you judged wrong or not worth a change, with the reason for each earlier in the body, on the Overridden threads line. '
-    + 'An approval must account for every listed thread: end the review body with one line exactly of the form "Resolved threads: ID1 ID2" naming only the thread IDs you verified fixed, or no longer applicable, at this head, one line exactly of the form "Follow-up threads: ID3 ID4", and one line exactly of the form "Overridden threads: ID5 ID6". '
+    + 'An approval must account for every listed thread: end the review body with one line exactly of the form "Resolved threads: ID1 ID2" naming only the thread IDs you verified fixed, or no longer applicable, at this head, one line exactly of the form "Follow-up threads: ID3 ID4", and one line exactly of the form "Overridden threads: ID5 ID6". An approval that leaves a listed thread off all three lines, a bot\'s included, is withdrawn and the review asked again. '
     + 'Do not resolve any thread yourself: Graphyard records these lines with your verdict and resolves exactly the threads they name once it observes your approval of this head. ';
 }
 /** What the prompt says when the thread list could not be read: nothing can be named as resolved. */
@@ -151,19 +151,33 @@ export function parseOverriddenThreads(body: unknown): string[] {
 export const hasResolvedThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^(resolved|overridden) threads:/i.test(entry.trim()));
 
 /**
+ * The listed threads an approval leaves unaccounted for: named on none of its Resolved, Follow-up
+ * and Overridden lines. An approval of a head whose launch listed threads is a complete verdict only
+ * when this is empty — a bot's thread past `botThreadReworkRounds` included, since advisory means it
+ * sends no rework, not that the reviewer may pass over it. The one exception is an approval of a
+ * launch from before the criteria-only rule that carries no line at all: it vouches for its whole
+ * listing (resolveNamedThreads), so it leaves none unaccounted.
+ */
+export function unaccountedThreads(body: unknown, listed: readonly string[], classified: boolean): string[] {
+  if (!classified && !hasResolvedThreadsLine(body)) return [];
+  const accounted = new Set([...parseResolvedThreads(body), ...parseFollowUpThreads(body), ...parseOverriddenThreads(body)]);
+  return listed.slice(0, listedThreadLimit).filter(id => !accounted.has(id));
+}
+
+/**
  * `implicit`: the approval had no `Resolved threads:` or `Overridden threads:` line, so it vouches
  * for every thread its launch prompt listed. `overridden` is the subset of `named` the reviewer
  * overrode rather than found fixed — the audit trail of every thread an approval passed over.
- * `outdated` are threads on lines the approved head changed, resolved with the approval although
- * no line named them.
+ * `outdated`, on records from before threads were resolved only when named, are threads on lines the
+ * approved head changed that were resolved although no line named them.
  */
 export interface ThreadResolution { at: string; reviewId: number; named: string[]; overridden?: string[]; outdated?: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; implicit?: boolean }
 
 /**
- * Resolve exactly the threads an approval named — fixed or overridden — and every thread on an
- * outdated line: each must be listed unresolved on the pull request now, and must have been opened
- * before the approval was submitted. Any other thread the reviewer did not name is never resolved.
- * Runs outside every coordination transaction.
+ * Resolve exactly the threads an approval named — fixed or overridden: each must be listed
+ * unresolved on the pull request now, and must have been opened before the approval was submitted.
+ * Any other thread the reviewer did not name is never resolved, on an outdated line or not: a line
+ * the head changed is not a finding the reviewer judged. Runs outside every coordination transaction.
  *
  * An approval with no `Resolved threads:` line still answers every thread its launch prompt listed,
  * because that prompt made any unfixed or unverified thread a REQUEST_CHANGES: on 2026-09-24 GY-159's
@@ -195,14 +209,12 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
   let named = [...new Set([...parseResolvedThreads(review.body), ...overridden])].filter(id => !followUps.includes(id)).slice(0, listedThreadLimit);
   let open: LaunchThread[];
   try { open = await readUnresolvedThreads(input.repository, input.pr, run); }
-  catch (error) { return { ...base, implicit, named, overridden, outdated: [], resolved: [], refused: [], failure: `the review threads could not be read: ${firstLine(error)}` }; }
+  catch (error) { return { ...base, implicit, named, overridden, resolved: [], refused: [], failure: `the review threads could not be read: ${firstLine(error)}` }; }
   // A thread the approval judged FOLLOW-UP stands at this head: it is filed, never vouched fixed.
   if (implicit) named = input.listed!.slice(0, listedThreadLimit).filter(id => !followUps.includes(id));
   const submitted = Date.parse(String(review.submitted_at ?? ''));
   const before = (thread: LaunchThread) => { const created = Date.parse(thread.createdAt ?? ''); return Number.isFinite(created) && Number.isFinite(submitted) && created < submitted; };
-  // A thread on a line the approved head has since changed is settled by the approval of that head.
-  const outdated = open.filter(thread => thread.outdated && !named.includes(thread.id) && !followUps.includes(thread.id) && before(thread)).map(thread => thread.id).slice(0, listedThreadLimit);
-  const targets = [...named, ...outdated];
+  const targets = named;
   const resolved = input.previous?.resolved.filter(id => targets.includes(id)) ?? [], refused: string[] = [];
   for (const id of targets) {
     if (resolved.includes(id)) continue;
@@ -216,7 +228,7 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
     } catch (error) { refused.push(`${id}: ${firstLine(error)}`.slice(0, 300)); }
   }
   const failed = refused.filter(entry => !/: not (an unresolved thread|opened before)/.test(entry));
-  return { ...base, implicit, named, overridden, outdated, resolved, refused, ...(failed.length ? { failure: `${failed.length} named thread(s) could not be resolved` } : {}) };
+  return { ...base, implicit, named, overridden, resolved, refused, ...(failed.length ? { failure: `${failed.length} named thread(s) could not be resolved` } : {}) };
 }
 
 /**

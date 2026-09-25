@@ -14,9 +14,9 @@ import type { Observation, Work } from '../src/model.js';
 
 // The reviewer names the threads it verified fixed on a `Resolved threads:` line of its approval and
 // the ones it overrides on an `Overridden threads:` line; the loop records both with the verdict and
-// resolves exactly those, plus every thread on an outdated line, with its own GitHub access, once it
-// holds that approval of the current candidate (or of the head whose approval was carried onto it).
-// Nothing else is resolved.
+// resolves exactly those with its own GitHub access, once it holds that approval of the current
+// candidate (or of the head whose approval was carried onto it). Nothing else is resolved, and an
+// approval that leaves a listed thread off every line is withdrawn rather than taken as the verdict.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -228,19 +228,76 @@ test('unit:overridden-threads-recorded — an approval that overrides a bot thre
   } finally { await cleanup(); }
 });
 
-test('unit:outdated-threads-auto-resolved — approving a new head resolves every pre-existing thread on an outdated line, even one no line named', async () => {
+test('unit:outdated-threads-resolved-only-when-named — approving a new head resolves a pre-existing thread on an outdated line only when a line names it', async () => {
+  for (const scenario of [
+    { name: 'named on no line', body: 'Looks good.\nResolved threads: none', resolved: [] as string[] },
+    { name: 'named resolved', body: 'Looks good.\nResolved threads: PRRT_stale0001', resolved: ['PRRT_stale0001'] },
+  ]) {
+    const { root, cleanup } = await boundMaster();
+    try {
+      await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
+      const gh = github({ body: scenario.body, threads: [
+        { id: 'PRRT_stale0001', createdAt: '2026-09-23T11:00:00Z', outdated: true },
+        { id: 'PRRT_current01', createdAt: '2026-09-23T11:00:00Z' },
+        { id: 'PRRT_newstale1', createdAt: '2026-09-23T12:30:00Z', outdated: true },
+      ] });
+      const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
+      assert.deepEqual(gh.resolved, scenario.resolved, `${scenario.name}: an outdated line is not a finding the reviewer judged`);
+      assert.equal(settled.reviews[0].threadResolution?.outdated, undefined, scenario.name);
+    } finally { await cleanup(); }
+  }
+});
+
+/** GitHub for the completeness check: each approval by id, and the resolve mutation. */
+function approvals(bodies: Record<number, string>) {
+  const resolved: string[] = [];
+  const run = (_command: string, args: string[]) => {
+    const id = /pulls\/64\/reviews\/(\d+)$/.exec(args[1] ?? '')?.[1];
+    if (id) return JSON.stringify({ id: Number(id), state: 'APPROVED', commit_id: H, user: { login: reviewer }, submitted_at: submittedAt, body: bodies[Number(id)] });
+    const query = args.find(arg => arg.startsWith('query=')) ?? '';
+    if (query.includes('resolveReviewThread')) { const thread = args.find(arg => arg.startsWith('thread='))!.slice('thread='.length); resolved.push(thread); return JSON.stringify({ data: { resolveReviewThread: { thread: { id: thread, isResolved: true } } } }); }
+    if (query.includes('reviewThreads')) return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: ['PRRT_fixed0001', 'PRRT_person01', 'PRRT_bot00001'].map(thread =>
+      ({ id: thread, isResolved: resolved.includes(thread), isOutdated: false, path: 'src/a.ts', line: 3, comments: { nodes: [{ author: { login: thread === 'PRRT_bot00001' ? 'chatgpt-codex-connector' : 'lead' }, body: 'finding', createdAt: '2026-09-23T11:00:00Z' }] } })) } } } } });
+    throw new Error(`unexpected gh ${args.join(' ')}`);
+  };
+  return { run, resolved };
+}
+
+test('unit:approval-accounts-for-listed-threads — an approval that leaves a listed thread off its Resolved, Follow-up and Overridden lines is withdrawn, resolves nothing and is relaunched; a bot thread past the rework rounds still has to be named', async () => {
   const { root, cleanup } = await boundMaster();
   try {
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
-    const gh = github({ body: 'Looks good.\nResolved threads: none', threads: [
-      { id: 'PRRT_stale0001', createdAt: '2026-09-23T11:00:00Z', outdated: true },
-      { id: 'PRRT_current01', createdAt: '2026-09-23T11:00:00Z' },
-      { id: 'PRRT_newstale1', createdAt: '2026-09-23T12:30:00Z', outdated: true },
-    ] });
-    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
-    const resolution = settled.reviews[0].threadResolution!;
-    assert.deepEqual(resolution.outdated, ['PRRT_stale0001'], 'only an outdated thread opened before the approval');
-    assert.deepEqual(gh.resolved, ['PRRT_stale0001'], 'a thread on a current line, and one opened after the approval, stay open');
-    assert.ok(settled.threads.some(line => line.startsWith('resolved review thread PRRT_stale0001 on GY-64 PR #64, outdated at the head approved by 77')), settled.threads.join('\n'));
+    // Past botThreadReworkRounds: the bot's thread sends no rework any more, and the reviewer still names it.
+    const reworked = work(H, B, { pipeline: { reworkRounds: 2 } } as unknown as Partial<Work>);
+    const listing = async () => [listedThread('PRRT_fixed0001'), listedThread('PRRT_person01'), { ...listedThread('PRRT_bot00001'), author: 'chatgpt-codex-connector' }];
+    await launchReview(root, reworked, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: listing });
+    const gh = approvals({ 77: 'AC-1 met.\nResolved threads: PRRT_fixed0001\nFollow-up threads: PRRT_person01\nOverridden threads: none',
+      78: 'AC-1 met.\nResolved threads: PRRT_fixed0001\nFollow-up threads: PRRT_person01\nOverridden threads: PRRT_bot00001' });
+    const dismissed: { reviewId: number; message: string }[] = [];
+    let refuse = true;
+    const dismiss = async (_record: unknown, reviewId: number, message: string) => { if (refuse) throw new Error('GitHub refused to dismiss review 77 (403)'); dismissed.push({ reviewId, message }); };
+    const config = await loadMasterConfig(root);
+    // GitHub refuses the withdrawal: the record stays pending, says why, and is judged again.
+    let settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [reworked], threadsRun: gh.run, dismiss });
+    assert.equal(settled.reviews[0].state, 'pending', 'an incomplete approval is not recorded as the verdict');
+    assert.equal(settled.reviews[0].verdict, undefined);
+    assert.match(settled.reviews[0].resolution!, /not yet a complete verdict: it could not be withdrawn \(GitHub refused to dismiss review 77 \(403\)\)/);
+    refuse = false;
+    settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [reworked], threadsRun: gh.run, dismiss });
+    assert.deepEqual(dismissed.map(entry => entry.reviewId), [77], 'the incomplete approval is withdrawn');
+    assert.match(dismissed[0].message, /does not account for listed review thread\(s\) PRRT_bot00001/);
+    const withdrawn = settled.reviews[0];
+    assert.equal(withdrawn.state, 'failed', 'recorded unanswered, so the request is relaunched');
+    assert.equal(withdrawn.verdict?.state, 'DISMISSED');
+    assert.match(withdrawn.resolution!, /left listed threads unaccounted \(PRRT_bot00001\), so it was withdrawn and the request is relaunched/);
+    assert.deepEqual(gh.resolved, [], 'an incomplete approval resolves nothing');
+
+    // The relaunched session's approval accounts for every listed thread: it is the verdict.
+    await launchReview(root, reworked, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: listing });
+    settled = await reconcileReviews(root, config, { run: herdrRun, observe: record => record.id === withdrawn.id ? null : { ...verdict(), reviewId: 78 }, work: [reworked], threadsRun: gh.run, dismiss });
+    const complete = settled.reviews.find(record => record.id !== withdrawn.id)!;
+    assert.equal(complete.state, 'completed', complete.resolution);
+    assert.equal(complete.verdict?.state, 'APPROVED');
+    assert.deepEqual(dismissed.length, 1, 'a complete approval is never withdrawn');
+    assert.deepEqual(complete.threadResolution?.named, ['PRRT_fixed0001', 'PRRT_bot00001']);
   } finally { await cleanup(); }
 });

@@ -450,7 +450,8 @@ test('applying protection changes only the review subresource and verifies the r
 test('unit:protection-no-conversation-resolution — master protection plans conversation resolution off and applies it with one PUT that keeps every other setting', async () => {
   const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
   const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
-  let protection: any = { required_pull_request_reviews: { required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true, dismissal_restrictions: { users: [{ login: 'lead' }], teams: [], apps: [] } },
+  let protection: any = { required_pull_request_reviews: { required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true, dismissal_restrictions: { users: [{ login: 'lead' }], teams: [], apps: [] },
+    bypass_pull_request_allowances: { users: [{ login: 'release-bot' }], teams: [{ slug: 'maintainers' }], apps: [{ slug: 'graphyard-control' }] } },
     required_status_checks: { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true },
     allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false }, required_linear_history: { enabled: true }, required_conversation_resolution: { enabled: true } };
   const plan = protectionPlan(protection, config, [agent]);
@@ -477,7 +478,8 @@ test('unit:protection-no-conversation-resolution — master protection plans con
   assert.equal(body.required_conversation_resolution, false);
   assert.deepEqual(body.required_status_checks, { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }] }, 'the App-bound check and strict-off stay as observed');
   assert.equal(body.enforce_admins, true); assert.equal(body.required_linear_history, true); assert.equal(body.allow_force_pushes, false); assert.equal(body.allow_deletions, false);
-  assert.deepEqual(body.required_pull_request_reviews, { required_approving_review_count: 0, dismiss_stale_reviews: true, require_code_owner_reviews: false, require_last_push_approval: false, dismissal_restrictions: { users: ['lead'], teams: [], apps: [] } });
+  assert.deepEqual(body.required_pull_request_reviews, { required_approving_review_count: 0, dismiss_stale_reviews: true, require_code_owner_reviews: false, require_last_push_approval: false, dismissal_restrictions: { users: ['lead'], teams: [], apps: [] },
+    bypass_pull_request_allowances: { users: ['release-bot'], teams: ['maintainers'], apps: ['graphyard-control'] } }, 'dismissal restrictions and pull request bypass allowances are kept, by login and slug');
   assert.equal((await applyProtection(config, [agent], run)).applied, false, 'a branch without the requirement is left alone');
 });
 

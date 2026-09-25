@@ -3401,17 +3401,23 @@ type RetainedMergeOutcome = { key: string; pr: number; sha: string; method: Mast
  *
  * - merged: the control plane is asked to observe it now, which records the delivery from
  *   merge_commit_sha and closes the execution; no provider call is made.
- * - open at the execution's head: the provider did not merge. This executor cancels its own
- *   execution and the caller retries the guarded merge in the same tick (`null`).
+ * - open at the execution's head: the provider did not merge, as far as this one read can tell.
+ *   This executor cancels its own execution and the guarded merge is retried on the next cycle,
+ *   never in this one: a read served by a lagging replica can say open for a pull request the
+ *   provider already merged, and a fresh execution acquired on it would be the one the merged
+ *   observation is bound to. A cycle later the pull request answers for itself.
  * - anything else — an unreadable answer, a moved head, a closed pull request, or an execution
  *   another executor instance holds — stays pending, and the control plane is asked to observe.
  */
-async function settleRetainedMerge(config: MasterConfig, current: Work, authorization: ReturnType<typeof assertMergeCandidate>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: ChildRun, executionOwner?: string, refresh?: (work: Work) => Promise<unknown>): Promise<RetainedMergeOutcome | null> {
+async function settleRetainedMerge(config: MasterConfig, current: Work, authorization: ReturnType<typeof assertMergeCandidate>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: ChildRun, executionOwner?: string, refresh?: (work: Work) => Promise<unknown>): Promise<RetainedMergeOutcome> {
   const execution = current.mergeExecution!;
   const outcome = { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod };
-  const observe = async () => { try { await refresh?.(current); } catch { /* the observation job still runs on its own cadence */ } };
+  // A refresh that fails is not a failed settlement — the observation job still runs on its own
+  // cadence — but what it failed with is part of what the pending outcome reports.
+  let refreshError: string | null = null;
+  const observe = async () => { try { await refresh?.(current); } catch (error) { refreshError = (error instanceof Error ? error.message : String(error)).slice(0, 200); } };
   if (current.observation?.merged) return { ...outcome, merged: true, ...(current.observation.mergeSha ? { mergeSha: current.observation.mergeSha } : {}), result: 'GitHub shows the pull request merged under the retained execution; Graphyard delivers it from that observation without another provider call' };
-  const pending = (why: string) => ({ ...outcome, pending: true, result: `the provider outcome of merge execution ${execution.id} is unknown; ${why}; Graphyard retained it until ${execution.expiresAt} and asks GitHub again next cycle` });
+  const pending = (why: string) => ({ ...outcome, pending: true, result: `the provider outcome of merge execution ${execution.id} is unknown; ${why}; Graphyard retained it until ${execution.expiresAt} and asks GitHub again next cycle${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}` });
   let pr: { merged?: unknown; merge_commit_sha?: unknown; state?: unknown; head?: { sha?: unknown } } | null = null;
   try { pr = JSON.parse(await run('gh', ['api', `repos/${config.repository}/pulls/${authorization.pr}`])); }
   catch (error) { return pending(`GitHub could not be read (${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'})`); }
@@ -3422,8 +3428,9 @@ async function settleRetainedMerge(config: MasterConfig, current: Work, authoriz
   if (pr?.merged !== false || typeof pr.state !== 'string') return pending('GitHub did not say whether the pull request merged');
   if (pr.state !== 'open' || pr.head?.sha !== execution.sha) { await observe(); return pending(`GitHub shows the pull request ${pr.state} at head ${String(pr.head?.sha ?? 'unknown').slice(0, 12)}, not open at ${execution.sha.slice(0, 12)}`); }
   if (!executionOwner || execution.owner !== executionOwner) { await observe(); return pending(`GitHub shows the pull request open and unmerged, and the execution belongs to ${execution.owner}, which this executor never cancels`); }
-  await cancel(current, execution, `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)} after the provider call; the merge is retried`);
-  return null;
+  await cancel(current, execution, `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)} after the provider call; the merge is retried next cycle`);
+  await observe();
+  return { ...outcome, pending: true, result: `GitHub shows pull request #${authorization.pr} open and unmerged at ${execution.sha.slice(0, 12)}, so merge execution ${execution.id} was cancelled; the guarded merge is retried next cycle, once a fresh reading can show a merge this one missed${refreshError ? ` (asking the control plane to observe it failed: ${refreshError})` : ''}` };
 }
 /**
  * What a guarded merge is bound to: the candidate head, its base, the policy revision, the published
@@ -3453,16 +3460,10 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   // Only a recorded provider commit marks an unknown provider outcome: the broker may already
   // have called GitHub. That retained execution is a pending outcome, never a merge (GY-195), and
   // it is settled by reading the pull request (GY-202): merged is delivered from the observation
-  // without another provider call; open at the same head cancels it, and the guarded merge below
-  // runs again in this same call. A verified execution that never reached the commit resumes
-  // below; the provider was not attempted.
-  if (current.mergeExecution?.committingAt) {
-    const settled = await settleRetainedMerge(config, current, assertMergeCandidate(current, before.now, executionOwner), cancel, run, executionOwner, refresh);
-    if (settled) return settled;
-    before = await freshSnapshot(); current = before.work.find(item => item.id === work.id);
-    if (!current || mergeBinding(current) !== mergeBinding(work)) throw new Error(`${work.key} changed before GitHub verification; retry`);
-    if (current.mergeExecution) throw new Error(`${work.key} merge execution ${current.mergeExecution.id} still stands after its cancellation; the next cycle asks GitHub again`);
-  }
+  // without another provider call; open at the same head cancels it, and the guarded merge runs
+  // again next cycle. A verified execution that never reached the commit resumes below; the
+  // provider was not attempted.
+  if (current.mergeExecution?.committingAt) return settleRetainedMerge(config, current, assertMergeCandidate(current, before.now, executionOwner), cancel, run, executionOwner, refresh);
   // The engine bounds a merge execution by the GitHub observation it was granted on (two minutes
   // from observation.at), and the provider call needs about 92 s of it. An attempt that starts
   // on an observation already ~20 s old runs out of window after committing (GY-159, 2026-09-24),
