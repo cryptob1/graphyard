@@ -9,7 +9,7 @@ import { predictQueue } from '../src/merge-queue.js';
 import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
 import { fixtureApi, flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
-import { classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
+import { boardFromStatus, classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
 import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../web/pr-steps.js';
 import { noRelease, releaseView } from '../web/release.js';
 import ShippedPage from '../web/pages/shipped.js';
@@ -46,13 +46,15 @@ const board = () => boardWork() as unknown as Work[];
 const find = (key: string, work: Work[] = board()) => work.find(item => item.key === key)!;
 function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin'): Dashboard {
   const work = overrides.work ?? board();
-  return {
+  const d: Dashboard = {
     token: 'fixture', work, status: boardStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: { validation: null, releases: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
     codexAvailable: false, queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, role), refresh: async () => {},
     action: async () => {}, setError: noop, signOut: noop, ...overrides,
   };
+  // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
+  return 'board' in overrides ? d : { ...d, board: boardFromStatus(d.work, d.observedAt, d.status) };
 }
 const home = (d = dashboard()) => markup(createElement(OverviewPage, d));
 const itemPage = (key: string, d = dashboard()) => markup(createElement(WorkDetails, { ...d, item: find(key, d.work) }));

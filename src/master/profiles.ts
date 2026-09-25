@@ -206,6 +206,9 @@ export const masterRunSchema = z.object({
   // volume raises the threshold without restarting the loop.
   reclaimIdleHours: z.number().min(0.25).max(720).optional(),
   diskThresholdGb: z.number().min(0.1).max(10_000).optional(),
+  // How many finished assignment worktrees one reclaim pass removes outright (GY-360; default 50),
+  // so a large backlog drains over a few cycles without stalling any one of them.
+  worktreeRemovalLimit: z.number().int().min(1).max(1000).optional(),
   // The managed worktree root every proof and review checkout is created under: an absolute path
   // on durable storage outside every worktree (default: the installation's data directory), the
   // free space setup and each launch require of its volume, and the size the root may reach before
