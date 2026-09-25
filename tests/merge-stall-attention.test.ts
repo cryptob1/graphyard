@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeStallAttention } from '../src/cli/master-status.js';
+import { mergeStallAttention, stalledItemAttention } from '../src/cli/status-attention.js';
 import type { GitHubMergeQueueState } from '../src/merge-queue.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -30,6 +30,8 @@ test('unit:merge-stall-surfaced — a merge pending six minutes on an UNSTABLE h
   assert.match(item.text, /no refusal is recorded/);
   assert.equal((item as any).role, 'master');
   assert.deepEqual(attention([work(4)]), [], 'four minutes is within the bound');
+  // master status raises it with the stalled items, so it is visible within one cycle.
+  assert.ok(stalledItemAttention({ work: [work(6)], now: new Date(now).toISOString() }).some(entry => entry.text.startsWith('merge-stalled: GY-245')));
 
   for (const mergeStateStatus of ['CLEAN', 'HAS_HOOKS']) assert.equal(attention([work(6, { mergeStateStatus })]).length, 1, mergeStateStatus);
   // Not mergeable, refused, queued, another head, no current request, or merged: not a stall.

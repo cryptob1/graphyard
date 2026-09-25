@@ -25,11 +25,11 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-Grants are checked every five minutes and after any 403; a shortfall shows under `appPermissions`, its jobs **held, not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
+Grants are checked every five minutes and after a 403; a shortfall shows under `appPermissions`, its jobs **held, not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
 ## The reviewer App
 
-A separate reviewer App, created by `graphyard master reviewer setup` (Pull requests write, reads otherwise), reviews; binding refuses one that can write code. Review tokens last one hour; an approval by `SLUG[bot]` on the exact head satisfies GitHub and Graphyard.
+A separate reviewer App (`graphyard master reviewer setup`; Pull requests write, reads otherwise) reviews; binding refuses one that can write code. Review tokens last one hour; `SLUG[bot]`'s approval of the exact head satisfies GitHub and Graphyard.
 
 ## Require the check
 
@@ -41,11 +41,13 @@ The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, approval of the 
 
 A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof binds it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
 
-Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge directly; one pending five minutes shows as `merge-stalled`.
-
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. A moved base is merged in; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+
+### Direct merges
+
+Without a queue, `CLEAN`, `UNSTABLE` (optional checks not passing) and `HAS_HOOKS` PRs merge at once, head-bound; one pending five minutes is `merge-stalled`.
 
 ### Proofs in CI
 
@@ -53,11 +55,11 @@ A protected `pull_request_target` workflow, with the default branch's workflow a
 
 ## Post-deployment smoke proof
 
-With `"deploySmoke": true`, the master dispatches the smoke workflow (`master init --smoke-workflow deploy-smoke.yml`) once the release serves the merge; `scripts/deploy-smoke.mjs` publishes `e2e:deploy-smoke`, and a failure marks the item [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+With `"deploySmoke": true`, the master dispatches `master init --smoke-workflow deploy-smoke.yml` once the release serves the merge; `scripts/deploy-smoke.mjs` publishes `e2e:deploy-smoke`; a failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Enforcement boundary
 
-GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker can still push its branch after losing its lease.
+GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker losing its lease can still push.
 
 ## Identity-bound agent review
 

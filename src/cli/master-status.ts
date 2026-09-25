@@ -31,7 +31,7 @@ import { interventionSummary } from './intervention-status.js';
 import { setupHealth } from './master-setup.js';
 import { consentHoldItems } from './consent-holds.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
-import { mergeStalls, nameUnresolvedThreads } from '../merge-queue.js';
+import { nameUnresolvedThreads } from '../merge-queue.js';
 import { contextOverflows } from '../model/escalation-context.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { terminalDecisions } from './decision-report.js';
@@ -45,10 +45,6 @@ export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from '
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
 export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
-
-/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
-export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
-  mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
 
 /**
  * The `master status` report: Graphyard work truth joined with Herdr session health, the local
@@ -124,7 +120,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // An open item the control plane names no action for. Those waiting on another item or on a
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
-  const stalledItems = [...stalledItemAttention(snapshot), ...mergeStallAttention(snapshot)];
+  const stalledItems = stalledItemAttention(snapshot);
   // A submitted item with no review, producer or rework request and no named wait (GY-191).
   const actorless = actorlessAttention(snapshot, cycling?.approvals);
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
