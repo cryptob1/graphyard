@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyProtection, mergeMode, mergeQueueRulesetName, protectionPlan, repositoryMergeSettings } from '../src/protection.js';
+import { applyProtection, mergeMode, mergeQueueRulesetName, protectionPlan, repositoryMergeSettings, withMergeSettings } from '../src/protection.js';
 import { applyProtection as installProtection, protectionSatisfied, type GitHubCli } from '../src/install/github.js';
 import { applyProposal, scanProposal } from '../src/repository-setup.js';
 import type { Work } from '../src/model.js';
@@ -43,7 +43,7 @@ function github(owner: 'User' | 'Organization', options: { allowAutoMerge?: bool
 test('unit:protection-auto-merge-mode — a user-owned repository plans auto-merge and no queue ruleset; an organization repository plans the queue', async () => {
   // Planning: a user-owned repository wants allow_auto_merge, never a ruleset.
   const user = github('User');
-  const plan = protectionPlan(branch(), config, [agent], [], repositoryMergeSettings({ owner: { type: 'User' }, allow_auto_merge: false }));
+  const plan = protectionPlan(withMergeSettings(branch(), repositoryMergeSettings({ owner: { type: 'User' }, allow_auto_merge: false })), config, [agent], []);
   assert.equal(plan.mergeMode, 'auto-merge'); assert.equal(plan.mergeQueue, null); assert.deepEqual(plan.autoMerge, { enabled: false });
   assert.equal(plan.consistent, false);
   assert.ok(plan.changes.some(change => change.startsWith('allow_auto_merge false to true')), plan.changes.join('; '));
@@ -58,13 +58,13 @@ test('unit:protection-auto-merge-mode — a user-owned repository plans auto-mer
   // Consistent once auto-merge is on and `Graphyard / merge` is a required check.
   const settled = await applyProtection(config, [agent], user.run);
   assert.equal(settled.applied, false); assert.equal(settled.consistent, true);
-  const unbound = protectionPlan({ ...branch(), required_status_checks: { strict: false, checks: [] } }, config, [agent], [], { ownerType: 'User', allowAutoMerge: true });
+  const unbound = protectionPlan(withMergeSettings({ ...branch(), required_status_checks: { strict: false, checks: [] } }, { ownerType: 'User', allowAutoMerge: true }), config, [agent], []);
   assert.equal(unbound.consistent, false, 'auto-merge alone is not enough without the required check');
   assert.match(unbound.refusal!, /Graphyard \/ merge/);
 
   // An organization repository plans and writes the queue ruleset, and leaves auto-merge alone.
   const organization = github('Organization');
-  const queued = protectionPlan(branch(), config, [agent], [], repositoryMergeSettings({ owner: { type: 'Organization' }, allow_auto_merge: false }));
+  const queued = protectionPlan(withMergeSettings(branch(), repositoryMergeSettings({ owner: { type: 'Organization' }, allow_auto_merge: false })), config, [agent], []);
   assert.equal(queued.mergeMode, 'queue'); assert.equal(queued.autoMerge, null);
   assert.equal(queued.mergeQueue?.ruleset.name, mergeQueueRulesetName);
   assert.ok(queued.changes.some(change => change.includes(`ruleset "${mergeQueueRulesetName}"`)), queued.changes.join('; '));

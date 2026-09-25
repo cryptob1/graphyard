@@ -83,7 +83,13 @@ export function queueRulesetRefused(detail: string) { return /\bHTTP 422\b|\(422
 /** The `gh` arguments that let the repository auto-merge pull requests. */
 export const enableAutoMergeArgs = (repository: string) => ['api', '--method', 'PATCH', `repos/${repository}`, '-F', 'allow_auto_merge=true'];
 
-export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules], repository: RepositoryMergeSettings | null = current?.[repositoryMerge] ?? null) {
+/** Attach repository merge settings to a protection document, as readProtection does, for protectionPlan to read. */
+export function withMergeSettings<T extends object>(protection: T, settings: RepositoryMergeSettings | null): T {
+  Object.defineProperty(protection, repositoryMerge, { value: settings, enumerable: false, configurable: true });
+  return protection;
+}
+
+export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules]) {
   const { protection, items } = requiredReviewProtection(work);
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
@@ -102,7 +108,7 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   // protection does not require conversation resolution. A branch that still does lets GitHub
   // refuse a merge every Graphyard gate passed, over a bot's thread the reviewer already judged.
   const conversationResolution = current?.required_conversation_resolution?.enabled === true;
-  const mode = mergeMode(repository, rules);
+  const repository: RepositoryMergeSettings | null = current?.[repositoryMerge] ?? null, mode = mergeMode(repository, rules);
   // Auto-merge mode plans no queue ruleset: GitHub would refuse it, and the plan would never settle.
   const queue = mode === 'queue' ? mergeQueueState(rules, config.githubAppId) : null;
   const autoMerge = mode === 'auto-merge' ? { enabled: repository?.allowAutoMerge === true } : null;
@@ -116,11 +122,10 @@ export function protectionPlan(current: any, config: { repository: string; baseB
     ...(autoMerge && !autoMerge.enabled ? [`allow_auto_merge false to true (${config.repository} cannot have a merge queue, so GitHub merges through auto-merge)`] : []),
   ];
   return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, changes, blockers,
-    // GitHub performs the merge through its queue (GY-258), or through auto-merge where the repository
-    // cannot have one (GY-310); mergeQueue is null in auto-merge mode or when the branch rules were not read.
-    mergeMode: mode,
+    // GitHub performs the merge through its queue (GY-258); null when the branch rules were not read.
     mergeQueue: queue ? { ...queue, ruleset: mergeQueueRuleset(config) } : null,
-    autoMerge,
+    // Or through auto-merge where the repository cannot have a queue (GY-310); mergeQueue is then null.
+    mergeMode: mode, autoMerge,
     consistent: !changes.length && !blockers.length,
     refusal: blockers.length ? `Branch protection is missing settings Graphyard cannot reconcile for you: ${blockers.join('; ')}` : null };
 }
@@ -135,7 +140,7 @@ export function readProtection(config: { repository: string; baseBranch: string 
   try { settings = repositoryMergeSettings(JSON.parse(run('gh', ['api', `repos/${config.repository}`]))); } catch { settings = null; }
   if (protection && typeof protection === 'object') {
     Object.defineProperty(protection, branchRules, { value: rules, enumerable: false });
-    Object.defineProperty(protection, repositoryMerge, { value: settings, enumerable: false });
+    withMergeSettings(protection, settings);
   }
   return protection;
 }
@@ -210,7 +215,8 @@ export async function applyProtection(config: { repository: string; baseBranch: 
       JSON.stringify({ required_approving_review_count: plan.desired.requiredApprovals, require_last_push_approval: plan.desired.requireLastPushApproval, dismiss_stale_reviews: plan.desired.dismissStaleReviews }));
   }
   const reread = readProtection(config, run), settings: RepositoryMergeSettings | null = reread?.[repositoryMerge] ?? null;
-  const verified = protectionPlan(reread, config, work, undefined, queueRefused ? { ownerType: settings?.ownerType ?? 'Organization', allowAutoMerge: settings?.allowAutoMerge === true, queueRefused } : settings);
+  if (queueRefused && reread && typeof reread === 'object') withMergeSettings(reread, { ownerType: settings?.ownerType ?? 'Organization', allowAutoMerge: settings?.allowAutoMerge === true, queueRefused });
+  const verified = protectionPlan(reread, config, work);
   if (!verified.consistent) throw new Error(`GitHub did not report the reconciled protection; branch protection remains inconsistent with the open review policies: ${[...verified.changes, ...verified.blockers].join('; ')}`);
   return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${CHECK_NAME}` : verified.autoMerge ? `, and ${plan.branch} merges through auto-merge requiring ${CHECK_NAME} (the repository cannot have a merge queue)` : ''}` };
 }
