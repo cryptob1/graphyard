@@ -33,7 +33,7 @@ Grants are checked every five minutes and after a 403; a shortfall (`appPermissi
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` bound to this App, leave `strict` **off**, enforce for administrators, forbid force pushes and deletion, give workers no bypass. `master browser protection` reconciles it; `master protection --apply` also adds a merge queue requiring it (CI must run on `merge_group`).
+On the base branch require `Graphyard / merge` bound to this App, leave `strict` **off**, enforce for administrators, forbid force pushes and deletion, give workers no bypass. `master browser protection` reconciles it; `master protection --apply`, `install --apply` and `init --scan --apply` set the merge mode: organization repositories get a merge queue requiring it (CI runs on `merge_group`), user-owned ones (or a 422) `allow_auto_merge`.
 
 The gate also needs `GITHUB_CI_APP_IDS` CI checks, approval of the head, trusted evidence (executed > 0, skipped 0), a mergeable PR and the queue head.
 
