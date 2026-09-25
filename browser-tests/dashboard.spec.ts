@@ -43,7 +43,8 @@ async function openInsightsDetails(page: Page) {
 }
 const pulse = (page: Page) => page.locator('.pulse');
 const itemPage = (page: Page, name?: string) => name ? page.getByRole('article', { name }) : page.locator('article.item-page');
-const moreDetails = (page: Page) => itemPage(page).getByText('More details', { exact: true }).click();
+const technicalDetails = (page: Page) => itemPage(page).getByText('Technical details', { exact: true }).click();
+const fullHistory = (page: Page) => itemPage(page).locator('.full-history > summary').click();
 const editMenu = (page: Page) => itemPage(page).getByText('Edit', { exact: true }).click();
 const row = (page: Page, key: string) => page.locator(`.work-row[data-row="${key}"]`);
 
@@ -492,7 +493,7 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
     eventReads++;
     return eventReads === 1 ? route.fulfill({ json: [{ seq: 1, kind: 'fixture-created', actor: 'fixture', created_at: '2026-01-01T00:00:00Z' }] }) : route.fulfill({ status: 503, json: { error: 'History temporarily unavailable' } });
   });
-  await login(page); await cardSelect(page).click(); await moreDetails(page);
+  await login(page); await cardSelect(page).click(); await fullHistory(page);
   await expect(itemPage(page).getByText('fixture-created', { exact: true })).toBeVisible();
   await expect.poll(() => eventReads, { timeout: 10000 }).toBeGreaterThan(1);
   await expect(itemPage(page).getByText('fixture-created', { exact: true })).toBeVisible();
@@ -502,7 +503,7 @@ test('history groups observation noise and bounds expanded rows without losing o
   await fixture(page);
   const events = Array.from({ length: 60 }, (_, i) => ({ seq: 60 - i, kind: i < 40 ? 'github.observed' : `work.event-${i}`, actor: 'github', created_at: new Date(Date.UTC(2026, 0, 1, 0, 60 - i)).toISOString() }));
   await page.route('**/api/events**', route => route.fulfill({ json: events }));
-  await login(page); await cardSelect(page).click(); await moreDetails(page);
+  await login(page); await cardSelect(page).click(); await fullHistory(page);
   const history = page.getByRole('region', { name: 'Work history', exact: true });
   await expect(history.getByText('github.observed × 40', { exact: true })).toBeVisible();
   await expect(history.locator('.timeline > div')).toHaveCount(20);
@@ -535,7 +536,7 @@ test('history groups observation noise and bounds expanded rows without losing o
   await page.route('**/api/work-snapshot',route=>route.fulfill({json:{work:[assigned],now:'2026-01-01T00:00:00Z'}}));
   await page.route('**/api/status',route=>route.fulfill({json:{actor:{id:'fixture',role:'reader'},github:true,jobs:[],now:'2026-01-01T00:02:00Z'}}));
   // The item view names the active worker; a lapsed lease would read "Last worked by".
-  await login(page);await cardSelect(page).click();await moreDetails(page);const owner=itemPage(page).locator('.assignment-details');
+  await login(page);await cardSelect(page).click();await technicalDetails(page);const owner=itemPage(page).locator('.assignment-details');
   await expect(owner).toHaveText('Atlas · Codex');await expect(owner).not.toContainText('Last worked by');
  });
 
@@ -550,7 +551,7 @@ test('history groups observation noise and bounds expanded rows without losing o
   const bounds=await card.evaluate(e=>({card:e.clientWidth,content:e.scrollWidth}));
   expect(bounds.content).toBeLessThanOrEqual(bounds.card);
   await expect(card).not.toContainText(displayName);
-  await card.click();await moreDetails(page);const details=itemPage(page).locator('.assignment-details');
+  await card.click();await technicalDetails(page);const details=itemPage(page).locator('.assignment-details');
   await expect(details).toHaveText(identity);
   await expect(itemPage(page)).toContainText('Worker ID: worker-a');
   expect(await details.evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);
@@ -660,7 +661,7 @@ test('work details explain missing proof and operator can revise explicit criter
   const state = await fixture(page); await login(page);
   await cardSelect(page).click();
   await expect(itemPage(page).locator('.marker-pending')).toContainText('manual:browser pending');
-  await moreDetails(page);
+  await technicalDetails(page);
   await expect(page.getByText('AC-1 · manual:browser · unmeasured')).toBeVisible();
   await editMenu(page);
   await page.getByRole('button', { name: 'Revise requirements', exact: true }).click();
@@ -734,7 +735,7 @@ test('validation view reports failures honestly and bounds request history', asy
   await expect(page.locator('.scenario-card')).toHaveCount(20);
 });
 
-test('merge queue shows each entry with its position in line, and its predicted tip under More details', async ({ page }) => {
+test('merge queue shows each entry with its position in line, and its predicted tip under Technical details', async ({ page }) => {
   const enqueuedAt = new Date(Date.now() - 45 * 60_000).toISOString();
   const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40), tipSha = 'c'.repeat(40);
   const entry = (overrides: Record<string, unknown>) => ({ ...work, stage: 'merge', evidence: [], observation: null, ...overrides });
@@ -758,10 +759,10 @@ test('merge queue shows each entry with its position in line, and its predicted 
     await expect(row(page, key).locator('.status-age')).toHaveCount(1);
   }
   await row(page, 'GY-11').click();
-  // The item page says where it is in line; the predicted base and tip are under More details.
+  // The item page says where it is in line; the predicted base and tip are under Technical details.
   const drawer = itemPage(page, 'Behind the head');
   await expect(drawer.locator('.status-sentence')).toHaveText('Merging · 2nd in line, after GY-10.');
-  await moreDetails(page);
+  await technicalDetails(page);
   await expect(drawer.getByRole('heading', { name: 'Merge queue' })).toBeVisible();
   await expect(drawer).toContainText('Position 2 of 2');
   await expect(drawer).toContainText(`Predicted base ${headSha.slice(0, 8)}`);

@@ -7,6 +7,32 @@ import { elapsed } from '../model/sessions.js';
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
 
 /**
+ * One attention item per requested decision whose approver could not be launched (GY-101). A
+ * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
+ * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
+ * standing with a session that never started. `master status` used to show that as a decision
+ * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
+ * named here as what it is, with the loop's own refusal and the command that launches it again.
+ */
+export function approverLaunchAttention(daemon: {
+  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
+  actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
+}): AttentionItem[] {
+  const actions = daemon.actions ?? [];
+  return (daemon.approvals ?? []).flatMap(watch => {
+    if (watch.settledAt) return [];
+    // The loop records a refused launch under the decision it was requested for (the request that
+    // could not reach an approver) or under that launch's own key (a replacement that could not).
+    const since = Date.parse(watch.launchedAt ?? watch.requestedAt);
+    const refusal = actions.find(action => action.state === 'failed' && action.kind === 'decision'
+      && (action.key === watch.key || action.key.startsWith(`approver:${watch.decision}:launch:`))
+      && (!Number.isFinite(since) || Date.parse(action.at) >= since));
+    return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
+      ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
+  });
+}
+
+/**
  * Who is told what, and with which command.
  *
  * `master status` is an assembler over ledgers and snapshots; this is the part of it that turns
@@ -46,3 +72,14 @@ export function stalledItemAttention(snapshot: { work: Work[]; now: string }, th
 
 /** Direct-merge mode (src/direct-merge.ts), first in master status and in one line while it is on: gated merging is bypassed. */
 export const directMergeLine = (coordinator: any): { directMerge?: string } => coordinator?.directMerge?.line ? { directMerge: coordinator.directMerge.line } : {};
+
+/**
+ * The worker scope requests the loop has routed to the independent approver (GY-176), as the
+ * `(key, epoch, at)` that identifies each ask. A routed request is the approver's to judge and the
+ * worker's to be told about; naming `master scope` for it would send a master to decide what is
+ * already being decided, so the scope attention leaves these out.
+ */
+export function routedScopeRequests(approvals: readonly { work: string; action: string; scope?: { epoch: number; at: string } | null }[] = []) {
+  const routed = new Set(approvals.filter(watch => watch.action === 'requirements' && watch.scope).map(watch => `${watch.work}:${watch.scope!.epoch}:${watch.scope!.at}`));
+  return (work: { key: string; scopeRequest?: { epoch: number; at: string } | null }) => !!work.scopeRequest && routed.has(`${work.key}:${work.scopeRequest.epoch}:${work.scopeRequest.at}`);
+}

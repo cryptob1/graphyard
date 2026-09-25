@@ -40,32 +40,42 @@ export interface QueueSpeculation {
 }
 /**
  * One unresolved review thread on a candidate's pull request: who opened it (the author of its
- * first comment), and the path and line it is anchored to. `line` is null for a thread on a file
- * rather than a line; `outdated` threads sit on code the head has since changed and still block.
- * `id` is the thread's GraphQL node id — what `scripts/resolve-thread.mjs` takes — so whoever may
- * resolve it can do so without a raw GraphQL read to rediscover it.
+ * first comment, and whether GitHub reports that author as a bot), and the path and line it is
+ * anchored to. `line` is null for a thread on a file rather than a line; `outdated` threads sit on
+ * code the head has since changed. `id` is the thread's GraphQL node id — what
+ * `scripts/resolve-thread.mjs` takes — so whoever may resolve it can do so without a raw GraphQL
+ * read to rediscover it.
  */
-export interface ReviewThread { id?: string; author: string; path: string; line: number | null; outdated: boolean; url?: string }
+export interface ReviewThread { id?: string; author: string; bot?: boolean; path: string; line: number | null; outdated: boolean; url?: string }
 /**
- * Review conversations as a gate input (GY-139). `required` is the managed branch's
- * `required_conversation_resolution`; `unresolved` is read only when it is set, since a thread
- * blocks nothing otherwise. Absent on observations recorded before threads were observed.
+ * Review conversations as a gate input. `required` is the managed branch's
+ * `required_conversation_resolution`, which Graphyard's desired protection no longer sets: the
+ * review gate is the configured reviewer's verdict on the exact head, and unresolved threads are
+ * that reviewer's inputs, not merge blockers (the reviewer reads them itself at launch).
+ * `unresolved` is read only while `required` is set — the one case GitHub itself refuses a merge
+ * over them — so the observation spends no GraphQL read otherwise. Absent on observations recorded
+ * before threads were observed.
  */
 export interface ConversationResolution { required: boolean; unresolved: ReviewThread[] }
 declare module './model/work.js' { interface Observation { conversations?: ConversationResolution } }
 
-/** One single-quoted shell argument: nothing inside it is expanded, whatever a contributor named a file. */
-const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 /** `author on path:line`, the way every refusal and attention line names a thread. */
 export const describeThread = (thread: ReviewThread) => `${thread.author} on ${thread.path}${thread.line === null ? '' : `:${thread.line}`}${thread.outdated ? ' (outdated)' : ''}`;
+/** A thread opened by an automatic reviewer (a GitHub App or other bot account), not a person. */
+export const botThread = (thread: ReviewThread) => thread.bot === true || /\[bot\]$/i.test(thread.author);
+/** The unresolved threads observed on the current candidate's head: none unless the observation is of that head and it is unmerged. */
+export function openThreads(work: Pick<Work, 'candidate' | 'observation'>): ReviewThread[] {
+  const observation = work.observation, candidate = work.candidate;
+  if (!candidate || !observation?.conversations || observation.candidate?.sha !== candidate.sha || observation.merged) return [];
+  return observation.conversations.unresolved;
+}
 /**
- * The unresolved threads that block the current candidate's merge: none unless the observation is
- * of the current head and branch protection requires conversation resolution.
+ * The unresolved threads GitHub itself would refuse the merge over: only where the managed
+ * branch's protection still requires conversation resolution — protection drift from what
+ * `graphyard master protection --apply` writes. Graphyard's own gate never refuses on a thread.
  */
 export function blockingThreads(work: Pick<Work, 'candidate' | 'observation'>): ReviewThread[] {
-  const observation = work.observation, candidate = work.candidate;
-  if (!candidate || !observation?.conversations?.required || observation.candidate?.sha !== candidate.sha || observation.merged) return [];
-  return observation.conversations.unresolved;
+  return work.observation?.conversations?.required ? openThreads(work) : [];
 }
 /** How long after an approval of the current head the loop's thread resolution is waited for. */
 export const threadResolutionGraceMs = 300_000;
@@ -87,35 +97,30 @@ export function threadsAwaitReview(work: Work, observedAt: number): boolean {
   return Number.isFinite(approvedAt) && !(observedAt - approvedAt >= threadResolutionGraceMs);
 }
 /**
- * The merge refusal for those threads, or null. Each thread is a reviewer's finding: the remedy
- * is rework that addresses it, never resolving or dismissing a thread somebody else wrote.
+ * The merge refusal for protection drift, or null: the branch still requires conversation
+ * resolution and threads are open, so GitHub would refuse the merge whatever Graphyard's gate says.
+ * The remedy is the desired protection, not rework: the reviewer's verdict is the review gate.
  */
-export function unresolvedThreadRefusal(work: Pick<Work, 'candidate' | 'observation'>): string | null {
+export function conversationProtectionRefusal(work: Pick<Work, 'candidate' | 'observation'>): string | null {
   const threads = blockingThreads(work);
   if (!threads.length) return null;
-  return `Branch protection requires conversation resolution and ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} unresolved on ${work.candidate!.sha.slice(0, 12)}: ${threads.map(describeThread).join('; ')}. GitHub blocks the merge until each is resolved; rework the candidate to address the findings, never dismiss them`;
+  return `Branch protection still requires conversation resolution, which Graphyard's review gate does not use: GitHub refuses the merge of ${work.candidate!.sha.slice(0, 12)} while ${threads.length} thread${threads.length === 1 ? '' : 's'} stay${threads.length === 1 ? 's' : ''} open (${threads.map(describeThread).join('; ')}). graphyard master protection --apply removes the requirement; the reviewer's approval of the head is the review gate`;
 }
 /**
- * `master status` for candidates GitHub will not merge over unresolved threads: each row lists
- * them under `reviewThreads`, is never `mergeable`, and its attention names the remedy — a rework
- * decision that addresses the findings — unless the threads still wait on the current head's review
- * (`threadsAwaitReview`), when the loop defers that rework and the status names the wait instead: a
- * rework requested then invalidates the review that would resolve them. The row's attention and its
- * attention item are rewritten together, so both say the same thing.
+ * `master status` for candidates' review threads: each row lists its open threads under
+ * `reviewThreads` for the record. They are the reviewer's inputs, not merge blockers, so a row is
+ * demoted from `mergeable` and given attention only for protection drift — a branch that still
+ * requires conversation resolution — whose remedy is `graphyard master protection --apply`. The
+ * row's attention and its attention item are rewritten together, so both say the same thing.
  */
 export function nameUnresolvedThreads<S extends { work: { key: string; mergeable: boolean; attention: string | null; attentionOwner: unknown }[]; attentionItems: { subject: string; text: string }[]; counts: { attention: number; mergeable: number } }, O extends object>(status: S, work: Work[], owner: (role: 'master', next: string, approvedBy: 'approver' | null) => O): Omit<S, 'work'> & { work: (S['work'][number] & { reviewThreads: ReviewThread[] })[] } {
   const rewritten = new Map<string, { previous: string | null; item: S['attentionItems'][number] }>();
   const rows = status.work.map(row => {
     const item = work.find(candidate => candidate.key === row.key);
-    const threads = item ? blockingThreads(item) : [];
-    if (!threads.length) return { ...row, reviewThreads: [] as ReviewThread[] };
-    const text = unresolvedThreadRefusal(item!)!;
-    // The thread's path and author are contributor-controlled text, so the reason is one quoted
-    // argument and the command is the whole of `next`: nothing in it can end the argument or run.
-    const reason = `Address the unresolved review threads: ${threads.map(describeThread).join('; ')}. Fix each finding; resolving or dismissing a thread the master did not write is not the master's call`;
-    const attentionOwner = threadsAwaitReview(item!, Date.parse(item!.observation?.at ?? ''))
-      ? owner('master', `Request no rework yet: the review of ${item!.candidate!.sha.slice(0, 12)} judges these threads first — an approval names the ones fixed and the loop resolves them, and the loop requests the rework itself if the review settles without resolving them`, null)
-      : owner('master', `graphyard master decide ${row.key} rework ${shellQuote(reason)}`, 'approver');
+    const threads = item ? openThreads(item) : [];
+    const text = item ? conversationProtectionRefusal(item) : null;
+    if (!text) return { ...row, reviewThreads: threads };
+    const attentionOwner = owner('master', 'graphyard master protection --apply: the desired protection does not require conversation resolution; the reviewer\'s verdict on the head is the review gate', null);
     rewritten.set(row.key, { previous: row.attention, item: { subject: row.key, text, ...attentionOwner } as S['attentionItems'][number] });
     return { ...row, mergeable: false, reviewThreads: threads, attention: text, attentionOwner };
   });
@@ -281,8 +286,26 @@ export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseR
   return refresh?.head === candidate.sha && refresh.policyRevision === work.policyRevision && refresh.restoredApproval?.sha === candidate.sha ? refresh.restoredApproval : null;
 }
 export interface QueuePlacement {
+  /**
+   * `position` is the entry's place in the chain of validated entries it is predicted on, not its
+   * index in the queue (GY-196): an entry that fell out of validation is predicted on the same
+   * chain as the validated entry behind it, so both can hold the same position, and position 0 is
+   * the chain's head only for a validated entry. An entry that fell back out of validation at the
+   * merge stage (rework, violation) at position 0 is observed at the head cadence (github.ts) and
+   * no more: it cannot merge, and the validated head beside it lands first. `sequence` alone
+   * orders the physical queue: select the entries behind one by a greater sequence, never by
+   * slicing the placements at `position`.
+   */
   id: string; key: string; position: number; size: number; sequence: number; enqueuedAt: string; waitMs: number;
   predecessors: string[]; predictedBase: string | null; tip: string | null;
+  /** Entries ahead by sequence that are not validated (see `validatedQueueEntry`): passed over, never predicted on (GY-196). */
+  skipped?: string[];
+  /**
+   * Set only on an entry that is not validated itself: the validated entries behind it by sequence,
+   * which pass over it and may land first until it is revalidated (GY-196). `size` counts the
+   * validated entries, and this one too while it is passed over.
+   */
+  passedOver?: string[];
   /** The base-branch commit the chain of predictions rests on, as the head entry observed it. */
   base: { sha: string; tree: string | null } | null;
   /** How a current entry binds its predicted base: the exact commit, or a tree-identical advance of it. */
@@ -530,15 +553,43 @@ export function keptTipCarry(work: Pick<Work, 'candidate' | 'queue'>, speculatio
   return recorded && recorded.tip === speculation.tip && recorded.base === speculation.base && recorded.policyRevision === speculation.policyRevision ? recorded.carry ?? null : null;
 }
 
+/**
+ * Whether a queued entry is a predecessor the entries behind it are predicted on (GY-196). An entry
+ * stays one while its tip is being validated by the control plane's own rounds — CI and the proofs
+ * it requests run on every freshly published tip, and the entries behind it validate in parallel
+ * on that tip. It stops being one when it fell back out of validation: its tip needs an approval
+ * afresh (a republication or base refresh the approval did not carry across, a review requested
+ * anew), a rework was requested, or it has an open violation. Such an entry keeps its sequence, but
+ * nothing behind it is built on, bound to, or ejected for a tip that may never land: the entries
+ * behind it are predicted on the base branch plus the predecessors ahead only, and their tips are
+ * rebuilt there. It is predicted on that same chain itself, and counts again once it is approved.
+ * An entry GitHub already merged is not passed over: its content is on the base branch, and it
+ * holds its place until its reconciliation exits it (see `unpublishableEntry`).
+ */
+const validatingStages: readonly Work['stage'][] = ['test', 'acceptance', 'merge'];
+export function validatedQueueEntry(work: Pick<Work, 'queue' | 'stage' | 'violations' | 'reworkRequested' | 'observation'>): boolean {
+  if (!work.queue) return false;
+  if (work.observation?.merged) return true;
+  return validatingStages.includes(work.stage) && !work.reworkRequested && !work.violations.length;
+}
 export function predictQueue(all: Work[], now: number): QueuePlacement[] {
   const entries = queueOrder(all);
   const placements: QueuePlacement[] = [];
-  for (const [position, work] of entries.entries()) {
+  const validated = entries.map(validatedQueueEntry), validatedCount = validated.filter(Boolean).length;
+  for (const [index, work] of entries.entries()) {
     const entry = work.queue!, candidate = work.candidate, speculation = entry.speculation;
-    // Entry 0 predicts against the observed base branch; every other entry predicts against the
-    // validated tip of the entry directly ahead, which is what main will hold once it merges.
-    const predictedBase = position === 0 ? observedBaseTip(work) : placements[position - 1].tip;
-    const base = position === 0 ? predictedBase ? { sha: predictedBase, tree: work.observation?.baseTree ?? null } : null : placements[position - 1].base;
+    // The entries ahead that this one is predicted on: the validated ones only (GY-196). Its
+    // position is its place in that chain, so an entry behind only unvalidated ones is the head.
+    const ahead = entries.slice(0, index).filter((_, at) => validated[at]);
+    const skipped = entries.slice(0, index).filter((_, at) => !validated[at]).map(item => item.key);
+    const passedOver = validated[index] ? null : entries.slice(index + 1).filter((_, at) => validated[index + 1 + at]).map(item => item.key);
+    const position = ahead.length;
+    const previous = position === 0 ? null : placements.find(placement => placement.id === ahead[position - 1].id)!;
+    // The chain's head predicts against the observed base branch; every other entry predicts
+    // against the validated tip of the validated entry directly ahead, which is what main will
+    // hold once it merges.
+    const predictedBase = !previous ? observedBaseTip(work) : previous.tip;
+    const base = !previous ? predictedBase ? { sha: predictedBase, tree: work.observation?.baseTree ?? null } : null : previous.base;
     const published = !!speculation && !!candidate && speculation.tip === candidate.sha
       && speculation.base === candidate.baseSha && speculation.policyRevision === work.policyRevision;
     const onPrediction = !!candidate && !!predictedBase && candidate.baseSha === predictedBase;
@@ -548,7 +599,7 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     // bound; the advance is recorded, not republished. This is the same judgement at every
     // position (GY-100): a tip push replaces the head, and GitHub dismisses its approval with it,
     // so an entry whose prediction moved only in sha must not be republished either.
-    const predictedBaseTree = position === 0 ? work.observation?.baseTree ?? null : placements[position - 1].tipTree ?? null;
+    const predictedBaseTree = !previous ? work.observation?.baseTree ?? null : previous.tipTree ?? null;
     // The queue head lands on the base branch tip itself, and GitHub dismisses the approval of a
     // head that does not contain that exact commit, whatever its tree (GY-145): no carry for it.
     const unancestored = position === 0 && !onPrediction && published && predictedBase === work.observation?.baseTip ? missingBaseAncestry(work) : null;
@@ -563,14 +614,18 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     // though the candidate branch is deliberately behind the base branch while it waits its turn.
     const current = published && (onPrediction || treeEquivalent || carriedToPrediction);
     const reasons: string[] = [];
-    if (position > 0) reasons.push(`Merge queue position ${position + 1} of ${entries.length}: ${entries[position - 1].key} is ahead`);
+    // The chain this entry is counted in: the validated entries, and itself while passed over. A
+    // passed-over entry says so, naming the validated entries behind it that may land before it.
+    const size = validatedCount + (passedOver ? 1 : 0);
+    const passed = passedOver?.length ? `passed over until revalidated, so ${passedOver.join(', ')} behind may merge first` : null;
+    if (position > 0 || passed) reasons.push(`Merge queue position ${position + 1} of ${size}: ${[position > 0 ? `${ahead[position - 1].key} is ahead` : null, passed].filter(Boolean).join('; ')}`);
     if (!current) reasons.push(predictedBase
       ? unancestored ? `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published onto that exact commit: ${missingAncestryReason(unancestored)}`
       : `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published and validated for this candidate`
-      : `Waiting for ${entries[position - 1]?.key ?? 'the queue head'} to publish its speculative tip`);
+      : `Waiting for ${ahead[position - 1]?.key ?? 'the queue head'} to publish its speculative tip`);
     placements.push({
-      id: work.id, key: work.key, position, size: entries.length, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
-      waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: entries.slice(0, position).map(ahead => ahead.key),
+      id: work.id, key: work.key, position, size, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
+      waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: ahead.map(item => item.key), skipped, ...(passedOver ? { passedOver } : {}),
       predictedBase, tip: current && candidate ? candidate.sha : null, base, binding: current ? treeEquivalent || carriedToPrediction ? 'tree-equivalent' : 'exact' : null,
       tipTree: current && candidate ? speculation!.tipTree ?? null : null, current,
       publishable: !current && !!predictedBase && !!candidate, reasons,
@@ -660,9 +715,9 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [])
   });
   if (check) return `Required CI check ${check} did not pass on speculative tip ${tip}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
-  // An unresolved review thread GitHub will not merge over is a finding like a change request:
-  // the entry leaves rather than holding the head of the queue with a merge that cannot land.
-  const threads = unresolvedThreadRefusal(work);
+  // Unresolved threads are the reviewer's inputs, not a reason to eject; only a branch that still
+  // requires conversation resolution (protection drift) makes a merge GitHub cannot land.
+  const threads = conversationProtectionRefusal(work);
   if (threads) return threads;
   // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
   // failure or a withdrawal of it is an adverse conclusion about this tip.

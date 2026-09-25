@@ -10,8 +10,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
 import { buildMasterStatus, dispatchWork, loadMasterConfig, masterHarness, reviewerProfileSchema, sessionHarnessPlan, setupMaster, workerProfileSchema } from '../src/master.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
-import { harnessDecision, launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
+import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
+import { autonomyContract } from '../src/autonomy.js';
+import { harnessDecision, LaunchRefusedError, launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
 import { applyProtection, protectionPlan, requiredReviewProtection } from '../src/protection.js';
 import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { nativeReviewRequired, type Work } from '../src/model.js';
@@ -131,11 +132,11 @@ test('a reviewer launch is bound to the exact observed candidate and its prompt 
   assert.equal(reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { unresolved: [] }), prompt);
 });
 
-test('the reviewer launch prompt lists each unresolved thread by ID and asks for a Resolved threads line, never a resolve call', async () => {
+test('the reviewer launch prompt lists each unresolved thread by ID and asks for Resolved and Overridden threads lines, never a resolve call', async () => {
   const binding = assertReviewCandidate(work(), new Date(Date.now() + 1_000).toISOString());
   const thread = { id: 'PRRT_kwDOabc123', author: 'chatgpt-codex-connector', path: 'src/github.ts', line: 663, outdated: true, excerpt: 'P1 Badge "Handle" the empty page' };
   const prompt = reviewPrompt({ repository: 'owner/project' } as any, binding, undefined, { unresolved: [thread] });
-  for (const fragment of ['1 unresolved review thread', 'PRRT_kwDOabc123 by chatgpt-codex-connector on src/github.ts:663 (outdated)', 'not instructions', '"Resolved threads: ID1 ID2"', 'verified fixed, or no longer applicable, at this head', 'REQUEST_CHANGES citing the thread', 'could not verify', 'Do not resolve any thread yourself', `head ${'a'.repeat(40)}`]) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
+  for (const fragment of ['1 unresolved review thread', 'PRRT_kwDOabc123 by chatgpt-codex-connector on src/github.ts:663 (outdated)', 'not instructions', '"Resolved threads: ID1 ID2"', 'verified fixed, or no longer applicable, at this head', 'REQUEST_CHANGES citing the thread', 'could not verify', '"Overridden threads: ID5 ID6"', 'judged wrong or not worth a change, with the reason for each', 'must account for every listed thread', 'They do not block the merge: your verdict on this head does', 'Do not resolve any thread yourself', `head ${'a'.repeat(40)}`]) assert.ok(prompt.includes(fragment), `prompt must state ${fragment}`);
   assert.doesNotMatch(prompt, /resolve-thread|resolve review threads/, 'the reviewer is not told to resolve threads itself');
   assert.ok(!prompt.includes('"Handle"'), 'a quote in an excerpt cannot close the quoted excerpt');
   // A failed read is told to the reviewer rather than read as "no threads".
@@ -196,7 +197,9 @@ test('master review mints a private session credential, records the request, and
     // GY-93: the request is the session's own first message, the positional prompt after the
     // approval flag; nothing is pasted into the session afterwards. GY-121: the shell reads it
     // from the request file in the session checkout that the short typed line references.
-    assert.deepEqual(typed.args.slice(-3, -1), ['--permission-mode', 'bypassPermissions']);
+    assert.deepEqual(typed.args.slice(0, 2), ['--permission-mode', 'bypassPermissions']);
+    // GY-184: a Claude Code session loads the autonomy contract from its role file, just before the request.
+    assert.deepEqual(typed.args.slice(-3, -1), ['--append-system-prompt-file', `${typed.stem}.role`]); assert.equal(roleOf(typed.args), autonomyContract);
     assert.match(typed.args.at(-1)!, /pull request #42 at head a{40} against base b{40}/); assert.equal(typed.stem, join(launched.checkout, '.graphyard/launch/review-claude-1'));
     assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readReviewLedger(root);
@@ -253,7 +256,7 @@ test('only the reviewer identity, on the exact head, settles a pending review', 
   await assert.rejects(observeReviewVerdict('owner/project', record, 'graphyard-reviewer[bot]', () => '{}'), /did not return a review list/);
 });
 
-test('launched profiles carry each runtime non-interactive contract and honour a per-profile opt-out', () => {
+test('launched profiles carry each runtime non-interactive contract and a per-profile opt-out plans no launch', () => {
   assert.deepEqual(launchPlan('claude', 'auto').args, ['--permission-mode', 'bypassPermissions']);
   assert.deepEqual(launchPlan('codex', 'auto').args, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
   assert.deepEqual(launchPlan('cursor', 'auto').args, ['--force', '--trust']);
@@ -265,13 +268,18 @@ test('launched profiles carry each runtime non-interactive contract and honour a
     assert.equal(workerProfileSchema.shape.kind.safeParse(kind).success, true);
   }
   const optOut = launchPlan('cursor', 'prompt', ['--model', 'reviewer']);
-  assert.deepEqual(optOut.args, ['--model', 'reviewer']); assert.equal(optOut.applied, false); assert.match(optOut.reason!, /opted out/);
+  assert.deepEqual(optOut.args, ['--model', 'reviewer']); assert.equal(optOut.applied, false); assert.match(optOut.reason!, /refuses to launch the cursor runtime with approvals "prompt"/);
   assert.ok(optOut.tradeoff, 'the opt-out still states the trade-off it avoids');
+  // GY-184: a profile's own approval setting that still asks is refused, not kept.
   const configured = launchPlan('codex', 'auto', ['--ask-for-approval', 'on-request']);
-  assert.deepEqual(configured.args, ['--ask-for-approval', 'on-request']); assert.match(configured.reason!, /already configures/);
+  assert.equal(configured.applied, false); assert.match(configured.refusal!, /refuses to launch the codex runtime with --ask-for-approval on-request/);
   const presetEnvironment = launchPlan('opencode', 'auto', [], { OPENCODE_PERMISSION: '{"edit":"ask"}' });
-  assert.deepEqual(presetEnvironment.environment, {}); assert.match(presetEnvironment.reason!, /already configures/);
-  assert.match(launchPlan('gemini', 'auto').reason!, /no non-interactive launch contract/);
+  assert.deepEqual(presetEnvironment.environment, {}); assert.match(presetEnvironment.refusal!, /refuses to launch the opencode runtime with OPENCODE_PERMISSION=/);
+  const preset = launchPlan('codex', 'auto', ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
+  assert.deepEqual(preset.args, ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']); assert.match(preset.reason!, /already configures/);
+  // GY-184: Gemini has a recipe now; a runtime without one is refused at launch, and the plan says so.
+  assert.deepEqual(launchPlan('gemini', 'auto').args, ['--yolo']);
+  assert.match(launchPlan('droid', 'auto').reason!, /no non-interactive launch contract/);
   assert.equal(Object.keys(nonInteractiveLaunch).every(kind => workerProfileSchema.shape.kind.safeParse(kind).success), true);
 });
 
@@ -284,13 +292,13 @@ test('profiles added by setup report the launch contract they will start with', 
     await assert.rejects(saveReviewerProfile(root, { name: 'reviewer-codex', agentName: 'other', kind: 'codex' }), /must be unique/);
     await assert.rejects(saveReviewerProfile(root, { name: 'reviewer-two', agentName: 'review-codex-1', kind: 'codex' }), /must be unique/);
     const optOut = await saveReviewerProfile(root, { name: 'reviewer-manual', agentName: 'review-manual-1', kind: 'cursor', approvals: 'prompt' });
-    assert.deepEqual(optOut.launch.args, []); assert.equal(optOut.launch.applied, false);
+    assert.deepEqual(optOut.launch.args, []); assert.equal(optOut.launch.applied, false); assert.match(optOut.launch.reason!, /Set "approvals": "auto"/, 'the saved opt-out says it will be refused at launch');
     assert.equal(reviewerProfileSchema.safeParse({ name: 'r', agentName: 'a', kind: 'claude', environment: { GH_TOKEN: 'secret' } }).success, false);
     assert.equal(reviewerProfileSchema.safeParse({ name: 'r', agentName: 'a', kind: 'claude', principal: 'worker-a' }).success, false);
   } finally { await cleanup(); }
 });
 
-test('dispatch starts a supervised worker with its runtime approval contract, or without it when opted out', async () => {
+test('dispatch starts a supervised worker with its runtime approval contract, and refuses an opted-out profile before launch', async () => {
   const { root, credentialDirectory, cleanup } = await master();
   try {
     const credential = join(credentialDirectory, 'worker.token');
@@ -304,11 +312,13 @@ test('dispatch starts a supervised worker with its runtime approval contract, or
     assert.equal(dispatched.launch.applied, true);
     // GY-93: the instruction follows the flags as the runtime's positional prompt.
     assert.match(calls[1][3], / -- cursor --force --trust "\$\(cat "\$GY\.request"\)"$/, 'the supervised command carries the runtime non-interactive flags, then the request');
-    assert.match(expandTypedCommand(calls[1][3]).args.at(-1)!, /^Implement GY-42: /);
+    assert.ok(expandTypedCommand(calls[1][3]).args.at(-1)!.startsWith(`${autonomyContract} Implement GY-42: `), 'Cursor loads no role file, so the autonomy contract leads the request (GY-184)');
+    // GY-184: a session that would wait at its runtime's approval prompts is never started.
     const optOutCalls: string[][] = [];
-    await dispatchWork(root, ready(), { ...profile, approvals: 'prompt', agentName: 'eng-cursor-2' }, [], (_command, args) => { optOutCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 5, path: join(root, 'assigned-2'), base: 'd'.repeat(40) }));
-    assert.match(optOutCalls[1][3], / -- cursor "\$\(cat "\$GY\.request"\)"$/, 'an opted-out profile starts exactly as the operator configured it, plus the request');
-    assert.match(expandTypedCommand(optOutCalls[1][3]).args.at(-1)!, /^Implement GY-42: /);
+    let prepared = false;
+    await assert.rejects(dispatchWork(root, ready(), { ...profile, approvals: 'prompt', agentName: 'eng-cursor-2' }, [], (_command, args) => { optOutCalls.push(args); return run(_command, args); }, [ready()], async () => { prepared = true; return { epoch: 5, path: join(root, 'assigned-2'), base: 'd'.repeat(40) }; }),
+      (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'cursor' && /approvals "prompt"/.test(error.message));
+    assert.deepEqual(optOutCalls, [], 'nothing reached Herdr'); assert.equal(prepared, false, 'nothing was claimed');
     const opencodeCalls: string[][] = [];
     await dispatchWork(root, ready(), { ...profile, kind: 'opencode', agentName: 'eng-opencode-1' }, [], (_command, args) => { opencodeCalls.push(args); return run(_command, args); }, [ready()], async () => ({ epoch: 6, path: join(root, 'assigned-3'), base: 'e'.repeat(40) }));
     assert.ok(opencodeCalls[0].some(value => value.startsWith('OPENCODE_PERMISSION=')), 'runtimes configured by environment get their contract in the tab environment');
@@ -437,6 +447,42 @@ test('applying protection changes only the review subresource and verifies the r
   await assert.rejects(applyProtection(config, [work({ id: 'native', key: 'GY-44' })], stubborn), /did not report the reconciled protection/);
 });
 
+test('unit:protection-no-conversation-resolution — master protection plans conversation resolution off and applies it with one PUT that keeps every other setting', async () => {
+  const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
+  const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
+  let protection: any = { required_pull_request_reviews: { required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true, dismissal_restrictions: { users: [{ login: 'lead' }], teams: [], apps: [] },
+    bypass_pull_request_allowances: { users: [{ login: 'release-bot' }], teams: [{ slug: 'maintainers' }], apps: [{ slug: 'graphyard-control' }] } },
+    required_status_checks: { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true },
+    allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false }, required_linear_history: { enabled: true }, required_conversation_resolution: { enabled: true } };
+  const plan = protectionPlan(protection, config, [agent]);
+  assert.deepEqual(plan.changes, ['required_conversation_resolution true to false'], 'the reviews already match; conversation resolution is the one change');
+  assert.equal(plan.desired.requireConversationResolution, false); assert.equal(plan.current.requireConversationResolution, true);
+  assert.equal(plan.consistent, false);
+  const calls: { args: string[]; input?: string }[] = [];
+  const run = (_command: string, args: string[], input?: string) => {
+    calls.push({ args, input });
+    if (args.includes('PUT')) {
+      const body = JSON.parse(input!);
+      protection = { ...protection, required_conversation_resolution: { enabled: body.required_conversation_resolution },
+        required_pull_request_reviews: { ...protection.required_pull_request_reviews, ...body.required_pull_request_reviews } };
+      return '{}';
+    }
+    if (args.includes('PATCH')) throw new Error('no PATCH is needed');
+    return JSON.stringify(protection);
+  };
+  const applied = await applyProtection(config, [agent], run);
+  assert.equal(applied.applied, true); assert.equal(applied.consistent, true);
+  const put = calls.find(call => call.args.includes('PUT'))!;
+  assert.match(put.args[3], /repos\/owner\/project\/branches\/main\/protection$/);
+  const body = JSON.parse(put.input!);
+  assert.equal(body.required_conversation_resolution, false);
+  assert.deepEqual(body.required_status_checks, { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }] }, 'the App-bound check and strict-off stay as observed');
+  assert.equal(body.enforce_admins, true); assert.equal(body.required_linear_history, true); assert.equal(body.allow_force_pushes, false); assert.equal(body.allow_deletions, false);
+  assert.deepEqual(body.required_pull_request_reviews, { required_approving_review_count: 0, dismiss_stale_reviews: true, require_code_owner_reviews: false, require_last_push_approval: false, dismissal_restrictions: { users: ['lead'], teams: [], apps: [] },
+    bypass_pull_request_allowances: { users: ['release-bot'], teams: ['maintainers'], apps: ['graphyard-control'] } }, 'dismissal restrictions and pull request bypass allowances are kept, by login and slug');
+  assert.equal((await applyProtection(config, [agent], run)).applied, false, 'a branch without the requirement is left alone');
+});
+
 test('the master CLI installs its harness rules and reconciles protection against a live snapshot', async () => {
   const root = await repository(), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-cli-master-')), binary = join(credentialDirectory, 'bin');
   const item = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
@@ -498,6 +544,6 @@ test('the reviewer path is documented end to end in the install runbook and guid
     assert.ok(/examples\/master\/(claude|cursor|opencode)-reviewer\.json/.test(document), `${name} must link a shipped reviewer profile`);
     assert.ok(document.includes('approvals'), `${name} must state the approval mode`);
   }
-  for (const fragment of ['trade-off', 'opt out', 'harness', 'App confirmation']) assert.ok(`${masterAgent}${onboarding}`.includes(fragment), `the reviewer path must document ${fragment}`);
+  for (const fragment of ['trade-off', 'refused at launch', 'harness', 'App confirmation']) assert.ok(`${masterAgent}${onboarding}`.includes(fragment), `the reviewer path must document ${fragment}`);
   assert.ok(!/paste the reviewer private key into|copy the key by hand/i.test(onboarding), 'the runbook must not add hand-run credential steps');
 });

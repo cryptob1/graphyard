@@ -204,12 +204,12 @@ test('integration:generated-index-no-conflict — AGENTS.md carries exactly the 
   assert.equal(managedMasterInstructions(agents), agents, 'the master block matches src/master.ts; run graphyard master init and commit');
 });
 
-test('manual:overlap-docs — the guides describe overlap holds, --allow-overlap, smallest-scope-first dispatch, conflict sets, generated files and sync regeneration', async () => {
+test('manual:overlap-docs — the guides describe optimistic dispatch, smallest-scope-first dispatch, conflict sets, generated files and sync regeneration', async () => {
   const read = (path: string) => readFile(join(repositoryRoot, path), 'utf8');
   const coordination = await read('docs/coordination.md'), master = await readMasterGuide(), development = await read('docs/development.md');
-  for (const fragment of ['--allow-overlap', 'smallest', 'highConflict', 'GRAPHYARD_GENERATED_FILES', 'generated', 'merge-tree', 'regenerate']) assert.ok(coordination.includes(fragment), `docs/coordination.md must mention ${fragment}`);
-  for (const fragment of ['--allow-overlap', 'smallest', 'merge-tree', 'conflicts', 'overlap']) assert.ok(master.includes(fragment), `docs/master-agent.md must mention ${fragment}`);
+  for (const fragment of ['optimistic', 'smallest', 'highConflict', 'GRAPHYARD_GENERATED_FILES', 'generated', 'merge-tree', 'regenerate']) assert.ok(coordination.includes(fragment), `docs/coordination.md must mention ${fragment}`);
+  for (const fragment of ['optimistic', 'smallest', 'merge-tree', 'conflicts', 'overlap']) assert.ok(master.includes(fragment), `docs/master-agent.md must mention ${fragment}`);
   for (const fragment of ['generated in full', 'docs:check', 'GRAPHYARD_GENERATED_FILES', 'AGENTS.md']) assert.ok(development.includes(fragment), `docs/development.md must mention ${fragment}`);
   const help = execFileSync(process.execPath, [launcher, 'help'], { encoding: 'utf8', env: { ...process.env, GRAPHYARD_URL: 'http://127.0.0.1:9', GRAPHYARD_TOKEN: 'x' } });
-  assert.match(help, /master dispatch GY-N PROFILE \[--allow-overlap\]/); assert.match(help, /sync GY-N[^\n]*regenerate generated files/);
+  assert.match(help, /master dispatch GY-N PROFILE +Invite a worker/); assert.doesNotMatch(help, /--allow-overlap/); assert.match(help, /sync GY-N[^\n]*regenerate generated files/);
 });

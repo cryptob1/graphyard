@@ -212,11 +212,16 @@ img.mark{width:26px;height:26px}
 .where-now{display:flex;flex-direction:column;gap:var(--space-4);padding:20px var(--space-5);border:1px solid color-mix(in srgb,var(--group) 35%,var(--bg));border-radius:var(--radius-lg);background:color-mix(in srgb,var(--group) 6%,var(--bg))}
 .where-now .status-sentence{margin:0;font-size:var(--type-sentence);font-weight:500;line-height:1.5;color:var(--text)}
 .next-line{margin:0;font-size:var(--type-body);color:var(--text-2)}.next-line strong{color:var(--text);font-weight:600}
-.item-columns{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:var(--space-5);align-items:start}
-.item-column{display:flex;flex-direction:column;gap:var(--space-5)}
 .panel{display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-4) 18px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface)}
 .panel h2{display:flex;align-items:baseline;gap:10px;margin:0;font-size:var(--type-item);font-weight:600}.panel h2 small{font-size:var(--type-small);font-weight:400;color:var(--text-2)}
 .left-list{margin:0;padding-left:18px;font-size:var(--type-body);line-height:1.7;color:var(--text)}
+.left-step h3{margin:0 0 var(--space-2);font-size:var(--type-body);font-weight:600}.left-step h3 small{font-weight:400}.left-step+.left-step{margin-top:var(--space-3)}
+.panel .later-steps{margin:0}.panel .later-steps .left-step{margin-top:var(--space-3)}
+.criterion-full summary{cursor:pointer;list-style:none}.criterion-full summary::-webkit-details-marker{display:none}.criterion-full[open] summary .criterion-text{display:none}.criterion-full p{margin:6px 0 0;font-size:var(--type-small);color:var(--text)}
+.criterion-mark{display:inline-block;width:1.2em;color:var(--needs-you)}.criterion-met .criterion-mark{color:var(--shipped)}
+.activity-list{list-style:none;margin:0;padding:0;font-size:var(--type-body);line-height:1.8;color:var(--text)}
+.full-history summary,.more-details>summary{cursor:pointer}.full-history summary{color:var(--up-next);font-size:var(--type-small);font-weight:600}
+.more-details h3{margin:var(--space-5) 0 var(--space-2)}.overlap-line{font-size:var(--type-small)}
 .human-request{border:1px solid color-mix(in srgb,var(--needs-you) 45%,var(--bg));border-radius:var(--radius);padding:var(--space-4);background:var(--surface)}
 .human-request textarea{margin:var(--space-2) 0}
 
@@ -249,7 +254,7 @@ img.mark{width:26px;height:26px}
 /* Every animation respects the viewer's reduced-motion setting. */
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.step-seg.current,.now-dot,.now-dot::before,.replay-dot{animation:none;transition:none}}
 
-@media(max-width:1100px){.row-head,.work-row{grid-template-columns:72px minmax(0,1fr) 300px 130px 70px auto}.item-columns,.insight-charts{grid-template-columns:1fr}}
+@media(max-width:1100px){.row-head,.work-row{grid-template-columns:72px minmax(0,1fr) 300px 130px 70px auto}.insight-charts{grid-template-columns:1fr}}
 @media(max-width:1000px){.sidebar{width:200px;min-width:200px}.main{padding:var(--space-5)}}
 /* Phone: the sidebar folds into a menu, tiles become chips, rows become cards. */
 @media(max-width:650px){

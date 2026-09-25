@@ -74,6 +74,8 @@ export interface ScopeDecision {
   paths: string[];
   requestedBy: string;
   requestedAt: string;
+  /** The attempt that asked: an answered request is cleared, and its worker still reads the outcome here. */
+  epoch?: number;
 }
 
 /**
@@ -167,6 +169,48 @@ export function decideScopeRequest(
   return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
 }
 
+// ---------------------------------------------------------------------------
+// Pinning tests (GY-199). A behaviour change breaks the tests that pin the old text: the worker asks
+// for the test, the item's criteria never name it, and the rule above refuses it. Such a test is the
+// item's own scope when its failing assertion quotes text a planned file holds — the text the item
+// changes. The loop reads both files from the base branch outside every transaction and applies this
+// rule to what it read; nothing here reads a file.
+// ---------------------------------------------------------------------------
+
+/** A test file as the pinning rule reads one: under a tests directory, or named `*.test.*` / `*.spec.*`. */
+export const testFile = (path: string) => !pathScope(path).prefix && (/(^|\/)(tests?|__tests__|browser-tests|spec)\//.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path));
+/** The shortest quote the rule accepts: shorter text is too common to tie a test to a file. */
+export const pinnedQuoteMin = 8;
+/**
+ * The texts a request's reason quotes, as written and as the file would hold them: backtick and
+ * double-quoted segments as they are, and a regular-expression literal (`/Old text\./`) both as its
+ * source (the test holds that) and unescaped (the planned file holds that).
+ */
+export function quotedTexts(reason: string): { raw: string; text: string }[] {
+  const quotes: { raw: string; text: string }[] = [];
+  for (const match of reason.matchAll(/`([^`\n]+)`|"([^"\n]+)"|(?:^|[\s(,=:])\/((?:\\.|[^/\\\n])+)\/[dgimsuyv]*/g)) {
+    const raw = match[1] ?? match[2] ?? match[3];
+    const text = match[3] ? raw.replace(/\\(.)/g, '$1') : raw;
+    if (text.trim().length >= pinnedQuoteMin) quotes.push({ raw, text });
+  }
+  return quotes;
+}
+/**
+ * The grounds a test file is granted on, or null. The request's reason quotes the failing assertion;
+ * the quote must be in the test file (it is that test's assertion) and in a file the item already
+ * plans (the text the item changes). Anything else — a quote only one of them holds, a file that is
+ * not a test — is refused and goes to the approver.
+ */
+export function pinningTestGround(path: string, reason: string, testText: string | null, planned: readonly { path: string; text: string | null }[]): string | null {
+  if (!testFile(path) || !testText) return null;
+  for (const quote of quotedTexts(reason)) {
+    if (!testText.includes(quote.raw) && !testText.includes(quote.text)) continue;
+    const holder = planned.find(file => file.path !== path && !!file.text && file.text.includes(quote.text));
+    if (holder) return `${path} pins "${quote.text.length > 80 ? `${quote.text.slice(0, 79)}…` : quote.text}", which planned file ${holder.path} holds`;
+  }
+  return null;
+}
+
 /**
  * True when a request the loop refused would be approved by the rules as they stand now — a rule
  * change, or a widening that made its implication hold — so the loop asks the control plane to
@@ -177,4 +221,91 @@ export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]
   const request = item.scopeRequest;
   return !!request && request.decision?.state === 'refused' && !!item.blocker?.startsWith(scopeRefusalBlocker)
     && decideScopeRequest(item, request).state === 'approved';
+}
+
+// ---------------------------------------------------------------------------
+// Routing what the rules cannot ground to the independent approver (GY-176).
+//
+// A request the implication rule refuses and no review finding grounds is still, most of the time,
+// the item's own scope: the worker's reason and the criteria justify it without naming the file.
+// On 2026-09-24 a master granted between three and five of those by hand while each item sat idle
+// until the next master cycle. Deciding one is a judgement, not a rule, so the loop does not
+// decide it: it requests a `requirements` decision as the master's operator-agent identity — the
+// same additive revision `master scope` applies — and the independent approver judges it, exactly
+// as it judges rework, recovery, resolution and merge. The requester is never the approver.
+// ---------------------------------------------------------------------------
+
+/** The additive widening a refused request asks the approver for, or null when there is none to route. */
+export function routableScopeRequest(item: { plannedFiles?: readonly string[]; scopeRequest?: ScopeRequestState | null; lease?: { epoch: number; expiresAt: string } | null }, now: number) {
+  const request = item.scopeRequest;
+  if (!request || request.decision?.state !== 'refused' || request.remove?.length || request.criteria?.length) return null;
+  // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
+  if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return null;
+  const paths = unplannedPaths(item.plannedFiles, request.paths);
+  return paths.length ? { request, paths, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] } : null;
+}
+
+/** The requested paths the item's plannedFiles do not yet cover — what is still being asked for. */
+export const unplannedPaths = (plannedFiles: readonly string[] | undefined, paths: readonly string[]) =>
+  [...new Set(paths)].filter(path => !(plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+
+/** One requested decision per request: the instant the worker recorded it identifies the ask. */
+export const scopeDecisionBinding = (request: Pick<ScopeRequestState, 'epoch' | 'at'>) => `scope:${request.epoch}:${request.at}`;
+
+/**
+ * What the approver is asked to judge, within the control plane's 2000-character reason bound: the
+ * worker's own reason and the exact paths, why the rules could not decide it, and the item's
+ * criteria. A widening that introduces a root-level directory carries the broad-scope exception
+ * (`broad`, the text `guardBroadScope` records): the approver may grant it only with a stated
+ * reason, which the control plane writes into the applied revision beside this one.
+ */
+export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState, 'requestedBy' | 'reason' | 'decision'>, criteria: readonly ScopeCriterion[], paths: readonly string[], broad: string | null, max = 2000) {
+  const cut = (text: string, room: number) => text.length <= room ? text : `${text.slice(0, Math.max(0, room - 1))}…`;
+  const rules = ` The implication rule refused it and no review finding on the item's own change names it, so it is the approver's judgement: approve an additive widening the item's criteria justify (the worker keeps its lease), refuse with the reason otherwise.`;
+  const exception = broad ? ` ${cut(broad, 300)} It needs the broad-scope flag (--allow-broad-scope): grant it only with a stated reason why narrower paths will not do.` : '';
+  const asked = cut(`${key}: ${request.requestedBy} asks to widen plannedFiles with ${cut(paths.join(', '), 400)} because ${request.reason}.`, 800);
+  const refusal = cut(` Rule refusal: ${request.decision?.reason ?? 'none recorded'}.`, 250);
+  const named = ` Criteria: ${criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
+  const head = asked + rules + exception + refusal;
+  return head + cut(named, max - head.length);
+}
+
+/**
+ * What the worker reads in its own session once its request is judged (GY-176) — from its own
+ * `scope-request --wait` or `status`, never a message pasted into the session: carry on, or the
+ * approver's reason and that the attempt stays inside plannedFiles, withdrawing the ask, which
+ * lifts the refusal holding the item, rather than waiting on a master that will not come.
+ */
+export function scopeOutcomeMessage(key: string, epoch: number, outcome: { state: 'approved' | 'refused'; paths: readonly string[]; approver: string | null; reason: string | null }, cli = 'graphyard') {
+  const paths = outcome.paths.join(', ');
+  return outcome.state === 'approved'
+    ? `Graphyard: your scope request on ${key} (epoch ${epoch}) was approved${outcome.approver ? ` by ${outcome.approver}` : ''}${outcome.reason ? `: ${outcome.reason}` : ''}. plannedFiles now include ${paths} and you keep your lease: continue the work.`
+    : `Graphyard: your scope request on ${key} (epoch ${epoch}) for ${paths} was refused by the independent approver${outcome.approver ? ` ${outcome.approver}` : ''}: ${outcome.reason ?? 'no reason recorded'}. Stay inside plannedFiles: withdraw the request with ${cli} scope-request ${key} ${epoch} - and finish the work without those files, or record a blocker if the criteria cannot be met without them.`;
+}
+
+export type ScopeRequestOutcome = { state: 'pending' | 'ended'; text: string } | { state: 'approved' | 'refused'; text: string };
+/**
+ * The outcome of one ask (its epoch and the instant it was recorded), read from the item as the
+ * control plane holds it now. A refusal by the widening rule (`decidedBy` graphyard) is not the
+ * answer: the loop puts it to the independent approver, so it is still pending. An approval by
+ * any path — the rule, a finding, the approver or a master — shows as the paths now planned.
+ * A lease past its deadline ends the wait even before reconciliation clears it: no approval or
+ * refusal can reach that attempt any more. `now` is the control plane's time (a snapshot's `now`),
+ * since the deadline is one it issued: a worker host's clock is never compared with it.
+ */
+export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly string[]; lease?: { epoch: number; expiresAt: string } | null; scopeRequest?: ScopeRequestState | null; scopeDecision?: ScopeDecision | null },
+  ask: { epoch: number; at: string; paths: readonly string[] }, now: number, cli = 'graphyard'): ScopeRequestOutcome {
+  const own = item.scopeRequest?.epoch === ask.epoch && item.scopeRequest.at === ask.at ? item.scopeRequest : null;
+  const decided = item.scopeDecision?.requestedAt === ask.at ? item.scopeDecision : null;
+  const outside = unplannedPaths(item.plannedFiles, ask.paths), covered = !outside.length;
+  // Liveness comes first: an outcome, even one decided before the deadline, is not this attempt's
+  // to act on once its lease has lapsed or been reconciled away.
+  if (item.lease?.epoch !== ask.epoch || Date.parse(item.lease.expiresAt) <= now) return { state: 'ended', text: `Graphyard: your lease on ${item.key} (epoch ${ask.epoch}) is no longer live, so no scope outcome applies to this attempt; stop the work` };
+  if (!own && covered) return { state: 'approved', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'approved', paths: ask.paths, approver: decided?.state === 'approved' && decided.decidedBy !== 'graphyard' ? decided.decidedBy : null, reason: decided?.state === 'approved' ? decided.reason : null }, cli) };
+  const refusal = own?.decision ?? decided;
+  // A refusal names only the paths still outside plannedFiles: one widened meanwhile, by any path,
+  // is planned, and the worker is not told to finish without it.
+  if (refusal?.state === 'refused' && refusal.decidedBy !== 'graphyard') return { state: 'refused', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'refused', paths: outside.length ? outside : ask.paths, approver: refusal.decidedBy, reason: refusal.reason }, cli) };
+  if (!own) return { state: 'ended', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) is no longer open — withdrawn or re-asked — and nothing widened plannedFiles for it` };
+  return { state: 'pending', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) for ${ask.paths.join(', ')} is ${own.decision ? 'with the independent approver: the widening rule could not ground it' : 'waiting for the widening rule'}; you keep your lease` };
 }

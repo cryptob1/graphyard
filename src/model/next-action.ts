@@ -10,6 +10,7 @@ import type { Work } from './work.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
+import { livenessCarry } from './liveness.js';
 
 // The vocabulary lives in `action-kinds.ts`, the classification in `refusal-mapping.ts`, the
 // declared refusals in `refusal-catalogue.ts` and the accounting vocabulary in
@@ -117,8 +118,6 @@ function proofStep(work: Work, all: Work[], now: Date): ProofStep | null {
 
 const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null });
 
-
-
 type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'defect'>;
 
 /**
@@ -132,7 +131,7 @@ type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'de
  * the accounting. A caller that has to tell an idle item from a stalled one calls `actionAccount`.
  */
 export function nextAction(work: Work, all: Work[], now: Date): OpenAction | null {
-  return carriedAction(work, computeAccount(work, all, now).action, all, now);
+  return actionAccount(work, all, now).action;
 }
 
 /**
@@ -150,7 +149,8 @@ export function nextAction(work: Work, all: Work[], now: Date): OpenAction | nul
 export function actionAccount(work: Work, all: Work[], now: Date): ActionAccount {
   const heldSince = work.stageEnteredAt ?? work.updatedAt ?? now.toISOString();
   const held = Date.parse(heldSince);
-  const computed = computeAccount(work, all, now);
+  // The liveness rules (liveness.ts) apply to what was computed before any concern is carried.
+  const computed = livenessCarry(work, computeAccount(work, all, now), all, now);
   // A standing escalation turns an item with nothing else to do into an `escalate` (concerns.ts).
   const action = carriedAction(work, computed.action, all, now);
   return { work: work.id, key: work.key, ...computed, action, ...(action && !computed.action ? { wait: null, defect: null } : {}),

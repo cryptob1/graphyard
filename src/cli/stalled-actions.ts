@@ -1,5 +1,5 @@
 import { agentOwner, type AttentionItem } from '../master.js';
-import { actionStallRecheckMs, queueSnapshot } from '../model/action-progress.js';
+import { actionStallMaxMs, actionStallRecheckMs, queueSnapshot } from '../model/action-progress.js';
 import type { Work } from '../model.js';
 
 /**
@@ -14,7 +14,8 @@ import type { Work } from '../model.js';
  *
  * A row whose failures stop changing (`actionStall`) is not waiting out a fault, it is re-running
  * an impossibility, and the one thing typed actions exist to prevent is an item owing something
- * with nobody told. Reporting only: the classification is the control plane's, made when the
+ * with nobody told. It is still retried, on a backoff that widens with each identical failure
+ * (GY-185): the line used to say "not retrying" of rows claimed every two minutes for days. Reporting only: the classification is the control plane's, made when the
  * failure was recorded.
  */
 
@@ -34,7 +35,7 @@ const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}
 export function stalledActionAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
   return queueSnapshot(snapshot.work, new Date(snapshot.now)).stalled.map(entry => ({
     subject: entry.key,
-    text: `${entry.key}'s ${entry.kind} action is stalled, not retrying: ${entry.stall!.failures} attempts in a row failed for one unchanged reason — ${entry.stall!.reason} — and it has been open ${elapsed(entry.waitedMs)} over ${entry.attempts} attempt(s). Nothing changes by attempting it again while that condition stands`,
-    ...agentOwner('master', `Clear what that reason names: the row rechecks every ${Math.round(actionStallRecheckMs / 1000)}s, so it is claimed a minute after the condition clears and needs no forced retry. master status lists it under actions.stalled`),
+    text: `${entry.key}'s ${entry.kind} action is stalled, retried only on a widening backoff: ${entry.stall!.failures} attempts in a row failed for one unchanged reason — ${entry.stall!.reason} — and it has been open ${elapsed(entry.waitedMs)} over ${entry.attempts} attempt(s)${entry.retryAt ? `; next attempt at ${entry.retryAt}` : ''}. Nothing changes by attempting it again while that condition stands`,
+    ...agentOwner('master', `Clear what that reason names: the row rechecks ${Math.round(actionStallRecheckMs / 1000)}s after the third identical failure and twice as long after each further one, up to ${Math.round(actionStallMaxMs / 60_000)} minutes, so it is claimed within one such interval of the condition clearing and needs no forced retry. master status lists it under actions.stalled`),
   }));
 }
