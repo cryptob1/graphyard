@@ -6,7 +6,7 @@ import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, 
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 import { executorFleet } from './executor-report.js';
-import { owedAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
+import { owedAttention, needsHumanActions, routedScopeStatus, scopeRequestAttention } from './owed-report.js';
 import { daemonSummary, loopAttention, readDaemonState, type CycleMetrics, type DaemonState } from '../master-daemon.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -99,8 +99,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is exactly the condition that stops it. The plan behind the number is the same one the
-  // loop and `master reclaim` compute, so the attention item never promises room reclaiming cannot give.
+  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes.
   const worktrees = worktreesDirectory(root);
   const trees = await inventoryWorktrees(root).catch(() => []), reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
@@ -127,8 +126,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // role, the sessions running against the declared limit and the longest wait for a slot.
   const sessions = nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now));
-  // A required check that failed on the clock says so, with the measurement against its budget.
-  const status = await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository));
+  // A check failed on the clock says so, against its budget; a routed scope request, its approver.
+  const status = routedScopeStatus(await qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository)), snapshot.work, cycling?.approvals);
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
   // the one step no agent may take for them; a timed-out one is the master's to rerun.
   const sudo = administration.sudo;

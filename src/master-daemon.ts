@@ -9,7 +9,7 @@ import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { pathScopeContains, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
+import { pathScopeContains, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, unplannedPaths, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
@@ -518,6 +518,23 @@ export function scopeAnsweredAt(work: Work, request: { epoch: number; at: string
   if (eventAt && Number.isFinite(Date.parse(eventAt))) return eventAt;
   const decision = work.scopeDecision;
   return decision && decision.requestedAt === request.at && (decision.epoch === undefined || decision.epoch === request.epoch) ? decision.at : null;
+}
+
+/**
+ * Whether an approver's settled judgement answered the routed request it names (GY-176), read from
+ * the item as observed at `clock`. The control plane attaches a refusal only to the open request of
+ * a live attempt under the revision it was asked against; a stale one leaves the request as it stood,
+ * which is no outcome: neither measured nor reported to the worker. An applied widening answers once
+ * the item holds its outcome or plans the paths. `pending` when the judgement was recorded after the
+ * observation, which cannot say yet.
+ */
+export function scopeOutcomeAnswered(work: Work, request: { epoch: number; at: string; paths: string[] }, judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null }, clock: number): 'answered' | 'unanswered' | 'pending' {
+  const approved = judged.state === 'applied', decision = work.scopeDecision;
+  if (decision && decision.requestedAt === request.at && (decision.epoch === undefined || decision.epoch === request.epoch)
+    && decision.state === (approved ? 'approved' : 'refused') && (approved || decision.decidedBy !== 'graphyard')) return 'answered';
+  if (approved && !unplannedPaths(work.plannedFiles, request.paths).length) return 'answered';
+  const at = Date.parse((approved ? judged.approvedAt : judged.refusal?.at) ?? '');
+  return Number.isFinite(at) && at >= clock ? 'pending' : 'unanswered';
 }
 
 export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => ({
@@ -2310,9 +2327,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
         && JSON.stringify(entry.input?.plannedFiles) === JSON.stringify(decision.input?.plannedFiles) && entry.input?.expectedPolicyRevision === item.policyRevision
         && sameAnswers(entry.input?.answers, decision.input?.answers)) : undefined;
       if (judged) {
-        const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: judged.id, requestedAt: stamp, settledAt: stamp, scope: decision.scope ?? null });
+        // A refusal recorded after this observation is settled once an observation shows it.
+        const pending = !!decision.scope && scopeOutcomeAnswered(item, decision.scope, judged, clock) === 'pending';
+        const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: judged.id, requestedAt: stamp, settledAt: pending ? null : stamp, scope: decision.scope ?? null });
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${judged.id} for this widening was already refused by ${judged.refusal?.approver ?? 'its approver'}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-        await noteScopeOutcome(item, watch, judged);
+        if (!pending) await noteScopeOutcome(item, watch, judged);
         return;
       }
       // The control plane holds one requirements decision at a time. One that answers no scope
@@ -2397,6 +2416,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     const scope = watch.scope, key = `scope:outcome:${watch.decision}`;
     if (!scope || state.actions[key]?.state === 'done') return;
     const approved = judged.state === 'applied', by = approved ? judged.approvedBy : judged.refusal?.approver;
+    // A judgement the control plane did not attach to this request (its revision or the asking
+    // lease had moved on) left the request as it stood: the worker sees no outcome, so none is
+    // measured or reported, only that this decision answered nothing.
+    if (scopeOutcomeAnswered(item, scope, judged, clock) !== 'answered') {
+      await note(key, item, 'scope', 'done', `${watch.action} decision ${watch.decision} (${judged.state}) did not answer ${item.key}'s scope request (epoch ${scope.epoch}, asked at ${scope.at}): the control plane left the request as it stood, so no outcome is measured or reported`);
+      return;
+    }
     const why = approved ? judged.approvalReason : judged.refusal?.reason ?? judged.outcome;
     // The wait the worker saw, from its ask to the approver's answer (step 2 left the rule refusal
     // unmeasured). It ends when the control plane recorded the answer, which the worker reads at
@@ -2411,6 +2437,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     const judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
     const step = approvalStep(watch, judged, await sessions(), clock);
     if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
+    // A routed request judged after this observation is settled from one that shows the outcome.
+    if ((step.step === 'settled' || step.step === 'refused') && watch.scope && judged && scopeOutcomeAnswered(item, watch.scope, judged, clock) === 'pending') return;
     const base = `approver:${watch.decision}`;
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
@@ -2519,7 +2547,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     // the item stops needing it at once: its outcome is noted and measured here, before the watch goes.
     if (item && watch.scope && !watch.settledAt && effects.decisions) {
       const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision), () => undefined);
-      if (judged?.state === 'applied' || judged?.state === 'refused') { watch.settledAt = stamp; await noteScopeOutcome(item, watch, judged); }
+      if (judged?.state === 'applied' || judged?.state === 'refused') {
+        if (scopeOutcomeAnswered(item, watch.scope, judged, clock) === 'pending') return;
+        watch.settledAt = stamp; await noteScopeOutcome(item, watch, judged);
+      }
     }
     // Another current watch holds this decision: the request is not moved past, only re-keyed.
     if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) { delete state.approvals[key]; return; }

@@ -8,10 +8,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { scopeRequestAttention } from '../src/cli/owed-report.js';
+import { owedAttention, routedScopeStatus, scopeRequestAttention } from '../src/cli/owed-report.js';
 import { routedScopeRequests } from '../src/cli/status-attention.js';
-import { answeringWidening, daemonSummary, emptyDaemonState, runCycle, scopeBudget, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { approverSessionName, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { answeringWidening, daemonSummary, emptyDaemonState, runCycle, scopeBudget, scopeOutcomeAnswered, scopeRoutineDecision, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { approverSessionName, buildMasterStatus, decisionInput, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { scopeBlockedBudgetMs, scopeOutcomeMessage, scopeRequestOutcome } from '../src/model/scope.js';
 import { awaitScopeOutcome } from '../src/cli/session-commands.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
@@ -628,4 +628,78 @@ test('unit:scope-approver-routine — a routed wait is measured to the time the 
     assert.equal(measured[0].waitedMs, Math.max(0, Date.parse(measured[0].at) - Date.parse(asked.scopeRequest!.at)));
     assert.equal(Object.values(state.actions).filter(action => action.kind === 'scope' && action.work === work.key && new RegExp(`^${verdict === 'approve' ? 'Approved' : 'Refused'} ${work.key}'s scope request .* through requirements decision`).test(action.detail)).length, 1, `the ${verdict} is noted`);
   }
+});
+
+test('unit:scope-approver-routine — a refusal that did not answer the routed request is neither measured nor reported to the worker', async () => {
+  let work = await claimed('stale refusal is not an outcome');
+  await ask(work, ['src/server/routes/work.ts'], 'The route would be easier to change here too');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [requested] = await standing(work);
+  const before = await reload(work.id);
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{policyRevision}',to_jsonb($2::int)) WHERE id=$1", [work.id, before.policyRevision + 1]);
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: requested.id, reason: 'Judged against the old requirements' });
+  work = await reload(work.id);
+  assert.equal(work.scopeDecision!.decidedBy, 'graphyard', 'the control plane left the request as it stood');
+  assert.equal(scopeOutcomeAnswered(work, { epoch: work.epoch, at: work.scopeRequest!.at, paths: ['src/server/routes/work.ts'] }, { state: 'refused', refusal: { at: new Date(Date.now() - 1000).toISOString() } }, Date.now()), 'unanswered');
+  await loop.cycle(state);
+  assert.equal(state.scope.filter(entry => entry.work === work.key).length, 0, 'no refused sample for an outcome the worker never sees');
+  const notes = Object.values(state.actions).filter(action => action.kind === 'scope' && action.work === work.key).map(action => action.detail);
+  assert.equal(notes.filter(detail => new RegExp(`^Refused ${work.key}'s scope request .* through requirements decision`).test(detail)).length, 0, 'no refusal reported to the worker');
+  assert.ok(notes.some(detail => detail.includes(`did not answer ${work.key}'s scope request`)), notes.join('\n'));
+});
+
+test('unit:scope-approver-routine — a refusal recorded after the loop\'s observation is settled from an observation that shows it, then measured once', async () => {
+  let work = await claimed('refusal after the observation');
+  await ask(work, ['src/server/routes/work.ts'], 'The route would be easier to change here too');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [requested] = await standing(work);
+  // The loop's next read was taken before the approver refused.
+  const read = loop.effects.snapshot, earlier = await read();
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: requested.id, reason: 'The route belongs to another item' });
+  loop.effects.snapshot = async () => earlier;
+  await loop.cycle(state);
+  const watch = Object.values(state.approvals).find(entry => entry.decision === requested.id)!;
+  assert.equal(watch.settledAt, null, 'an observation that predates the refusal cannot say whether it answered');
+  assert.equal(state.scope.filter(entry => entry.work === work.key).length, 0);
+  loop.effects.snapshot = read;
+  await loop.cycle(state);
+  const measured = state.scope.filter(entry => entry.work === work.key);
+  assert.deepEqual(measured.map(entry => entry.state), ['refused'], 'measured once the refusal is observed on the item');
+  work = await reload(work.id);
+  assert.ok(Math.abs(Date.parse(measured[0].at) - Date.parse(work.scopeDecision!.at)) < 5_000, 'the sample ends at the recorded refusal');
+});
+
+test('unit:scope-outcome-delivered — while the approver judges a routed request, the master status row and owed action name the approver, not master unblock', async () => {
+  const work = await claimed('status row names the approver');
+  await ask(work, ['src/server/routes/work.ts'], 'The route would be easier to change here too');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [requested] = await standing(work);
+  const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot') as { work: Work[]; now: string };
+  const mine = { work: snapshot.work.filter(item => item.id === work.id), now: snapshot.now };
+  const plain = buildMasterStatus(mine, [], []);
+  const unrouted = plain.work.find(row => row.key === work.key)!;
+  assert.ok(unrouted.attention, 'the rule refusal is the row attention');
+  const approvals = daemonSummary(state, Date.now(), 30_000).approvals;
+  const status = routedScopeStatus(plain, mine.work, approvals);
+  const row = status.work.find(entry => entry.key === work.key)!;
+  assert.match(row.attention!, /is with the independent approver/);
+  assert.equal(row.attentionOwner!.approvedBy, 'approver');
+  assert.match(row.attentionOwner!.next, new RegExp(`requirements decision ${requested.id}`));
+  assert.doesNotMatch(`${row.attention} ${row.attentionOwner!.next}`, /master (unblock|scope|decide)|Clear the cause/);
+  const items = status.attentionItems.filter(item => item.subject === work.key);
+  assert.ok(items.length >= 1 && items.every(item => !/master (unblock|scope)|Clear the cause/.test(`${item.text} ${item.next}`)), JSON.stringify(items));
+  const owed = owedAttention(mine, status.work, []);
+  const escalated = owed.rows.filter(entry => entry.key === work.key && entry.source === 'action');
+  assert.ok(escalated.length >= 1, "the rule refusal's escalation is owed");
+  assert.ok(escalated.every(entry => entry.resolve === (row as { routedScope?: string }).routedScope && /approver/.test(entry.decision)), JSON.stringify(escalated));
+  // Once the approver answers, the row is the item's own again.
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: requested.id, reason: 'The route belongs to another item' });
+  await loop.cycle(state);
+  const after = await ok(token(coordinator), 'GET', 'work-snapshot') as { work: Work[]; now: string };
+  const answered = { work: after.work.filter(item => item.id === work.id), now: after.now };
+  const settled = buildMasterStatus(answered, [], []);
+  assert.deepEqual(routedScopeStatus(settled, answered.work, daemonSummary(state, Date.now(), 30_000).approvals).work, settled.work);
 });
