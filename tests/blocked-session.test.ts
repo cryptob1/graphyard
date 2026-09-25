@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blockedPromptFailMs, dispatchKey, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { destructivePromptGuidance, masterConfigSchema, workerPrompt, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { classifyRuntimePrompt, destructivePromptGuidance, masterConfigSchema, workerPrompt, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { producerPrompt } from '../src/producer.js';
-import { classifyRuntimePrompt } from '../src/model/sessions.js';
+
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
