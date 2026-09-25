@@ -35,7 +35,7 @@ Grants are checked every five minutes and after a 403; a shortfall (`appPermissi
 
 On the base branch require `Graphyard / merge` bound to this App, leave `strict` **off**, enforce for administrators, forbid force pushes and deletion, give workers no bypass. `master browser protection` reconciles it; `master protection --apply`, `install --apply` and `init --scan --apply` give organization repositories a merge queue requiring it (CI on `merge_group`), user-owned ones or a 422 `allow_auto_merge`.
 
-The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, approval of the current head, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head.
+The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head approval, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head.
 
 ## Merge queue
 
@@ -43,13 +43,13 @@ A candidate enters once its gates pass. Its speculative tip (predicted base merg
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
-Carry holds regardless of reviewed files when that conflict-free Graphyard merge left the change's own patch-id unchanged; carried steps name their ground.
+Carry ignores reviewed files when that conflict-free Graphyard merge left the change's own patch-id unchanged; carried steps name their ground.
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4, 1 disables; published via `POST /api/merge-queue`) batches entries onto one CI-tested combined tip; members merge in order once a tip holding them passes, and a failing batch is halved until its failing entry is ejected, naming the check (`mergeStep` in status).
+`mergeQueue.batchSize` (master config, default 4, 1 disables; `POST /api/merge-queue` publishes it) batches entries onto one CI-tested tip; members merge in order once a tip holding them passes; a failing batch is halved until its failing entry is ejected, naming the check (`mergeStep`).
 
 ### Proofs in CI
 
