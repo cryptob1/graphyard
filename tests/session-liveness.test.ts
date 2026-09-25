@@ -21,6 +21,7 @@ import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { masterConfigSchema, profileSessions } from '../src/master.js';
 import { sessionReport } from '../src/cli/master-status.js';
 import { overlongSessionAttention } from '../src/cli/overlong-sessions.js';
+import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-state.js';
 
 /**
  * GY-113: a session was recorded as running until something ended it, so a session that crashed,
@@ -557,9 +558,10 @@ test('manual:session-liveness-docs-review — docs/master-agent.md states that t
   assert.match(section, /every automatic-dispatch tick/);
   assert.match(section, /run\.dispatchIntervalSeconds/);
   assert.match(section, new RegExp(`${sessionReconcileIntervalMs / 1000} at most`));
-  assert.match(section, new RegExp(`${sessionVanishGraceMs / 1000}-second grace`));
-  assert.match(section, /counted from the first sweep\s+that missed it/);
-  assert.match(section, new RegExp(`within ${sessionClosureBoundMs / 1000} seconds of the runtime dropping it`));
+  // The session report's rule (GY-172): lost at the second consecutive miss, and a young handle left alone.
+  assert.equal(lostAfterReports, 2);
+  assert.match(section, /closes at the second consecutive sweep\s+that misses it/);
+  assert.match(section, new RegExp(`left alone for its first ${sessionLaunchGraceMs / 60_000} minutes`));
   assert.match(section, /A handle another host launched is left to\s+that host's loop/);
 
   // Every closure the sweep makes, named with the reason it records.
