@@ -23,7 +23,7 @@ import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-
 import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
-import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
+import { followUpThreadIds, launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, readCredentialFile, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
@@ -923,6 +923,20 @@ export function resolveCovers(standing: { input: any; pin?: { escalations?: { tr
 }
 /** The control plane's bound on a decision's reason (`src/model/approval.ts`); a longer one is refused on every retry. */
 export const decisionReasonMax = 2000;
+/**
+ * The snapshot as the cycle decides from it: each item's unresolved threads without the ones its
+ * approval named as follow-up (GY-166). Those are the review loop's to file and resolve, not a
+ * worker's to fix, so a thread-rework decision is never requested for them. Only the cycle's copy
+ * changes; GitHub still blocks the merge on each until the loop has resolved it.
+ */
+export function setAsideFollowUpThreads<S extends { work: Work[] }>(snapshot: S, followUps: Map<string, Set<string>> | undefined): S {
+  if (!followUps?.size) return snapshot;
+  return { ...snapshot, work: snapshot.work.map(item => {
+    const ids = followUps.get(item.key), conversations = item.observation?.conversations;
+    if (!ids?.size || !conversations?.unresolved.some(thread => thread.id && ids.has(thread.id))) return item;
+    return { ...item, observation: { ...item.observation!, conversations: { ...conversations, unresolved: conversations.unresolved.filter(thread => !thread.id || !ids.has(thread.id)) } } };
+  }) };
+}
 /** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
 const reworkThreadsNamed = 5;
 /**
@@ -1620,6 +1634,12 @@ export interface DaemonEffects {
    * judged on observation age alone.
    */
   snapshot: () => Promise<{ work: Work[]; now: string; jobs?: { work_id?: string; error?: string | null }[] }>;
+  /**
+   * The review threads, per item key, that a standing approval named as follow-up (GY-166), or that
+   * an approval of `work`'s current head was shown while the dispatcher has yet to file its
+   * follow-ups. The review loop files and resolves them, so the cycle requests no thread rework for them.
+   */
+  followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
   /**
    * Files the one backlog item a recurring fault class gets (GY-173), as the master's own
@@ -1880,8 +1900,11 @@ export function retriedSnapshot<T>(read: () => Promise<T>, pause: () => number =
 export async function runCycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number = Date.now) {
   const effects = boundedPersist(unbounded);
   const startedAt = now();
-  const snapshot = await effects.snapshot();
+  const read = await effects.snapshot();
   const readAt = now();
+  // Filing runs in the dispatcher, beside this cycle: an approval it has not yet reconciled still
+  // sets its threads aside, so the cycle never sends a head back over what that review filed.
+  const snapshot = setAsideFollowUpThreads(read, await effects.followUpThreads?.(read.work, Number.isFinite(Date.parse(read.now)) ? Date.parse(read.now) : readAt).catch(() => undefined));
   const observedAt = Date.parse(snapshot.now), clock = Number.isFinite(observedAt) ? observedAt : startedAt;
   // The same bound `master status` uses, from the read that produced this snapshot: containment
   // settlement may only be proposed while the local clock can be compared with the control plane.
@@ -3509,6 +3532,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopSupervisor: async (orphan, signal) => { await stopWatchSupervisor(orphan, signal, run); },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     snapshot: deps.snapshot,
+    followUpThreads: async (work, at) => {
+      const reviewer = current().reviewer;
+      return followUpThreadIds((await readReviewLedger(root)).reviews, work, reviewer ? { reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
+    },
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
