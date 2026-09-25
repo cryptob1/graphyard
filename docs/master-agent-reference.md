@@ -15,25 +15,25 @@ A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PA
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports conflicts between candidates under `conflicts` ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
+Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports candidate conflicts under `conflicts` ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
 
 ### Speculative tips and branch protection
 
-**An approval must survive a tip publication.** It carries when the predecessor changed no reviewed file.
+**An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is.
 
-**A branch must never keep another item's unlanded commits.** Tips are built from the reviewed head, and an ejection restores the branches it leaves behind (`baseRefresh.restore`).
+**A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`).
 
 #### A contaminated branch
 
 A branch carrying another item's unlanded commits is listed under `branches.contaminated`: run `master repair GY-42 REASON`.
 
-A worker restores its own branch with `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
+A worker restores its own with `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
-Protection reconciles through `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the profile from `master init --browser-profile`: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
+Protection reconciles through `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the `master init --browser-profile` profile: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
 
 | Flow | What it does |
 | --- | --- |
@@ -45,13 +45,13 @@ Each flow records `record.json` under `.graphyard/master-actions/` and appends t
 
 ## Harness permissions
 
-A harness classifier refuses routine administration, so `master harness claude --apply` writes allow and deny rules to `.claude/settings.local.json` (Codex: `master harness codex`).
+A harness classifier refuses routine administration; `master harness claude --apply` (Codex: `master harness codex`) writes allow and deny rules to `.claude/settings.local.json`.
 
 ## Typed actions and executors
 
-The control plane names one typed action per item (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements, listed under `actions.needsHuman`.
+The control plane names one typed action per item (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`).
 
-Three failures with an unchanged reason mark a row stalled rather than retrying: a fleet that looks idle and is not. Once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff never outlives it, doubling from one minute. Eight escalate it, retried half-hourly; ticks requeue ownerless items (`liveness.violations`).
+Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
@@ -71,9 +71,9 @@ Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/shar
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists each surviving process with pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
-A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator` and `stopped-by-attestation` lapses are history. Any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
+An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
 
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
@@ -83,4 +83,4 @@ Faults carry `faultClass` (`master status` `faults`); recurring classes file one
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten or more deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.

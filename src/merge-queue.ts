@@ -8,6 +8,8 @@ import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestr
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
 export function queueRef(key: string) { return `refs/graphyard/queue/${key.toLowerCase()}`; }
+/** The scratch branch a base refresh test-merges on before it trusts GitHub's conflict reading (GY-375); deleted after each check. */
+export function mergeCheckBranch(key: string) { return `graphyard-merge-check/${key.toLowerCase()}`; }
 
 export interface QueueSpeculation {
   ref: string; tip: string; base: string; baseTree: string;
@@ -37,6 +39,8 @@ export interface QueueSpeculation {
   reviewedHead?: string;
   /** An approval GitHub dismissed for a merge-base change on this very tip, restored as the binding approval; see `restoredApproval`. */
   restoredApproval?: RestoredApproval | null;
+  /** Why the tip was built (GY-375): the queue head is the one candidate brought onto the base unasked. */
+  trigger?: 'queue-head';
 }
 /**
  * One unresolved review thread on a candidate's pull request: who opened it (the author of its
@@ -134,7 +138,15 @@ export function nameUnresolvedThreads<S extends { work: { key: string; mergeable
   return { ...status, work: rows, attentionItems, counts: { ...status.counts, attention: status.counts.attention + raised, mergeable: status.counts.mergeable - demoted } };
 }
 
-export interface QueueEntry { sequence: number; enqueuedAt: string; policyRevision: number; speculation: QueueSpeculation | null }
+export interface QueueEntry {
+  sequence: number; enqueuedAt: string; policyRevision: number; speculation: QueueSpeculation | null;
+  /**
+   * The batch this entry is validated in (GY-330), re-derived on every evaluation from the queue
+   * and the control plane's batch size: the gates read it to merge on the batch's combined tip and
+   * to eject only the member a bisection isolates, and status and the dashboard show it.
+   */
+  batch?: MergeBatchView | null;
+}
 /** The published tip that replaces a queued entry's head on the next observation, or null when the head is the tip. */
 export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>): string | null {
   const speculation = work.queue?.speculation, candidate = work.candidate;
@@ -153,10 +165,25 @@ export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policy
  * refusals for the tip.
  */
 export const tipValidationPrefix = 'Merge queue is validating speculative tip ';
-export function tipValidation(work: Pick<Work, 'candidate' | 'policyRevision'>, queue: QueueEntry | null, testReasons: string[]): string[] | null {
+/**
+ * With batching (GY-330), CI is required on the batch's combined tip, not on every member's own:
+ * a member the batch plan merges — a combined tip holding it passed every required check — is
+ * validated by that tip and its own tip's CI is not waited for, and a member still being validated
+ * names the combined tip under test; a batch behind the head requires nothing until it heads the
+ * queue. `[]` means nothing is required now: the test gate stands and the merge gate adds nothing.
+ */
+export function tipValidation(work: Pick<Work, 'key' | 'candidate' | 'policyRevision'>, queue: QueueEntry | null, testReasons: string[]): string[] | null {
   const speculation = queue?.speculation, candidate = work.candidate;
-  if (!testReasons.length || !speculation || !candidate || speculation.tip !== candidate.sha || speculation.base !== candidate.baseSha || speculation.policyRevision !== work.policyRevision) return null;
-  return testReasons.map(reason => `${tipValidationPrefix}${candidate.sha.slice(0, 12)}: ${reason}`);
+  if (!speculation || !candidate || speculation.tip !== candidate.sha || speculation.base !== candidate.baseSha || speculation.policyRevision !== work.policyRevision) return null;
+  const batch = queue?.batch;
+  // A batch behind the head waits its turn: no CI is required of it until it heads the queue, and
+  // its queue position already holds the merge. A member the plan merges is validated, and while
+  // the plan merges or ejects others ahead of it, or waits for the tip it would test to be
+  // published, nothing is required of it until it is replanned: its placement holds the merge.
+  if (batch && (batch.state === 'waiting' || !batch.underTest?.tip)) return [];
+  if (!testReasons.length) return null;
+  const under = batch?.underTest?.tip ?? candidate.sha;
+  return testReasons.map(reason => `${tipValidationPrefix}${under.slice(0, 12)}: ${reason}`);
 }
 /** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's, or a tip's. */
 export function onto(work: Pick<Work, 'queue' | 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
@@ -376,6 +403,39 @@ export interface BaseRefresh {
   restore?: BranchRestore | null;
   /** An approval GitHub dismissed for a merge-base change on this very head, restored as the binding approval. */
   restoredApproval?: RestoredApproval | null;
+  /**
+   * What made the control plane touch the branch (GY-375): a conflict its own test merge confirmed,
+   * or a branch restore (an ejection's, or a repair the coordinator requested). Absent on records
+   * that predate the rule.
+   */
+  trigger?: RefreshTrigger;
+  /**
+   * GitHub reported the head conflicting with `base`, and the control plane's own test merge of
+   * the two was clean (GY-375): nothing was written, and the reading is recorded here instead of a
+   * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
+   */
+  stale?: StaleMergeability | null;
+}
+/** Why a branch was written by the control plane rather than by its worker (GY-375). */
+export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair';
+/**
+ * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
+ * GitHub recomputes mergeability lazily after the base moves and can report a clean head
+ * conflicting for a while; acting on that reading refreshed clean candidates and dropped their
+ * review and proofs. The reading is recorded for exactly this head, base tip and policy revision,
+ * and every observation of the same pair is stored with the conflict disproved (`disprovedConflict`),
+ * so nothing refreshes, holds or reworks the candidate for it.
+ */
+export interface StaleMergeability { head: string; base: string; policyRevision: number; at: string; reading: string }
+/** The stale reading recorded for exactly the current head and observed base tip, or null. */
+export function staleMergeability(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): StaleMergeability | null {
+  const observation = work.observation;
+  return observation && work.candidate?.sha === observation.candidate.sha ? disprovedConflict(work, observation) : null;
+}
+/** The stale reading that disproves this observation's conflict: recorded for its head, base tip and the current policy. */
+export function disprovedConflict(work: Pick<Work, 'baseRefresh' | 'policyRevision'>, observation: Pick<Observation, 'candidate' | 'baseTip'>): StaleMergeability | null {
+  const stale = work.baseRefresh?.stale;
+  return stale && stale.head === observation.candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision ? stale : null;
 }
 /**
  * A branch that carried another item's unlanded commits, and what the control plane did about it.
@@ -433,7 +493,10 @@ export function heldBase(work: Pick<Work, 'candidate' | 'baseRefresh' | 'policyR
  * needed: for the merge-queue head, whose speculative tip merges its own reviewed head onto the
  * base just before it lands (`predictQueue`, `advanceQueue`), and here for a candidate GitHub
  * reports conflicting with the new base, whose refresh records the conflict and returns it to its
- * worker. A candidate that merges cleanly keeps its head, its CI, its review and its proofs, bound
+ * worker. GitHub's reading alone is not trusted for that (GY-375): the refresh first test-merges
+ * the head onto the new tip on a scratch branch, and a merge that is clean records the reading as
+ * stale (`staleMergeability`), writes nothing to the candidate's branch, and later observations of
+ * the same head and tip are stored with the conflict disproved. A candidate that merges cleanly keeps its head, its CI, its review and its proofs, bound
  * to the base it was built on (`heldBase`), and its stage; one whose mergeability GitHub has not
  * computed yet waits for the next observation. One attempt per head, base tip and policy revision:
  * a refresh already recorded for the same three is never repeated, so neither a conflict nor a
@@ -721,7 +784,7 @@ export function unpublishableEntry(work: Work): { sequence: number; mergeSha: st
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
-export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = []): string | null {
+export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [], batch: MergeBatchView | null = null): string | null {
   if (!work.queue || work.stage === 'done') return null;
   // A merged entry waits for its reconciliation, which delivers it and drops it from the order.
   // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
@@ -749,7 +812,14 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [])
     const run = latestCheck(observation.checks.filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
     return !!run && failedConclusions.has(run.result);
   });
-  if (check) return `Required CI check ${check} did not pass on speculative tip ${tip}`;
+  // A batch member's tip holds every member ahead of it, so a failure there is not yet its own
+  // (GY-330): it is ejected only when the batch plan isolates it — its tip fails on a prefix known
+  // to pass, or on the base — and otherwise stays queued while the bisection runs. A head that is
+  // not its published tip holds no other member, and fails on its own as ever.
+  const speculation = work.queue.speculation;
+  const planned = !!batch && speculation?.tip === candidate.sha && speculation.base === candidate.baseSha;
+  const isolated = !planned || batch!.step.kind === 'eject' && batch!.step.member === work.key;
+  if (check && isolated) return `Required CI check ${check} did not pass on speculative tip ${tip}${planned && batch!.size > 1 ? `, isolated by bisecting batch ${batch.batch} (${batch.members.join(', ')})` : ''}`;
   if (observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED')) return `Review requested changes on speculative tip ${tip}`;
   // Unresolved threads are the reviewer's inputs, not a reason to eject; only a branch that still
   // requires conversation resolution (protection drift) makes a merge GitHub cannot land.
@@ -978,4 +1048,148 @@ export function describeGitHubQueue(work: Pick<Work, 'observation'>): string | n
   if (state.mode === 'none') return 'not in GitHub\'s merge queue';
   if (state.mode === 'auto-merge') return `auto-merge enabled at ${state.head.slice(0, 12)}`;
   return `in GitHub's merge queue${state.position !== null ? ` at position ${state.position}` : ''}${state.entryState ? ` (${state.entryState.toLowerCase()})` : ''}${state.groupHead ? `, merge group ${state.groupHead.slice(0, 12)}` : ''}`;
+}
+
+// ---- Batching the merge queue (GY-330) -----------------------------------------------------------
+// N queued entries used to cost N combined-tip CI runs, one after another. As GitHub's merge queue
+// and bors do, consecutive entries are validated together: one combined tip for up to `batchSize`
+// entries, merged in order when its required checks pass. Only a failing tip costs more runs, and
+// then only as many as a bisection needs: the batch is split in half and the first half's combined
+// tip tested, repeating until the failing entry is isolated and ejected with the failing check
+// named, while every passing prefix merges. The chain of speculative tips already makes each
+// prefix of the queue a commit of its own — an entry's tip holds every validated entry ahead of it
+// — so a batch's combined tip is its last member's tip, and each half is a prefix tip.
+
+/** Consecutive entries one combined tip validates when master config sets no `mergeQueue.batchSize`; 1 is one tip per entry. */
+export const defaultMergeBatchSize = 4;
+/** The largest batch size master config and the control plane accept. */
+export const maxMergeBatchSize = 32;
+/** The installation-ledger event recording the batch size the master published (POST /api/merge-queue). */
+export const mergeBatchSizeEvent = 'merge-queue.batch-size';
+/** A combined tip's verdict: every required check passed, or the first one that failed. */
+export type TipVerdict = { result: 'pass' } | { result: 'fail'; check: string };
+/**
+ * What the queue does next for one batch: run CI on the combined tip of the base and exactly
+ * `combination` (a prefix of the batch), merge `members` in order, or eject `member` for `check`.
+ */
+export type BatchStep =
+  | { kind: 'test'; combination: string[] }
+  | { kind: 'merge'; members: string[] }
+  | { kind: 'eject'; member: string; check: string };
+/**
+ * The next step for a batch, from the verdicts on record. `verdict(prefix)` answers for the combined
+ * tip of the batch's base and exactly that prefix, or undefined when it has not run; `before` is the
+ * verdict of that base itself (null when not yet judged) — a pass for the head batch, whose base is the base branch, and the
+ * combined tip of the batches ahead for any other. An entry that fails on a prefix known to pass
+ * (or on a base known to pass) is isolated and ejected; otherwise a passing
+ * prefix merges at once, the untested whole batch is tested first, and a failing prefix is halved
+ * until a single entry fails on the prefix before it. A prefix of the whole batch that is known to fail is never run
+ * again, which is what keeps the bisection to one run per halving.
+ */
+export function batchStep(members: string[], verdict: (prefix: string[]) => TipVerdict | undefined, before: TipVerdict | null = { result: 'pass' }): BatchStep {
+  if (!members.length) throw new Error('A batch has at least one member');
+  const results = members.map((_, index) => verdict(members.slice(0, index + 1)));
+  const failing = results.findIndex(result => result?.result === 'fail');
+  // A member whose tip fails where the prefix before it passed (or on a base known to pass) is
+  // isolated: it is ejected at once, before the passing prefix merges, so the entries behind
+  // rebuild without it. The first member of a batch behind the head sits on the batches ahead,
+  // whose failure its tip inherits (CI runs on every published tip), so it is isolated only once
+  // their combined tip passed; until then it waits for that tip to be judged.
+  const prior = (index: number) => index === 0 ? before : results[index - 1];
+  if (failing !== -1 && prior(failing)?.result === 'pass') return { kind: 'eject', member: members[failing], check: (results[failing] as { check: string }).check };
+  if (failing === 0) return { kind: 'test', combination: members.slice(0, 1) };
+  const below = failing === -1 ? members.length : failing;
+  for (let index = below - 1; index >= 0; index--) if (results[index]?.result === 'pass') return { kind: 'merge', members: members.slice(0, index + 1) };
+  if (failing === -1) return { kind: 'test', combination: members };
+  return { kind: 'test', combination: members.slice(0, Math.floor((failing - 1) / 2) + 1) };
+}
+/** The batch at the head of the queue — its first `batchSize` entries — and its next step. */
+export function planMergeBatch(queue: string[], batchSize: number, verdict: (prefix: string[]) => TipVerdict | undefined): { members: string[]; step: BatchStep } | null {
+  if (!queue.length) return null;
+  const members = queue.slice(0, Math.max(1, Math.floor(batchSize)));
+  return { members, step: batchStep(members, verdict) };
+}
+/**
+ * Drives a queue through its batches to the end: the reference the live plan follows step for
+ * step. `runTip(merged, prefix)` runs CI on the combined tip of the base, the entries merged so far
+ * and `prefix`; every run is recorded, and a combination already judged is never run again.
+ */
+export function runMergeBatches(queue: string[], batchSize: number, runTip: (merged: string[], prefix: string[]) => TipVerdict) {
+  const pending = [...queue], merged: string[] = [], ejected: { member: string; check: string }[] = [], runs: string[][] = [];
+  // A combined tip is named by everything it holds past the base: merging a prefix leaves the
+  // tips of what stays pending exactly as they were, so their verdicts stand.
+  const judged = new Map<string, TipVerdict>();
+  const holds = (prefix: string[]) => [...merged, ...prefix].join(',');
+  while (pending.length) {
+    const step = planMergeBatch(pending, batchSize, prefix => judged.get(holds(prefix)))!.step;
+    if (step.kind === 'test') {
+      judged.set(holds(step.combination), runTip([...merged], step.combination));
+      runs.push([...merged, ...step.combination]);
+    } else if (step.kind === 'merge') {
+      merged.push(...pending.splice(0, step.members.length));
+    } else {
+      ejected.push({ member: step.member, check: step.check });
+      pending.splice(pending.indexOf(step.member), 1);
+    }
+  }
+  return { merged, ejected, runs };
+}
+/** The verdict of an entry's own published tip, read from the observation of exactly that commit. */
+export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null): TipVerdict | undefined {
+  const speculation = work.queue?.speculation, candidate = work.candidate, observation = work.observation;
+  if (!speculation || !candidate || speculation.tip !== candidate.sha || !observation || observation.candidate.sha !== candidate.sha) return undefined;
+  const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
+  const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result));
+  if (failed) return { result: 'fail', check: failed.name };
+  return runs.every(entry => entry.run?.result === 'success') ? { result: 'pass' } : undefined;
+}
+/** One batch as master status and the dashboard show it: a substate of the Merge step, never a return to Test. */
+export interface MergeBatchView {
+  /** 1 for the batch at the head of the queue. */
+  batch: number; size: number; members: string[];
+  /** The batch's combined tip: its last member's published tip, which holds every member; null until published. */
+  tip: string | null;
+  /** The combination the queue is running CI on, or would run next, and that combination's tip. */
+  underTest: { members: string[]; tip: string | null } | null;
+  state: 'testing' | 'bisecting' | 'merging' | 'ejecting' | 'waiting';
+  step: BatchStep;
+  summary: string;
+}
+/**
+ * The batches of the live queue (GY-330): the chain of validated entries in `batchSize` groups.
+ * Each prefix of the chain is an entry's own tip, so a batch's combined tip is its last member's,
+ * each half a bisection tests is the tip of the half's last member, and a verdict is the required
+ * checks as observed on that tip. The head batch acts; the batches behind it wait their turn.
+ */
+export function describeMergeBatches(all: Work[], placements: QueuePlacement[], batchSize: number, ciAppIds: readonly number[] | null = null): Map<string, MergeBatchView> {
+  const size = Math.max(1, Math.floor(batchSize));
+  const chain = placements.filter(placement => !placement.passedOver).sort((a, b) => a.position - b.position || a.sequence - b.sequence);
+  const byKey = new Map(all.map(work => [work.key, work]));
+  const placed = new Map(chain.map(placement => [placement.key, placement]));
+  const views = new Map<string, MergeBatchView>();
+  for (let start = 0, batch = 1; start < chain.length; start += size, batch++) {
+    const members = chain.slice(start, start + size).map(placement => placement.key);
+    const tipOf = (key: string) => placed.get(key)?.tip ?? null;
+    const verdict = (prefix: string[]) => { const last = byKey.get(prefix.at(-1)!); return last && tipOf(last.key) ? tipVerdict(last, ciAppIds) : undefined; };
+    // The batches ahead are this batch's base: their combined tip is the tip of the entry just before it.
+    const ahead = start > 0 ? byKey.get(chain[start - 1].key) : undefined;
+    const before: TipVerdict | null = start === 0 ? { result: 'pass' } : ahead && tipOf(ahead.key) ? tipVerdict(ahead, ciAppIds) ?? null : null;
+    const step = batchStep(members, verdict, before);
+    const head = batch === 1;
+    const state: MergeBatchView['state'] = !head ? 'waiting' : step.kind === 'merge' ? 'merging' : step.kind === 'eject' ? 'ejecting' : step.combination.length === members.length ? 'testing' : 'bisecting';
+    const underTest = step.kind === 'test' ? { members: step.combination, tip: tipOf(step.combination.at(-1)!) } : null;
+    const tip = tipOf(members.at(-1)!);
+    const named = `batch ${batch} (${members.join(', ')})`;
+    const summary = state === 'waiting' ? `${named} waits for batch ${batch - 1} to merge`
+      : state === 'merging' ? `${named}: combined tip ${tipOf((step as { members: string[] }).members.at(-1)!)?.slice(0, 12) ?? 'unpublished'} passed; merging ${(step as { members: string[] }).members.join(', ')} in order`
+      : state === 'ejecting' ? `${named}: ${(step as { member: string }).member} is isolated as failing ${(step as { check: string }).check} and is ejected; the rest stay queued`
+      : state === 'bisecting' ? `${named}: the combined tip failed; bisecting on the tip of ${underTest!.members.join(', ')}${underTest!.tip ? ` (${underTest!.tip.slice(0, 12)})` : ''}`
+      : `${named}: validating combined tip ${tip?.slice(0, 12) ?? '(not yet published)'}`;
+    for (const key of members) views.set(key, { batch, size: members.length, members, tip, underTest, state, step, summary });
+  }
+  return views;
+}
+/** The batch one queued entry is in under `batchSize`, as the gates read it; null when it is in none (passed over, or not queued). */
+export function queueBatch(work: Pick<Work, 'key'>, all: Work[], now: number, batchSize: number, ciAppIds: readonly number[] | null): MergeBatchView | null {
+  return describeMergeBatches(all, predictQueue(all, now), batchSize, ciAppIds).get(work.key) ?? null;
 }
