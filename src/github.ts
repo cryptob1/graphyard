@@ -1,5 +1,5 @@
 import { ReconciliationRetry, Refusal, SpeculativeConflict, requireCurrent } from './model.js';
-import { createSign, randomUUID } from 'node:crypto';
+import { createHash, createSign, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
@@ -21,6 +21,31 @@ export const scopeLookupBudget = 200;
  * so a list this long may be truncated: it is treated as incomplete and nothing is carried.
  */
 export const compareFileCap = 300;
+/** One file of a GitHub compare, as far as a patch-id reads it. */
+export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown }
+/**
+ * The patch-id of a change as GitHub's compare lists it (GY-330): a hash of every file's path,
+ * rename source, status and textual patch, with hunk line numbers removed as `git patch-id`
+ * removes them. Unlike `git patch-id`, whitespace inside a line counts: a change to indentation
+ * (YAML, Python, Makefiles) or to a string literal is a different change; only a line ending's
+ * carriage return and trailing whitespace are ignored. The same change applied to a base that
+ * moved elsewhere — even in another hunk of the same file — has the same patch-id; any edit to the
+ * change itself gives another.
+ * Null when the list is not the whole change: truncated at compareFileCap, or a file GitHub gives
+ * no textual patch for (binary, or too large), apart from a pure rename, which has none to give.
+ */
+export function patchId(files: CompareFile[] | null | undefined): string | null {
+  if (!Array.isArray(files) || files.length >= compareFileCap) return null;
+  const parts: string[] = [];
+  for (const file of files) {
+    if (typeof file?.filename !== 'string') return null;
+    const renamed = file.status === 'renamed' && (file.changes ?? 0) === 0;
+    if (typeof file.patch !== 'string' && !renamed) return null;
+    const body = typeof file.patch === 'string' ? file.patch.split('\n').map(line => line.startsWith('@@') ? '@@' : line.replace(/\s+$/, '')).join('\n') : '';
+    parts.push(`${typeof file.previous_filename === 'string' ? file.previous_filename : file.filename}\u0000${file.filename}\u0000${String(file.status ?? '')}\u0000${body}`);
+  }
+  return createHash('sha1').update(parts.sort().join('\u0001')).digest('hex');
+}
 const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
@@ -1210,7 +1235,21 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     }
     return [...new Set(paths(files))];
   }
-  /** How GitHub describes the tip Graphyard's merge produced: parents, author, and whether the author is this App. */
+  /**
+   * The patch-id of `head`'s own change: GitHub's compare of it against its merge base with
+   * `base` (a three-dot compare). Null when there is no change of its own to read, or when GitHub
+   * could not list it completely or at all: the carry then falls back to the files rule.
+   */
+  async diffPatchId(base: string, head: string): Promise<string | null> {
+    if (base === head) return null;
+    try { return patchId((await this.request(`/compare/${base}...${head}`))?.files); }
+    catch { return null; }
+  }
+  /**
+   * How GitHub describes the tip Graphyard's merge produced: parents, author, whether the author is
+   * this App, and the change's own diff on each side of the merge (GY-330) — the reviewed head
+   * against the base it was bound to, and the tip against the base it was merged onto.
+   */
   private async describeMerge(from: string, tip: string, boundBase: string, predictedBase: string): Promise<TipMerge> {
     const commit = await this.request(`/commits/${tip}`);
     const parents = Array.isArray(commit?.parents) ? commit.parents.map((parent: any) => parent?.sha).filter((sha: unknown) => typeof sha === 'string') : [];
@@ -1219,7 +1258,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const authoredByApp = appAuthored(commit, await this.controlPlaneLogin());
     // The provider merge never resolves a conflict: a conflicting merge is refused with 409 and
     // ejects the entry (see mergeBranch), so a tip that exists was produced without one.
-    return { from, parents, author: author ?? (email || null), authoredByApp, conflicts: false, baseChanges: await this.changedFiles(boundBase, predictedBase) };
+    // A diff neither side of which could be read is left off: the record is what it was before GY-330.
+    const diff = { reviewed: await this.diffPatchId(boundBase, from), tip: await this.diffPatchId(predictedBase, tip) };
+    return { from, parents, author: author ?? (email || null), authoredByApp, conflicts: false, baseChanges: await this.changedFiles(boundBase, predictedBase), ...(diff.reviewed || diff.tip ? { diff } : {}) };
   }
   /** Returns the new head, or null when the branch already contains the merged commit. */
   async mergeBranch(branch: string, head: string, message: string): Promise<string | null> {
@@ -1581,7 +1622,17 @@ export const headObservationSeconds = 20;
 export const idleObservationSeconds = 300;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
+/** How often the job loop re-reads the batch size the master published (GY-330). */
+export const mergeBatchSizeRefreshMs = 30_000;
+const batchSizeRead = new WeakMap<Engine, number>();
 export async function processJob(engine: Engine, github: GitHub) {
+  // The batch size is the master's configuration, published to the installation ledger; a
+  // restarted server reads it back here before the next evaluation it runs.
+  const readAt = batchSizeRead.get(engine);
+  if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
+    batchSizeRead.set(engine, Date.now());
+    await engine.loadMergeBatchSize().catch(() => batchSizeRead.delete(engine));
+  }
   const job = await engine.store.takeJob();
   if (!job) return;
   let work: Work | undefined;

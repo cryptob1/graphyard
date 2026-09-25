@@ -12,7 +12,7 @@ import { regressionRefusals } from '../regression-guard.js';
 import { mechanicalFailure, mechanicalVerdicts } from './mechanical-proofs.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeBatchSize?: number): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
@@ -89,10 +89,11 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   // is reconciled.
   const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
   const threads = current ? conversationProtectionRefusal(work) : null;
-  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !threads && !!candidate && !obs?.merged);
+  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !threads && !!candidate && !obs?.merged, mergeBatchSize);
   // CI on a queued entry's own speculative tip is the merge step validating the combined result,
   // not the change going back to Test because the base moved (GY-292): its checks refuse the merge
-  // gate, and the test gate, which judges the candidate's own change, stands.
+  // gate, and the test gate, which judges the candidate's own change, stands. A batch member the
+  // plan merges on its batch's passing combined tip needs no verdict on its own tip (GY-330).
   const test = gates.find(g => g.name === 'test')!;
   const validating = tipValidation(work, queueState.queue, test.reasons);
   if (validating) { test.reasons = []; test.passed = true; }
