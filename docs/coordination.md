@@ -17,11 +17,11 @@ A criterion states an outcome and its proofs:
 
 ## Dispatch optimistically, smallest scope first
 
-`plannedFiles` (paths, or directory prefixes ending in `/`) is the change-scope contract, not a lock: overlap holds nothing. The merge queue and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and lists candidates `git merge-tree` cannot merge. Smallest planned scope dispatches first; a root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
+`plannedFiles` (paths, or directory prefixes ending in `/`) is the change-scope contract, not a lock: the merge queue and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and lists candidates `git merge-tree` cannot merge. Smallest planned scope dispatches first; a root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI. Unresolved threads are its inputs: the approval lists each on `Resolved threads:` or `Overridden threads:`, recorded with the verdict; the loop resolves those and outdated-line threads. After two rework rounds a bot's thread is advisory. Protection requiring conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI. Threads are its inputs: the approval names each resolved, follow-up (filed as backlog) or overridden; the loop resolves them and outdated-line threads. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 

@@ -9,7 +9,7 @@ Register the exact branch, path and host ID (`graphyard register GY-1 workspace.
 
 ## `watch`
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials from the child and on lease loss sends SIGTERM then SIGKILL to the process group; it is not a sandbox. A contained launch first records a **quarantine** naming its systemd scope unit. If the supervisor dies, the item stays fenced until `POST /api/work/UUID/autosettle` (`coordinator` or `admin`) proves authority expired 120 seconds ago and no supervisor, workspace process or scope member is alive, or until an operator attests the stop. Once that scope ends, settlement excuses only the recorded pane's idle, childless shell; the loop closes its pane and re-probes.
+`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials from the child and on lease loss sends SIGTERM then SIGKILL to the process group; it is not a sandbox. A contained launch first records a **quarantine** naming its systemd scope unit. If the supervisor dies, the item stays fenced until `POST /api/work/UUID/autosettle` (`coordinator` or `admin`) proves authority expired 120 seconds ago and no supervisor, workspace process or scope member is alive, or until an operator attests the stop. Settlement then excuses only the recorded pane's idle, childless shell, whose pane the loop closes.
 
 ## How a lease ends
 

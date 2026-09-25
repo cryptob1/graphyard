@@ -53,7 +53,7 @@ When a candidate passes the build gate, `autoDispatch` records one producer requ
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) is how many sessions it runs at once, each with a name unique to its request above one. Changes apply without a restart; lowering it drains sessions first; status reports `longestWaitMs`; a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles as `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`; close its pane. Unanswered sessions relaunch next tick on another profile (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded, relaunched after 2 minutes.
+**Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles as `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`; close its pane. Unanswered sessions relaunch on another profile (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded, then relaunched.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching that review.
 
@@ -71,4 +71,4 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 `master merge GY-N|--all` (skipping system-driven items) merges only under a current authorization for the exact head, base and policy, never using an administrative merge bypass. Protocol skew refuses: `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
 
-Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` (filed as one backlog item) or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
+Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

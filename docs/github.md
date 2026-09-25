@@ -55,7 +55,7 @@ With `"deploySmoke": true` in the policy, the master dispatches the smoke workfl
 
 ## Enforcement boundary
 
-No transaction spans GitHub and Postgres: a single-use merge execution and final re-observation narrow the gap, and [revocation](protocol/evidence.md#revocation) cancels an execution until its commit point. An unknown provider outcome is settled next tick from the pull request: merged delivers; open at the same head is retried. Restrict other merge identities; a worker can still push its own branch after losing its lease.
+No transaction spans GitHub and Postgres: a single-use merge execution and final re-observation narrow the gap, and [revocation](protocol/evidence.md#revocation) cancels an execution until its commit point. An unknown merge outcome is settled next tick from the pull request. Restrict other merge identities; a worker can still push its own branch after losing its lease.
 
 ## Identity-bound agent review
 
