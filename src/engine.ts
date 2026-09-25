@@ -1188,8 +1188,19 @@ export class Engine {
       demand(work, 'Work item not found', 404);
       if (action.kind !== 'hold') await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'github', action.kind === 'enqueue' ? 'merge.enqueued' : 'merge.dequeued',
         JSON.stringify({ details: { reason: action.reason, pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, head: state.head, queue: state.queue, mode: state.mode, at: now.toISOString() } })]);
+      // A refused enqueue or dequeue is a hold for the queue, never silent (all merges stalled when
+      // GitHub refused auto-merge on clean pull requests): one `merge.enqueue.refused` per reason and
+      // head, however many observations repeat it, and the latest kept on the observation for master status.
+      let refused: GitHubMergeQueueState['refused'] = null;
+      if (action.kind === 'hold' && action.reason.startsWith('GitHub refused to')) {
+        const seen = (await db.query("SELECT created_at FROM events WHERE work_id=$1 AND kind='merge.enqueue.refused' AND payload->'details'->>'reason'=$2 AND payload->'details'->>'head'=$3 ORDER BY seq DESC LIMIT 1", [work.id, action.reason, state.head])).rows[0];
+        const at = seen ? new Date(seen.created_at).toISOString() : now.toISOString();
+        if (!seen) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'github', 'merge.enqueue.refused',
+          JSON.stringify({ details: { reason: action.reason, head: state.head, mode: state.mode, pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, queue: state.queue, mergeStateStatus: state.mergeStateStatus ?? null, at } })]);
+        refused = { reason: action.reason, head: state.head, mode: state.mode, at };
+      }
       // What the queue holds once the action took effect: GitHub answered the mutation, not a re-read.
-      const recorded: GitHubMergeQueueState = { ...state, mode: action.kind === 'enqueue' ? state.queue ? 'queued' : 'auto-merge' : action.kind === 'dequeue' ? 'none' : state.mode };
+      const recorded: GitHubMergeQueueState = { ...state, mode: action.kind === 'enqueue' ? state.queue ? 'queued' : 'auto-merge' : action.kind === 'dequeue' ? 'none' : state.mode, refused };
       const comparable = (value: GitHubMergeQueueState | null | undefined) => value ? JSON.stringify({ ...value, at: null }) : null;
       if (!work.observation || work.observation.merged || comparable(work.observation.githubQueue) === comparable(recorded)) return work;
       work.observation.githubQueue = recorded;
