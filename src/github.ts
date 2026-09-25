@@ -25,9 +25,12 @@ export const compareFileCap = 300;
 export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown }
 /**
  * The patch-id of a change as GitHub's compare lists it (GY-330): a hash of every file's path,
- * rename source, status and textual patch, with hunk line numbers and whitespace removed as `git
- * patch-id` removes them. The same change applied to a base that moved elsewhere — even in another
- * hunk of the same file — has the same patch-id; any edit to the change itself gives another.
+ * rename source, status and textual patch, with hunk line numbers removed as `git patch-id`
+ * removes them. Unlike `git patch-id`, whitespace inside a line counts: a change to indentation
+ * (YAML, Python, Makefiles) or to a string literal is a different change; only a line ending's
+ * carriage return and trailing whitespace are ignored. The same change applied to a base that
+ * moved elsewhere — even in another hunk of the same file — has the same patch-id; any edit to the
+ * change itself gives another.
  * Null when the list is not the whole change: truncated at compareFileCap, or a file GitHub gives
  * no textual patch for (binary, or too large), apart from a pure rename, which has none to give.
  */
@@ -38,7 +41,7 @@ export function patchId(files: CompareFile[] | null | undefined): string | null 
     if (typeof file?.filename !== 'string') return null;
     const renamed = file.status === 'renamed' && (file.changes ?? 0) === 0;
     if (typeof file.patch !== 'string' && !renamed) return null;
-    const body = typeof file.patch === 'string' ? file.patch.split('\n').map(line => line.startsWith('@@') ? '@@' : line.replace(/\s+/g, '')).join('\n') : '';
+    const body = typeof file.patch === 'string' ? file.patch.split('\n').map(line => line.startsWith('@@') ? '@@' : line.replace(/\s+$/, '')).join('\n') : '';
     parts.push(`${typeof file.previous_filename === 'string' ? file.previous_filename : file.filename}\u0000${file.filename}\u0000${String(file.status ?? '')}\u0000${body}`);
   }
   return createHash('sha1').update(parts.sort().join('\u0001')).digest('hex');
@@ -1596,7 +1599,17 @@ export const headObservationSeconds = 20;
 export const idleObservationSeconds = 300;
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
+/** How often the job loop re-reads the batch size the master published (GY-330). */
+export const mergeBatchSizeRefreshMs = 30_000;
+const batchSizeRead = new WeakMap<Engine, number>();
 export async function processJob(engine: Engine, github: GitHub) {
+  // The batch size is the master's configuration, published to the installation ledger; a
+  // restarted server reads it back here before the next evaluation it runs.
+  const readAt = batchSizeRead.get(engine);
+  if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
+    batchSizeRead.set(engine, Date.now());
+    await engine.loadMergeBatchSize().catch(() => batchSizeRead.delete(engine));
+  }
   const job = await engine.store.takeJob();
   if (!job) return;
   let work: Work | undefined;

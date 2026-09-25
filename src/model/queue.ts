@@ -1,4 +1,4 @@
-import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from '../merge-queue.js';
+import { defaultMergeBatchSize, ejectionReason, nextQueueSequence, queueBatch, queueHistoryLimit, queuePlacement } from '../merge-queue.js';
 import type { QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { carriedApproval, currentCarry, describeGround } from './carry.js';
@@ -11,7 +11,7 @@ import { requiredProofs } from './bootstrap.js';
  * place, reorder, or hold a position. An entry leaves only by merging or by an explicit,
  * observed validation failure, and a re-entry always starts a new sequence at the back.
  */
-export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean) {
+export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, batchSize = defaultMergeBatchSize) {
   const history = [...(work.queueHistory ?? [])];
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
@@ -20,7 +20,10 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
   };
   const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
-  const reason = queue ? ejectionReason(probe, ciAppIds, all) : null;
+  // The batch plan (GY-330) decides which failed tip ejects: it is read from the queue as it
+  // stands, with this entry's own record as just observed.
+  const batchOf = (subject: Work) => queueBatch(subject, all.map(item => item.id === subject.id ? subject : item), now.getTime(), batchSize, ciAppIds);
+  const reason = queue ? ejectionReason(probe, ciAppIds, all, batchOf(probe)) : null;
   if (queue && reason) {
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
@@ -33,6 +36,11 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   }
   const shadow = { ...work, queue, queueSequence } as Work;
   const placement = queue ? queuePlacement(shadow, all.map(item => item.id === work.id ? shadow : item), now.getTime()) : null;
+  if (queue) {
+    const batch = batchOf(shadow);
+    const { batch: _previous, ...entry } = queue;
+    queue = batch ? { ...entry, batch } : entry;
+  }
   const reasons = placement ? placement.reasons
     : work.observation?.merged || work.stage === 'done' ? []
     : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]

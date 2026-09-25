@@ -30,7 +30,7 @@ import { basePaths, baseText, findingScope, readReviewFindings, type ReviewFindi
 import { capacityRecheckMs, defaultAwaitReviewers, launchedSessionHandle, unexercisedFindings } from './auto-dispatch.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { approverProfile, approverRoleHealth, classifyRuntimePrompt, continueAfterDecline, deliverPrompt, escalationProfile, escalationRoleHealth, readApproverLaunch, inspectProducerCredentials, inspectProfileAccounts, launchEscalationHandler, preservePartialWork, profileAccount, ownLoginAccounts, readEnvironmentLog, readEscalationSessions, recordObservedExhaustion, roleCapacity, saveEscalationSession, selectionKey, verifiedContext, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity, type RuntimePrompt } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionId, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, herdrJson, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, transientMergeRace, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, mergeBatchSize, approverSessionId, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, herdrJson, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, transientMergeRace, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { httpFleetClient } from './fleet.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
@@ -1681,6 +1681,12 @@ export interface DaemonEffects {
    * so the dashboard and flow report read releases under that same name; sent only on a change.
    */
   publishProductionEnvironment?: () => Promise<unknown>;
+  /**
+   * Publishes `mergeQueue.batchSize` (GY-330) to the control plane, whose merge queue batches by
+   * it; sent only on a change, and read at the start of every cycle so a reconfiguration applies
+   * before the next merge.
+   */
+  publishMergeBatchSize?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
   /**
@@ -1959,6 +1965,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   // settlement may only be proposed while the local clock can be compared with the control plane.
   const clockOffset = { min: Math.round(startedAt - clock), max: Math.round(readAt - clock) };
   const performed: DaemonAction[] = [];
+  // The merge queue batches by this loop's configuration; a failed publication is retried next cycle.
+  if (effects.publishMergeBatchSize) await effects.publishMergeBatchSize().catch(() => undefined);
   const resumed = reconcilePendingActions(state, snapshot.work, clock);
   if (resumed.length) { performed.push(...resumed); await effects.persist(state); }
   // One item's failure is that item's failed action, never the cycle's (GY-187). Each step handles
@@ -3878,7 +3886,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
-  let publishedEnvironment: string | null = null;
+  let publishedEnvironment: string | null = null, publishedBatchSize: number | null = null;
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     reconcileSessions: (runtime, finished) => reconcileFleetSessions(current(), runtime, finished),
@@ -3980,6 +3988,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (environment === publishedEnvironment) return;
       await deps.mutate('production-environment', { environment });
       publishedEnvironment = environment;
+    },
+    publishMergeBatchSize: async () => {
+      const batchSize = mergeBatchSize(current());
+      if (batchSize === publishedBatchSize) return;
+      await deps.mutate('merge-queue', { batchSize });
+      publishedBatchSize = batchSize;
     },
     recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {

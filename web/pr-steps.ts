@@ -1,5 +1,5 @@
 import { carriedBindings, deliveryState, isClosed, type Gate, type Work } from '../src/model';
-import { defaultMergeBatchSize, latestCheck, tipValidationPrefix } from '../src/merge-queue';
+import { latestCheck, tipValidationPrefix } from '../src/merge-queue';
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
 import type { PipelineTimeline } from '../src/pipeline-speed';
 import { assignment } from './assignment';
@@ -85,18 +85,15 @@ function tipChecks(work: Work): string[] {
   return reasons.filter(reason => reason.startsWith(tipValidationPrefix)).map(reason => reason.slice(reason.indexOf(': ') + 2));
 }
 
-/** A release view that may also carry the master's `mergeQueue.batchSize`; without it the default applies. */
-export type MergeBatchRelease = ReleaseView & { mergeBatchSize?: number };
 /**
- * The batch a queued entry is validated in, from its own speculative tip (GY-330): the tip is built
- * behind every validated entry ahead of it, so its place in that chain gives its batch, and the
- * entries ahead of it in the same batch are the members its combined tip already holds. Null for
- * the first member of a batch, whose tip holds no other member yet.
+ * The batch a queued entry is validated in (GY-330), as the control plane recorded it on the queue
+ * entry under the batch size the master published: its number, and the members ahead of it whose
+ * combination its tip already holds. Null outside a batch, and for the first member of a batch,
+ * whose tip holds no other member yet.
  */
-export function batchedWith(work: Work, batchSize: number): { number: number; ahead: string[] } | null {
-  const ahead = work.queue?.speculation?.tip === work.candidate?.sha ? work.queue?.speculation?.predecessors ?? [] : [];
-  const size = Math.max(1, Math.floor(batchSize)), start = Math.floor(ahead.length / size) * size;
-  return start < ahead.length ? { number: start / size + 1, ahead: ahead.slice(start) } : null;
+export function batchedWith(work: Work): { number: number; ahead: string[] } | null {
+  const batch = work.queue?.batch, at = batch?.members.indexOf(work.key) ?? -1;
+  return batch && at > 0 ? { number: batch.batch, ahead: batch.members.slice(0, at) } : null;
 }
 
 /** The review refusal no reviewer can answer: every configured reviewer profile is exhausted. */
@@ -180,7 +177,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       // A batched entry names the members ahead of it in its batch, whose combination its tip holds (GY-330).
       if (tipChecks(work).length) {
         const checks = checkStates(work, release.ciAppIds);
-        const batch = batchedWith(work, (release as MergeBatchRelease).mergeBatchSize ?? defaultMergeBatchSize);
+        const batch = batchedWith(work);
         return { detail: `validating the combined tip${batch ? ` of batch ${batch.number} with ${batch.ahead.join(', ')}` : ''} · ${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
       }
       const queued = reasons.map(reason => reason.match(/^Merge queue position (\d+) of \d+: (\S+) is ahead$/)).find(Boolean);

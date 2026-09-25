@@ -47,7 +47,7 @@ Reviews and proofs bind one head, base and policy revision. Across a conflict-fr
 
 ### Batches
 
-`mergeQueue.batchSize` in `.graphyard/master.json` (default 4; 1 disables it) groups consecutive entries under one combined tip, the last member's; on success they merge in order. A failing batch is halved until the failing entry is ejected, naming the check; the rest merge. `master status` shows the batch as `mergeStep`, a Merge substate.
+`mergeQueue.batchSize` in `.graphyard/master.json` (default 4; 1 restores one tip per entry) groups consecutive entries under one combined tip, the last member's. The master loop publishes it to the control plane (`POST /api/merge-queue`, recorded in the ledger; `/api/status` reports `mergeQueue`), whose gates follow the plan: CI is required only on the tip under test, members merge in order once a combined tip holding them passes, and a failing batch is halved until the entry failing where the prefix before it passed is ejected, naming the check. Other members' failing tips eject nothing; the rest merge. `master status` shows the batch as `mergeStep`, a Merge substate.
 
 ### Proofs in CI
 

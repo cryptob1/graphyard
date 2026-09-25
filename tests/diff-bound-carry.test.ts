@@ -46,6 +46,10 @@ test('unit:diff-bound-carry — a patch-id from GitHub\'s compare ignores where 
   assert.equal(patchId([...reviewedFiles()].reverse()), reviewed, 'the order GitHub lists files in does not matter');
   assert.notEqual(patchId(tipFiles('entries.push(other);')), reviewed, 'an edit to the change itself changes the patch-id');
   assert.notEqual(patchId(reviewedFiles().slice(0, 1)), reviewed, 'a file dropped from the change changes the patch-id');
+  // Whitespace inside a line is content: indentation and string literals are part of the change.
+  const yaml = (line: string) => [{ filename: 'ci.yml', status: 'modified', changes: 1, patch: `@@ -1,2 +1,2 @@\n jobs:\n-  old: 1\n+${line}` }];
+  assert.notEqual(patchId(yaml('  new: 1')), patchId(yaml('new: 1')), 'a change of indentation changes the patch-id');
+  assert.equal(patchId(yaml('  new: 1  \r')), patchId(yaml('  new: 1')), 'trailing whitespace and a carriage return do not');
   // A list that is not the whole change is never compared.
   assert.equal(patchId([{ filename: 'assets/logo.png', status: 'modified', changes: 0 }]), null, 'a binary file has no patch to compare');
   assert.equal(patchId(Array.from({ length: 300 }, (_, index) => ({ filename: `f${index}`, status: 'modified', changes: 1, patch: '@@ -1 +1 @@\n-a\n+b' }))), null, 'a truncated list');
