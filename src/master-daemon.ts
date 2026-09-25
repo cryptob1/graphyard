@@ -1507,7 +1507,7 @@ export interface DaemonEffects {
   /**
    * The control plane's status, read with the coordinator's visibility, whose status-level problems
    * (App permissions, held jobs, production, a GitHub pause, unserved executors) are classified and
-   * tracked each cycle. A read that fails leaves the cycle to the faults it has.
+   * tracked each cycle. A read that fails makes the cycle partial: it opens what it saw and ends nothing.
    */
   controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
   /**
@@ -1582,7 +1582,8 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
   }
-  if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }));
+  // The reported attention names each unserved executor kind on the item it holds; the status's copy of the same lines is not a second fault.
+  if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }).filter(fault => !(sources.reported && fault.kind === 'executor')));
   const shown = new Set(own.map(fault => `${fault.subject}|${fault.faultClass}`));
   return [...own, ...derived.filter(fault => !shown.has(`${fault.subject}|${fault.faultClass}`))];
 }
@@ -2628,12 +2629,15 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
 
   // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
-  const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => null) : null;
+  //     A read that fails makes the cycle partial: faults its source would have shown were not
+  //     observed, so none standing ends this cycle (and none reopens as a new instance next cycle).
+  let partial = false, reported: AttentionItem[] | undefined;
+  const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => { partial = true; return null; }) : null;
   const summary = controlPlane && effects.reportedAttention ? daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId) : null;
-  const reported = summary ? await effects.reportedAttention!(snapshot.work, controlPlane!, { agents, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
-    .catch(error => [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem]) : [];
+  if (summary) reported = await effects.reportedAttention!(snapshot.work, controlPlane!, { agents, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
+    .catch(error => { partial = true; return [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem]; });
   endFailingRuns(state, effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), clock);
-  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported }), new Date(clock).toISOString());
+  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported }), new Date(clock).toISOString(), partial);
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
 
   spent('deployment');

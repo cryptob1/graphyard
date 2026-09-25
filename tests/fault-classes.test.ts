@@ -10,11 +10,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
-import { controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type MasterConfig } from '../src/master.js';
+import { controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
 import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, type DaemonEffects } from '../src/master-daemon.js';
 import { derivedAttention, faulted } from '../src/master-status.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
+import { describeUnserved } from '../src/model/executor-presence.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import OverviewPage from '../web/pages/overview.js';
@@ -517,4 +518,46 @@ test('unit:recurring-class-item — the loop reads status-level faults with coor
   } finally {
     await rm(secrets, { recursive: true, force: true });
   }
+});
+
+test('unit:recurring-class-item — a failed control-plane read ends no standing fault, so transient failures file nothing', async () => {
+  const filed: any[] = [];
+  let read: 'ok' | 'fail' = 'ok';
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {},
+    controlPlane: async () => { if (read === 'fail') throw new Error('status read timed out'); return { github: true, heldJobs: 1, jobs: [] }; },
+    reportedAttention: async () => [],
+    fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${400 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  // The held job stands throughout; every other read of the status fails.
+  for (let round = 0; round < 7; round++) {
+    read = round % 2 ? 'fail' : 'ok';
+    const now = clock + round * 60_000; await runCycle(config(), state, effects, () => now);
+  }
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'held-jobs').length, 1, 'one standing fault is one instance across the unread cycles');
+  assert.deepEqual(filed, [], 'transient read failures neither reopen the standing fault nor file its class');
+  // A cycle that read everything and no longer sees the fault ends it; its return is a new instance.
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  const held = { kind: 'held-jobs' as const, faultClass: 'configuration' as const, subject: 'installation', text: 'held' };
+  trackFaults(record, [held], iso(0)); trackFaults(record, [], iso(60_000), true);
+  assert.equal(trackFaults(record, [held], iso(120_000)).length, 0, 'partial: still the same instance');
+  trackFaults(record, [], iso(180_000));
+  assert.equal(trackFaults(record, [held], iso(240_000)).length, 1, 'a full read that cleared it ends it');
+});
+
+test('unit:fault-classes — unserved executor attention is classified once, as the executor configuration fault', () => {
+  const unserved = describeUnserved({ live: [], unserved: [{ kind: 'merge', key: 'GY-1', requestedAt: iso(-hour), waitedMs: hour, start: 'graphyard executor start' }] } as any);
+  const reported = unserved.map(entry => ({ subject: entry.keys[0], text: entry.text })) as AttentionItem[];
+  const down = { subject: 'GY-2', text: `Every declared executor slot on this host is down (graphyard-executor@1.service inactive) while 1 action(s) are pending, the oldest merge for GY-2 since ${iso(-hour)}; GET /api/actions failed` };
+  assert.deepEqual(classifyAttention([...reported, down]).map(entry => [entry.subject, entry.kind, entry.faultClass]), [['GY-1', 'executor', 'configuration'], ['GY-2', 'executor', 'configuration']]);
+  // The status carries the same unserved lines: with the reported attention read, they are not a second fault.
+  const status = { github: true, executors: { live: 0, attention: unserved } } as any;
+  const state = emptyDaemonState(config());
+  const faults = cycleFaults(state, [], clock, { config: config(), status, reported }).filter(fault => fault.faultClass === 'configuration' || fault.faultClass === 'unclassified');
+  assert.deepEqual(faults.map(fault => [fault.subject, fault.kind]), [['GY-1', 'executor']]);
+  // Without the reported attention (the dashboard's read), the status's copy is the one fault.
+  assert.deepEqual(cycleFaults(state, [], clock, { config: config(), status }).filter(fault => fault.kind === 'executor').map(fault => fault.subject), ['executors']);
 });

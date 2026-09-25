@@ -113,7 +113,7 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['github-budget', subject => subject === 'github'],
   ['intervention-pattern', subject => subject === 'interventions'],
   ['throughput', subject => subject === 'throughput'],
-  ['executor', subject => subject === 'executors'],
+  ['executor', (subject, text) => subject === 'executors' || /^Nothing can run \S+: |^Every declared executor slot on this host is down/.test(text)],
   ['setup', subject => subject === 'setup'],
   ['dispatch-failures', subject => subject === 'dispatch'],
   ['loop-cursor', (subject, text) => subject === 'loop' && /cursor cannot be read/.test(text)],
@@ -257,9 +257,9 @@ function retain(record: FaultRecord) { // drops the oldest past the bound: first
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
  * the same instance (its `lastSeenAt` moves); one not seen before, or seen again after it cleared,
- * is a new instance; one no longer observed has ended. Returns the instances this cycle opened.
+ * is a new instance; one no longer observed has ended — unless the cycle's reads were `partial`, when an unread source ends nothing. Returns what opened.
  */
-export function trackFaults(record: FaultRecord, observations: readonly FaultObservation[], at: string): FaultInstance[] {
+export function trackFaults(record: FaultRecord, observations: readonly FaultObservation[], at: string, partial = false): FaultInstance[] {
   const opened: FaultInstance[] = [], seen = new Set<string>();
   for (const observation of observations) {
     const key = `${observation.kind}|${observation.subject.slice(0, 200)}`;
@@ -269,7 +269,7 @@ export function trackFaults(record: FaultRecord, observations: readonly FaultObs
     const instance = instanceOf(observation, at);
     record.instances.push(instance); record.open[key] = instance.id; opened.push(instance);
   }
-  for (const key of Object.keys(record.open)) if (!seen.has(key)) delete record.open[key];
+  if (!partial) for (const key of Object.keys(record.open)) if (!seen.has(key)) delete record.open[key];
   retain(record);
   return opened;
 }
