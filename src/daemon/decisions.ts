@@ -365,6 +365,11 @@ export function reworkDecisionReason(prefix: string, grounds: string, refused: s
   const suffix = [prose, bare].find(text => decisionReasonMax - prefix.length - text.length >= Math.min(reworkGroundsMin, grounds.length));
   return suffix === undefined ? null : fitDecisionReason(prefix, grounds, suffix);
 }
+/** How many standing refusals the server names that a rework request answers by citing them before it gives up. */
+export const maxRefusalAnswers = 3;
+/** The refused rework decision the server's refusal of a request names as standing against it, or null. */
+export const refusalNamedIn = (error: string): string | null =>
+  /Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \(rework\) with this input\b/.exec(error)?.[1] ?? null;
 /**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
  * carry that attestation and the engine lowers the containment fence on it, so it rests only on

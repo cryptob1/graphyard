@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
+import type { DecisionSituation } from '../model/approval.js';
 import type { ScopeRequestState } from '../model/scope.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
@@ -107,7 +108,7 @@ export interface DaemonEffects {
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
    */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —

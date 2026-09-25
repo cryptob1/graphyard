@@ -1,11 +1,11 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
-import { uncitedRefusals } from '../model/approval.js';
+import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
 import { type ContainmentAssessment, type HerdrAgent, approverSessionName, approvedMerge, decisionInput } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
@@ -149,9 +149,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // names its grounds, and a refused binding is never requested again), so it answers the prior
       // refusals of this action on the item by citing them. A refusal an earlier refused request
       // already cited is answered through it, so only the uncited ones are named: however many
-      // refusals the item gathers, the citation stays the newest one or few (GY-163).
-      const refused = decision.action === 'rework' ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), 'rework', decisionInput('rework', item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b)) : [];
-      const reason = decision.action === 'rework' ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, refused) : fitDecisionReason('', decision.reason, '');
+      // refusals the item gathers, the citation stays the newest one or few (GY-163). A refusal
+      // stands only against the candidate and base it judged (GY-229): one refused for an earlier
+      // candidate is not this request's to answer, so only this candidate's refusals are cited.
+      let refused = decision.action === 'rework' ? uncitedRefusals(history.map(entry => ({ ...entry, reason: entry.reason ?? '' })), 'rework', decisionInput('rework', item, {}), (a, b) => JSON.stringify(a) === JSON.stringify(b), decisionSituation('rework', item)) : [];
+      let reason = decision.action === 'rework' ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, refused) : fitDecisionReason('', decision.reason, '');
       if (reason === null) {
         // Retrying would be refused every time; the request is not sent, and the master is told once.
         const escalation = `escalation:rework-refusals:${item.key}:${refused.length}`;
@@ -159,7 +161,21 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         if (!state.actions[escalation]) await note(escalation, item, 'escalation', 'failed', `${item.key} has ${refused.length} refused rework decisions that no later refused request cited, and a rework request must cite each by id within the ${decisionReasonMax}-character reason bound; they no longer fit beside its grounds (${decision.reason.slice(0, 300)}), so the loop has stopped requesting it: read them with graphyard master decisions ${item.key}, then request it with graphyard master decide ${item.key} rework --precedent ID[,ID] REASON citing them, or act on the item yourself`);
         return;
       }
-      const requested = standing ?? await effects.decide!(item, decision.action, reason, decision.input);
+      // The history the loop read can miss a refusal the server holds (the read failed, or a refusal
+      // landed since). The server's answer names it, and this candidate's refusal is the loop's to
+      // answer on its new grounds: the request is made again citing it, a bounded number of times,
+      // rather than failing on every cycle with nobody told why (GY-229).
+      let requested: { id: string } | undefined = standing;
+      for (let answers = 0; !requested; answers++) {
+        try { requested = await effects.decide!(item, decision.action, reason, decision.input); }
+        catch (error) {
+          const named = decision.action === 'rework' && answers < maxRefusalAnswers ? refusalNamedIn(message(error)) : null;
+          const cited = named && !refused.includes(named) ? reworkDecisionReason(`${observedFrom(item)} `, decision.reason, [...refused, named]) : null;
+          if (!named || cited === null) throw error;
+          refused = [...refused, named];
+          reason = cited;
+        }
+      }
       // A standing request another watch holds is the same decision under a binding that has since
       // changed (a rework's unresolved-thread set moved while it was requested). That watch is
       // retired here, its sessions and counts carried over, so the cleanup below does not withdraw
