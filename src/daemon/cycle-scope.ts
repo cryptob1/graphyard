@@ -1,6 +1,7 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
-import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, testFile } from '../model/scope.js';
+import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, routableScopeRequest, testFile, unplannedPaths } from '../model/scope.js';
+import { type Successor, successorGround, successorsOf } from '../model/successors.js';
 import { findingScope, type ReviewFinding } from '../review-scope.js';
 import { guardBroadScope } from '../master.js';
 import { message, scopeMeasurementSchema } from './state.js';
@@ -13,15 +14,23 @@ import type { Cycle } from './cycle.js';
 
 /**
  * GY-199. What grants each requested path without an approver, or the first refusal: a trusted
- * review finding naming it (review-scope.ts findingScope), or — for a test file — the pinning rule
- * (model/scope.ts pinningTestGround), read from the base branch's texts outside every transaction.
+ * review finding naming it (review-scope.ts findingScope), a file on the base that succeeds a
+ * planned file main split or renamed (GY-394, model/scope.ts successorsOf), or — for a test file —
+ * the pinning rule (model/scope.ts pinningTestGround), read from the base branch outside every
+ * transaction. `successors` is read once, and only when a finding does not already ground a path.
  */
-export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>): Promise<{ grounds: { path: string; ground: string }[] } | { refusal: string }> {
+export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>, successors?: () => Promise<readonly Successor[]>): Promise<{ grounds: { path: string; ground: string }[] } | { refusal: string }> {
   const grounds: { path: string; ground: string }[] = [];
   let planned: { path: string; text: string | null }[] | null = null;
+  let succeeding: readonly Successor[] | null = null;
   for (const path of paths) {
     const named = findingScope([path], findings, exists);
     if ('grounds' in named) { grounds.push(...named.grounds); continue; }
+    if (successors && !pathScope(path).prefix && exists(path)) {
+      succeeding ??= await successors();
+      const successor = succeeding.find(entry => entry.path === path);
+      if (successor) { grounds.push({ path, ground: successorGround(successor) }); continue; }
+    }
     if (read && testFile(path) && exists(path)) {
       const text = await read(path);
       planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
@@ -55,7 +64,7 @@ export async function scopeStep(cycle: Cycle) {
   //     end that clears that request meanwhile makes the control plane refuse it, never apply it.
   //     It answers with the time the control plane recorded the widening, or null when it did not widen.
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<string | null> => {
-    if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
+    if (!(effects.reviewFindings || effects.baseSuccessions) || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return null;
     const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
     if (!paths.length) return null;
@@ -66,9 +75,9 @@ export async function scopeStep(cycle: Cycle) {
     if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return null;
     const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
     try {
-      const findings = await effects.reviewFindings(item);
+      const findings = await effects.reviewFindings?.(item) ?? [];
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
-      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText);
+      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText, baseSuccessors(effects, item));
       if ('refusal' in scoped) {
         const detail = boundDetail(`Not widened on a review finding: ${scoped.refusal}`);
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
@@ -78,12 +87,12 @@ export async function scopeStep(cycle: Cycle) {
       }
       const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
-        `Additive scope ${item.key}'s own change calls for — a review finding names it, or a test pins text a planned file holds: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+        `Additive scope ${item.key}'s own change calls for — a review finding names it, it succeeds a planned file the base branch split or renamed, or a test pins text a planned file holds: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       const widened = await effects.widenScope(item, request, paths, reason) as Work | undefined;
       // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
       const recorded = widened?.scopeDecision;
       const at = recorded?.epoch === request.epoch && recorded.requestedAt === request.at ? recorded.at : new Date(now()).toISOString();
-      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${scoped.grounds.every(entry => entry.ground.startsWith('successor of ')) ? `the base branch's split or rename of a planned file` : `the review finding that names ${paths.length === 1 ? 'it' : 'them'}`}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
@@ -148,4 +157,46 @@ export async function scopeStep(cycle: Cycle) {
     performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
   return { settled, budget };
+}
+
+/** The successors of the item's planned files on the base since the item was planned, as a lazy read for `automaticScopeGrounds`. */
+const baseSuccessors = (effects: Cycle['effects'], item: Work) => effects.baseSuccessions
+  ? async () => { const read = await effects.baseSuccessions!(item.createdAt); return successorsOf(item.plannedFiles ?? [], read.successions).filter(entry => read.files.has(entry.path)); }
+  : undefined;
+
+/**
+ * Step 2c (GY-394): re-plan open items onto the successors of the files they plan. When a merged
+ * change splits or renames a file — GY-177 split src/master-daemon.ts into src/daemon/* — every open
+ * item naming the old file would otherwise find the code it plans to change outside its scope, and
+ * stall on a scope request or on the build gate. The loop reads the base branch's successions since
+ * each item was planned and adds every successor that exists on the base, as the master's own
+ * audited additive requirements revision naming each successor's ground. Nothing is removed, and an
+ * item whose successors are all planned already is left alone, so a standing re-plan never churns.
+ */
+export async function successorStep(cycle: Cycle) {
+  const { state, effects, now, performed, isolate, open } = cycle;
+  if (!effects.baseSuccessions || !effects.replan) return;
+  for (const item of open) await isolate('scope', item, item.key, async () => {
+    if (item.observation?.merged || !(item.plannedFiles ?? []).length) return;
+    const key = `successors:${item.id}:${item.policyRevision}`;
+    const previous = state.actions[key];
+    if (previous && !readyToRetry(previous, state.cycle)) return;
+    const attempts = (previous?.attempts ?? 0) + 1;
+    try {
+      const read = await effects.baseSuccessions!(item.createdAt);
+      const found = successorsOf(item.plannedFiles ?? [], read.successions).filter(entry => read.files.has(entry.path));
+      const missing = new Set(unplannedPaths(item.plannedFiles, found.map(entry => entry.path)));
+      const adding = found.filter(entry => missing.has(entry.path));
+      if (!adding.length) return;
+      const grounds = adding.map(entry => `${entry.path} (${successorGround(entry)})`).join('; ');
+      const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...missing])] },
+        `Re-planned ${item.key} onto the successors of the files it plans, which the base branch split or renamed; nothing is removed: ${grounds}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+      await effects.replan!(item, [...missing], reason);
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'done',
+        detail: boundDetail(`Re-planned ${item.key} with ${namePaths([...missing])}, the successors of planned files the base branch split or renamed: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'failed',
+        detail: boundDetail(`Could not re-plan ${item.key} onto the successors of its planned files: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  });
 }

@@ -15,7 +15,7 @@ export { cycleCost, loopLiveness, cycleFailureAttentionAfter, cycleFailureCeilin
 export { stoppedStates, failoverKey, capacityKey, preserveKey, findingRecheckMs, launchAppearanceMs, handlerSettleMs, blockedPromptFailMs, blockedPromptAnswers, blockedPromptSettleMs, promptDigest, snapshotRetryDelayMs, retriedSnapshot, relaunchSession, daemonEffects, type LaunchedSession, type DaemonEffects } from './daemon/effects.js';
 export { runCycle } from './daemon/cycle.js';
 export { cycleFaults, timingFaultAttention, onceAnnotations, herdrFaultKinds, restatements, endFailingRuns, fileRecurringFaultClasses, faultRecurrenceReport, faultStep, type ReportedAttention, type FaultSources } from './daemon/faults.js';
-export { automaticScopeGrounds } from './daemon/cycle-scope.js';
+export { automaticScopeGrounds, successorStep } from './daemon/cycle-scope.js';
 export { closeEndedWorkerPanes } from './daemon/cycle-reclaim.js';
 export { mergeRaceRetries, waitingInMergeQueue, mergeRetryBaseMs, mergeRetryCapMs, mergeRetryDue } from './daemon/cycle-delivery.js';
 export { deploymentPageSize, deploymentListingPages, maxDeploymentRequests, productionEnvironmentRecord, observeDeployment } from './daemon/deployment.js';

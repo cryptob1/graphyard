@@ -7,6 +7,7 @@
 // files those texts name, as the master's own additive intent.
 import type { ChildRun } from './child-runner.js';
 import { pathScope } from './model/scope.js';
+import { parseSuccessions, successorMinSimilarity, successorTrailer, type Succession } from './model/successors.js';
 
 /** A review text the loop read and the grounds it is cited as: one trusted comment of an unresolved thread, or the reviewer's change request. */
 export interface ReviewFinding { ground: string; text: string }
@@ -147,4 +148,72 @@ export async function basePaths(root: string, baseBranch: string, paths: readonl
   const entries = String(await run('git', ['-C', root, 'ls-tree', '-z', commit, '--', ...paths])).split('\0');
   const files = new Set(entries.flatMap(entry => { const tab = entry.indexOf('\t'); return tab > 0 && entry.slice(0, tab).split(' ')[1] === 'blob' ? [entry.slice(tab + 1)] : []; }));
   return new Set(paths.filter(path => files.has(path)));
+}
+
+/** The most commits one successor read walks: a bound base months behind reads only the newest of them. */
+export const successionCommitLimit = 1000;
+/** What one successor read found: the base tip it read, the successions since the bound base, and which successors are files at that tip. */
+export interface SuccessionRead { tip: string; successions: Succession[]; files: Set<string> }
+/**
+ * The successions on the base branch since `since` (GY-394): every rename and copy git detects,
+ * commit by commit, at `successorMinSimilarity` or more (`-M -C`), with the successor map any split
+ * commit records in a `Graphyard-Successor:` trailer, oldest first. The bound base is the base
+ * branch's tip as it stood at `since` (first parent, so a branch merged later still counts), and a
+ * split spread over several commits is caught by one `--find-copies` diff between that bound base
+ * and the current tip, attributed to the tip. Reads `origin/<baseBranch>` as the last fetch left
+ * it; a failing git throws, so the caller retries rather than judging a successor absent.
+ */
+export async function baseSuccessions(root: string, baseBranch: string, since: string, run: ChildRun): Promise<SuccessionRead> {
+  const ref = `origin/${baseBranch}`, similarity = `${successorMinSimilarity}%`;
+  const tip = String(await run('git', ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`])).trim();
+  const bound = String(await run('git', ['-C', root, 'rev-list', '-1', '--first-parent', `--before=${since}`, tip])).trim();
+  const range = bound ? `${bound}..${tip}` : tip, walk = ['log', '--reverse', `--max-count=${successionCommitLimit}`];
+  // The recorded maps come from every commit; the detected pairs from the commits git sees a rename
+  // or copy in, since `--diff-filter` leaves a commit with neither out of its listing altogether.
+  const recorded = parseSuccessions(String(await run('git', ['-C', root, ...walk, `--format=%x1e%H%x1f%(trailers:key=${successorTrailer},valueonly,separator=%x1d)`, range])));
+  const detected = parseSuccessions(String(await run('git', ['-C', root, ...walk, `-M${similarity}`, `-C${similarity}`, '--name-status', '--diff-filter=RC', '--format=%x1e%H%x1f', range])));
+  const order = [...new Set([...recorded, ...detected].map(entry => entry.commit))];
+  const position = new Map(String(await run('git', ['-C', root, 'rev-list', '--reverse', `--max-count=${successionCommitLimit}`, range])).split('\n').filter(Boolean).map((commit, index) => [commit, index]));
+  order.sort((a, b) => (position.get(a) ?? 0) - (position.get(b) ?? 0));
+  const commits = order.flatMap(commit => [...recorded, ...detected].filter(entry => entry.commit === commit));
+  const spanning = bound && bound !== tip
+    ? parseSuccessions(`\x1e${tip}\n${String(await run('git', ['-C', root, 'diff', `-M${similarity}`, `-C${similarity}`, '--name-status', '--diff-filter=RC', bound, tip]))}`)
+      .filter(entry => !commits.some(other => other.from === entry.from && other.to === entry.to))
+    : [];
+  const successions = [...commits, ...spanning];
+  const targets = [...new Set(successions.map(entry => entry.to))];
+  const files = new Set<string>();
+  // Only a file at the tip is a successor to grant: a name renamed away again, or never created, is not.
+  for (let at = 0; at < targets.length; at += 200) {
+    const entries = String(await run('git', ['-C', root, 'ls-tree', '-z', tip, '--', ...targets.slice(at, at + 200)])).split('\0');
+    for (const entry of entries) { const tab = entry.indexOf('\t'); if (tab > 0 && entry.slice(0, tab).split(' ')[1] === 'blob') files.add(entry.slice(tab + 1)); }
+  }
+  return { tip, successions, files };
+}
+
+/** How often the loop fetches the base for its successor reads: a split is re-planned within about this long of merging. */
+export const successionFetchMs = 60_000;
+/**
+ * The loop's successor reader: fetches the base at most every `successionFetchMs`, and reads each
+ * bound base's successions once per base tip, so re-checking every open item every cycle costs a
+ * `rev-parse` and a `rev-list` per item while the base stands still.
+ */
+export function successionReader(root: string, baseBranch: string, run: ChildRun, clock: () => number = Date.now) {
+  let fetchedAt = -Infinity;
+  const read = new Map<string, SuccessionRead>();
+  return async (since: string): Promise<SuccessionRead> => {
+    if (clock() - fetchedAt >= successionFetchMs) {
+      await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`]);
+      fetchedAt = clock();
+    }
+    const tip = String(await run('git', ['-C', root, 'rev-parse', '--verify', `origin/${baseBranch}^{commit}`])).trim();
+    const bound = String(await run('git', ['-C', root, 'rev-list', '-1', '--first-parent', `--before=${since}`, tip])).trim();
+    const key = `${tip}:${bound}`;
+    const known = read.get(key);
+    if (known) return known;
+    const fresh = await baseSuccessions(root, baseBranch, since, run);
+    if (read.size >= 200) read.clear();
+    read.set(key, fresh);
+    return fresh;
+  };
 }
