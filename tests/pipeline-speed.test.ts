@@ -397,37 +397,27 @@ test('integration:speed-ci-proofs — a published queue tip is committed onto th
 });
 
 // ---------------------------------------------------------------------------------------------
-// AC-4 — overlapping plannedFiles are not built concurrently unless an operator overrides
+// AC-4 — overlapping plannedFiles are built concurrently: dispatch is optimistic
 // ---------------------------------------------------------------------------------------------
 
-test('integration:speed-conflict-avoidance — an item whose plannedFiles overlap a claimed or unmerged item is held from dispatch with the item ahead named in master status, the loop\'s schedule holds it, and only the operator\'s --allow-overlap dispatches over it', async () => {
+test('integration:speed-conflict-avoidance — an item whose plannedFiles overlap a claimed or unmerged item is dispatchable at once, the loop\'s schedule offers it, and master status records what it runs beside', async () => {
   const live = await claimed('Engine work in flight', ['src/engine.ts', 'src/master.ts']);
-  const held = await created('Overlaps the engine', ['src/engine.ts', 'docs/coordination.md']);
+  const overlapping = await created('Overlaps the engine', ['src/engine.ts', 'docs/coordination.md']);
   const apart = await created('Touches nothing shared', ['web/pages/speed.tsx']);
   const inFlight = await submitted('Submitted, unmerged', ['docs/coordination.md']);
   const work = await store.list();
   const now = Date.now();
   const schedule = dispatchSchedule(work, now);
-  const entry = (key: string) => schedule.order.find(item => item.key === key)!;
-  assert.equal(entry(held.key).held, true); assert.equal(entry(apart.key).held, false);
+  assert.ok(schedule.order.some(item => item.key === overlapping.key) && schedule.order.some(item => item.key === apart.key), 'both are offered');
   assert.equal(schedule.order.find(item => item.key === live.key), undefined, 'a claimed item is not offered');
-  const hold = schedule.held.find(item => item.key === held.key)!;
-  assert.deepEqual(hold.ahead.map(item => [item.key, item.paths]).sort(), [[inFlight.key, ['docs/coordination.md']], [live.key, ['src/engine.ts']]].sort());
-  assert.match(hold.reason, /Held by planned-file overlap/); assert.match(hold.reason, /--allow-overlap to override/);
-  assert.throws(() => assertDispatchable(held, work, new Date(now).toISOString()), new RegExp(`held by planned-file overlap with .*${live.key} \\(claimed, build\\) on src/engine\\.ts`));
-  assert.doesNotThrow(() => assertDispatchable(held, work, new Date(now).toISOString(), { allowOverlap: true }));
+  assert.doesNotThrow(() => assertDispatchable(overlapping, work, new Date(now).toISOString()));
   assert.doesNotThrow(() => assertDispatchable(apart, work, new Date(now).toISOString()));
   const status = buildMasterStatus({ work, now: new Date(now).toISOString() }, [], [], {}, {}, { pending: [], completed: [] });
-  const row = status.work.find(item => item.key === held.key)!;
-  assert.equal(row.overlap.held, true); assert.deepEqual(row.overlap.ahead.map(item => item.key).sort(), [inFlight.key, live.key].sort()); assert.match(row.overlap.reason!, /--allow-overlap/);
-  assert.equal(status.work.find(item => item.key === apart.key)!.overlap.held, false);
-  assert.deepEqual(status.schedule.held.map(item => item.key), [held.key]);
-  // Once the items ahead are out of the way the hold lifts on its own.
-  await store.pool.query("UPDATE work_items SET document=document||$2::jsonb WHERE id=$1", [inFlight.id, JSON.stringify({ stage: 'done', delivery: { mergedAt: new Date().toISOString(), mergeSha: sha40('1f'), authorizationRevision: 1 } })]);
-  await engine.execute(implementer, 'release', live.id, { epoch: live.epoch }, randomUUID());
-  assert.equal(dispatchSchedule(await store.list(), Date.now()).held.length, 0);
+  const row = status.work.find(item => item.key === overlapping.key)!;
+  assert.deepEqual(row.overlap.concurrent.map(item => [item.key, item.paths]).sort(), [[inFlight.key, ['docs/coordination.md']], [live.key, ['src/engine.ts']]].sort());
+  assert.deepEqual(status.work.find(item => item.key === apart.key)!.overlap.concurrent, []);
   const guide = await readMasterGuide();
-  for (const fragment of ['## Conflict avoidance', '--allow-overlap', 'smallest planned scope first']) assert.ok(guide.includes(fragment), `docs/master-agent.md must say: ${fragment}`);
+  for (const fragment of ['## Conflict avoidance', 'optimistic', 'smallest planned scope first']) assert.ok(guide.includes(fragment), `docs/master-agent.md must say: ${fragment}`);
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { mechanicalHold } from './model/dispatch.js';
+import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { inPlannedScope } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
@@ -24,7 +24,7 @@ export const compareFileCap = 300;
 const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { id isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login } url } } }
+    nodes { id isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login __typename } url } } }
   } } }
 }`;
 /**
@@ -179,7 +179,7 @@ export function observationFingerprint(observation: Observation | null | undefin
   if (!observation) return null;
   return JSON.stringify({
     sha: observation.candidate.sha, baseSha: observation.candidate.baseSha, baseTip: observation.baseTip,
-    prState: observation.prState, draft: observation.draft, merged: observation.merged, mergeable: observation.mergeable,
+    prState: observation.prState, draft: observation.draft, merged: observation.merged, mergeable: observation.mergeable, conflicting: observation.conflicting || undefined,
     checks: observation.checks.map(check => [check.name, check.result, check.appId, check.id ?? null, check.attempt ?? null]),
     reviews: observation.reviews.map(review => [review.id, review.reviewer, review.sha, review.state]),
     agentReview: observation.agentReview ? [observation.agentReview.sha, observation.agentReview.approved, observation.agentReview.reason ?? null] : null,
@@ -657,8 +657,8 @@ export class GitHub {
   /**
    * Every unresolved review thread on the pull request, with the author of its first comment and
    * the path and line it is anchored to. REST exposes no resolution state, so this is the one
-   * GraphQL read an observation makes, and only when protection makes a thread block the merge.
-   * An outdated thread is still unresolved: GitHub blocks on it all the same.
+   * GraphQL read an observation makes, and only while protection still requires conversation
+   * resolution: threads block no merge in Graphyard's gate (the reviewer's verdict does).
    */
   async unresolvedThreads(pr: number): Promise<ReviewThread[]> {
     const [owner, name] = this.config.repository.split('/');
@@ -672,7 +672,7 @@ export class GitHub {
         if (thread?.isResolved !== false) continue;
         const comment = thread.comments?.nodes?.[0];
         const line = Number.isSafeInteger(thread.line) ? thread.line : Number.isSafeInteger(thread.originalLine) ? thread.originalLine : null;
-        threads.push({ ...(typeof thread.id === 'string' ? { id: thread.id } : {}), author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', path: typeof thread.path === 'string' ? thread.path : '(no path)', line, outdated: thread.isOutdated === true,
+        threads.push({ ...(typeof thread.id === 'string' ? { id: thread.id } : {}), author: typeof comment?.author?.login === 'string' ? comment.author.login : 'an unknown author', ...(comment?.author?.__typename === 'Bot' ? { bot: true } : {}), path: typeof thread.path === 'string' ? thread.path : '(no path)', line, outdated: thread.isOutdated === true,
           ...(typeof comment?.url === 'string' ? { url: comment.url } : {}) });
       }
       if (!connection.pageInfo?.hasNextPage) return threads;
@@ -777,8 +777,9 @@ export class GitHub {
     const [checks, reviews, protection, files, branch] = await Promise.all([
       this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
     ]);
-    // Review threads block a merge only where protection requires conversation resolution, so
-    // they are read only there, and only for a pull request that can still merge (GY-139).
+    // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
+    // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
+    // only while protection still requires conversation resolution (drift, which GitHub enforces).
     const conversations = { required: protection.conversationResolution, unresolved: protection.conversationResolution && !pr.merged && pr.state === 'open' ? await this.unresolvedThreads(pr.number) : [] };
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
@@ -834,7 +835,7 @@ export class GitHub {
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
-      prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open',
+      prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
@@ -1009,7 +1010,7 @@ export class GitHub {
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
     const first = await this.observe(work, peers);
     const second = await this.observe(work, peers);
-    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, conversations: o.conversations, merged: o.merged, mergeable: o.mergeable, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
+    const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, conversations: o.conversations, merged: o.merged, mergeable: o.mergeable, conflicting: o.conflicting || undefined, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
   }
@@ -1041,13 +1042,13 @@ export class GitHub {
     return observeAgentReview(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId, profile, app);
   }
   /**
-   * A review is requested only for a head that contains the base tip; anything else is refused
-   * before any write. This is a wait, not a rework round: the control plane brings the head onto
-   * the moved base itself (see `refreshCandidateBase`) and the request is dispatched for the head
-   * it republishes, unless the merge conflicts, which is the one case the worker still owns.
+   * A review is requested for any head that merges cleanly against the current base, contained or
+   * not: the merge queue integrates and re-tests the combined tip before merging (GY-191). A head
+   * behind the base that GitHub does not report mergeable is refused before any write; it goes back
+   * to its worker for a sync.
    */
   private reviewable(work: Work) {
-    demand(work.observation?.baseTipContained !== false, `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation?.baseTip?.slice(0, 12)}; a review of it would be dismissed when the merge base changes, so none is requested until the head contains the tip`);
+    demand(!behindBaseHold(work), `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation?.baseTip?.slice(0, 12)} and does not merge cleanly with it; a review of it would judge a diff the sync will change, so none is requested until it does`);
   }
   async requestAgentReview(work: Work, profile: ReviewerProfile, app: ReviewerApp, beforeWrite: () => Promise<void>): Promise<ReviewRequest> {
     demand(work.candidate && work.policy.review && reviewProviderOf(work.policy) === 'agent', 'Candidate with agent review policy required');
@@ -1533,12 +1534,12 @@ export async function processJob(engine: Engine, github: GitHub) {
         if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true); return true; }
       }
       const provider = reviewProviderOf(work.policy);
-      // A head that does not contain the base tip is not reviewed: the request is deferred, and
-      // diagnose reports why, until the refresh above republishes it, the queue publishes a tip
-      // that contains it, or — when the merge conflicts — the worker resolves it and pushes.
+      // A head behind the base tip is reviewed when it merges cleanly (GY-191): the queue
+      // integrates and re-tests it before merging. One that does not is deferred, and diagnose
+      // reports why, until the refresh above republishes it or the worker syncs and pushes.
       // Nor is a head whose unit and integration proofs have not all passed: mechanical
       // verification precedes review for every provider, not only the one a session answers.
-      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && observation.baseTipContained !== false
+      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && !behindBaseHold(work)
         && !mechanicalHold(work, all, new Date());
       // A request binds the exact candidate; an approval Graphyard carried onto its own authored
       // tip already stands for that candidate, so no new request is dispatched for it.
