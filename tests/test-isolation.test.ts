@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { abnormalTestExit, isolatedTestEnvironment, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment } from '../src/cli/test-isolation.js';
+import { abnormalTestExit, isolatedTestEnvironment, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
 import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
@@ -213,6 +213,15 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.match(String(installMatchesLockfile({ ...v1, dependencies: { ...v1.dependencies, 'left-pad': { ...v1.dependencies['left-pad'], version: '1.1.0' } } }, heldV3, linuxGlibc)), /node_modules\/left-pad is installed at 1\.0\.0, package-lock\.json names 1\.1\.0/);
     assert.match(String(installMatchesLockfile(v1, { packages: { ...heldV3.packages, 'node_modules/stray': { version: '1.0.0' } } }, linuxGlibc)), /node_modules\/stray is installed but package-lock\.json no longer names it/);
     assert.match(String(installMatchesLockfile(v1, { packages: { 'node_modules/left-pad': heldV3.packages['node_modules/left-pad'] } }, linuxGlibc)), /node_modules\/left-pad\/node_modules\/nested is named by package-lock\.json but not installed/);
+    // A v1 git, file or tarball record names its source in `version`, usually with no integrity: a source moved to another
+    // commit or tarball is a mismatch, whichever spelling npm recorded for the same repository and commit.
+    const commit = (c: string) => c.repeat(40);
+    const gitLock = (source: string) => ({ lockfileVersion: 1, dependencies: { 'from-git': { version: source } } });
+    const gitHeld = { packages: { 'node_modules/from-git': { version: '3.1.0', resolved: `git+ssh://git@github.com/o/dep.git#${commit('a')}` } } };
+    assert.equal(installMatchesLockfile(gitLock(`github:o/dep#${commit('a')}`), gitHeld, linuxGlibc), true, 'the same repository and commit in another spelling');
+    assert.match(String(installMatchesLockfile(gitLock(`git+ssh://git@github.com/o/dep.git#${commit('b')}`), gitHeld, linuxGlibc)), /node_modules\/from-git is installed from git\+ssh:\/\/git@github\.com\/o\/dep\.git#a{40}, package-lock\.json names git\+ssh:\/\/git@github\.com\/o\/dep\.git#b{40}/);
+    assert.match(String(installMatchesLockfile(gitLock('https://registry.example/dep-3.2.0.tgz'), { packages: { 'node_modules/from-git': { version: '3.1.0', resolved: 'https://registry.example/dep-3.1.0.tgz' } } }, linuxGlibc)), /installed from https:\/\/registry\.example\/dep-3\.1\.0\.tgz/);
+    assert.match(String(installMatchesLockfile(gitLock(`github:o/dep#${commit('a')}`), { packages: { 'node_modules/from-git': { version: '3.1.0' } } }, linuxGlibc)), /installed from no recorded source/, 'an install that recorded no source cannot be matched, so npm ci reinstalls it');
     // End to end: a checkout with a v1 lockfile is installed once, then reported current, never failed after a good npm ci.
     await rm(join(worktree, 'node_modules'), { recursive: true, force: true }); await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(v1));
     const npmV3 = async (cwd: string) => {
@@ -234,6 +243,9 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.match(await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8'), /'--no-dry-run', '--ignore-scripts=false', '--bin-links'/, 'the trusted unit runner overrides them too');
     const cleared = npmCiEnvironment({ PATH: '/bin', NODE_ENV: 'production', npm_config_omit: 'dev', NPM_CONFIG_PRODUCTION: 'true', npm_config_dry_run: 'true', 'npm_config_dry-run': 'true', npm_config_ignore_scripts: 'true', npm_config_bin_links: 'false' });
     assert.deepEqual(cleared, { PATH: '/bin' });
+    // The install runs the checkout's lifecycle scripts outside any sandbox: none of the launcher's credentials reach them.
+    assert.deepEqual(npmCiEnvironment({ PATH: '/bin', npm_config_registry: 'https://registry.example/', GRAPHYARD_TOKEN_FILE: '/secret', GRAPHYARD_TOKEN: 't', GRAPHYARD_URL: 'http://plane', HERDR_PANE: 'p', GH_TOKEN: 'g', GITHUB_TOKEN: 'g' }),
+      { PATH: '/bin', npm_config_registry: 'https://registry.example/' });
 
     // A refused lease heartbeat stops the install and fails the worktree command.
     await rm(join(worktree, 'node_modules'), { recursive: true, force: true });
@@ -304,6 +316,16 @@ test('an ordinary case of the same file', () => { writeFileSync(${JSON.stringify
     const runner = await readFile(new URL('scripts/run-unit-acceptance.mjs', repository), 'utf8');
     assert.match(runner, /const abnormal = abnormalTestExit\(run\.stdout \?\? '', run\.status, run\.signal\);\n\s*if \(abnormal\) throw/, 'the trusted unit runner fails a run that did not end normally');
 
+    // A required title must report exactly once: a module the inventory imports can register a later case under it, and its
+    // pass must not stand in for the protected case's failure.
+    assert.equal(repeatedRequiredTitle(['not ok 1 - unit:demo first case', 'ok 2 - unit:demo other'].join('\n'), ['unit:demo first case']), null);
+    assert.match(repeatedRequiredTitle(['not ok 1 - unit:demo first case', '    ok 1 - unit:demo first case', 'ok 2 - unit:demo first case # SKIP'].join('\n'), ['unit:demo first case', 'unit:demo other']) ?? '', /the required case "unit:demo first case" reported 3 verdicts/);
+    assert.match(runner, /const repeated = repeatedRequiredTitle\(run\.stdout \?\? '', selected\.requiredCases\.map\(id => selected\.titles\[id\]\)\);\n\s*if \(repeated\) throw/, 'the trusted unit runner fails a required title reported twice');
+    // The transpiler loads from the protected harness, never from the tsx the candidate's lockfile installed.
+    assert.doesNotMatch(runner, /'--import', 'tsx'/);
+    assert.match(runner, /\['--import', transpiler, '--test'/);
+    assert.match(runner, /const transpiler = harnessTranspiler\(\);\n\s*execFileSync\('npm', \['ci'/, 'the transpiler is resolved before any candidate code runs');
+    assert.match(runner, /try \{ return import\.meta\.resolve\('tsx'\); \}/);
     const tap = ['ok 1 - unit:demo first case', 'ok 2 - unit:demo-other is another proof # SKIP test name does not match pattern', 'ok 3 - an ordinary case # SKIP', '    not ok 1 - unit:demo nested case', 'ok 4 - unit:demo skipped case # SKIP'].join('\n');
     assert.deepEqual(countProofCases(tap, 'unit:demo'), { executed: 2, failed: 1, skipped: 1 });
     for (const file of ['src/cli/verify.ts', 'scripts/run-unit-acceptance.mjs'])

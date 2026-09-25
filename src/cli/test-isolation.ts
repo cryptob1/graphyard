@@ -146,6 +146,29 @@ export function abnormalTestExit(tap: string, status: number | null, signal: Nod
 export const npmCiArgs = ['ci', '--include=dev', '--include=optional', '--no-dry-run', '--ignore-scripts=false', '--bin-links', '--no-audit', '--no-fund'];
 export function npmCiEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const clean: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(env)) if (!/^(npm_config_(omit|only|production|also|dev|include|dry_run|dry-run|ignore_scripts|ignore-scripts|bin_links|bin-links)|NODE_ENV)$/i.test(name)) clean[name] = value;
+  for (const [name, value] of Object.entries(env)) if (!/^(npm_config_(omit|only|production|also|dev|include|dry_run|dry-run|ignore_scripts|ignore-scripts|bin_links|bin-links)|NODE_ENV)$/i.test(name) && !withheldFromInstall.test(name)) clean[name] = value;
   return clean;
+}
+/**
+ * The install runs the checkout's lifecycle scripts and its dependencies' outside any agent
+ * sandbox, before a session starts, so it inherits none of the launcher's authority: no Graphyard
+ * or Herdr variable (GRAPHYARD_TOKEN_FILE and every other credential or control among them) and no
+ * GitHub token. npm's own registry settings stay: they are what the install needs.
+ */
+const withheldFromInstall = /^(GRAPHYARD_|HERDR_|GH_TOKEN$|GITHUB_TOKEN$|GH_ENTERPRISE_TOKEN$|GITHUB_ENTERPRISE_TOKEN$)/;
+
+/**
+ * Why a TAP stream cannot decide the required titles, or null. The verdict of a required case is
+ * read by its title, so each must report exactly once: a module the inventory imports can register
+ * a later case under a required title, and a map keeping the last verdict would let that
+ * duplicate's pass stand in for the protected case's failure.
+ */
+export function repeatedRequiredTitle(tap: string, titles: string[]): string | null {
+  const counts = new Map<string, number>(titles.map(title => [title, 0]));
+  for (const line of tap.split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:ok|not ok) \d+ - (.*?)(?: # (?:SKIP|TODO)\b.*)?$/);
+    if (match && counts.has(match[1])) counts.set(match[1], counts.get(match[1])! + 1);
+  }
+  const repeated = [...counts].find(([, count]) => count > 1);
+  return repeated ? `the required case "${repeated[0]}" reported ${repeated[1]} verdicts, so none of them identifies the protected case` : null;
 }

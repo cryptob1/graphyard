@@ -544,7 +544,12 @@ export function installMatchesLockfile(lockfile: LockfileInventory, installed: {
     // lockfile records the package's own version instead, so only its integrity identifies it.
     if (!want[legacySource] && want.version !== entry.version) return `${name} is installed at ${entry.version ?? 'no version'}, package-lock.json names ${want.version ?? 'no version'}`;
     if (want.integrity && entry.integrity && want.integrity !== entry.integrity) return `${name} is installed from a different tarball than package-lock.json names`;
-    if (want[legacySource]) continue;
+    // Nor does a v1 record's source always carry an integrity (a git dependency never does): the
+    // source it names must be the one the install recorded, or the install is not this lockfile's.
+    if (want[legacySource]) {
+      if (!legacySourceMatches(want, entry)) return `${name} is installed from ${entry.resolved ?? 'no recorded source'}, package-lock.json names ${want.version}`;
+      continue;
+    }
     // A git, file or link dependency carries its identity in `resolved` or `link`, usually with no integrity.
     if (Boolean(want.link) !== Boolean(entry.link)) return `${name} is installed ${entry.link ? 'as a link' : 'as a package'}, package-lock.json names ${want.link ? 'a link' : 'a package'}`;
     if ((!want.integrity || !entry.integrity) && (want.resolved ?? null) !== (entry.resolved ?? null)) return `${name} is installed from ${entry.resolved ?? 'no recorded source'}, package-lock.json names ${want.resolved ?? 'no recorded source'}`;
@@ -579,6 +584,23 @@ function lockfilePackages(lockfile: LockfileInventory): Record<string, any> {
   };
   unfold(lockfile.dependencies, '');
   return packages;
+}
+
+/**
+ * Whether a v1 git, file, link or tarball record names the source the install recorded. npm writes
+ * a git source in several spellings (git+ssh://git@host/owner/repo.git#sha, git+https://…, github:
+ * owner/repo#sha), so a git source is its repository path and commit; any other is its location
+ * without a `file:` prefix. A source that cannot be matched is a mismatch: npm ci reinstalls it.
+ */
+function legacySourceMatches(want: { version?: string; resolved?: string }, entry: { resolved?: string; link?: boolean }) {
+  const installed = sourceIdentity(entry.resolved);
+  return installed !== null && [want.version, want.resolved].some(source => sourceIdentity(source) === installed);
+}
+function sourceIdentity(source: string | undefined): string | null {
+  if (!source) return null;
+  const git = source.match(/^(?:git\+[a-z+]+:\/\/(?:[^@/]+@)?[^/:]+[/:]|git:\/\/[^/]+\/|git@[^:]+:|github:|)([^#:/@]+\/[^#:/]+?)(?:\.git)?#([0-9a-f]{7,40})$/i);
+  if (git && /^(git|github:)/i.test(source)) return `git:${git[1].toLowerCase()}#${git[2].toLowerCase()}`;
+  return source.replace(/^file:/, '');
 }
 
 export interface InstallHost { os: string; cpu: string; libc: string | null }
