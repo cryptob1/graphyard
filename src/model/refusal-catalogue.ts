@@ -96,8 +96,8 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'merge', id: 'tip-awaited', match: /^Waiting for \S+ to publish its speculative tip$/, example: 'Waiting for GY-1 to publish its speculative tip', kinds: ['merge'] },
   { gate: 'merge', id: 'ejected', match: /^Ejected from the merge queue: /, kinds: ['request-rework'],
     example: 'Ejected from the merge queue: Pull request was closed without merging; a new candidate re-enters at the back of the queue' },
-  { gate: 'merge', id: 'unresolved-threads', match: /^Branch protection requires conversation resolution and \d+ review threads? (is|are) unresolved on /, kinds: ['request-rework'],
-    example: 'Branch protection requires conversation resolution and 1 review thread is unresolved on 0123456789ab: chatgpt-codex-connector on docs/a.md:1' },
+  { gate: 'merge', id: 'conversation-protection', match: /^Branch protection still requires conversation resolution, which Graphyard's review gate does not use: /, kinds: ['escalate'],
+    example: "Branch protection still requires conversation resolution, which Graphyard's review gate does not use: GitHub refuses the merge of 0123456789ab while 1 thread stays open (chatgpt-codex-connector on docs/a.md:1). graphyard master protection --apply removes the requirement; the reviewer's approval of the head is the review gate" },
   { gate: 'merge', id: 'not-entered', match: /^Candidate has not entered the merge queue$/, example: 'Candidate has not entered the merge queue', kinds: ['merge'] },
 ];
 
