@@ -7,19 +7,23 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 
 ## 2. Add machines
 
-Every concurrent session needs its own worker identity and host ID. Rerun the installer with a higher `--workers`, or connect a machine with its own worker token:
+Each concurrent session needs a worker identity and host ID: rerun the installer with a higher `--workers`, or connect a machine:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit the updated `AGENTS.md` and `.gitignore`, never `.graphyard/`. A worker without the master runs under `graphyard watch GY-1 EPOCH -- COMMAND`, which stops it when its lease is lost.
+Commit the updated `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graphyard/`. Without the master, run a worker under `graphyard watch GY-1 EPOCH -- COMMAND`, which stops it on lease loss.
+
+### Documentation policy
+
+`init --scan --apply` writes the documentation paths it finds (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to the committed `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Set the printed `GRAPHYARD_DOCUMENTATION` on the deployment (default `docs/`, `README.md`, `AGENTS.md`). Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
 
 ### What the generated instructions authorize
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder to post its verdict) comes from the same launcher and is acted on without confirmation.
 
-Agents rightly treat Herdr's bracketed paste as untrusted data (a prompt injection defence), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. Nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat Herdr's bracketed paste as untrusted data (a prompt injection defence), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -35,7 +39,7 @@ Profiles default to `"approvals": "auto"` so sessions never block on a permissio
 
 ### Configure the fleet
 
-The control plane's **agent registry** (CLI, `/api/agent-registry` or the **Agent fleet** page) records runtimes, accounts and which accounts serve each role; propose it from this host's logins:
+The **agent registry** (CLI, `/api/agent-registry` or the **Agent fleet** page) records runtimes, accounts and roles; propose it from this host's logins:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -66,7 +70,7 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 
 ### Add a role
 
-Accounts are listed most preferred first:
+Most preferred account first:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude; Codex is overflow"
@@ -81,7 +85,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-For worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
+When adding workers, for worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -92,19 +96,17 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-The second `init` installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances that run each item's next action; without it resyncs and reclaims go unserved.
+The second `init` installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances that run each item's next action.
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 
-`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now graphyard-master.service` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. Installing it is explicit, never a side effect: worker checkouts and temporary directories are refused. To move it, run `master init --token-stdin --replace-supervisor` from the new checkout. `master status` reports `setup.supervisor`.
+`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`; the unit restarts on crash, reboot and hang. It is never a side effect: worker checkouts and temporary directories are refused. To move it, run `master init --token-stdin --replace-supervisor` from the new checkout. `master status` reports `setup.supervisor`.
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it, the worker submits, review and proofs start, and the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
-
-Before adding workers, let one lease expire and confirm a reclaim fences the old epoch.
+`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 ## What stays manual
 
