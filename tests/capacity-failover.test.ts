@@ -16,7 +16,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { answerHumanCommand, humanRequestsCommand, parkCommand } from '../src/cli/session-commands.js';
 import type { CliContext } from '../src/cli/context.js';
-import { actionableSubjects, capacityKey, emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
+import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, readApproverLaunch, readEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
@@ -928,4 +928,11 @@ test('an exhausted escalation handler\'s record survives a failed relaunch, whic
   assert.equal(relaunches.length >= 3, true, JSON.stringify(relaunches));
   const running = await readEscalationSessions(root);
   assert.deepEqual(running.map(entry => [entry.trigger, entry.waiting]), [['lease-loss', null]]);
+});
+
+test('a re-keyed approval watch carries its session\'s account, runtime and registry session, so a retained session\'s exhaustion holds the account it spent', () => {
+  const prior = approvalWatchSchema.parse({ work: 'GY-1', action: 'rework', decision: 'decision-1', requestedAt: new Date().toISOString(),
+    launches: 1, agentName: 'graphyard-approver-GY-1-abc123', pane: 'pane-7', launchedAt: new Date().toISOString(), account: 'env-a', runtime: 'claude', session: 'registry-session-9' });
+  const carried = carriedSession(prior);
+  assert.deepEqual([carried.agentName, carried.pane, carried.launches, carried.account, carried.runtime, carried.session], [prior.agentName, 'pane-7', 1, 'env-a', 'claude', 'registry-session-9']);
 });

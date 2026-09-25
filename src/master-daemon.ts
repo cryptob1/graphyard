@@ -252,6 +252,12 @@ export const approvalWatchSchema = z.object({
   session: z.string().max(200).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
+/**
+ * What a re-keyed watch takes over from the one it retires: the session goes on, and so does what
+ * it runs on, so a retained session's exhaustion holds the account it spent (GY-182).
+ */
+export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
+  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session });
 
 /**
  * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a
@@ -2309,8 +2315,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // the decision this watch just adopted and close its approver — on every cycle the set moves.
       const [retired, prior] = standing ? Object.entries(state.approvals).find(([other, entry]) => other !== key && entry.decision === requested.id && !entry.settledAt) ?? [] : [];
       if (retired) delete state.approvals[retired];
-      // The session goes on, and so does what it runs on: a retained session's exhaustion holds the account it spent.
-      const kept = prior ? { launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt, exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session } : {};
+      const kept = prior ? carriedSession(prior) : {};
       const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: prior?.requestedAt ?? stamp, ...kept, requests: prior ? prior.requests : (carried?.requests ?? 0) + 1, ended: (prior ?? carried)?.ended ?? [], observation: observed });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it
       // needs. A base conflict has no verdict behind it, so it is not part of that measurement. It
