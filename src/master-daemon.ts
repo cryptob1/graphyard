@@ -30,6 +30,7 @@ import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, buildMasterStatus, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
+import { qualifyTimingFailures, type CheckAnnotations } from './cli/timing-failures.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -1607,6 +1608,33 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
 }
 /**
+ * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
+ * track as the timing-failure class (GY-173): the unqualified gate line they replace is never counted,
+ * so without them a failure on the clock could never recur to the loop and file its structural item.
+ */
+export async function timingFaultAttention(work: Work[], repository: string, annotations: CheckAnnotations): Promise<AttentionItem[]> {
+  const none = { work: [], attentionItems: [], counts: { attention: 0 } } as unknown as Parameters<typeof qualifyTimingFailures>[0];
+  return (await qualifyTimingFailures(none, work, repository, annotations)).attentionItems;
+}
+/**
+ * A check run's annotations, read once: a completed run's annotations do not change, and the loop
+ * would otherwise read every failed required check of every open candidate again each cycle. A read
+ * that fails is not kept, so the next cycle reads it again.
+ */
+export function onceAnnotations(read: CheckAnnotations, bound = 200): CheckAnnotations {
+  const kept = new Map<number, ReturnType<CheckAnnotations>>();
+  return checkRunId => {
+    let entry = kept.get(checkRunId);
+    if (!entry) {
+      if (kept.size >= bound) kept.delete(kept.keys().next().value!);
+      entry = read(checkRunId);
+      kept.set(checkRunId, entry);
+      entry.catch(() => { if (kept.get(checkRunId) === entry) kept.delete(checkRunId); });
+    }
+    return entry;
+  };
+}
+/**
  * The derived lines that restate a fault the item's own record holds under another kind: a fence's settle or grace line
  * is the fence, an exhausted reviewer is the item's spent account, a missing session is its lost lease, and a gate with
  * no action named is the blocker holding it. A derived line of the item's own kind always restates it.
@@ -3124,6 +3152,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
+  const annotations = onceAnnotations(async checkRunId => JSON.parse(await run('gh', ['api', '--paginate', `repos/${current().repository}/check-runs/${checkRunId}/annotations`])));
   const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
     const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
     try { return await post(work); }
@@ -3260,10 +3289,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // the faults it counts are read with the coordinator's visibility.
     controlPlane: coordinatorStatus,
     get reportedAttention() {
-      return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) =>
+      return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
         // Imported when first read: the status report imports this module, so a static import would be a cycle.
-        (await (await import('./cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
-          runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true })) : undefined;
+        const reported = await (await import('./cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
+          runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true });
+        // A required check red on the clock is named as master status names it, after buildMasterStatus.
+        return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
+      } : undefined;
     },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),

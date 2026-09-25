@@ -106,7 +106,7 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['stuck-request', (_, text) => /^\S+ request \S+ on \S+ \(session \S+\) is pending/.test(text)],
   ['overlong-session', (_, text) => /past the .+ maximum for its role/.test(text)],
   ['context-overflow', (_, text) => /escalation context for \S+ assembled to/.test(text)],
-  ['timing-failure', (_, text) => /^Required CI check \S+ failed on .*timing-dependent/.test(text)],
+  ['timing-failure', (_, text) => /^Required CI check .+ failed on .*timing-dependent/.test(text)],
   ['agent-request', (_, text) => /recorded a \S+ on \S+ .+ ago and released/.test(text)],
   ['owed-decision', (_, text) => /no executor may run it; .+ has been owed for/.test(text)],
   ['generated-files', (_, text) => /generated-file manifest|GRAPHYARD_GENERATED_FILES/.test(text)],

@@ -11,7 +11,7 @@ import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultCla
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
 import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, type DaemonEffects } from '../src/master-daemon.js';
+import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import type { ResourceReading } from '../src/master-resources.js';
 import { predictQueue } from '../src/merge-queue.js';
@@ -426,6 +426,31 @@ test('unit:recurring-class-item — attention master status adds after buildMast
   const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' } };
   assert.equal(daemonEffects('/nonexistent', config(), deps).reportedAttention, undefined);
   assert.equal(typeof daemonEffects('/nonexistent', { ...config(), operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/operator.token' } } as MasterConfig, deps).reportedAttention, 'function');
+});
+
+test('unit:recurring-class-item — a required check red on the clock reaches recurrence tracking as the timing-failure class, whatever its name', async () => {
+  // A policy check name may hold spaces; master status names the failure with it verbatim.
+  const check = 'Integration / test';
+  const red = (key: string, id: number) => item(key, { stage: 'test', policy: { checks: [check], review: true }, candidate: { sha: `${id}`.padStart(40, 'a'), pr: id },
+    observation: { at: iso(0), candidate: { sha: `${id}`.padStart(40, 'a'), pr: id }, checks: [{ name: check, result: 'failure', id, attempt: 1 }], reviews: [] },
+    gates: [{ name: 'test', passed: false, reasons: [`Required CI check ${check} has not passed on the current candidate`] }] } as unknown as Partial<Work>);
+  const work = [red('GY-1', 7001), red('GY-2', 7002), red('GY-3', 7003)];
+  const timing = { name: 'snapshot.p95', test: 'integration:snapshot', statistic: 'p95', measuredMs: 2092, budgetMs: 2000, comparison: '<', samples: 100, warmupDiscarded: 5, otherFailures: 0 };
+  const reads: number[] = [];
+  const annotations = onceAnnotations(async id => { reads.push(id); return [{ message: `graphyard-timing:${JSON.stringify(timing)}` }]; });
+  const items = await timingFaultAttention(work, 'owner/project', annotations);
+  assert.deepEqual(classifyAttention(items).map(entry => [entry.subject, entry.kind, entry.faultClass]),
+    [['GY-1', 'timing-failure', 'proof'], ['GY-2', 'timing-failure', 'proof'], ['GY-3', 'timing-failure', 'proof']], `a check name with spaces is still a timing failure: ${JSON.stringify(items)}`);
+  const state = emptyDaemonState(config());
+  trackFaults(state.faults, cycleFaults(state, work, clock, { config: config(), reported: items }), iso(0));
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'timing-failure').map(entry => entry.subject), ['GY-1', 'GY-2', 'GY-3']);
+  assert.deepEqual(recurringClasses(state.faults.instances, work, policy, clock).filter(entry => entry.file).map(entry => entry.faultClass), ['proof'], 'three timing failures in the window file the proof item');
+  // A completed run's annotations are read once however many cycles look; a failed read is read again.
+  await timingFaultAttention(work, 'owner/project', annotations);
+  assert.deepEqual(reads, [7001, 7002, 7003]);
+  let failures = 0;
+  const flaky = onceAnnotations(async () => { if (failures++ === 0) throw new Error('GitHub answered 502'); return []; });
+  await assert.rejects(flaky(1)); assert.deepEqual(await flaky(1), []); assert.equal(failures, 2);
 });
 
 test('unit:recurring-class-item — review conflicts and the other lines status derives after buildMasterStatus reach the loop', async () => {
