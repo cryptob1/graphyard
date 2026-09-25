@@ -139,7 +139,8 @@ export const describeChain = (chain: HoldLink[]) => chain.map(link => `${link.ke
 export interface EffectiveConcurrency { effective: number; items: string[]; nodes: number; edges: number; exact: boolean }
 /**
  * How many items could be in flight at once given the overlap graph: the largest set of open
- * items — in flight or dispatchable — no two of which exclude each other. A fleet whose items all
+ * items — in flight or dispatchable — no two of which exclude each other; an item held past
+ * `dispatchHoldBoundMs` excludes nobody, since it dispatches over the overlap. A fleet whose items all
  * claim the same root directory has an effective concurrency of one however many workers it has.
  * Exact for the sizes a board reaches; a graph past the search budget is answered greedily and
  * says so.
@@ -149,8 +150,11 @@ export function effectiveConcurrency(all: Work[], now: number): EffectiveConcurr
   // Two items exclude each other only when neither may be dispatched while the other is in flight:
   // under the scheduler's own exceptions a higher-priority item goes ahead, and a pair one of whose
   // pull requests is open holds nothing, so only two items both being built without a pull request
-  // on the same files exclude each other.
-  const adjacent = nodes.map((a, i) => nodes.map((b, j) => i !== j && !!overlapHolds(a, b) && !!overlapHolds(b, a)));
+  // on the same files exclude each other. Nor does a pair one of which is held past the bound: the
+  // scheduler dispatches that one over the overlap (`assertDispatchable` accepts an overdue hold), so
+  // counting the pair exclusive would report less capacity than the daemon actually launches.
+  const overdue = nodes.map(work => dispatchable(work, now) && !!dispatchHold(work, all, now)?.overdue);
+  const adjacent = nodes.map((a, i) => nodes.map((b, j) => i !== j && !overdue[i] && !overdue[j] && !!overlapHolds(a, b) && !!overlapHolds(b, a)));
   const edges = adjacent.reduce((total, row) => total + row.filter(Boolean).length, 0) / 2;
   let budget = 100_000, exhausted = false, best: number[] = [];
   const search = (remaining: number[], chosen: number[]) => {

@@ -332,4 +332,13 @@ test('unit:concurrency-counts-open-prs — two items exclude each other only whi
   const serial = effectiveConcurrency([...building, fresh], clock);
   assert.equal(serial.effective, 1); assert.equal(serial.edges, 6);
   assert.equal(buildMasterStatus({ work: [...building, fresh], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }).effectiveConcurrency.effective, 1);
+  // Held past the 30-minute bound, the fresh items dispatch over the overlap, so they exclude nobody:
+  // three same-file items held 31 minutes behind one being built report the full count, as the daemon launches them all.
+  const heldFor = (minutes: number) => [claimed('GY-184', [file], 2 * hour), ...['GY-190', 'GY-191', 'GY-192'].map(key => work(key, { plannedFiles: [file], stageEnteredAt: iso(-minutes * 60_000) }))];
+  const within = effectiveConcurrency(heldFor(29), clock);
+  assert.equal(within.effective, 1); assert.equal(within.edges, 6);
+  assert.deepEqual(effectiveConcurrency(heldFor(31), clock), { effective: 4, items: ['GY-184', 'GY-190', 'GY-191', 'GY-192'], nodes: 4, edges: 0, exact: true });
+  const overdue = buildMasterStatus({ work: heldFor(31), now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] });
+  assert.equal(overdue.effectiveConcurrency.effective, 4); assert.equal(overdue.effectiveConcurrency.overdue, 3);
+  assert.deepEqual(dispatchSchedule(heldFor(31), clock).overdue.map(entry => entry.key).sort(), ['GY-190', 'GY-191', 'GY-192']);
 });
