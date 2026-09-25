@@ -151,7 +151,7 @@ export function flowNow(work: Dashboard['work'], now: number, status: Dashboard[
   const rework = byGroup['up-next'].filter(item => !!item.candidate);
   const inFlow = [...byGroup.moving, ...byGroup.blocked, ...rework];
   const entries = inFlow.map(item => ({ item, steps: prSteps(item, now, release) })).filter(entry => entry.steps.current);
-  return { byGroup, entries, outside: { upNext: byGroup['up-next'].length - rework.length } };
+  return { byGroup, release, entries, outside: { upNext: byGroup['up-next'].length - rework.length } };
 }
 
 /**
@@ -196,7 +196,8 @@ export default function InsightsFlow({ work, status, api, observedAt, setSelecte
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing]);
 
-  const { byGroup, entries: now7, outside } = flowNow(work, now, status);
+  // The page reads the release view flowNow classified with, so every figure uses one reading.
+  const { byGroup, release, entries: now7, outside } = flowNow(work, now, status);
   // Each dot stands in its step's column, one row per item already there, so no two dots overlap.
   const row = new Map<string, number>(); const perStep = new Map<StepId, number>();
   for (const { item, steps } of now7) { const n = perStep.get(steps.current!) ?? 0; row.set(item.id, n); perStep.set(steps.current!, n + 1); }

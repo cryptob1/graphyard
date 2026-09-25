@@ -654,13 +654,14 @@ export const blockerReasonKey = (fact: FlowFact) => String(fact.details.reason ?
  * exclusive, so a window ending exactly at midnight ends the day before, never on an empty bucket. The window opens part
  * way through the day before the first bucket; that sliver is counted in the first bucket, so the
  * buckets together hold every instant of the window. More days than `flowLimits.buckets` keep the
- * latest ones. `bucketOf` is the bucket start an instant is counted in, or null outside them all.
+ * latest ones. `bucketOf` is the bucket start an instant is counted in, or null outside them all,
+ * including `to` itself and anything after it.
  */
 export function dayBuckets(from: number, to: number, days: number) {
   const today = Math.floor(Math.max(from, to - 1) / day) * day, count = Math.max(1, Math.min(days, flowLimits.buckets));
   const starts = Array.from({ length: count }, (_, index) => today - (count - 1 - index) * day);
   const floor = count === days ? Math.min(from, starts[0]) : starts[0];
-  const bucketOf = (at: number) => at < floor || at >= today + day ? null : Math.max(starts[0], Math.floor(at / day) * day);
+  const bucketOf = (at: number) => at < floor || at >= Math.min(to, today + day) ? null : Math.max(starts[0], Math.floor(at / day) * day);
   return { starts, truncated: count < days, bucketOf };
 }
 function valueAt(points: { at: number; value: any }[], at: number) {

@@ -989,6 +989,15 @@ test('a window ending exactly at 00:00Z ends on the day before: seven whole cale
   assert.equal(buckets.bucketOf(Date.parse(to)), null, 'the exclusive end is outside every bucket');
 });
 
+test('the exclusive report end is outside every calendar bucket when it falls part way through today', () => {
+  const to = Date.parse('2026-09-24T22:55:00.000Z');
+  const buckets = dayBuckets(to - 7 * day, to, 7);
+  assert.equal(buckets.starts.at(-1), Date.parse('2026-09-24T00:00:00.000Z'));
+  assert.equal(buckets.bucketOf(to - 1), Date.parse('2026-09-24T00:00:00.000Z'), 'the window\'s last instant is in today\'s bucket');
+  assert.equal(buckets.bucketOf(to), null, 'the exclusive end is outside every bucket');
+  assert.equal(buckets.bucketOf(Date.parse('2026-09-24T23:30:00.000Z')), null, 'an instant after the end but before midnight is outside every bucket');
+});
+
 test('facts read past the shared scan cutoff count landings and step moves but never complete a candidate episode\'s phases', () => {
   const to = '2026-09-24T22:55:00.000Z';
   const fact = (kind: string, observedAt: string, id: number, details: Record<string, unknown> = {}) => ({ ...calendarFact(kind, observedAt, id), details });
