@@ -1,5 +1,5 @@
 import { deliveryState, isClosed, type Gate, type Work } from '../src/model';
-import { latestCheck } from '../src/merge-queue';
+import { latestCheck, tipValidationPrefix } from '../src/merge-queue';
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
 import type { PipelineTimeline } from '../src/pipeline-speed';
 import { assignment } from './assignment';
@@ -61,7 +61,9 @@ export type CheckState = 'passed' | 'failed' | 'running';
  */
 export function checkStates(work: Work, ciAppIds: readonly number[] | null = null): { name: string; state: CheckState }[] {
   const gate = work.gates.find(entry => entry.name === 'test');
-  const reasons = gate?.reasons ?? [];
+  // A queued entry's CI on its own speculative tip is refused by the merge gate instead (GY-292,
+  // `tipValidation`), with the test gate's own wording after the queue's prefix.
+  const reasons = [...gate?.reasons ?? [], ...tipChecks(work)];
   const named = (name: string) => !gate || reasons.includes(`Required CI check ${name} has not passed on the current candidate`);
   return (work.policy.checks ?? []).map(name => {
     if (!named(name)) return { name, state: 'passed' };
@@ -69,6 +71,12 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
     const latest = latestCheck(runs)?.result;
     return { name, state: latest !== undefined && !pendingCheck.has(latest) && latest !== 'success' ? 'failed' : 'running' };
   });
+}
+
+/** The test-gate refusals the merge gate carries while the queue validates the entry's speculative tip (GY-292). */
+function tipChecks(work: Work): string[] {
+  const reasons = work.gates.find(entry => entry.name === 'merge')?.reasons ?? [];
+  return reasons.filter(reason => reason.startsWith(tipValidationPrefix)).map(reason => reason.slice(reason.indexOf(': ') + 2));
 }
 
 /** The review refusal no reviewer can answer: every configured reviewer profile is exhausted. */
@@ -147,6 +155,12 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       if (master) return { detail: plainReason(master, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Master agent' };
       const builder = reasons.find(reason => mergeBuilderClears.test(reason));
       if (builder) return { detail: plainReason(builder, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
+      // CI on the entry's own speculative tip: the merge step validating the combined result,
+      // shown here as a substate of Merge, never as a return to Test (GY-292).
+      if (tipChecks(work).length) {
+        const checks = checkStates(work, release.ciAppIds);
+        return { detail: `validating the combined tip · ${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
+      }
       const queued = reasons.map(reason => reason.match(/^Merge queue position (\d+) of \d+: (\S+) is ahead$/)).find(Boolean);
       if (queued) return { detail: `${ordinal(Number(queued[1]))} in line, after ${queued[2]}`, who: 'Graphyard (automatic)' };
       const stuck = reasons.map(reason => plainReason(reason, 'merge')).find(plain => plain.stuck);
