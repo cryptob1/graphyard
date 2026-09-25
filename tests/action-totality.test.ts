@@ -221,6 +221,10 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'ejected from the queue', work: { ...unproven, queueEjection: { at: now.toISOString(), sequence: 1, reason: 'Pull request was closed without merging', sha: head, policyRevision: unproven.policyRevision } } as Work },
     { name: 'first in the merge queue', work: ahead, all: world },
     { name: 'second in the merge queue', work: behind, all: world },
+    // CI on the entry's own published speculative tip is the merge step validating it (GY-292).
+    { name: 'validating its speculative tip', work: { ...proven, queue: { sequence: 1, enqueuedAt: now.toISOString(), policyRevision: proven.policyRevision,
+      speculation: { ref: `graphyard/queue/${proven.key}`, tip: head, base, baseTree: sha40('7e'), predecessors: [], policyRevision: proven.policyRevision, publishedAt: now.toISOString() } }, queueSequence: 1,
+      observation: { ...proven.observation!, checks: [{ name: 'test', result: 'in_progress', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }] } } as Work },
     // The one placement branch the evaluator keeps for a queued entry its own graph does not
     // hold: eligible, enqueued, and nowhere in the order it was placed against.
     { name: 'eligible and unplaced', work: proven, all: [] },

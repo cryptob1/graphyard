@@ -93,6 +93,8 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'merge', id: 'queue-position', match: /^Merge queue position \d+ of \d+: .+ is ahead$/, example: 'Merge queue position 2 of 3: GY-1 is ahead', kinds: ['merge'] },
   { gate: 'merge', id: 'tip-unpublished', match: /^Speculative tip on predicted base [0-9a-f]+ has not been published and validated for this candidate$/, kinds: ['merge'],
     example: 'Speculative tip on predicted base bbbbbbbbbbbb has not been published and validated for this candidate' },
+  { gate: 'merge', id: 'tip-validating', match: /^Merge queue is validating speculative tip [0-9a-f]+: Required CI check .+ has not passed on the current candidate$/, kinds: ['merge'],
+    example: 'Merge queue is validating speculative tip aaaaaaaaaaaa: Required CI check test has not passed on the current candidate' },
   { gate: 'merge', id: 'tip-awaited', match: /^Waiting for \S+ to publish its speculative tip$/, example: 'Waiting for GY-1 to publish its speculative tip', kinds: ['merge'] },
   { gate: 'merge', id: 'ejected', match: /^Ejected from the merge queue: /, kinds: ['request-rework'],
     example: 'Ejected from the merge queue: Pull request was closed without merging; a new candidate re-enters at the back of the queue' },
