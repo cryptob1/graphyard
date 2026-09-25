@@ -9,7 +9,7 @@ Graphyard is one stateless container plus Postgres.
 
 ## Versioned images
 
-Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports the version and `commit`; alert on `/healthz?strict`, which returns 503 when unhealthy.
+Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports the version and `commit`; alert on `/healthz?strict` (503 when unhealthy).
 
 ## Variables
 
@@ -31,7 +31,7 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports th
 | `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` or `s3` ([artifacts](recovery.md#artifact-backends-capacity-and-migration)) |
 | `RAILWAY_API_TOKEN` | Optional; records failed or missing deployments as incidents |
 
-Installers derive the four capacity limits from the deployed principals; an unset one is derived at start-up and reported as `delegationLimits` drift.
+Installers derive the four capacity limits from the deployed principals; an unset one is derived at start-up, reported as `delegationLimits` drift.
 
 ### CI producer
 

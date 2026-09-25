@@ -34,4 +34,4 @@ Text equivalent: sessions, the dashboard and producers call the API; the coordin
 - Every claim increments the epoch; commands from an old epoch or an expired lease are refused.
 - Evidence is attributed to the authenticated producer; the latest trusted record per proof and candidate wins, including a later failure.
 - History is append-only, and a retried command replays its original result.
-- Graphyard merges only the exact authorized candidate under a single-use execution; any other merge is a permanent violation. Merge is not deployment: see [delivery](delivery.md).
+- Graphyard merges only the exact authorized candidate under a single-use execution; any other merge is a permanent violation. Merge is not [delivery](delivery.md).

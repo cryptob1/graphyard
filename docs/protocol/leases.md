@@ -1,11 +1,11 @@
 <!-- page: Agent protocol | 3 | leases, workspaces, `watch`. -->
 # Leases, workspaces and supervision
 
-Claims last 120 seconds; renew at least every 30. Every owner mutation carries the epoch; an expired epoch is refused and cannot be revived.
+Claims last 120 seconds, renewed at least every 30. Every owner mutation carries the epoch; an expired epoch is refused and cannot be revived.
 
 ## Workspaces
 
-Register the exact branch, path and host ID (`graphyard register GY-1 workspace.json`) before submitting. Branches begin `graphyard/` and are globally unique; paths are unique per host, including historical reservations. Put the epoch in both names.
+Register the exact branch, path and host ID (`graphyard register GY-1 workspace.json`) before submitting. Branches begin `graphyard/` and are globally unique, paths unique per host (historical reservations included); put the epoch in both.
 
 ## `watch`
 

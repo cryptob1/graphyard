@@ -31,4 +31,4 @@ It is refused, with every reason, unless the newest attempt is a fresh settled p
 
 ## Replay and analytics
 
-`graphyard validation replay REQUEST ATTEMPT` re-verifies retained artifacts and re-runs the pinned report adapter; target, bundle and deployment health are always `not-covered`. A replay authorizes nothing, and `liveVerification` is always `not-established`. `graphyard validation analytics` reports outcomes and cost per proof and runner.
+`graphyard validation replay REQUEST ATTEMPT` re-verifies retained artifacts and re-runs the pinned report adapter; target, bundle and deployment health are always `not-covered`. A replay authorizes nothing; `liveVerification` is always `not-established`. `graphyard validation analytics` reports outcomes and cost per proof and runner.

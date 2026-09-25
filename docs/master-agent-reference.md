@@ -51,7 +51,7 @@ A harness classifier refuses routine administration, so `master harness claude -
 
 The control plane names one typed action per item (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements, listed under `actions.needsHuman`.
 
-Three failures with an unchanged reason mark a row stalled (a fleet that looks idle and is not), shown in `actions.stalled` and on its card; backoff doubles from one minute and never outlives it. Eight escalate it, retried half-hourly; ticks requeue ownerless items (`liveness.violations`).
+Three failures with an unchanged reason mark a row stalled rather than retrying: a fleet that looks idle and is not. Once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff never outlives it, doubling from one minute. Eight escalate it, retried half-hourly; ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
@@ -71,7 +71,7 @@ Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/shar
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists each surviving process (pid, cmdline, cwd). With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists each surviving process with pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator` and `stopped-by-attestation` lapses are history. Any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
 

@@ -38,7 +38,7 @@ Common options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`,
 
 ## Step 2 — approve the plan
 
-Show the plan and any `drift` to the human. **Verify** explicit approval; an agent never approves on the human's behalf.
+Show the human the plan and any `drift`. **Verify** their explicit approval; an agent never approves for them.
 
 ## Step 3 — apply
 
@@ -60,7 +60,7 @@ The installer prints `Open http://127.0.0.1:4311 ...`; the human registers and i
 
 Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); after `Graphyard / merge` first appears, rerun `--apply` when `nextSteps` says so. **Verify** the check is required on the base branch.
 
-`--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differences appear in `drift`, and credentials are never rotated.
+`--plan` and `--apply` are idempotent: done actions show `"satisfied"`, differences show in `drift`, credentials are never rotated.
 
 ## Upgrading an existing installation
 
