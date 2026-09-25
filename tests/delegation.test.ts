@@ -87,9 +87,10 @@ async function proven(work: Work, sha = head) {
 }
 
 before(async () => {
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-delegation-')), user: 'graphyard', password: 'testing-only', port: 15448, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 10;
+  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-delegation-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('delegation_test');
-  store = new Store('postgres://graphyard:testing-only@127.0.0.1:15448/delegation_test'); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delegation_test`); await store.init();
   engine = new Engine(store); engine.principals = roster;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
