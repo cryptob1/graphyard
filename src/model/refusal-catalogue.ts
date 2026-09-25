@@ -94,6 +94,8 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'merge', id: 'tip-unpublished', match: /^Speculative tip on predicted base [0-9a-f]+ has not been published and validated for this candidate$/, kinds: ['merge'],
     example: 'Speculative tip on predicted base bbbbbbbbbbbb has not been published and validated for this candidate' },
   { gate: 'merge', id: 'tip-awaited', match: /^Waiting for \S+ to publish its speculative tip$/, example: 'Waiting for GY-1 to publish its speculative tip', kinds: ['merge'] },
+  { gate: 'merge', id: 'predecessor-wait', match: /^Waiting for \S+(?:, \S+)* to land or leave the merge queue: /, kinds: ['merge'],
+    example: 'Waiting for GY-1 to land or leave the merge queue: candidate 0123456789ab was ejected because its speculative merge behind it conflicts (Speculative merge of 0123456789ab into graphyard/gy-2-1 conflicts and cannot be resolved by Graphyard); no sync with the base resolves that, so the same head re-enters at the back of the queue once it has landed or left' },
   { gate: 'merge', id: 'ejected', match: /^Ejected from the merge queue: /, kinds: ['request-rework'],
     example: 'Ejected from the merge queue: Pull request was closed without merging; a new candidate re-enters at the back of the queue' },
   { gate: 'merge', id: 'conversation-protection', match: /^Branch protection still requires conversation resolution, which Graphyard's review gate does not use: /, kinds: ['escalate'],

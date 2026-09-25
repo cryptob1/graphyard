@@ -35,15 +35,15 @@ Review uses a separate reviewer App, created by `graphyard master reviewer setup
 
 On the base branch require `Graphyard / merge` bound to this App, leave "require up to date" (`strict`) **off**, enforce for administrators, forbid force pushes and deletion, and remove bypass rights from worker identities. `master browser protection` reconciles it; `master protection --apply` also adds a merge queue requiring it (CI must run on `merge_group`).
 
-The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval of the current head, trusted evidence with executed > 0 and skipped 0, a mergeable non-draft PR, and the queue head.
+The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head approval, trusted evidence with executed > 0 and skipped 0, a mergeable non-draft PR, and the queue head.
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over until revalidated. Graphyard never merges: once requested, the App passes the check for an authorized head and its merge group and enqueues it (auto-merge without a queue); withdrawal fails and dequeues it.
+A candidate enters once its gates pass. Its speculative tip (predicted base plus candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`; every check, review and proof binds it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. An entry leaving validation keeps its sequence but is passed over until revalidated. Graphyard never merges: once requested, the App passes the check for an authorized head and its merge group and enqueues it (auto-merge without a queue); withdrawal fails and dequeues it.
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. When the base moves, reconciliation merges it into the branch; on that merge the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. When the base moves, reconciliation merges it into the branch; the approval carries if no reviewed file changed, each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
 ### Proofs in CI
 

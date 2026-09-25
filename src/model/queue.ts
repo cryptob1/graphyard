@@ -1,5 +1,5 @@
-import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from '../merge-queue.js';
-import type { QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
+import { baseRefreshConflict, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queuePlacement, speculativeConflictReason } from '../merge-queue.js';
+import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { carriedApproval, currentCarry } from './carry.js';
 import { currentEvidence } from './evidence.js';
@@ -25,19 +25,47 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
     queue = null;
-  } else if (!queue && eligible && !(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision)) {
+  } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all))) {
     queueSequence = nextQueueSequence(all);
     queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
     ejection = null;
     record('enqueued');
   }
+  const waiting = queue ? null : predecessorWait({ ...work, queue, queueEjection: ejection } as Work, all);
   const shadow = { ...work, queue, queueSequence } as Work;
   const placement = queue ? queuePlacement(shadow, all.map(item => item.id === work.id ? shadow : item), now.getTime()) : null;
   const reasons = placement ? placement.reasons
     : work.observation?.merged || work.stage === 'done' ? []
+    : waiting?.length ? [predecessorWaitText(work, waiting)]
     : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]
     : eligible ? ['Candidate has not entered the merge queue'] : [];
   return { queue, queueSequence, ejection, history, reasons, placement };
+}
+
+/**
+ * The record of a queued entry leaving the queue for `reason`: the ejection and the history entry.
+ * A speculative-merge conflict also records the prediction it was found on (GY-321): the entries
+ * ahead of it, or [] when the merge was onto the base branch tip itself. Only the latter is a
+ * conflict with the base, which a sync can resolve; the former waits for those entries instead.
+ */
+export function queueEjectionRecord(work: Work, all: Work[], reason: string, now: Date): { ejection: QueueEjection; history: QueueHistoryEntry[] } {
+  const sequence = work.queue!.sequence, at = now.toISOString();
+  const predecessors = speculativeConflictReason.test(reason) ? queuePlacement(work, all, now.getTime())?.predecessors ?? [] : null;
+  const ejection: QueueEjection = { at, sequence, reason, sha: work.candidate?.sha ?? null, policyRevision: work.policyRevision, ...(predecessors ? { predecessors } : {}) };
+  const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
+  return { ejection, history };
+}
+
+/**
+ * GY-321. Whether an entry ejected for a conflict with its predecessors alone re-enters with the
+ * same head: once any predecessor named in the ejection has landed or left the queue. A landed one
+ * moved the base first, and the base refresh brings the head onto the new tip before it re-enters
+ * (a new head re-enters by the ordinary rule; a refresh conflict is the base's and asks for rework).
+ * An ejected speculative tip is still restored to the item's own head first (`ejectedTipRestore`).
+ */
+function predecessorReentry(work: Work, all: Work[]) {
+  const waiting = predecessorWait(work, all);
+  return !!waiting && !waiting.length && !pendingBaseRefresh(work) && !baseRefreshConflict(work) && !pendingRestore(work) && !ejectedTipRestore(work, all);
 }
 
 /** How one binding of a queued candidate currently stands, and why. */

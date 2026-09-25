@@ -1,4 +1,4 @@
-import { queueSequencingReason } from '../merge-queue.js';
+import { predecessorWaitReason, queueSequencingReason } from '../merge-queue.js';
 import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
 import { mechanicalProof } from './mechanical-proofs.js';
 import { producerLaunchStop } from './action-progress.js';
@@ -296,6 +296,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     if (kind === 'merge' && failing.reasons.every(entry => queueSequencingReason(entry))) {
       const ahead = refusal.match(/^Merge queue position \d+ of \d+: (\S+) is ahead$/);
       if (ahead) return waits({ kind: 'queue', on: ahead[1], detail: `${key} waits behind ${ahead[1]} in the merge queue: ${refusal}` }, failing.name, refusal);
+      // An entry ejected for a conflict with its predecessors alone waits for them, not for a sync (GY-321).
+      const predecessors = predecessorWaitReason(refusal);
+      if (predecessors) return waits({ kind: 'queue', on: predecessors.join(', '), detail: `${key} waits for ${predecessors.join(', ')} to land or leave the merge queue: ${refusal}` }, failing.name, refusal);
     }
     if (kind === 'merge') return make('merge', `${key} is queued to merge: ${refusal}`,
       { kind: 'merge', pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null }, binding, failing.name, refusal);
