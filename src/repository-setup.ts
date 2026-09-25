@@ -6,6 +6,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
+import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
 import { documentationAssignment, documentationPolicySchema, parseRepositoryConfig, repositoryConfigFile, type DocumentationPolicy } from './model/documentation.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
@@ -295,6 +296,8 @@ export interface ApplyDependencies {
   githubSetup?: (repository: string, deployment: string) => Promise<{ appId: number; slug: string }>;
   now?: () => Date;
   token?: () => string;
+  /** Runs `gh` for the merge-mode step; without it onboarding leaves GitHub's merge settings to `master protection --apply`. */
+  github?: ProtectionRun;
 }
 
 /**
@@ -378,6 +381,16 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     if (!Number.isSafeInteger(registration?.appId) || !registration?.slug) throw new Error('The GitHub App flow returned an incomplete registration');
     githubApp = { appId: registration.appId, slug: registration.slug };
     applied.push(`GitHub App registration ${githubApp.slug}`);
+  }
+
+  // A user-owned repository cannot have a merge queue, so GitHub merges through auto-merge there
+  // and the repository must allow it (GY-310); an organization repository gets its queue ruleset
+  // from `master protection --apply` once the App has published its check.
+  if (dependencies.github) {
+    try {
+      const merge = ensureMergeMode(proposal.repository, dependencies.github);
+      (merge.enabled ? applied : unchanged).push(merge.mode === 'queue' ? `merge mode: GitHub merge queue (${proposal.repository} is organization-owned; master protection --apply writes the ruleset)` : `merge mode: auto-merge ${merge.enabled ? 'enabled' : 'already enabled'} (${proposal.repository} cannot have a merge queue)`);
+    } catch (error: any) { drift.push(`merge mode could not be read or set on ${proposal.repository} (${String(error?.message ?? error).split('\n')[0]}); run graphyard master protection --apply`); }
   }
 
   const state = appliedStateSchema.parse({ version: 1, appliedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
