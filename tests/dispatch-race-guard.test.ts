@@ -118,7 +118,7 @@ const producerRow = (overrides: Partial<ActionRow> = {}): ActionRow => dispatchR
 const launchRows = (make: (overrides?: Partial<ActionRow>) => ActionRow) => ({
   pending: make(), claimed: make(claimed()), 'backing-off': make({ attempts: 1, retryAt: iso(600_000) }),
   settling: make({ state: 'done', resolvedAt: iso(-30_000), result: 'launched' } as any), reopening: make({ state: 'done', resolvedAt: iso(-3_600_000), result: 'launched' } as any),
-  'stalled but claimable': stalledRow(make, iso(-1_000)), 'stalled but claimed': stalledRow(make, iso(60_000), claimed()),
+  'stalled but claimable': stalledRow(make, iso(-1_000)), 'stalled but claimed': stalledRow(make, iso(60_000), claimed()), 'stalled and rechecking': stalledRow(make),
 });
 /** A row whose last attempts were each refused for one unchanged reason, rechecking at `retryAt`. */
 const stalledRow = (make: (overrides?: Partial<ActionRow>) => ActionRow, retryAt = iso(60_000), overrides: Partial<ActionRow> = {}) => {
@@ -273,8 +273,10 @@ test('unit:system-driven-items master review stays open only as the recovery of 
   const stopped = [session('completed', -120_000)];
   for (const [label, row] of Object.entries(launchRows(reviewRow)))
     assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), stopped, undefined, now), null, `a ${label} request-review row`);
-  // A row stalled on one unchanged refusal is the record of a launch no executor can make: the recovery is the master's again.
-  assert.match(reviewRecovery(underReview({ actionQueue: { actions: [stalledRow(reviewRow)], history: [] } }), stopped, undefined, now)!, /completed without satisfying it/);
+  // A row stalled on one unchanged refusal still rechecks, and is claimed a minute after its cause clears: a hand launch in that wait would be a second launch.
+  assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [stalledRow(reviewRow)], history: [] } }), stopped, undefined, now), null, 'a stalled row waiting to recheck');
+  // Once the item no longer needs the action its row is retired, and the recovery is the master's again.
+  assert.match(reviewRecovery(underReview({ actionQueue: { actions: [], history: [{ ...stalledRow(reviewRow), resolvedAt: iso(-1_000), resolution: 'retired' }] } }), stopped, undefined, now)!, /completed without satisfying it/);
   const master = await masterHarness({ work: [underReview()] });
   try {
     assert.match(await master.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/);
@@ -307,7 +309,8 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
     assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [row], history: [] } }, 'attest', attest, stopped), 'evidence', `a ${label} producer dispatch row`);
   assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [producerRow({ inputs: { ...producerRow().inputs, requestId: null } as any })], history: [] } }, 'attest', attest, stopped), 'evidence', 'a row naming the request only by its group');
   assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [producerRow({ inputs: { ...producerRow().inputs, requestId: 'e'.repeat(32), group: 'unit' } as any })], history: [] } }, 'attest', attest, stopped), null, "another request's row does not hold this one");
-  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [stalledRow(producerRow)], history: [] } }, 'attest', attest, stopped), null, 'a stalled row launches nothing');
+  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [stalledRow(producerRow)], history: [] } }, 'attest', attest, stopped), 'evidence', 'a stalled row waiting to recheck still launches the producer once its cause clears');
+  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [], history: [stalledRow(producerRow)] } }, 'attest', attest, stopped), null, 'a retired row launches nothing');
   const master = await masterHarness({ work: [underProof()] });
   try {
     const decide = ['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'reviewed', 'by', 'hand'];

@@ -1,4 +1,4 @@
-import { actionClaimMs, actionStall, claimable, claimLive, settling, waitingToRetry, type ActionRow } from '../model/actions.js';
+import { actionClaimMs, claimable, claimLive, settling, waitingToRetry, type ActionRow } from '../model/actions.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import type { Work } from '../model/work.js';
@@ -92,7 +92,7 @@ export interface LoopSessions {
  * a dismissal reopens the record as `failed`, which the loop relaunches itself.
  */
 function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number, rows: ActionRow[] = []): string | null {
-  if (rows.some(row => rowRunning(row, new Date(now)))) return null;
+  if (rowRunning(rows)) return null;
   const retry = sessionRetry(sessions, request.id, now);
   const answered = sessions.filter(session => session.requestId === request.id).at(-1);
   if (answered?.state === 'completed' && answered.verdict && answered.verdict.state !== 'DISMISSED') return null;
@@ -103,19 +103,15 @@ function stoppedRequest(label: string, request: { id: string }, sessions: LoopSe
 }
 
 /**
- * Whether the loop's executor still runs this durable action row: claimed, claimable, settling,
- * about to be reopened, or waiting out an ordinary failure backoff. The local ledgers only see the
- * sessions this host launched; an executor on any host launches from the row, so a recovery is
- * granted only once the row itself says no executor is launching it. The one open row that does
- * not is a stalled one (`actionStall`): its last attempts were each refused for one unchanged
- * reason by whichever executors claimed it — the durable record of a launch the loop cannot make,
- * which it would otherwise recheck forever and so leave nothing to recover. A stalled row that is
- * claimed or claimable is still being attempted, and blocks the recovery like any other.
+ * Whether the loop's executor still runs a durable action row for the request. The local ledgers
+ * only see the sessions this host launched; an executor on any host launches from the row, and
+ * every row the queue still holds is one it runs: claimed, claimable, settling, reopened once it
+ * settles, or waiting out a backoff. A stalled row (`actionStall`) is no exception — it is
+ * re-offered every `actionStallRecheckMs` and claimed a minute after the condition that refused it
+ * clears, so a hand launch made during that wait would be the second of two launches for one
+ * request. Only the row's retirement, when the item no longer needs the action, stops the executor.
  */
-function rowRunning(row: ActionRow, now: Date): boolean {
-  if (row.state !== 'pending' || claimLive(row, now) || !waitingToRetry(row, now)) return true;
-  return !actionStall(row);
-}
+const rowRunning = (rows: ActionRow[]) => rows.length > 0;
 
 /** The open review launch rows: the executor's `request-review` handler launches for the item's live review request whatever request its row names. */
 const reviewRows = (work: Pick<Work, 'actionQueue'>) => (work.actionQueue?.actions ?? []).filter(row => row.kind === 'request-review');
