@@ -43,13 +43,11 @@ A candidate enters once its gates pass. Its speculative tip (predicted base merg
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, each proof if its `scopeFiles` are disjoint. CI always re-runs.
-
-Carry ignores reviewed files if that conflict-free Graphyard merge kept the change's patch-id; carried steps name their ground.
+Reviews and proofs bind one head, base and policy revision. A moved base merges into the branch; all carry if that conflict-free merge kept the patch-id, else the approval if no reviewed file changed, each proof if its `scopeFiles` are disjoint. Carried steps name their ground; CI always re-runs.
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4, 1 disables; `POST /api/merge-queue` publishes it) batches entries onto one CI-tested tip; members merge in order when it passes, or it halves until ejecting the culprit, naming the check (`mergeStep`).
+`mergeQueue.batchSize` (master config, default 4, 1 disables; `POST /api/merge-queue` publishes it) tests entries on one tip; members merge in order when it passes, else halving ejects the culprit, naming the check (`mergeStep`); batches behind an unpassed one eject nothing.
 
 ### Direct merges
 

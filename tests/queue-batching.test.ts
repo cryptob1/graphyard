@@ -65,7 +65,9 @@ function driveQueue(batchSize: number, failing: string, everyTip = false) {
   const runs: string[][] = [], merged: { key: string; afterRuns: number }[] = [], ejected: { key: string; reason: string; afterRuns: number }[] = [];
   for (let round = 0; queued().length && round < 50; round++) {
     publish();
-    for (const item of queued()) {
+    // The engine evaluates each entry on its own observation, in no set order; `everyTip` takes the
+    // back of the queue first, so an entry behind the failure is judged before the failure is isolated.
+    for (const item of everyTip ? queued().reverse() : queued()) {
       Object.assign(item, evaluate(item, items, now, [15368], batchSize));
       if (!item.queue) ejected.push({ key: item.key, reason: item.queueEjection!.reason, afterRuns: runs.length });
     }
