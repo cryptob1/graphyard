@@ -1,10 +1,12 @@
-import { defaultMergeBatchSize, ejectionReason, nextQueueSequence, queueBatch, queueHistoryLimit, queuePlacement } from '../merge-queue.js';
+import { ejectionReason, nextQueueSequence, queueHistoryLimit, queuePlacement } from '../merge-queue.js';
 import type { QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
-import { carriedApproval, currentCarry, describeGround } from './carry.js';
+import { carriedApproval, currentCarry } from './carry.js';
 import { currentEvidence } from './evidence.js';
 import { exactApproval } from './review.js';
 import { requiredProofs } from './bootstrap.js';
+import { defaultMergeBatchSize, queueBatch } from '../merge-queue.js';
+import { describeGround } from './carry.js';
 
 /**
  * Queue membership is derived, never asserted: no command, operator, or administrator can
