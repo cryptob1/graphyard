@@ -1255,8 +1255,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const authoredByApp = appAuthored(commit, await this.controlPlaneLogin());
     // The provider merge never resolves a conflict: a conflicting merge is refused with 409 and
     // ejects the entry (see mergeBranch), so a tip that exists was produced without one.
+    // A diff neither side of which could be read is left off: the record is what it was before GY-330.
     const diff = { reviewed: await this.diffPatchId(boundBase, from), tip: await this.diffPatchId(predictedBase, tip) };
-    return { from, parents, author: author ?? (email || null), authoredByApp, conflicts: false, baseChanges: await this.changedFiles(boundBase, predictedBase), diff };
+    return { from, parents, author: author ?? (email || null), authoredByApp, conflicts: false, baseChanges: await this.changedFiles(boundBase, predictedBase), ...(diff.reviewed || diff.tip ? { diff } : {}) };
   }
   /** Returns the new head, or null when the branch already contains the merged commit. */
   async mergeBranch(branch: string, head: string, message: string): Promise<string | null> {

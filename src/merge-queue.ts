@@ -973,7 +973,7 @@ export function runMergeBatches(queue: string[], batchSize: number, runTip: (mer
 export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null): TipVerdict | undefined {
   const speculation = work.queue?.speculation, candidate = work.candidate, observation = work.observation;
   if (!speculation || !candidate || speculation.tip !== candidate.sha || !observation || observation.candidate.sha !== candidate.sha) return undefined;
-  const runs = work.policy.checks.map(name => ({ name, run: latestCheck(observation.checks.filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
+  const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
   const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result));
   if (failed) return { result: 'fail', check: failed.name };
   return runs.every(entry => entry.run?.result === 'success') ? { result: 'pass' } : undefined;
