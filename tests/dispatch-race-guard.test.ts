@@ -220,6 +220,43 @@ test('unit:dispatch-race-guard the executor\'s dispatch proceeds on the row the 
   assert.deepEqual(launched, ['GY-7:claude-worker']);
 });
 
+test('unit:dispatch-race-guard an expired, unreclaimed lease is the loop\'s pending release: master dispatch is refused naming the reclaim', async () => {
+  const now = new Date(), window = { intervalMs: 10_000, releasedAt: null };
+  // A worker's lease lapsed with nothing submitted, and reconciliation has not recorded lease.expired yet.
+  const lease = { owner: 'worker-a', epoch: 1, expiresAt: iso(-30_000) };
+  const lapsed = item({ epoch: 1, lease: lease as Work['lease'], actionQueue: { actions: [], history: [] } });
+  // Too recent to be queued: the refusal names the reclaim the loop is about to queue.
+  assert.match(dispatchRaceRefusal(lapsed, now, window)!, /GY-7: the lease worker-a held under epoch 1 expired at .* and no lease.expired release is recorded yet; the loop queues a reclaim action for it on its next tick, and once it records the release the dispatcher's next tick claims the item's dispatch action, so master dispatch is refused/);
+  // The planner queues a reclaim, not an implementation dispatch, so the dispatch-row checks alone had nothing to refuse on.
+  const next = nextAction(lapsed, [lapsed], now);
+  assert.equal(next?.kind, 'reclaim');
+  reconcileActions(lapsed, [lapsed], now, { next });
+  const row = lapsed.actionQueue!.actions.find(entry => entry.kind === 'reclaim')!;
+  assert.ok(row, 'the reclaim row is queued');
+  assert.equal(lapsed.actionQueue!.actions.some(entry => entry.kind === 'dispatch'), false, 'no implementation dispatch row exists yet');
+  assert.match(dispatchRaceRefusal(lapsed, now, window)!, new RegExp(`reclaim action ${row.id} \\(GY-7 is held by worker-a under epoch 1.*\\) is queued, and once it records the release`));
+  const claimedRow = claimAction([lapsed], { id: 'executor-host-1', host: 'host-1', principal: 'master' }, now, { kinds: ['reclaim'] });
+  assert.equal(claimedRow?.row.id, row.id);
+  assert.match(dispatchRaceRefusal(lapsed, now, window)!, new RegExp(`reclaim action ${row.id} .* is claimed by executor executor-host-1 on host-1`));
+  // A retained reclaim row holds the refusal even once the snapshot no longer carries the lease.
+  assert.match(dispatchRaceRefusal({ ...lapsed, lease: null }, now, window)!, /the lapsed lease it reclaims is not yet released; reclaim action .* is claimed by executor/);
+  // A live lease is not this guard's: assertDispatchable refuses the active owner.
+  assert.equal(dispatchRaceRefusal(item({ lease: { ...lease, expiresAt: iso(600_000) } as Work['lease'] }), now, window), null);
+
+  const state: { work: Work[]; releasedAt?: string | null } = { work: [item({ systemDriven: false, epoch: 1, lease: lease as Work['lease'] })], releasedAt: iso(-3_600_000) };
+  const master = await masterHarness(state);
+  try {
+    assert.match(await master.refusal(['dispatch', 'GY-7', 'claude-worker']), /GY-7: the lease worker-a held under epoch 1 expired at .* and no lease.expired release is recorded yet; the loop queues a reclaim action/);
+    state.work = [item({ systemDriven: false, epoch: 1, lease: lease as Work['lease'], actionQueue: { actions: [structuredClone(row)], history: [] } })];
+    assert.match(await master.refusal(['dispatch', 'GY-7', 'claude-worker']), new RegExp(`GY-7: the lease worker-a .*; reclaim action ${row.id} .* is claimed by executor executor-host-1 on host-1, and once it records the release the dispatcher's next tick claims the item's dispatch action, so master dispatch is refused`));
+    // The reclaim recorded lease.expired: the release window takes over, then the hand dispatch is the recovery again.
+    state.work = [item({ systemDriven: false, epoch: 1 })]; state.releasedAt = iso(-3_000);
+    assert.match(await master.refusal(['dispatch', 'GY-7', 'claude-worker']), /GY-7 was released at .*, within the loop's 10s dispatch interval/);
+    state.releasedAt = iso(-60_000);
+    assert.match(await master.refusal(['dispatch', 'GY-7', 'claude-worker']), /Unknown worker profile claude-worker/);
+  } finally { await master.close(); }
+});
+
 // ---- AC-2: a system-driven item refuses the hand actions the loop owns ----
 
 test('unit:system-driven-items new items are system-driven by the shipped default; existing items and an explicit opt-out are not', () => {

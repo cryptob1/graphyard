@@ -207,7 +207,10 @@ export function dispatchRetryAt(work: Pick<Work, 'actionQueue'>, now: Date): num
  * (`handDispatchFenceMs`); a hand dispatch then is the recovery it is for, and it claims nothing
  * once the backoff is about to end (`assertHandDispatch`'s `claimBy`).
  */
-export function dispatchRaceRefusal(work: Pick<Work, 'key' | 'actionQueue'>, now: Date, window: { intervalMs: number; releasedAt: string | null }): string | null {
+export function dispatchRaceRefusal(work: Pick<Work, 'key' | 'actionQueue'> & Partial<Pick<Work, 'lease'>>, now: Date, window: { intervalMs: number; releasedAt: string | null }): string | null {
+  const reclaim = (work.actionQueue?.actions ?? []).find(row => row.kind === 'reclaim');
+  const lapsed = work.lease && !(Date.parse(work.lease.expiresAt) > now.getTime()) ? work.lease : null;
+  if (reclaim || lapsed) return reclaimRefusal(work.key, reclaim, lapsed, now);
   const row = (work.actionQueue?.actions ?? []).find(implementationDispatch);
   const named = (row: ActionRow) => `dispatch action ${row.id} (${row.reason})`;
   if (row && claimLive(row, now)) return `${work.key}: ${named(row)} is claimed by executor ${row.claim!.executor} on ${row.claim!.host} until ${row.claim!.expiresAt}; the executor's dispatch is in progress, so master dispatch is refused`;
@@ -220,6 +223,24 @@ export function dispatchRaceRefusal(work: Pick<Work, 'key' | 'actionQueue'>, now
   if (Number.isFinite(released) && now.getTime() - released < window.intervalMs)
     return `${work.key} was released at ${window.releasedAt}, within the loop's ${Math.round(window.intervalMs / 1000)}s dispatch interval; the dispatcher's next tick claims its dispatch action, so master dispatch is refused`;
   return null;
+}
+
+/**
+ * The release the loop has not recorded yet. A lease that lapsed with nothing submitted is still in
+ * the snapshot until reconciliation records `lease.expired`, so neither the implementation dispatch
+ * row nor the release event exists yet — but the executor's `reclaim` row (or its next tick, for a
+ * lapse too recent to be queued) records the release, and the dispatcher's next tick then queues and
+ * claims the dispatch. A hand launch in that window races it exactly as it would race a pending
+ * dispatch row, so the reclaim is named as the loop's pending action: a retained row in any state
+ * (pending, claimed, settling, backing off), or a lapsed lease no row has been queued for yet.
+ */
+function reclaimRefusal(key: string, row: ActionRow | undefined, lease: Work['lease'], now: Date): string {
+  const held = lease ? `the lease ${lease.owner} held under epoch ${lease.epoch} expired at ${lease.expiresAt} and no lease.expired release is recorded yet` : 'the lapsed lease it reclaims is not yet released';
+  const state = !row ? 'the loop queues a reclaim action for it on its next tick'
+    : claimLive(row, now) ? `reclaim action ${row.id} (${row.reason}) is claimed by executor ${row.claim!.executor} on ${row.claim!.host}`
+    : row.state === 'done' ? `reclaim action ${row.id} (${row.reason}) completed at ${row.resolvedAt} and is settling`
+    : `reclaim action ${row.id} (${row.reason}) is queued`;
+  return `${key}: ${held}; ${state}, and once it records the release the dispatcher's next tick claims the item's dispatch action, so master dispatch is refused`;
 }
 
 /** Throws the refusal for a hand action on a system-driven item. */
