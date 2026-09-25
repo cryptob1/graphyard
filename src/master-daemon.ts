@@ -28,7 +28,7 @@ import { followUpThreadIds, launchReview, readReviewLedger, updateReviewLedger }
 import { basePaths, baseText, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { defaultAwaitReviewers, unexercisedFindings } from './auto-dispatch.js';
 import { classifyRuntimePrompt, continueAfterDecline, deliverPrompt, inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity, type RuntimePrompt } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, herdrJson, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, transientMergeRace, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, dispatchReserved, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, herdrJson, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, transientMergeRace, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { capacityRefusal, reconcileFleetSessions } from './fleet.js';
@@ -2475,7 +2475,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     const key = dispatchKey(item);
     if (state.actions[key] && state.actions[key].state !== 'failed') return;
     const free = await effects.agents();
-    const choice = health.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
+    const pick = () => health.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
+    let choice = pick();
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no
       // profile could take work even if it were free.
@@ -2487,23 +2488,40 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       }
       return 'stop';
     }
-    taken.add(choice.profile.name);
-    await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-    try {
-      const dispatched = await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined;
-      clearProfileFailure(state, choice.profile);
-      // The session is now running somewhere. Put the handle where every Graphyard reader looks,
-      // so watching this specific agent never means asking this loop to relay its pane id.
-      await effects.recordSession?.(item, {
-        id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal, runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
-        ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-        ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
-        subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-      }).catch(() => { /* the dispatch landed; a handle that could not be written is not a failed dispatch */ });
-      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      recordProfileFailure(state, choice.profile, message(error), now());
-      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${choice.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+    const previous = state.actions[key];
+    for (;;) {
+      taken.add(choice.profile.name);
+      await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+      try {
+        const dispatched = await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined;
+        clearProfileFailure(state, choice.profile);
+        // The session is now running somewhere. Put the handle where every Graphyard reader looks,
+        // so watching this specific agent never means asking this loop to relay its pane id.
+        await effects.recordSession?.(item, {
+          id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal, runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
+          ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
+          ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
+          subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
+        }).catch(() => { /* the dispatch landed; a handle that could not be written is not a failed dispatch */ });
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      } catch (error) {
+        // Another dispatcher — an executor, or a hand dispatch — holds the profile or the item
+        // (GY-273). Nothing was claimed and nothing is wrong with the profile: a held profile is
+        // passed over for the next free one, and a held item is left to the launch holding it.
+        if (dispatchReserved(error)) {
+          const next = error.resource === 'profile' ? pick() : undefined;
+          if (next) { choice = next; continue; }
+          // The profile this item did not use is still free for the next item.
+          if (error.resource === 'work') taken.delete(choice.profile.name);
+          if (previous) state.actions[key] = previous; else delete state.actions[key];
+          await effects.persist(state);
+          return error.resource === 'profile' ? 'stop' : undefined;
+        }
+        recordProfileFailure(state, choice.profile, message(error), now());
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${choice.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
     }
   }) === 'stop') break;
 
@@ -3621,7 +3639,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
-    dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now),
+    dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
     decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.

@@ -8,7 +8,7 @@ import { independentProducerProfiles } from './producer.js';
 import { profileHealth, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
-import type { HerdrAgent, MasterConfig, MergeExecutor, ProducerProfile, WorkerProfile } from './master.js';
+import { dispatchReserved, type HerdrAgent, type MasterConfig, type MergeExecutor, type ProducerProfile, type WorkerProfile } from './master.js';
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 
 /**
@@ -104,9 +104,23 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const agents = await herdr();
     const workers = config().workers;
     const health = profileHealth(workers, await effects.workerCredentials(workers), agents, statelessProfiles, Date.parse(observedAt) || Date.now());
-    const choice = health.find(entry => entry.healthy);
-    if (!choice) throw new Error(`no worker profile can take ${work.key}: ${health.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`);
-    const launched = await effects.dispatchWorker(work, choice.profile, agents, { work: all, now: observedAt });
+    const choices = health.filter(entry => entry.healthy);
+    if (!choices.length) throw new Error(`no worker profile can take ${work.key}: ${health.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`);
+    // The loop dispatches beside the executors, each from its own snapshot of Herdr. A profile
+    // another dispatcher holds is refused before anything is claimed and the next healthy one is
+    // tried; an item another dispatcher is launching is left to that launch (GY-273).
+    let choice = choices[0], launched: any;
+    const held: string[] = [];
+    for (let index = 0; ; index++) {
+      choice = choices[index];
+      if (!choice) throw new Error(`no worker profile can take ${work.key}: every healthy profile is reserved by another dispatch (${held.join('; ')})`);
+      try { launched = await effects.dispatchWorker(work, choice.profile, agents, { work: all, now: observedAt }); break; }
+      catch (error) {
+        if (!dispatchReserved(error)) throw error;
+        if (error.resource === 'work') return `${work.key} is left to the dispatcher already launching it: ${error.message}`;
+        held.push(error.message);
+      }
+    }
     const workspace = config().herdrWorkspace;
     await record(work, {
       // The worker session's own handle: it fills in the tab and transcript only it has, so the

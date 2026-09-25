@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, statfs, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir, hostname } from 'node:os';
@@ -24,7 +24,7 @@ import { CHECK_NAME, carriedApproval, closedHistory, isClosed, escalationTrigger
 import { containmentAttestation, containmentGraceMs, containmentSettlementRefusals, containmentVerificationSchema, type ContainmentVerification } from './quarantine.js';
 import { probeSupervisorAbsence, type SupervisorProbe } from './containment-probe.js';
 import { consentHoldAttention, consentHoldMs, detectConsentPrompt, sameConsentPrompt, settingsWarning, writeConsentHold, type ConsentAnswer, type ConsentHold, type ConsentPrompt } from './consent-prompt.js';
-import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
+import { installLoopSupervisor, loopSupervisionAttention, loopUnitName, unsupervisedInstruction, watchAssignment, type LoopSupervisorHost, type LoopSupervisorInstallation } from './supervisor.js';
 import { baseRefreshConflict, branchContamination, currentBaseRefreshCarry, currentRestore, pendingBaseRefresh, pendingRestore, predictQueue, refusedReconciliation, restoredApproval, unpublishableEntry, conversationProtectionRefusal, type QueuePlacement } from './merge-queue.js';
 import { MERGE_PROTOCOL } from './protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention, missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
@@ -1440,6 +1440,7 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
  * the runtime says about its arguments (GY-101).
  */
 export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null;
+  /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
   assertSessionName(name, options.retry);
@@ -1459,6 +1460,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
   const command = launchCommand(kind, args, files, options.prefix);
   await herdrRun(['pane', 'run', pane, command], run);
+  options.onRun?.();
   const started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates });
   let named = true;
   try { await herdrJson(['agent', 'rename', pane, name], run); }
@@ -3030,6 +3032,109 @@ export interface DispatchOptions {
   probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
   claimBy?: number;
+  /**
+   * Whether the watch supervisor for an assignment is running on this host (GY-273): a launch that
+   * fails once one may be is never closed under it. A test's stub answers for its fake panes.
+   */
+  supervisor?: (target: { key: string; epoch: number; pane: string | undefined }) => boolean | Promise<boolean>;
+  /** Herdr's agents read afresh, under the profile's reservation (GY-273); the loop passes `listHerdrAgents`. */
+  agents?: () => HerdrAgent[] | Promise<HerdrAgent[]>;
+}
+
+/**
+ * The per-host dispatch reservation (GY-273). The loop and every executor dispatch from their own
+ * snapshot of Herdr's agents, so two of them could pick one profile, or one item, within the same
+ * second; the loser had already claimed the item and started its runtime when Herdr refused the
+ * name. A dispatch therefore takes an exclusive reservation of its profile and its item — a lock
+ * file created with O_EXCL under the installation's `.graphyard/dispatch` — before anything is
+ * claimed, re-reads Herdr's agents while holding it, and gives it back once the session carries
+ * its name (or the launch failed). A dispatcher that finds either reserved is refused cleanly,
+ * before any claim, with a `DispatchReservedError` naming what is held, and picks another profile
+ * or leaves the item to the dispatcher launching it.
+ *
+ * A lock is stale, and taken over, once its holder's process is gone on this host or it is older
+ * than `dispatchReservationMs` — longer than any launch takes (two attempts at the start ceiling).
+ */
+export const dispatchReservationMs = 10 * 60_000;
+export const dispatchReservationDirectory = (root: string) => resolve(root, '.graphyard/dispatch');
+export class DispatchReservedError extends Error {
+  readonly dispatchReserved = true;
+  constructor(readonly resource: 'profile' | 'work', readonly subject: string, message: string) { super(message); }
+}
+export const dispatchReserved = (error: unknown): error is DispatchReservedError => (error as { dispatchReserved?: boolean } | null)?.dispatchReserved === true;
+interface ReservationHolder { token: string; pid: number; host: string; at: string; epoch?: number }
+const reservationFile = (root: string, resource: 'profile' | 'work', subject: string) => resolve(dispatchReservationDirectory(root), `${resource}-${subject.replace(/[^A-Za-z0-9._-]/g, '_')}.lock`);
+const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } };
+async function reservationHolder(file: string): Promise<{ holder: ReservationHolder | null; ageMs: number } | null> {
+  let text: string, ageMs: number;
+  try { [text, ageMs] = await Promise.all([readFile(file, 'utf8'), stat(file).then(info => Date.now() - info.mtimeMs)]); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+  try { return { holder: JSON.parse(text) as ReservationHolder, ageMs }; } catch { return { holder: null, ageMs }; }
+}
+/** Reserves one resource, or refuses naming its live holder; the returned function gives it back. */
+async function reserveDispatchResource(root: string, resource: 'profile' | 'work', subject: string, refusal: (holder: ReservationHolder | null) => string): Promise<() => Promise<void>> {
+  const file = reservationFile(root, resource, subject);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  const token = randomUUID();
+  const body = JSON.stringify({ token, pid: process.pid, host: hostname(), at: new Date().toISOString() } satisfies ReservationHolder);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(file, body, { flag: 'wx', mode: 0o600 });
+      return async () => { const held = await reservationHolder(file).catch(() => null); if (held?.holder?.token === token) await rm(file, { force: true }); };
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    const held = await reservationHolder(file);
+    if (!held) continue;
+    // A file still being written reads as unparsable for an instant: only its age makes it stale.
+    const stale = held.ageMs > dispatchReservationMs || !!held.holder && held.holder.host === hostname() && Number.isSafeInteger(held.holder.pid) && !processAlive(held.holder.pid);
+    if (!stale) throw new DispatchReservedError(resource, subject, refusal(held.holder));
+    await rm(file, { force: true });
+  }
+  throw new DispatchReservedError(resource, subject, refusal(null));
+}
+const heldBy = (holder: ReservationHolder | null) => holder ? ` (process ${holder.pid} on ${holder.host} since ${holder.at})` : '';
+/**
+ * What the last dispatch on this host launched, written before its reservation is given back: the
+ * epoch it claimed for an item (a snapshot from before it is stale) and the profile it named.
+ */
+const dispatchedFile = (root: string, key: string) => resolve(dispatchReservationDirectory(root), `dispatched-${key.replace(/[^A-Za-z0-9._-]/g, '_')}.json`);
+const profileLaunchedFile = (root: string, profile: string) => resolve(dispatchReservationDirectory(root), `launched-${profile.replace(/[^A-Za-z0-9._-]/g, '_')}.json`);
+const launchedAfter = async (file: string, observedAt: string) => {
+  const marker = await readFile(file, 'utf8').then(text => JSON.parse(text) as { epoch?: number; at?: string }).catch(() => null);
+  return marker && typeof marker.at === 'string' && Date.parse(marker.at) > Date.parse(observedAt) ? marker : null;
+};
+/**
+ * Herdr's agents as they stand under the reservation. A snapshot can only have gone stale on this
+ * profile's name if a dispatch here launched the profile after the snapshot was taken, and every
+ * such launch leaves its marker before giving the reservation back: with such a marker, or a fresh
+ * reader supplied, Herdr is read again; otherwise the snapshot the dispatcher chose from stands.
+ */
+async function currentAgents(root: string, profile: WorkerProfile, snapshot: HerdrAgent[], observedAt: string, run: ChildRun | undefined, fresh: DispatchOptions['agents']) {
+  if (fresh) return fresh();
+  return await launchedAfter(profileLaunchedFile(root, profile.name), observedAt) ? listHerdrAgents(run) : snapshot;
+}
+async function reserveDispatch(root: string, work: Work, profile: WorkerProfile, observedAt: string) {
+  const releaseWork = await reserveDispatchResource(root, 'work', work.key, holder => `${work.key} is being dispatched by another dispatcher${heldBy(holder)}; it is left to that launch`);
+  try {
+    // A dispatch that finished while this one read its snapshot claimed a newer epoch than the
+    // snapshot shows: the item is taken, and claiming it again would only be refused at the claim.
+    const last = await launchedAfter(dispatchedFile(root, work.key), observedAt);
+    if (typeof last?.epoch === 'number' && last.epoch > work.epoch) throw new DispatchReservedError('work', work.key, `${work.key} was dispatched at epoch ${last.epoch} after this dispatcher's snapshot (epoch ${work.epoch}); it is left to that launch`);
+    const releaseProfile = await reserveDispatchResource(root, 'profile', profile.name, holder => `Worker profile ${profile.name} is reserved by another dispatch${heldBy(holder)}; pick another profile`);
+    return async () => { await releaseProfile().catch(() => {}); await releaseWork().catch(() => {}); };
+  } catch (error) { await releaseWork().catch(() => {}); throw error; }
+}
+/**
+ * Whether this host runs the watch supervisor of `KEY EPOCH`, read from the process table by the
+ * supervisor's exact command line. A host whose table cannot be read answers true: a pane that may
+ * hold a running supervisor is not closed.
+ */
+export function watchSupervisorRunning(target: { key: string; epoch: number }, readCommand: (pid: number) => string = pid => readFileSync(`/proc/${pid}/cmdline`, 'utf8'), list: () => string[] = () => readdirSync('/proc')): boolean {
+  let pids: string[];
+  try { pids = list().filter(name => /^\d+$/.test(name)); } catch { return true; }
+  return pids.some(pid => {
+    try { const assignment = watchAssignment(readCommand(Number(pid)).split('\0').filter(Boolean)); return assignment?.key === target.key && assignment.epoch === String(target.epoch); }
+    catch { return false; }
+  });
 }
 /** Refuses a hand launch past its `claimBy`: the item's backed-off dispatch action is the executor's again, so the launch claims nothing. */
 export function assertClaimDeadline(key: string, claimBy: number | undefined, now = Date.now()) {
@@ -3068,30 +3173,43 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
   } else {
     await readCredentialFile(profile.credentialFile!);
-    if (target) throw new Error('Launch profile agent name is already visible in Herdr');
+    if (target) throw new DispatchReservedError('profile', profile.name, 'Launch profile agent name is already visible in Herdr');
     // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
-    // The account is chosen before anything is claimed: a profile whose accounts are all logged out
-    // or out of quota claims nothing, and the refusal names every account it skipped and why.
-    selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });
-    // The Git directories the worker writes are granted once its worktree exists (launchWorker).
-    // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
-    const chosen = selected;
-    const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
-    launched = launch;
-    // A prompt the runtime never accepted closes the session and releases the claim; the launch is
-    // then made once more from a fresh claim, rather than leaving an idle session holding the item.
-    for (let attempt = 1; ; attempt++) {
-      try {
-        assertClaimDeadline(work.key, options.claimBy);
-        ({ target, harness, dependencies, delivery, sandbox, started, consent } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy)); break; }
-      catch (error) {
-        if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
-        // The registry session chosen for this launch never ran; its account is free again at once.
-        await selected.release?.(`worker launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
-        throw error;
+    // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
+    // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
+    const unreserve = await reserveDispatch(root, work, profile, observedAt);
+    try {
+      if ((await currentAgents(root, profile, agents, observedAt, run, options.agents)).some(agent => agent.name === profile.agentName))
+        throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
+      // The account is chosen before anything is claimed: a profile whose accounts are all logged out
+      // or out of quota claims nothing, and the refusal names every account it skipped and why.
+      selected = await selectAccount(config, 'worker', profile, { ...options.probe, work: work.key });
+      // The Git directories the worker writes are granted once its worktree exists (launchWorker).
+      // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
+      const chosen = selected;
+      const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
+      launched = launch;
+      // A prompt the runtime never accepted closes the session and releases the claim; the launch is
+      // then made once more from a fresh claim, rather than leaving an idle session holding the item.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          assertClaimDeadline(work.key, options.claimBy);
+          let epoch: number;
+          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor));
+          // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
+          const at = new Date().toISOString();
+          await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
+          await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: work.key, epoch, agentName: profile.agentName, at }), { mode: 0o600 }).catch(() => {});
+          break;
+        } catch (error) {
+          if (error instanceof PromptNotAcceptedError && attempt < 2) { relaunched++; continue; }
+          // The registry session chosen for this launch never ran; its account is free again at once.
+          await selected.release?.(`worker launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
+          throw error;
+        }
       }
-    }
+    } finally { await unreserve(); }
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
@@ -3109,7 +3227,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning) {
   const prepared = await prepare(root, work.key, profile.name, undefined, claimBy);
   // The worker writes its worktree, the worktree's own Git admin directory and the shared one;
   // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
@@ -3122,7 +3240,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null);
   // The worker loads its own role rules, never the master's: it may push its assigned branch.
   const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
-  let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
+  let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
   try {
     // A sandbox that cannot write them is a launch failure naming the path, not a worker that
     // fails at its first sync; the claim is released below like any other failed launch.
@@ -3133,22 +3251,30 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment });
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, onRun: () => { ran = true; } });
     // A worker stopped on a prompt the launcher does not answer is held for a human rather than
     // closed: its record beside the launch files is what master status raises and what the watch
     // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
     const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
     if (hold) writeConsentHold(started.files.stem, hold);
     return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
-      started: started.started.state, consent: { answered: started.consent, awaiting: hold } };
+      started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
-    if (pane || tabId || malformedTab) {
+    const failed = error instanceof Error ? error.message : 'Worker launch failed';
+    // Once the command line is in the pane, the watch supervisor may be running there with the
+    // runtime under it. Closing that pane kills both by SIGHUP and leaves an unverified containment
+    // fence (GY-273), so it is left alone: the claim is released below, and the supervisor stops
+    // its own worker on the lost lease and settles the containment itself.
+    const supervised = ran && await Promise.resolve(supervisor({ key: work.key, epoch: prepared.epoch, pane })).catch(() => true);
+    if (!supervised && (pane || tabId || malformedTab)) {
       try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
-      catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
+      catch { throw new Error(`${failed}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
     }
     try { await release(root, work.key, prepared.epoch, profile.name); }
-    catch { throw new Error(`${error instanceof Error ? error.message : 'Worker launch failed'}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
+    catch { throw new Error(supervised ? `${failed}; pane ${pane} was left to its running supervisor, but Graphyard could not release epoch ${prepared.epoch}` : `${failed}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
+    // A supervised pane is never relaunched over: the failure is reported as it is, not as a retryable prompt.
+    if (supervised) throw Object.assign(new Error(`${failed}; pane ${pane} was left to its running supervisor, which stops the worker on the released epoch ${prepared.epoch}`), { cause: error });
     throw error;
   }
 }
