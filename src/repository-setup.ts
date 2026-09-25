@@ -461,7 +461,27 @@ export interface ExecutorSupervision {
   units: { slot: number; unit: string; active: string }[];
   /** Instances above the declared count that were disabled. */
   disabled: string[];
+  /** Which component runs the guarded merge on this host, and why the kinds are what they are. */
+  merger: string;
   next: string;
+}
+
+/** Every kind an executor serves beside a merging loop: all it can run but `merge`. */
+export const loopMergerExecutorKinds = executorRunnableKinds.filter(kind => kind !== 'merge');
+
+/**
+ * The kinds to declare given whether a master loop merges on this host (GY-245). Beside a loop,
+ * `merge` is removed — from an explicit list it is refused, since that list would put a second
+ * merger on the installation. Without a loop, a list that is exactly the one written beside a loop
+ * goes back to every kind, so the executors merge again once the loop is gone.
+ */
+export function executorMergeKinds(kinds: NextActionKind[] | null, loop: { name: string } | null, explicit = false): NextActionKind[] | null {
+  if (loop) {
+    if (explicit && kinds?.includes('merge')) throw new Error(`${loop.name} merges on this installation; an executor declared with merge would race it for the same candidate, so leave merge out of --kinds`);
+    return (kinds ?? executorRunnableKinds).filter(kind => kind !== 'merge');
+  }
+  if (!explicit && kinds && kinds.length === loopMergerExecutorKinds.length && loopMergerExecutorKinds.every(kind => kinds.includes(kind))) return null;
+  return kinds;
 }
 
 /**
@@ -471,15 +491,21 @@ export interface ExecutorSupervision {
  * and unit are left alone, and `enable --now` on a running instance is a no-op. Without a user
  * manager the declaration is still written, and the result names the unit to install by hand.
  */
-export async function installExecutorSupervision(root: string, options: { count?: number; kinds?: NextActionKind[] | null; intervalSeconds?: number; run?: SystemctlRunner; unitDirectory?: string; template?: string; node?: string } = {}): Promise<ExecutorSupervision> {
+export async function installExecutorSupervision(root: string, options: { count?: number; kinds?: NextActionKind[] | null; intervalSeconds?: number; run?: SystemctlRunner; unitDirectory?: string; template?: string; node?: string; loop?: { name: string } | null } = {}): Promise<ExecutorSupervision> {
   const primary = connectionRoots(root)[0];
   const existing = await readExecutorDeclaration(primary);
-  const declaration = executorDeclarationSchema.parse({ ...(existing ?? defaultExecutorDeclaration), ...(options.count !== undefined ? { count: options.count } : {}), ...(options.kinds !== undefined ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== undefined ? { intervalSeconds: options.intervalSeconds } : {}) });
+  // Exactly one component merges (GY-245): where the master loop merges, the executors are
+  // declared without `merge`; where there is none, they keep it. Read lazily: the executor module
+  // reads the loop's cursor, and this one is loaded long before any loop exists.
+  const loop = options.loop !== undefined ? options.loop : await (await import('./executor.js')).detectLoopMerger(primary, { unitDirectory: options.unitDirectory });
+  const kinds = executorMergeKinds(options.kinds !== undefined ? options.kinds : existing?.kinds ?? null, loop, options.kinds !== undefined);
+  const declaration = executorDeclarationSchema.parse({ ...(existing ?? defaultExecutorDeclaration), ...(options.count !== undefined ? { count: options.count } : {}), kinds, ...(options.intervalSeconds !== undefined ? { intervalSeconds: options.intervalSeconds } : {}) });
+  const merger = loop ? `${loop.name} merges, so the executors serve ${declaration.kinds!.join(', ')} and never merge` : 'no master loop merges on this host, so the executors run the guarded merge';
   const written = await writeExecutorDeclaration(primary, declaration);
   const run = options.run ?? systemctl;
   const manager = systemdUserManager(run);
   const byHand = `copy examples/master/${executorUnitTemplate} to ~/.config/systemd/user/, edit WorkingDirectory and ExecStart to ${primary}, then systemctl --user daemon-reload && systemctl --user enable --now ${Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1)).join(' ') || '(no slot is declared)'}`;
-  if (!manager.available) return { declaration, declarationFile: written.file, installed: false, reason: manager.reason, unitFile: null, units: [], disabled: [], next: `Executors are not supervised on this host: ${manager.reason}. ${byHand}` };
+  if (!manager.available) return { declaration, declarationFile: written.file, installed: false, reason: manager.reason, unitFile: null, units: [], disabled: [], merger, next: `Executors are not supervised on this host: ${manager.reason}. ${byHand}` };
   const template = options.template ?? await readFile(resolve(primary, 'examples/master', executorUnitTemplate), 'utf8');
   const unitFile = resolve(options.unitDirectory ?? executorUnitDirectory(), executorUnitTemplate);
   const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath });
@@ -496,9 +522,11 @@ export async function installExecutorSupervision(root: string, options: { count?
   }
   const disabled = [...known].filter(unit => !wanted.includes(unit)).sort();
   if (disabled.length) run(['disable', '--now', ...disabled]);
-  if (current !== rendered && wanted.length) run(['restart', ...wanted]);
+  // A slot reads its kinds once, at start: a changed kind list reaches the running slots only by a restart.
+  const kindsChanged = JSON.stringify(existing?.kinds ?? null) !== JSON.stringify(declaration.kinds);
+  if ((current !== rendered || kindsChanged) && wanted.length) run(['restart', ...wanted]);
   const units = wanted.map((unit, index) => ({ slot: index + 1, unit, active: activeState(run, unit) }));
-  return { declaration, declarationFile: written.file, installed: true, reason: null, unitFile, units, disabled,
+  return { declaration, declarationFile: written.file, installed: true, reason: null, unitFile, units, disabled, merger,
     next: declaration.count ? `${declaration.count} executor slot(s) run under systemd; journalctl --user -u 'graphyard-executor@*' -f follows them, and node scripts/graphyard-executor.mjs --install --count N changes the count` : 'No executor slot is declared, so no action of any kind runs on this host; node scripts/graphyard-executor.mjs --install --count 1 declares one' };
 }
 

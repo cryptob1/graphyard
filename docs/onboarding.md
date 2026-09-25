@@ -92,7 +92,7 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-The second `init` installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances that run each item's next action; without it resyncs and reclaims go unserved.
+The second `init` installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances running each item's next action (never merges beside a loop); without it resyncs and reclaims go unserved.
 
 Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
@@ -104,7 +104,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 `graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it, the worker submits, review and proofs start, and the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-Before adding workers, let one lease expire and confirm a reclaim fences the old epoch.
+Before adding workers, let a lease expire and confirm a reclaim fences its epoch.
 
 ## What stays manual
 
