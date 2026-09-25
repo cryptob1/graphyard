@@ -4051,10 +4051,19 @@ export async function approverRoleHealth(config: MasterConfig, probe: Environmen
   return { profiles, health: await inspectProfileAccounts(config, 'approver', profiles, Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null as string | null }])), probe) };
 }
 
-/** The escalation-handler role's accounts as `roleCapacity` reads them, as `approverRoleHealth` does for the approver. */
-export async function escalationRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}) {
-  const profiles = [{ name: escalationProfile }];
-  return { profiles, health: await inspectProfileAccounts(config, 'escalation-handler', profiles, { [escalationProfile]: { available: true, reason: null as string | null } }, probe) };
+/**
+ * The escalation-handler role's accounts as `roleCapacity` reads them, as `approverRoleHealth` does
+ * for the approver. A handler launches on the runtime its escalation names, so `runtimes` — those of
+ * the handlers waiting to launch again — are each checked: a runtime's own login another role saw
+ * spent bars the handler too. The role has capacity while any of them can launch.
+ */
+export async function escalationRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}, runtimes: string[] = []) {
+  const profiles = [{ name: escalationProfile }], results: { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }[] = [];
+  for (const kind of runtimes.length ? [...new Set(runtimes)] : [undefined]) {
+    results.push((await inspectProfileAccounts(config, 'escalation-handler', [{ name: escalationProfile, kind }], { [escalationProfile]: { available: true, reason: null as string | null } }, probe))[escalationProfile]);
+  }
+  const usable = results.find(result => result.available);
+  return { profiles, health: { [escalationProfile]: usable ?? { available: false, reason: results.map(result => result.reason).filter(Boolean).join('; ') || null, accounts: results.flatMap(result => result.accounts ?? []) } } };
 }
 
 /**

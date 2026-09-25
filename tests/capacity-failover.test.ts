@@ -19,7 +19,7 @@ import type { CliContext } from '../src/cli/context.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, handlerSettleMs, launchAppearanceMs, maxApproverCloses, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { approverProfile, approverRoleHealth, heldRuntimeLogin, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, NoHealthyAccountError, observedExhaustions, ownLoginAccounts, preservePartialWork, profileAccount, recordObservedExhaustion, runtimeLogin, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
+import { approverProfile, approverRoleHealth, roleCapacity, heldRuntimeLogin, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, NoHealthyAccountError, observedExhaustions, ownLoginAccounts, preservePartialWork, profileAccount, recordObservedExhaustion, runtimeLogin, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
 import { describeCapacity, detectExhaustion, parseResetTime } from '../src/model/capacity.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
@@ -1065,6 +1065,38 @@ test('a waiting escalation handler record whose escalation was resolved another 
   assert.deepEqual((await reload(work.id)).capacity!.escalations.filter(entry => entry.role === 'escalation-handler'), [], 'and the item no longer waits on the role');
 });
 
+test('a waiting escalation handler record whose item has closed is ended with its registry session, not left holding the role\'s slot', async () => {
+  const root = await localRoot('escalation-closed');
+  const at = Date.now(), resetsAt = new Date(at + 3 * 86_400_000).toISOString(), ended: (string | null)[] = [], relaunches: string[] = [];
+  const { config, clock, cycle } = await approverLoop('escalation-closed', ['env-a', 'env-b'], now => ({
+    approver: undefined, decide: undefined,
+    roleHealth: async () => ({ 'escalation-handler': await escalationRoleHealth(config, loginsOnly(now)) }),
+    escalationSessions: () => readEscalationSessions(root),
+    endEscalation: async (session, _resolution, waiting) => {
+      if (!waiting) ended.push(session.session);
+      if (!waiting && ended.length === 1) throw new Error('registry end refused');
+      await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, waiting } : null, now());
+    },
+    relaunchEscalation: async session => { relaunches.push(session.trigger); throw new Error('a closed item is never launched again'); },
+  }));
+  // A failed launch left its unended registry session on the waiting record; the item is then done.
+  await saveEscalationSession(root, 'GY-404', 'lease-loss', { agentName: 'gy-esc', pane: null, work: 'GY-404', trigger: 'lease-loss', kind: 'claude', account: null, runtime: 'claude', launchedAt: new Date(at).toISOString(), session: 'registry-esc-orphan', waiting: { since: new Date(at).toISOString(), retryAt: resetsAt, reason: 'no account left' } }, at);
+
+  const state = emptyDaemonState(config);
+  const first = await cycle(state);
+  assert.equal(first.actions.find(action => action.kind === 'close')?.state, 'failed', 'a refused end is reported');
+  assert.equal((await readEscalationSessions(root)).length, 1, 'and the record, with its registry session, is kept for a retry');
+  clock.skewMs += 20_000;
+  const second = await cycle(state);
+  const close = second.actions.find(action => action.kind === 'close');
+  assert.equal(close?.state, 'done', JSON.stringify(second.actions));
+  assert.match(close!.detail, /GY-404 is no longer open/);
+  assert.deepEqual(ended, ['registry-esc-orphan', 'registry-esc-orphan'], 'the registry session is ended with the record');
+  assert.deepEqual(await readEscalationSessions(root), [], 'the record is dropped');
+  clock.skewMs = Date.parse(resetsAt) - Date.now() + 60_000;
+  await cycle(state);
+  assert.deepEqual(relaunches, [], 'nothing is launched for it after the reset');
+});
 test('an escalation handler launched with every account already spent is kept as a waiting record due at the first reset, so the loop launches it without a retry', async () => {
   await fresh();
   const root = await localRoot('escalation-spent-at-start'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-esc-start-'));
@@ -1141,6 +1173,12 @@ test('an approver and an escalation handler on the same runtime\'s own login sha
   assert.equal(health[approverProfile].available, false, 'the approver role reads as spent, so its capacity line names the held login');
   assert.deepEqual(health[approverProfile].accounts?.map(entry => [entry.environment, entry.resetsAt]), [[runtimeLogin('claude'), resetsAt]]);
   assert.equal((await heldRuntimeLogin(second, 'approver', approverProfile, 'GY-7', { now: () => Date.parse(resetsAt) + 1 }, 'claude')).account, null, 'eligible again after the reset');
+  // Capacity health follows the waiting handler's runtime: the approver's spent claude login bars it.
+  const spent = await escalationRoleHealth(config, { now: () => at }, ['claude']);
+  assert.equal(spent.health[escalationProfile].available, false, 'a handler waiting on claude reads the role as spent');
+  assert.deepEqual(spent.health[escalationProfile].accounts?.map(entry => [entry.environment, entry.resetsAt]), [[runtimeLogin('claude'), resetsAt]]);
+  assert.equal(roleCapacity('escalation-handler', spent.profiles, spent.health).exhausted, true, 'so master status names the wait rather than restoring the escalation');
+  assert.equal((await escalationRoleHealth(config, { now: () => at }, ['claude', 'codex'])).health[escalationProfile].available, true, 'a handler runtime still unspent keeps the role open');
 });
 
 test('a spent escalation handler waits for the earliest reset its relaunch computed, not only its own account\'s', async () => {

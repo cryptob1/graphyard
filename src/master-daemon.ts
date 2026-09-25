@@ -1811,22 +1811,23 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     // none left it waits for the first reset and is launched again then, by the loop alone.
     for (const session of await effects.escalationSessions?.().catch(() => [] as EscalationSession[]) ?? []) await isolate('failover', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
       const item = open.find(candidate => candidate.key === session.work);
-      // A handler whose item has closed has nothing left to judge: it is ended once it finishes.
-      if (!item) { if (!session.waiting) await handlerFinished(session, !!stopped(session.agentName)); return; }
-      const key = failoverKey('escalation-handler', item, `${session.trigger}:${session.waiting ? `${session.waiting.since}:relaunch` : session.launchedAt}`), previous = state.actions[key];
-      // A wait whose escalation was resolved another way while the item stays open has no handler
-      // left to launch: its record is dropped, so it is neither relaunched nor reported as a wait.
-      if (session.waiting && !standingEscalations(item).some(entry => entry.trigger === session.trigger)) {
-        const dropKey = `close:escalation:${session.work}:${session.trigger}:${session.waiting.since}`, dropped = state.actions[dropKey];
-        if (!effects.endEscalation || !readyToRetry(dropped, state.cycle)) return;
+      // A wait with nothing left to launch — its item closed, or its escalation resolved another way
+      // while the item stays open — is dropped: its record, and any registry session a failed launch
+      // left on it, are ended, so it is neither relaunched, reported as a wait, nor holding a slot.
+      const dropWait = async (waiting: NonNullable<EscalationSession['waiting']>, why: string) => {
+        const dropKey = `close:escalation:${session.work}:${session.trigger}:${waiting.since}`, dropped = state.actions[dropKey];
+        if (!effects.endEscalation || dropped?.state === 'done' || !readyToRetry(dropped, state.cycle)) return;
         try {
-          await effects.endEscalation(session, `the ${session.trigger} escalation on ${item.key} no longer stands, so no handler is launched for it`, null);
-          performed.push(await record(state, dropKey, { kind: 'close', work: item.key, principal: null, state: 'done', detail: `Dropped the waiting escalation handler record for ${item.key} (${session.trigger}): the escalation no longer stands, so nothing is left to launch`, attempts: (dropped?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+          await effects.endEscalation(session, `${why}, so no handler is launched for it`, null);
+          performed.push(await record(state, dropKey, { kind: 'close', work: session.work, principal: null, state: 'done', detail: `Dropped the waiting escalation handler record for ${session.work} (${session.trigger}): ${why}, so nothing is left to launch${session.session ? '; its registry session is ended' : ''}`, attempts: (dropped?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         } catch (error) {
-          performed.push(await record(state, dropKey, { kind: 'close', work: item.key, principal: null, state: 'failed', detail: `Could not drop the waiting escalation handler record for ${item.key} (${session.trigger}), whose escalation no longer stands: ${message(error)}`, attempts: (dropped?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+          performed.push(await record(state, dropKey, { kind: 'close', work: session.work, principal: null, state: 'failed', detail: `Could not drop the waiting escalation handler record for ${session.work} (${session.trigger}) (${why}): ${message(error)}`, attempts: (dropped?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         }
-        return;
-      }
+      };
+      // A handler whose item has closed has nothing left to judge: it is ended once it finishes.
+      if (!item) { if (session.waiting) await dropWait(session.waiting, `${session.work} is no longer open`); else await handlerFinished(session, !!stopped(session.agentName)); return; }
+      const key = failoverKey('escalation-handler', item, `${session.trigger}:${session.waiting ? `${session.waiting.since}:relaunch` : session.launchedAt}`), previous = state.actions[key];
+      if (session.waiting && !standingEscalations(item).some(entry => entry.trigger === session.trigger)) { await dropWait(session.waiting, `the ${session.trigger} escalation on ${item.key} no longer stands`); return; }
       if (session.waiting) {
         if (Date.parse(session.waiting.retryAt) > clock || !effects.relaunchEscalation || !readyToRetry(previous, state.cycle)) return;
         try {
@@ -3333,7 +3334,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const config = current();
       return {
         ...(config.approver && config.operatorAgent ? { approver: await approverRoleHealth(config) } : {}),
-        ...(config.operatorAgent ? { 'escalation-handler': await escalationRoleHealth(config) } : {}),
+        ...(config.operatorAgent ? { 'escalation-handler': await escalationRoleHealth(config, {}, (await readEscalationSessions(root).catch(() => [] as EscalationSession[])).filter(session => session.waiting).map(session => session.runtime ?? session.kind)) } : {}),
         ...(config.reviewers.length ? { reviewer: { profiles: config.reviewers, health: await inspectProfileAccounts(config, 'reviewer', config.reviewers, Object.fromEntries(config.reviewers.map(profile => [profile.name, { available: true, reason: null as string | null }]))) } } : {}),
         ...(config.producers.length ? { producer: { profiles: config.producers, health: await inspectProducerCredentials(root, config.producers) } } : {}),
       };
