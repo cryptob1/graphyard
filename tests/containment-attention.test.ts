@@ -289,3 +289,20 @@ test('unit:ended-worker-pane-closed a pane whose supervisor scope is still live 
   const renewing = await loop({ ...work, lease: { owner: 'worker-a', epoch: 1, expiresAt: at(90_000) } } as Work, { containment: probedBy(paneShellProbe()) });
   assert.deepEqual(renewing.closed, []);
 });
+
+test('unit:ended-worker-pane-closed only a pane the host probe found idle in this worktree is closed, whatever the session ledger names', async () => {
+  // The worker can write its own session handle: pointed at another agent's pane, whose shell
+  // Herdr reports outside this worktree, the ledger alone never gets that pane closed.
+  const other = 'w1V:pOTHER', spoofed = stranded({ sessions: [session(other)] } as Partial<Work>);
+  const foreign = await loop(spoofed, { containment: probedBy(paneShellProbe({ paneShell: { pane: other, pid: 7777, foregroundGroup: 7777 } })) });
+  assert.deepEqual(foreign.closed, [], 'a pane whose shell is not in the worktree belongs to someone else');
+  assert.deepEqual(foreign.settled, []);
+  const unread = await loop(stranded(), { containment: probedBy(paneShellProbe({ paneShell: null })) });
+  assert.deepEqual(unread.closed, [], 'a pane Herdr could not read is not proven to be this worker\'s');
+  for (const busy of [{ children: 1 }, { command: 'bash -c sleep 100' }, { paneShell: { pane, pid: shellPid, foregroundGroup: 6000 } }]) {
+    const running = await loop(stranded(), { containment: probedBy(paneShellProbe(busy)) });
+    assert.deepEqual(running.closed, [], `a pane shell running something is left for the fence to report: ${JSON.stringify(busy)}`);
+  }
+  const idle = await loop(stranded(), { containment: probedBy(paneShellProbe()) });
+  assert.deepEqual(idle.closed, [pane]);
+});

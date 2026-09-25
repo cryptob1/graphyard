@@ -13,7 +13,7 @@ import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scope
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
-import { countHeldChildren, endedScopeStates, paneShellReport, recordedPane } from './quarantine.js';
+import { closablePane, countHeldChildren, endedScopeStates, paneShellReport, recordedPane } from './quarantine.js';
 import { baseRefreshConflict, blockingThreads, describeThread, pendingBaseRefresh, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
 export { threadResolutionGraceMs, threadsAwaitReview } from './merge-queue.js';
 import { dispatchOrder } from './coordination.js';
@@ -1905,7 +1905,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
   // A worker whose supervisor scope has ended leaves its launch pane behind, the pane's own
   // shell still sitting in the worktree (GY-189). Nothing runs there any more, so the pane is
-  // closed, once, as the session's cleanup; a pane whose scope is still live is left alone.
+  // closed, once, as the session's cleanup; a pane whose scope is still live is left alone, and
+  // so is any pane the host probe did not find idle in this item's worktree, whatever the
+  // session ledger (which the worker can write) names.
   // Until that close is done the fence stays up: the settlement below may have excused that very
   // shell, so an item whose close failed is retried on a later cycle rather than settled. A pane
   // closed this cycle is probed again once it is gone, since the shell may have started something
@@ -1915,7 +1917,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     const assessment = assessments[item.id], quarantine = item.containmentQuarantine;
     const recorded = assessment?.verification?.recordedScope;
     if (!quarantine?.scope || !recorded || recorded.unit !== quarantine.scope.unit || recorded.pid !== quarantine.scope.pid || !endedScopeStates.includes(recorded.activeState)) continue;
-    const epoch = quarantine.epoch, pane = recordedPane(item);
+    const epoch = quarantine.epoch, pane = closablePane(item, assessment.verification!);
     if (!pane) continue;
     const key = `close:ended-scope:${item.id}:${epoch}:${pane}`, previous = state.actions[key];
     if (previous?.state === 'done') continue;

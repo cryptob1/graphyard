@@ -274,6 +274,18 @@ function paneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verif
     && !verification.scopes.some(scope => scope.processes.includes(process.pid) || scope.attributed.includes(process.pid));
 }
 /**
+ * The pane the loop may close once its worker's supervisor ended (GY-189): the recorded session's
+ * pane only when the host probe established that Herdr's shell for it is the idle shell sitting in
+ * this item's worktree, the one settlement excuses. The recorded pane is a coordinate the worker
+ * itself can write, so it alone never names a pane to close; another agent's pane has no shell in
+ * this worktree, and a pane whose shell is running anything is left for the fence to report.
+ */
+export function closablePane(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, verification: ContainmentVerification) {
+  const shell = verification.paneShell;
+  const process = shell ? verification.processes.find(entry => entry.pid === shell.pid) : undefined;
+  return shell && process && paneShell(work, verification, process) ? shell.pane : null;
+}
+/**
  * Pure refusal evaluation, shared by the verifying coordinator and the control plane.
  * Every check states what it could not prove; an empty result is the only authorization.
  */
