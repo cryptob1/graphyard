@@ -1,5 +1,6 @@
 import { queueSequencingReason } from '../merge-queue.js';
-import { automatableOutcomes, dispatchIneligibility, reviewNeed } from './dispatch.js';
+import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
+import { mechanicalProof } from './mechanical-proofs.js';
 import { standingEscalations } from './escalation.js';
 import { deliveryState } from './delivery.js';
 import { openAgentRequests } from './agent-requests.js';
@@ -70,14 +71,34 @@ export const sameAction = (left: NextAction | null | undefined, right: NextActio
 
 const dispatchInputs = (work: Work): NextActionInputs => ({ kind: 'dispatch', target: 'implementation', epoch: work.epoch, priority: work.priority, plannedFiles: [...(work.plannedFiles ?? [])] });
 
-/** The proof group the acceptance gate is waiting on, with the live producer request when one stands. */
-function proofInputs(work: Work, all: Work[], now: Date): NextActionInputs | null {
-  const outcomes = automatableOutcomes(work, all, now).filter(entry => entry.outcome === 'unproven');
-  if (!outcomes.length || !work.candidate) return null;
-  const group = outcomes[0].group;
-  const proofs = outcomes.filter(entry => entry.group === group).map(entry => entry.proof);
-  const request = (work.autoDispatch?.producers ?? []).find(entry => entry.group === group) ?? null;
-  return { kind: 'dispatch', target: 'proof', group, proofs, requestId: request?.id ?? null, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
+/**
+ * What the proof groups of the head call for, read from the decision `reconcileAutoDispatch`
+ * makes (`producerGroupDecisions`), so the planner never names a producer the reconciler will not
+ * request (GY-188):
+ *
+ * - `dispatch` — a group the reconciler requests, holding its open request. Nothing else is a
+ *   proof dispatch, so every one an executor claims has a request to launch against.
+ * - `failed` — trusted evidence failed for a group: this head can never pass, whatever else is
+ *   still unproven on it, so the step is a new head (or the operator, for a manual proof).
+ * - `wait` — a group is left to prove but no request is open for it: the reconciler opens one on
+ *   the next reading, or no request may stand for the head yet. Nobody's action, never a dispatch.
+ * - null — every proof left is one no producer session may run.
+ */
+type ProofStep = { step: 'dispatch'; inputs: NextActionInputs } | { step: 'failed'; decision: ProducerGroupDecision } | { step: 'wait'; detail: string };
+function proofStep(work: Work, all: Work[], now: Date): ProofStep | null {
+  if (!work.candidate) return null;
+  const candidate = work.candidate;
+  const decisions = producerGroupDecisions(work, all, now);
+  const failed = decisions.find(decision => decision.state === 'failed');
+  if (failed) return { step: 'failed', decision: failed };
+  for (const decision of decisions.filter(entry => entry.state === 'request')) {
+    const request = openProducerRequest(work, decision.group);
+    if (request) return { step: 'dispatch', inputs: { kind: 'dispatch', target: 'proof', group: decision.group, proofs: decision.unproven, requestId: request.id, pr: candidate.pr, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision } };
+  }
+  const pending = decisions.find(decision => decision.state === 'request' || decision.state === 'ineligible');
+  if (!pending) return null;
+  return { step: 'wait', detail: pending.state === 'ineligible' ? `${pending.group} proofs ${pending.unproven.join(', ')} wait: ${pending.reason}`
+    : `no ${pending.group} producer request is open yet for ${short(candidate.sha)} (${pending.unproven.join(', ')}); the control plane's reconciliation opens it` };
 }
 
 const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null });
@@ -209,11 +230,22 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     if (kind === 'dispatch') {
       // A review refusal is a dispatch only while the head's mechanical proofs have not run (GY-115).
       if (failing.name === 'acceptance' || failing.name === 'review') {
-        const inputs = proofInputs(work, all, now);
+        const proof = proofStep(work, all, now);
         // Every unproven proof is a manual one the operator holds: the control plane cannot
         // dispatch it, and saying so is an escalation rather than a dispatch nobody can run.
-        if (!inputs) return make('escalate', `${key} waits on proof no producer session may run: ${failing.reasons.join('; ')}`,
+        if (!proof) return make('escalate', `${key} waits on proof no producer session may run: ${failing.reasons.join('; ')}`,
           { kind: 'escalate', trigger: 'operator-proof', detail: refusal }, binding, failing.name, refusal);
+        // A failed proof holds the head at this gate for good: a unit or integration failure is the
+        // worker's to fix on a new head, and a manual one is the operator's judgement to make.
+        if (proof.step === 'failed') {
+          const detail = proof.decision.reason;
+          if (proof.decision.failed.every(entry => mechanicalProof(entry.proof))) return make('request-rework', `${key} needs a new head: ${detail}`,
+            { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
+          return make('escalate', `${key} failed a proof no producer session may re-run on this head: ${detail}`,
+            { kind: 'escalate', trigger: 'operator-proof', detail }, binding, failing.name, refusal);
+        }
+        if (proof.step === 'wait') return waits({ kind: 'session', on: 'graphyard', detail: `${key}: ${proof.detail}` }, failing.name, refusal);
+        const inputs = proof.inputs;
         return make('dispatch', `${key} needs ${inputs.kind === 'dispatch' && inputs.target === 'proof' ? inputs.proofs.join(', ') : refusal} on ${short(work.candidate?.sha)}`, inputs, binding, failing.name, refusal);
       }
       return make('dispatch', `${key} is ready and unassigned: ${refusal}`, dispatchInputs(work), `dispatch:${work.epoch}`, failing.name, refusal);
