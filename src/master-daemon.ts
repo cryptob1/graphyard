@@ -21,6 +21,7 @@ import { capacitySignature, describeCapacity, detectExhaustion, standingCapacity
 import { answerCommand, humanDecisionLabel, parkedOnHuman } from './model/human-request.js';
 import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
+import { runRecordSchema, type RunRecord } from './runner/types.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { followUpThreadIds, launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
@@ -252,6 +253,8 @@ export const approvalWatchSchema = z.object({
   session: z.string().max(200).nullable().default(null),
   /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
   capacity: z.string().max(500).nullable().default(null),
+  /** A headless approver's run (GY-169): its last events, its result, and what became of its verdict. */
+  run: runRecordSchema.nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 
@@ -1539,7 +1542,7 @@ export interface DaemonEffects {
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
    * Never the requester.
    */
-  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; session?: string | null }>;
+  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; session?: string | null; run?: RunRecord | null; settled?: Promise<RunRecord> }>;
   /**
    * Ends the agent-registry sessions that no longer run (GY-190): every live one whose runtime
    * session is gone from this host's Herdr, and every one `finished` names, with its reason.
@@ -2326,7 +2329,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       await effects.persist(state);
       return `left it pending for an approver slot, launched on the first cycle one frees: ${full}`;
     }
-    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, session: launched?.session ?? null, capacity: null });
+    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, session: launched?.session ?? null, capacity: null, run: launched?.run ?? null });
+    // A headless approver (GY-169) reports its run when it ends; the watch keeps it, and the next
+    // cycle reads the verdict it applied back from the control plane like any other.
+    launched?.settled?.then(async record => { if (watch.agentName === launched.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
     return `launched independent approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
@@ -3263,7 +3269,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane, session: launched.session }; };
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane, session: launched.session, run: launched.run, settled: launched.settled }; };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
