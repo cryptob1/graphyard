@@ -175,11 +175,11 @@ export function faulted(items: AttentionItem[]) {
  * the setup and the dispatcher, which the report reads before everything else.
  */
 export async function derivedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
-  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean }) {
+  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof scopeRequestAttention>[1] }) {
   const reviews = summarizeReviews(observed.reviews), now = Date.parse(snapshot.now);
   const rows = observed.rows ?? buildMasterStatus(snapshot, master.workers, observed.runtime.available ? observed.runtime.agents : [], {}, {}, reviews, master.baseBranch, coordinator ?? undefined,
     { producers: summarizeProducers(observed.producers), failures: [], retries: [] }).work;
-  const scopeRequests = [...scopeRequestAttention(snapshot), ...agentRequestAttention(snapshot), ...consentHoldItems(observed.trees ?? await inventoryWorktrees(root).catch(() => []), snapshot)];
+  const scopeRequests = [...scopeRequestAttention(snapshot, observed.approvals), ...agentRequestAttention(snapshot), ...consentHoldItems(observed.trees ?? await inventoryWorktrees(root).catch(() => []), snapshot)];
   const unobtainable = unobtainableReviewAttention(rows, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(rows);
   const stalledItems = stalledItemAttention(snapshot);

@@ -11,7 +11,7 @@
 
 ## Items, scope and human waits
 
-A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`: documentation, files the criteria name and, for items planning `docs/`, single files under `web/` and `browser-tests/` widen automatically; refusals are re-decided per policy revision. Refused additive requests widen, as operator-agent, to files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally, never in a negated clause, citing its id, during the asker's lease (rechecked every two minutes): existing base files only. One needing a human-only decision runs `park GY-N EPOCH KIND NEEDED -- REASON`, and the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PATH… -- REASON`. Documentation, files the criteria name and, for items planning `docs/`, single files under `web/` and `browser-tests/` widen automatically; so do existing base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or the reviewer's current-head `CHANGES_REQUESTED` review, names literally (never negated; rechecked every two minutes). The independent approver judges the rest (`--allow-broad-scope` needs a stated reason); the worker keeps its lease, reading the outcome via `scope-request GY-N EPOCH --wait`. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 

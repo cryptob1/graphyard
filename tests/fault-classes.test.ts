@@ -651,7 +651,7 @@ test('unit:recurring-class-item — the loop reads the attention master status a
     const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' }, fetcher };
     const source = { ...config(), credentialFile: coordinatorToken, operatorAgent: { id: 'graphyard-master-operator', credentialFile: operatorToken } } as MasterConfig;
     const effects = daemonEffects(await mkdtemp(join(secrets, 'root-')), source, deps);
-    const { items: reported } = await effects.reportedAttention!([], { github: true } as any, { agents: [], approvals: {} as any, loop: {} as any, now: iso(0) });
+    const { items: reported } = await effects.reportedAttention!([], { github: true } as any, { agents: [], approvals: [], loop: {} as any, now: iso(0) });
     const interventionReads = reads.filter(entry => entry.path.startsWith('interventions'));
     assert.ok(interventionReads.length > 0, `the intervention report is read: ${reads.map(entry => entry.path).join(', ')}`);
     assert.ok(reads.every(entry => entry.auth === `Bearer ${coordinator}`), 'every read is the coordinator\'s, as master status reads them');
