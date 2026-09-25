@@ -84,12 +84,20 @@ test('unit:predecessor-conflict-reenters — the ejected head re-enters at the b
   assert.equal(afterEjection.ejection, null);
   assert.equal(afterEjection.history.at(-1)!.event, 'enqueued');
 
-  // The predecessor lands: the base moves first, and nothing re-enters until the refresh has run.
+  // The predecessor lands: the base moves first. A head GitHub reports mergeable against the new
+  // tip re-enters as it is; its speculative tip integrates the new base (GY-292).
   const landed = { ...predecessor, stage: 'done', queue: null, observation: { ...predecessor.observation!, merged: true, mergeSha: movedBase } } as Work;
-  const behindMovedBase = { ...ejected, observation: { ...ejected.observation!, baseTip: movedBase, baseTipContained: false } } as Work;
+  const cleanOnMovedBase = { ...ejected, observation: { ...ejected.observation!, baseTip: movedBase, baseTipContained: false, mergeable: true } } as Work;
+  const afterCleanLanding = place(cleanOnMovedBase, [landed, cleanOnMovedBase, other]);
+  assert.ok(afterCleanLanding.queue, 're-enters after its predecessor lands when the head merges cleanly into the new base');
+  assert.equal(afterCleanLanding.queue!.sequence, 6);
+  // One whose mergeability GitHub has not computed yet, or that conflicts, stays out until the refresh has run.
+  const uncomputed = { ...cleanOnMovedBase, observation: { ...cleanOnMovedBase.observation!, mergeable: false } } as Work;
+  assert.equal(place(uncomputed, [landed, uncomputed, other]).queue, null, 'mergeability against the new tip is known before it re-enters');
+  const behindMovedBase = { ...ejected, observation: { ...ejected.observation!, baseTip: movedBase, baseTipContained: false, mergeable: false, conflicting: true } } as Work;
   assert.equal(place(behindMovedBase, [landed, behindMovedBase, other]).queue, null, 'the base refresh brings the head onto the new tip before it re-enters');
   // The refresh found the head already contains the new tip: the same head re-enters.
-  const refreshed = { ...behindMovedBase, observation: { ...behindMovedBase.observation!, baseTipContained: true },
+  const refreshed = { ...behindMovedBase, observation: { ...behindMovedBase.observation!, baseTipContained: true, mergeable: true, conflicting: false },
     baseRefresh: { from: { sha: sha('2'), baseSha: base }, base: movedBase, baseTree: sha('f'), policyRevision: 1, at, head: sha('2'), conflict: null, merge: null, carry: null } } as Work;
   const afterLanding = place(refreshed, [landed, refreshed, other]);
   assert.ok(afterLanding.queue, 're-enters after its predecessor lands');

@@ -1,6 +1,7 @@
 import { baseRefreshConflict, ejectedTipRestore, ejectionReason, nextQueueSequence, pendingBaseRefresh, pendingRestore, predecessorWait, predecessorWaitText, queueHistoryLimit, queuePlacement, speculativeConflictReason } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
+import { behindBaseHold } from './behind-base.js';
 import { carriedApproval, currentCarry } from './carry.js';
 import { currentEvidence } from './evidence.js';
 import { exactApproval } from './review.js';
@@ -59,13 +60,15 @@ export function queueEjectionRecord(work: Work, all: Work[], reason: string, now
 /**
  * GY-321. Whether an entry ejected for a conflict with its predecessors alone re-enters with the
  * same head: once any predecessor named in the ejection has landed or left the queue. A landed one
- * moved the base first, and the base refresh brings the head onto the new tip before it re-enters
+ * moved the base first. A head GitHub reports mergeable against the new tip re-enters as it is, and
+ * its speculative tip integrates that base (GY-292); one that conflicts, or whose mergeability is
+ * not computed yet (`behindBaseHold`), waits for the base refresh to bring it onto the new tip
  * (a new head re-enters by the ordinary rule; a refresh conflict is the base's and asks for rework).
  * An ejected speculative tip is still restored to the item's own head first (`ejectedTipRestore`).
  */
 function predecessorReentry(work: Work, all: Work[]) {
   const waiting = predecessorWait(work, all);
-  return !!waiting && !waiting.length && !pendingBaseRefresh(work) && !baseRefreshConflict(work) && !pendingRestore(work) && !ejectedTipRestore(work, all);
+  return !!waiting && !waiting.length && !behindBaseHold(work) && !pendingBaseRefresh(work) && !baseRefreshConflict(work) && !pendingRestore(work) && !ejectedTipRestore(work, all);
 }
 
 /** How one binding of a queued candidate currently stands, and why. */
