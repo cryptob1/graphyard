@@ -602,3 +602,30 @@ test('unit:scope-approver-routine — a routed request stays open in the blocked
   work = await reload(work.id);
   assert.equal(scopeBudget([work], [], Date.now(), true).open.length, 0, 'an answered request is no longer open');
 });
+
+test('unit:scope-approver-routine — a routed wait is measured to the time the control plane recorded the answer, not to when a stopped loop next observes it', async () => {
+  const delayMs = 45 * 60_000;
+  for (const verdict of ['approve', 'refuse'] as const) {
+    let work = await claimed(`measured to the recorded ${verdict}`);
+    const asked = await ask(work, [helper], 'The layout measures its breakpoints through a helper');
+    const loop = harness(), state = emptyDaemonState(loopConfig());
+    await loop.cycle(state);
+    const [requested] = await standing(work);
+    await ok(approver.token, 'POST', `work/${work.id}/approve`, verdict === 'approve'
+      ? { decision: requested.id, reason: 'The helper is the layout criterion spelled out' }
+      : { action: 'refuse', decision: requested.id, reason: 'AC-1 needs only the layout' });
+    work = await reload(work.id);
+    const answeredAt = Date.parse(work.scopeDecision!.at);
+    // The loop was stopped: its next cycle observes the answer long after it was recorded.
+    const snapshot = loop.effects.snapshot;
+    loop.effects.snapshot = async () => { const read = await snapshot(); return { ...read, now: new Date(Date.parse(read.now) + delayMs).toISOString() }; };
+    await loop.cycle(state);
+    const measured = state.scope.filter(entry => entry.work === work.key);
+    assert.equal(measured.length, 1, `one sample for the ${verdict}`);
+    assert.equal(measured[0].state, verdict === 'approve' ? 'approved' : 'refused');
+    assert.ok(Math.abs(Date.parse(measured[0].at) - answeredAt) < 5_000, `the sample ends at the recorded ${verdict}, not the late observation`);
+    assert.ok(measured[0].waitedMs < delayMs / 2, `the loop's own delay is not charged to the ${verdict}: ${measured[0].waitedMs}ms`);
+    assert.equal(measured[0].waitedMs, Math.max(0, Date.parse(measured[0].at) - Date.parse(asked.scopeRequest!.at)));
+    assert.equal(Object.values(state.actions).filter(action => action.kind === 'scope' && action.work === work.key && new RegExp(`^${verdict === 'approve' ? 'Approved' : 'Refused'} ${work.key}'s scope request .* through requirements decision`).test(action.detail)).length, 1, `the ${verdict} is noted`);
+  }
+});
