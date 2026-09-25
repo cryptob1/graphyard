@@ -1,4 +1,4 @@
-import { deliveryState, isClosed, type Gate, type Work } from '../src/model';
+import { carriedBindings, deliveryState, isClosed, type Gate, type Work } from '../src/model';
 import { latestCheck, tipValidationPrefix } from '../src/merge-queue';
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
 import type { PipelineTimeline } from '../src/pipeline-speed';
@@ -28,7 +28,13 @@ export const stepGate: Partial<Record<StepId, string>> = { validate: 'build', te
 /** The control plane's gate evaluation order (src/model evaluate). */
 export const gateOrder = ['ready', 'build', 'review', 'test', 'acceptance', 'merge'] as const;
 
-export interface PrStep { id: StepId; label: string; state: StepState }
+/**
+ * `carried` is set on a done Review or Prove step whose verdict the item holds by carry across a
+ * Graphyard-authored merge rather than by a fresh one on this commit (GY-330): the ground the carry
+ * rested on, such as `diff unchanged (patch-id 1a2b3c4d5e6f)`. The step's label says "carried" too,
+ * so it never reads as a step that just passed ahead of the current one.
+ */
+export interface PrStep { id: StepId; label: string; state: StepState; carried?: string }
 export interface PrSteps {
   steps: PrStep[];
   /** The current step, or null once the release serves it. */
@@ -77,6 +83,17 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
 function tipChecks(work: Work): string[] {
   const reasons = work.gates.find(entry => entry.name === 'merge')?.reasons ?? [];
   return reasons.filter(reason => reason.startsWith(tipValidationPrefix)).map(reason => reason.slice(reason.indexOf(': ') + 2));
+}
+
+/**
+ * The batch a queued entry is validated in (GY-330), as the control plane recorded it on the queue
+ * entry under the batch size the master published: its number, and the members ahead of it whose
+ * combination its tip already holds. Null outside a batch, and for the first member of a batch,
+ * whose tip holds no other member yet.
+ */
+export function batchedWith(work: Work): { number: number; ahead: string[] } | null {
+  const batch = work.queue?.batch, at = batch?.members.indexOf(work.key) ?? -1;
+  return batch && at > 0 ? { number: batch.batch, ahead: batch.members.slice(0, at) } : null;
 }
 
 /** The review refusal no reviewer can answer: every configured reviewer profile is exhausted. */
@@ -157,9 +174,11 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       if (builder) return { detail: plainReason(builder, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
       // CI on the entry's own speculative tip: the merge step validating the combined result,
       // shown here as a substate of Merge, never as a return to Test (GY-292).
+      // A batched entry names the members ahead of it in its batch, whose combination its tip holds (GY-330).
       if (tipChecks(work).length) {
         const checks = checkStates(work, release.ciAppIds);
-        return { detail: `validating the combined tip · ${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
+        const batch = batchedWith(work);
+        return { detail: `validating the combined tip${batch ? ` of batch ${batch.number} with ${batch.ahead.join(', ')}` : ''} · ${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
       }
       const queued = reasons.map(reason => reason.match(/^Merge queue position (\d+) of \d+: (\S+) is ahead$/)).find(Boolean);
       if (queued) return { detail: `${ordinal(Number(queued[1]))} in line, after ${queued[2]}`, who: 'Graphyard (automatic)' };
@@ -212,7 +231,14 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
   const passed = (id: StepId) => id === 'build' || (id !== 'merge' && id !== 'deploy' && byName.get(stepGate[id]!)?.passed !== false);
   const current = stepIds.find(id => id !== 'deploy' && !passed(id)) ?? 'merge';
   const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now, release);
-  return make(id => id === current ? 'current' : passed(id) ? 'done' : 'pending', current, detail, who);
+  const steps = make(id => id === current ? 'current' : passed(id) ? 'done' : 'pending', current, detail, who);
+  // A Review or Prove step passed by carry reads as carried, with its ground (GY-330).
+  const carried = carriedBindings(work, [work], new Date(now));
+  const marks: Partial<Record<StepId, string>> = {
+    ...(carried.review ? { review: carried.review.ground ?? carried.review.reason } : {}),
+    ...(carried.proofs.length ? { prove: [...new Set(carried.proofs.map(entry => entry.ground ?? entry.reason))].join('; ') } : {}),
+  };
+  return { ...steps, steps: steps.steps.map(step => step.state === 'done' && marks[step.id] ? { ...step, label: `${step.label} · carried`, carried: marks[step.id] } : step) };
 }
 
 /**

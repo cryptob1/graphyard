@@ -3,9 +3,9 @@ import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchOrder 
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
-import { type Work, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
+import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
-import { predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
+import { defaultMergeBatchSize, describeMergeBatches, type MergeBatchView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
@@ -117,7 +117,7 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard') {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', mergeQueue: { batchSize: number } = { batchSize: defaultMergeBatchSize }) {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
@@ -130,9 +130,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
   const placements = predictQueue(snapshot.work, now);
-  // Each queued item's place in GitHub's own merge queue, as the control plane last read it (GY-258):
-  // GitHub performs the merge, so this is where a queued item waits once every gate passes.
-  const githubQueueRow = (work: Work) => work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {};
+  // The queue in batches (GY-330): each entry's batch, its members, and the combined tip under test.
+  const reportedCiApps = (controlPlane as { ciAppIds?: unknown } | undefined)?.ciAppIds;
+  const batches = describeMergeBatches(snapshot.work, placements, mergeQueue.batchSize, Array.isArray(reportedCiApps) ? reportedCiApps.filter((id): id is number => typeof id === 'number') : null);
+  // Each queued item's batch (GY-330) and its place in GitHub's own merge queue, as the control plane
+  // last read it (GY-258): GitHub performs the merge, so this is where a queued item waits once every gate passes.
+  const githubQueueRow = (work: Work) => ({ batch: batches.get(work.key) ?? null, ...(work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {}) });
   const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement)), ...githubQueueRow(work) }; });
   // The cause each row's attention was raised for, which is the fault kind its attention item carries.
   const causes = new Map<string, WorkAttentionCause>();
@@ -258,7 +261,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // What the control plane is doing, or last did, about a base branch that moved under this
       // candidate: nobody is asked for a round while `pending` is set.
       base: baseRefresh || baseConflict || refreshCarry ? { pending: baseRefresh, conflict: baseConflict,
-        refreshed: refreshCarry ? { from: refreshCarry.from.sha, head: refreshCarry.to.sha, base: refreshCarry.to.baseSha,
+        refreshed: refreshCarry ? { from: refreshCarry.from.sha, head: refreshCarry.to.sha, base: refreshCarry.to.baseSha, ground: describeGround(refreshCarry.ground),
           approval: { carried: refreshCarry.approval.carried, reason: refreshCarry.approval.reason },
           evidence: refreshCarry.evidence.map(entry => ({ proof: entry.proof, carried: entry.carried, reason: entry.reason })) } : null } : null,
       // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
@@ -266,7 +269,14 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       contamination, restoredApproval: approvalRestored,
       scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
-      speed: pipelineSpeed(work, now) };
+      speed: pipelineSpeed(work, now),
+      // Where the item is inside the Merge step (GY-330): its batch and the combined tip under test,
+      // a substate of Merge — CI on that tip is the merge validating the combination, not a return
+      // to Test. Null for an item outside the queue.
+      mergeStep: mergeStep(work, batches.get(work.key) ?? null),
+      // The review and proofs held by carry across a Graphyard-authored merge, each with its ground:
+      // the verdict given before that merge, shown as carried rather than as freshly passed.
+      carried: carriedBindings(work, snapshot.work, new Date(now)) };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   // Every delivery no valid execution authorized, apart by how it was judged: reconciled — the
@@ -419,4 +429,15 @@ function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null)
   return { key: placement.key, position: placement.position + 1, size: placement.size, predictedBase: placement.predictedBase,
     predictedTip: placement.tip, validated: placement.current, waitMs: placement.waitMs, waitMinutes: Math.floor(placement.waitMs / 60_000),
     enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, skipped: placement.skipped ?? [], passedOver: placement.passedOver ?? null, reasons: placement.reasons, binding };
+}
+/**
+ * A queued item's place inside the Merge step (GY-330): `batch` while it is validated in a batch
+ * (its members, the combined tip and what is under test), `queued` while it is in the queue but
+ * outside the validated chain. The step stays Merge either way: the combined tip's CI is the merge
+ * validating the combination, never the item going back to Test.
+ */
+export function mergeStep(work: Work, batch: MergeBatchView | null) {
+  if (!work.queue || work.stage === 'done') return null;
+  if (!batch) return { step: 'merge' as const, substate: 'queued' as const, batch: null, summary: 'in the merge queue, outside the validated chain until revalidated' };
+  return { step: 'merge' as const, substate: 'batch' as const, batch: { number: batch.batch, members: batch.members, tip: batch.tip, underTest: batch.underTest, state: batch.state }, summary: batch.summary };
 }
