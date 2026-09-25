@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { stages, type Stage } from './work.js';
+import { faultClassOriginSchema } from './fault-classes.js';
 
 // work.ts spreads the origin schema into createSchema, so both modules reference each other; the
 // stage enum is resolved at parse time to keep that cycle free of evaluation order.
@@ -128,6 +129,8 @@ export const workOriginSchema = z.object({
     detectedAt: z.string(),
   }).strict().optional(),
   judgement: z.object({ id: z.string().uuid(), verdict: z.enum(judgementVerdicts), work: z.string().nullable(), page: z.string().nullable(), by: z.string(), at: z.string() }).strict().optional(),
+  // A recurring fault class the master loop filed the item for (GY-173): the class the item closes.
+  faultClass: faultClassOriginSchema.optional(),
 }).strict();
 export type WorkOrigin = z.infer<typeof workOriginSchema>;
 

@@ -5,9 +5,12 @@ import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
+import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
+/** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
+export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
 /** The most an action's detail may carry: daemonActionSchema's bound, which record() enforces. */
 export const actionDetailMax = 2000;
 export const daemonActionSchema = z.object({
@@ -22,6 +25,8 @@ export const daemonActionSchema = z.object({
   epoch: z.number().int().min(0).nullable().default(null),
   cycle: z.number().int().min(0),
   at: z.string(),
+  /** Set on a failed or indeterminate action: the fault class that failure is an instance of (GY-173). */
+  faultClass: z.enum(faultClasses).optional(),
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
@@ -290,6 +295,14 @@ export const daemonStateSchema = z.object({
   absences: z.record(z.string(), z.object({ epoch: z.number().int().min(0), owner: z.string().max(200), firstSeenAt: z.string(), cycle: z.number().int().min(0) }).strict()).default({}),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
+  /**
+   * Every fault instance the loop recorded, each with its class (GY-173), and per standing fault
+   * (`kind|subject`) the instance it is, and per action key in a run of failures the instance that run
+   * is. A class that recurs files one item; later instances link to it.
+   * The default is a factory: zod 4 hands a literal default out by reference, which would share one record between states.
+   */
+  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}) }).strict()
+    .default(() => ({ instances: [], open: {}, failing: {} })),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -338,6 +351,8 @@ export function pruneDaemonState(state: DaemonState) {
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
+  // A failing run whose action row is retired has ended (GY-173): its reference would otherwise hold its instance forever.
+  for (const key of Object.keys(state.faults.failing)) if (!state.actions[key]) delete state.faults.failing[key];
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
   if (state.latency.length > retainedSamples) state.latency = state.latency.slice(-retainedSamples);
   // A clock is dropped when its delivery was sampled; this bound only catches items the loop
@@ -360,6 +375,27 @@ export function pruneDaemonState(state: DaemonState) {
  * write loses the cycle. Counts are clamped, never reset, so a backoff keeps its place.
  */
 export const clampCount = (value: number, max: number) => Math.min(max, Math.max(0, Math.floor(Number.isFinite(value) ? value : 0)));
+
+/**
+ * Every write of an action goes through here (GY-173): a failed or indeterminate action carries
+ * the class of its fault kind, anything else carries none, and the outcome is noted against the
+ * fault record — a failure opening one instance per run of failures, a success ending the run.
+ * A null fault kind is an outcome that is no fault (a guarded merge the gate refused): it is
+ * stored for retry like any failure but carries no class and is never noted as an instance.
+ * The detail is bounded here, before the schema sees it, so a caller that quotes a long error or
+ * path list cannot fail every cycle with an over-long string (GY-179).
+ */
+export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind | null = daemonActionFaultKind(action.kind)): DaemonAction {
+  const { faultClass: _, ...rest } = action;
+  const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
+  const fault = faultKind === null ? null : classified(faultKind);
+  const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
+  if (fault) noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
+  state.actions[key] = entry;
+  return entry;
+}
+/** The action key a recurring class's filing is recorded under. */
+export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
 const cut = <T extends string | null | undefined>(value: T, max: number): T => (typeof value === 'string' && value.length > max ? boundDetail(value, max) : value) as T;
 export function boundDaemonState(state: DaemonState): DaemonState {
   for (const action of Object.values(state.actions)) {

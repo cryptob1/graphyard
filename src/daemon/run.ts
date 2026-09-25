@@ -1,9 +1,10 @@
 // Concern: the long-running loop — cycle scheduling, config reload, the watchdog and its summary.
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ConfigReload, MasterConfig } from '../master.js';
-import { acquireDaemonLock, type DaemonAction, daemonActionSchema, type DaemonState, message } from './state.js';
+import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
+import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
+import { faultRecurrenceReport } from './faults.js';
 import { latencyBudget, silenceReport } from './metrics.js';
-import { boundDetail } from './decisions.js';
 import { boundedPersist, cycleCost, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { runCycle } from './cycle.js';
@@ -39,6 +40,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     reclaim: state.reclaim,
     // Every decision the loop has put to an approver and not yet seen applied and retired.
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
+    // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
+    faults: faultRecurrenceReport(state, faultClassPolicyFromEnv(process.env), now),
   };
 }
 
@@ -52,12 +55,11 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
   state.config = { at: reload.at, changed: reload.changed.slice(0, 100), refused: reload.refused?.slice(0, 1000) ?? null };
   const noted: DaemonAction[] = [];
   if (reload.refused && previous?.refused !== state.config.refused) {
-    const entry = daemonActionSchema.parse({ kind: 'escalation', work: null, principal: null, state: 'failed', detail: state.config.refused, attempts: 1, cycle: state.cycle, at: reload.at });
-    state.actions[`escalation:config:${reload.at}`] = entry; noted.push(entry);
+    // A refused reload is a configuration fault, whatever kind of action reports it.
+    noted.push(storeAction(state, `escalation:config:${reload.at}`, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }, 'action:config'));
   }
   if (reload.changed.length) {
-    const entry = daemonActionSchema.parse({ kind: 'config', work: null, principal: null, state: 'done', detail: boundDetail(`Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`), attempts: 1, cycle: state.cycle, at: reload.at });
-    state.actions[`config:${reload.at}`] = entry; noted.push(entry);
+    noted.push(storeAction(state, `config:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
   }
   if (noted.length || previous?.refused !== state.config.refused) await persist(state);
   return noted;
@@ -68,8 +70,8 @@ export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof w
   if (!plan.refusal) return [];
   const key = `escalation:watchdog:${plan.windowMs}`;
   if (state.actions[key]) return [];
-  const entry = daemonActionSchema.parse({ kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, cycle: state.cycle, at });
-  state.actions[key] = entry; await persist(state);
+  const entry = storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at }, 'action:config');
+  await persist(state);
   return [entry];
 }
 
