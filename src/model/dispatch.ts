@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Work } from './work.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
+import { behindBaseHold } from './behind-base.js';
 import { automatableOutcomes, dispatchIneligibility, mechanicalHold, producerGroupDecisions, type ProducerGroup } from './mechanical-proofs.js';
 
 /**
@@ -46,6 +47,7 @@ export const dispatchHistoryLimit = 50;
 
 // Which proofs a machine settles and what the head's evidence says of them live in a module the
 // browser bundle can load (the gates read them); re-exported here for every existing reader.
+export { behindBaseHold } from './behind-base.js';
 export { automatableOutcomes, automatableProof, dispatchIneligibility, mechanicalFailure, mechanicalHold, mechanicalProof, mechanicalVerdicts, openProducerRequest, producerGroupDecisions, producerGroupOf, producerGroups, type MechanicalVerdict, type ProducerGroup, type ProducerGroupDecision, type ProducerGroupState, type ProofOutcome } from './mechanical-proofs.js';
 
 
@@ -89,7 +91,8 @@ export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): 
   const verdict = observation.agentReview;
   if (verdict?.verdict === 'changes-requested' && verdict.provider === provider && verdict.sha === candidate.sha)
     return { needed: false, state: 'changes-requested', reason: `${verdict.profile ?? provider} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
-  if (observation.baseTipContained === false) return { needed: false, state: 'base-not-contained', reason: `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')}; a review of it would be dismissed when GitHub recomputes the merge base` };
+  const behind = behindBaseHold(work);
+  if (behind) return { needed: false, state: 'base-not-contained', reason: behind };
   // Mechanical verification precedes judgment, for every provider: no reviewer is asked about a
   // head whose unit and integration proofs have not run, and a head that fails one goes back to
   // its worker (the build gate names the criterion) instead of consuming a reviewer session.

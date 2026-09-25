@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type pg from 'pg';
-import { ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
+import { advisoryLocks, ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
 import { releaseInfo, schemaVersion } from './release.js';
 
 /**
@@ -54,6 +54,9 @@ export async function createBackup(pool: pg.Pool): Promise<Backup> {
   const db = await pool.connect();
   try {
     await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    // The backup lock, shared: backups run beside each other and beside coordination work, and
+    // only a restore excludes them. Never the coordination lock (GY-203).
+    await db.query('SELECT pg_advisory_xact_lock_shared($1)', [advisoryLocks.backup]);
     const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
     if (current !== schemaVersion) throw new Error(`Database schema generation ${current} differs from this release (${schemaVersion}); run the migration first, then back up`);
     const takenAt = (await db.query('SELECT clock_timestamp() AS now')).rows[0].now.toISOString();
@@ -104,7 +107,9 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    await db.query('SELECT pg_advisory_xact_lock(71490321)');
+    // The backup lock, exclusive: one restore at a time and no backup of a half-restored ledger. The
+    // target must be empty, so there is no coordination work to exclude (GY-203).
+    await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.backup]);
     const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
     if (current !== schemaVersion) throw new Error(`Restore requires a database migrated to schema generation ${schemaVersion} (found ${current}); run \`graphyard db migrate\` with the release that took the backup or a newer one, then restore`);
     for (const name of ledgerTables) {

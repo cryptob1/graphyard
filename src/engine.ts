@@ -17,7 +17,9 @@ import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeD
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
-import { claimAction, openActions, reconcileActions, renewClaim, settleAction, type ActionRow } from './model/actions.js';
+import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
+import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
+import { livenessFallback, livenessOf, livenessRepairEntry, repairLiveness } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -130,10 +132,7 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 // provider merge the first one already committed. The instance is minted by the executor and
 // bound here to the principal that authenticates it, so no instance can name another principal's.
 const executorInstance = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
-// The revision the executor read is accepted for older executors and recorded nowhere: the grant is
-// bound to what it merges — head, base, policy revision, queue tip and the all-gates authorization —
-// never to the document revision, which every background write to the item moves (GY-192).
-const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive().optional(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
+const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000), executor: executorInstance.optional() }).strict();
 const mergeVerifySchema = z.object({ executionId: z.string().uuid(), executor: executorInstance.optional() }).strict();
 /**
@@ -970,11 +969,7 @@ export class Engine {
       if (!deliveredContainmentCleanup && !postDeployment && !deliveredSessionClosure) this.evaluate(work, all, now);
       // A delivered item's gates are an immutable snapshot, but what it still owes — a deployment
       // carrying the merge — is not; its queue is reconciled without re-evaluating the delivery.
-      else {
-        const computed = nextAction(work, all, now);
-        reconcileActions(work, all, now, { next: computed });
-        if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) work.nextAction = computed;
-      }
+      else settleDelivered(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
         : command === 'autoscope' ? { ...data, decision, before: { plannedFiles: before?.plannedFiles ?? [], blocker: before?.blocker ?? null } }
@@ -986,6 +981,10 @@ export class Engine {
     });
   }
 
+  /** The one item holding action row `id`, found by containment rather than by loading every document. */
+  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string): Promise<Work | undefined> {
+    return (await db.query(`SELECT document FROM work_items WHERE document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
+  }
   /**
    * Claim the next action for a stateless executor.
    *
@@ -1000,10 +999,20 @@ export class Engine {
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data = actionClaimSchema.parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.claim', data })).digest('hex');
+    // An idle poll takes no lock and loads no document (GY-185). A replayed key answers from its
+    // receipt, and the rows an executor could take are found in SQL; only when there are some is
+    // the lock taken, and then only their items are loaded, and claimed again under it.
+    const replayed = (await this.store.pool.query('SELECT fingerprint, result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+    if (replayed) { demand(replayed.fingerprint === fingerprint, idempotencyMismatch); return replayed.result as { action: ActionRow | null }; }
+    const candidates: string[] = (await this.store.pool.query(claimCandidatesSql, claimCandidatesParams(data.work, data.kinds))).rows.map(row => row.id);
+    if (!candidates.length) {
+      const at = (await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+      return { action: null, open: 0, at: at.toISOString() };
+    }
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result as { action: ActionRow | null }; }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all: Work[] = (await db.query('SELECT document FROM work_items WHERE id = ANY($1::uuid[]) ORDER BY number', [candidates])).rows.map(r => r.document);
       const claimed = claimAction(all, { id: data.executor ?? actor.id, host: data.host, principal: actor.id }, now, { kinds: data.kinds, leaseMs: data.leaseSeconds ? data.leaseSeconds * 1000 : undefined, work: data.work });
       const result = { action: claimed?.row ?? null, open: openActions(all, now, data.kinds).length, at: now.toISOString() };
       // A poll that claims nothing changed nothing, so it leaves no receipt: an idle executor
@@ -1028,10 +1037,12 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result as { action: ActionRow }; }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-      const work = all.find(item => item.actionQueue?.actions.some(row => row.id === id));
+      const work = await this.actionOwner(db, id);
       demand(work, 'Action is not open on any work item', 404);
       const transition = settleAction(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, data.result, data.reason, now);
+      // A row settled on a delivered item was the last claim holding it open: it is retired with
+      // the rest of what the delivery no longer needs, rather than offered again (GY-185).
+      if (work!.stage === 'done') settleDelivered(work!, (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document.id === work!.id ? work! : r.document as Work), now);
       await save(db, work!, actor.id, `action.${transition.event}`, now, { id, kind: transition.action.kind, executor: data.executor ?? actor.id, result: data.result, reason: data.reason, attempt: transition.action.attempts });
       if (work!.submission) await wakeJob(db, work!.id);
       const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
@@ -1053,8 +1064,7 @@ export class Engine {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
     const data = actionRenewSchema.parse(input);
     return this.store.transaction(async (db, now) => {
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-      const work = all.find(item => item.actionQueue?.actions.some(row => row.id === id));
+      const work = await this.actionOwner(db, id);
       demand(work, 'Action is not open on any work item', 404);
       const row = renewClaim(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, now, data.leaseSeconds ? data.leaseSeconds * 1000 : undefined);
       // A renewal is a fact about a claim, not a decision: it is persisted without re-evaluating
@@ -1153,10 +1163,13 @@ export class Engine {
           && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, fenced, or superseded');
         return receipt.result;
       }
-      // An observation refresh, queue bookkeeping or evidence carry since the executor read the item
-      // moves its revision and nothing it merges; only a moved binding refuses, and as a race.
-      demand(work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && work.policyRevision === data.policyRevision
-        && (!data.queueTip || work.queue?.speculation?.tip === data.queueTip && work.queue.speculation.base === data.baseSha), 'Merge binding changed before merge execution; retry');
+      // The grant is bound to what it merges, not to the document revision the caller read (GY-192):
+      // observations and bookkeeping bump the revision constantly without changing the candidate.
+      // A revision from the future was never read; any other change is re-validated below, in this
+      // transaction, against the binding — head, base, policy revision, the queue tip the caller
+      // verified, and the all-gates authorization for exactly those.
+      demand(data.expectedRevision <= work.revision, 'Task changed before merge execution; retry');
+      demand(data.queueTip === undefined || work.queue?.speculation?.tip === data.queueTip && work.queue.speculation.base === data.baseSha, 'Task changed before merge execution; retry');
       if (work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
       demand(!work.mergeExecution, work.mergeExecution?.committingAt ? 'A committed merge execution awaits GitHub reconciliation; no new execution can be granted until it is observed' : 'A merge execution is already active');
       this.evaluate(work, all, now);
@@ -1585,7 +1598,8 @@ export class Engine {
     // One computation answers both: the queue reconciles against it and the item carries it, so
     // two readers of the same evaluation cannot disagree about what this item needs.
     const computed = nextAction(work, all, now);
-    reconcileActions(work, all, now, { next: computed });
+    // An open item the derivation names nothing for and nothing moves is owned by an escalation (GY-201).
+    reconcileActions(work, all, now, { next: computed ?? livenessFallback(work, all, now) });
     // Only a different decision is written: an identical action rebuilt in source order would
     // differ from the stored one by key order alone, and the reconciliation tick would rewrite
     // every item on every pass.
@@ -1606,8 +1620,18 @@ export class Engine {
       // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
       await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
       for (const work of all) {
-        if (work.stage === 'done') continue;
+        // A delivered item is not re-evaluated, but one still holding rows, a queue entry or an
+        // action from before its delivery — every item delivered before GY-185 — is settled here
+        // once, and the check that finds nothing to settle costs no evaluation.
+        if (work.stage === 'done') {
+          const leftover = !!work.queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
+          if (leftover && settleDelivered(work, all, now)) await save(db, work, 'graphyard', 'delivery.settled', now);
+          continue;
+        }
         const before = JSON.stringify(work);
+        // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
+        // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
+        const stranded = livenessOf(work, all, now).violation;
         preserveAssignment(work); retainQuarantineFence(work);
         const executing = holdsMergeExecution(work, now.getTime());
         const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
@@ -1615,8 +1639,16 @@ export class Engine {
         // loss: that escalation must reach the record and fence the execution
         // rather than wait for it, so delivery cannot outrun the concern. A
         // committed execution is retired only by the GitHub observation that
-        // settles its provider outcome, never by reconciliation.
-        if (executing && !leaseLost) continue;
+        // settles its provider outcome, never by reconciliation — but one that outlived its
+        // authority with the pull request open is owed a fresh reading, queued here.
+        if (executing && !leaseLost) {
+          if (repairLiveness(work, all, now).length && JSON.stringify(work) !== before) {
+            const entry = stranded ? livenessRepairEntry(stranded, work, all, now) : null;
+            if (entry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+            await save(db, work, 'graphyard', 'reconciled', now, entry ? { ledger: [entry.kind] } : undefined);
+          }
+          continue;
+        }
         if (!executing && work.mergeExecution) work.mergeExecution = null;
         const ledger: { kind: string; details: Record<string, unknown> }[] = [];
         // The ledger explains a lapse: the epoch's own blocked report or the admin's stopped-worker
@@ -1651,6 +1683,9 @@ export class Engine {
         // behind it are woken to predict against the real base.
         const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
         if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
+        // Every violation found at the start of the tick is repaired by the evaluation above — the
+        // derivation names its successor and the queue opens its row — and the ledger says so.
+        if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
         if (JSON.stringify(work) !== before) {
           for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
           await this.recordDispatch(db, work, now);
@@ -1703,7 +1738,14 @@ export class Engine {
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
         const acquired = (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1`, [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
-        const boundedExecution = activeExecution ?? acquired ?? null;
+        // The execution that called the provider for this head is the one that bounds its merge: a
+        // later execution acquired on a lagging read that still showed the pull request open never
+        // committed, and binding the merge to it would record a merge its predecessor authorized as
+        // unauthorized (GY-202). So the latest committed execution for the observed head is preferred.
+        const commits = (candidate: Work['mergeExecution'] | undefined) => !!candidate?.committingAt && candidate.sha === observation.candidate.sha && candidate.baseSha === observation.candidate.baseSha;
+        const committed = commits(activeExecution) ? activeExecution : (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind='merge.execution.committed' AND ${eventWorkSql()}->'mergeExecution'->>'sha'=$2 AND ${eventWorkSql()}->'mergeExecution'->>'baseSha'=$3 ORDER BY seq DESC LIMIT 1`,
+          [id, observation.candidate.sha, observation.candidate.baseSha])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        const boundedExecution = (commits(committed) ? committed : null) ?? activeExecution ?? acquired ?? null;
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
         // The lower bound of the offset, so the recorded instant is the earliest the merge
@@ -1727,7 +1769,7 @@ export class Engine {
           && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
           && Date.parse(boundedExecution.verifiedAt) <= Date.parse(boundedExecution.committingAt)
           && Date.parse(boundedExecution.committingAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
-        if (activeExecution && executionValid && work.mergeAuthorization
+        if (activeExecution && activeExecution.id === boundedExecution?.id && executionValid && work.mergeAuthorization
           && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
           && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
           && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision
@@ -1850,6 +1892,9 @@ export class Engine {
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
             JSON.stringify({ details: { ...operatorAuthorization, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
+          // Delivered in this transaction: what it still owes is recomputed now, its leftover rows
+          // retired and its queue entry cleared, so nothing retries against the delivery (GY-185).
+          settleDelivered(work, all, now);
           // The queue shifted: every entry behind this one has a new position and predicted base.
           for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
         } else {

@@ -1,4 +1,4 @@
-import { dispatchOverlap, resourceConflicts } from '../coordination.js';
+import { resourceConflicts } from '../coordination.js';
 import { standingEscalations } from './escalation.js';
 import { actionJudgment, nextActionLlmRoles, type NextAction, type NextActionKind } from './action-kinds.js';
 import { escalationTriggers, type Work } from './work.js';
@@ -65,18 +65,17 @@ const carriedConcern = (key: string, escalation: { trigger: string; reason: stri
 
 /**
  * Why no fresh attempt can start on this item right now, apart from anything the gates or a
- * standing escalation say — the two holds `assertDispatchable` applies that the gates do not.
+ * standing escalation say — the one hold `assertDispatchable` applies that the gates do not.
  *
  * An assignment is the one action whose subject is another item as much as this one: an
- * exclusive resource is held by somebody else, and a planned-file overlap means whichever of the
- * two lands second re-integrates the other. Neither is visible in this item's own refusals, and
- * neither is something the worker such an action would launch could do anything about.
+ * exclusive resource held by somebody else is not visible in this item's own refusals, and is not
+ * something the worker such an action would launch could do anything about. Planned-file overlap
+ * is not a hold: dispatch is optimistic, and the merge queue and a sync round integrate whichever
+ * of two overlapping items lands second.
  */
 export function dispatchHold(work: Work, all: Work[], now: Date): string | null {
   const resources = resourceConflicts(work, all, now.getTime());
-  if (resources.length) return `exclusive resources are held by ${resources.map(conflict => `${conflict.key} (${conflict.resource})`).join(', ')}`;
-  const overlap = dispatchOverlap(work, all, now.getTime());
-  return overlap.length ? `its planned files overlap ${overlap.map(entry => `${entry.key} (${entry.state})`).join(', ')}, whichever lands second re-integrates the other` : null;
+  return resources.length ? `exclusive resources are held by ${resources.map(conflict => `${conflict.key} (${conflict.resource})`).join(', ')}` : null;
 }
 
 /**
@@ -90,7 +89,7 @@ export function dispatchHold(work: Work, all: Work[], now: Date): string | null 
  *
  * An item that cannot be worked is the one case where the concern is still the action. A
  * `dispatch` for an item nothing may be assigned to (`dispatchHold`) is an action no executor can
- * complete: naming it would replace one silence with another — a row failing on the overlap every
+ * complete: naming it would replace one silence with another — a row failing on the resource every
  * settle window — and hide the judgment the item owes behind it. Nothing can move there, so what
  * is owed is what is named.
  */

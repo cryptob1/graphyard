@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
+import { Store, storeConnectionTimeoutMs, storeStatementTimeoutMs } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { evidenceIndependenceRefusals, type Evidence, type Work } from '../src/model.js';
@@ -16,7 +16,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, missingProofs, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { dispatchSummary, emptyDispatchCursor, runAutoDispatch, tickRetryDelay, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { proofOutcome } from '../src/producer.js';
-import { coordinationHistoryLimit, coordinationViewHeader } from '../src/server/work-view.js';
+import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork } from '../src/server/work-view.js';
 import { cycleBudget } from '../src/cli/master.js';
 import { assertTiming, minimumSamples, steadyState } from './helpers/timing.js';
 
@@ -151,6 +151,90 @@ test('integration:work-snapshot-latency — the coordination snapshot of a 100-i
   assert.equal(full.body.view, undefined); assert.ok((full.body.work[0] as Work).evidence.length === HEADS_PER_ITEM * 3);
   const refused = await fetch(`${origin}/api/work-snapshot?view=everything`, { headers: { Authorization: `Bearer ${coordinatorToken}` } });
   assert.equal(refused.status, 400);
+});
+
+/** Every statement the store's pool runs while `run` does, with the rows each returned. */
+async function spyQueries<T>(target: Store, run: () => Promise<T>) {
+  const seen: { text: string; rows: any[] }[] = [];
+  const record = (original: (...args: any[]) => any) => async (...args: any[]) => {
+    const result = await original(...args);
+    const text = typeof args[0] === 'string' ? args[0] : args[0]?.text ?? '';
+    seen.push({ text, rows: result?.rows ?? [] });
+    return result;
+  };
+  const pool = target.pool as any;
+  const query = pool.query, connect = pool.connect;
+  pool.query = record(query.bind(pool));
+  // The pool's own query() checks a client out through connect() with a callback; those
+  // statements are already seen through the pool's query, so only checked-out clients are wrapped.
+  const clients: [any, any][] = [];
+  pool.connect = (...args: any[]) => {
+    if (typeof args[0] === 'function') return connect.apply(pool, args);
+    return connect.apply(pool, args).then((client: any) => { clients.push([client, client.query]); client.query = record(client.query.bind(client)); return client; });
+  };
+  try { return { result: await run(), seen }; }
+  finally { pool.query = query; pool.connect = connect; for (const [client, own] of clients) client.query = own; }
+}
+
+test('integration:store-bounded-waits — the store pool bounds the wait for a connection and every statement, and the coordination snapshot is trimmed in SQL, never selecting a full action-queue history', async () => {
+  // Both timeouts are set on the pool itself, so every client it hands out carries them — the
+  // coordination lock wait included, since taking it is a statement.
+  const options = (store.pool as any).options;
+  assert.equal(options.connectionTimeoutMillis, storeConnectionTimeoutMs);
+  assert.ok(storeConnectionTimeoutMs > 0 && storeConnectionTimeoutMs <= 30_000, 'a caller learns within its own timeout that no connection was free');
+  assert.equal(options.statement_timeout, storeStatementTimeoutMs);
+  assert.ok(storeStatementTimeoutMs > 0);
+  const client = await store.pool.connect();
+  try { assert.equal((await client.query('SHOW statement_timeout')).rows[0].statement_timeout, `${storeStatementTimeoutMs / 60_000}min`, 'the server enforces it on a pooled connection'); }
+  finally { client.release(); }
+  // A connection the pool cannot hand out fails with a reason instead of queueing forever.
+  const tight = new Store(options.connectionString);
+  (tight.pool as any).options.max = 1; (tight.pool as any).options.connectionTimeoutMillis = 200;
+  const held = await tight.pool.connect();
+  try { await assert.rejects(tight.pool.connect(), /timeout/i); } finally { held.release(); await tight.close(); }
+  const statement = await store.pool.connect();
+  try { await statement.query("SET statement_timeout = '100ms'"); await assert.rejects(statement.query('SELECT pg_sleep(1)'), /statement timeout/); }
+  finally { await statement.query('RESET statement_timeout'); statement.release(); }
+
+  // A long-lived item's action queue: far more resolved rows than the view keeps.
+  const [first] = (await store.list());
+  const history = Array.from({ length: 60 }, (_, n) => ({ id: `resolved-${n}`, kind: 'dispatch', work: first.id, key: first.key, state: 'done', history: Array.from({ length: 20 }, () => ({ at: new Date().toISOString(), event: 'failed', requester: 'graphyard', executor: 'executor-a', result: 'failed', reason: 'x'.repeat(400) })) }));
+  // And evidence for heads it no longer has, which no open or recent request names: a coordinator
+  // decision can never consult it, so it must not leave the database either.
+  const superseded = 'dead'.padEnd(40, '0');
+  const stale = Array.from({ length: 40 }, (_, n) => ({ ...first.evidence[0], id: randomUUID(), sha: superseded, url: `https://ci.example/superseded/${n}` }));
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(jsonb_set(document,'{actionQueue}',$2::jsonb),'{evidence}',(document->'evidence')||$3::jsonb) WHERE id=$1", [first.id, JSON.stringify({ actions: [], history }), JSON.stringify(stale)]);
+  try {
+    const { result, seen } = await spyQueries(store, () => read('work-snapshot', { [coordinationViewHeader]: 'coordination' }));
+    const view = result.body;
+    // What left the database: no statement selected whole documents, and no row it returned
+    // carried an action-queue history longer than the view keeps.
+    assert.ok(seen.length > 0, 'the read went through the store');
+    for (const { text, rows } of seen) {
+      assert.doesNotMatch(text, /jsonb_agg\(document\b|SELECT\s+document\s+FROM/i, `the coordination read selects no whole document: ${text.slice(0, 120)}`);
+      for (const row of rows) for (const document of [row.document, ...(Array.isArray(row.work) ? row.work : [])]) {
+        if (!document || typeof document !== 'object') continue;
+        assert.ok((document.actionQueue?.history?.length ?? 0) <= coordinationHistoryLimit, 'the SQL trimmed the action-queue history before it left the database');
+        assert.equal(document.pipeline, undefined);
+        assert.equal(document.observation?.scopeFiles, undefined);
+        assert.ok(!(document.evidence ?? []).some((entry: Evidence) => entry.sha === superseded), 'the SQL filtered superseded-head evidence before it left the database');
+      }
+    }
+    const trimmed = (view.work as Work[]).find(item => item.id === first.id)!;
+    assert.deepEqual(trimmed.actionQueue!.history.map(row => row.id), history.slice(-coordinationHistoryLimit).map(row => row.id), 'the most recent rows are the ones kept, in order');
+    assert.ok(view.omitted.actionHistory >= history.length - coordinationHistoryLimit, 'and the view still says how many it left out');
+    // The evidence kept is exactly what the view's own rule keeps from the whole document, and the
+    // records the SQL dropped are still counted as left out.
+    const full = (await read('work-snapshot')).body as { work: Work[] };
+    const whole = full.work.find(item => item.id === first.id)!;
+    assert.deepEqual(trimmed.evidence.map(entry => entry.id), coordinationWork(whole, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 }).evidence.map(entry => entry.id));
+    assert.ok(trimmed.evidence.length > 0, 'the candidate\'s own evidence is kept');
+    assert.equal(view.omitted.evidence, trimInProcess(full).omitted.evidence, 'the records the SQL dropped are counted as the in-process trim would count them');
+    // The full view is untouched: it still carries every row.
+    assert.equal(((await read('work-snapshot')).body.work as Work[]).find(item => item.id === first.id)!.actionQueue!.history.length, history.length);
+  } finally {
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document-'actionQueue','{evidence}',$2::jsonb) WHERE id=$1", [first.id, JSON.stringify(first.evidence)]);
+  }
 });
 
 test('integration:dispatch-read-resilience — a dispatcher tick whose read times out or fails retries promptly with backoff, and master status reports the last successful tick and consecutive failures', async () => {

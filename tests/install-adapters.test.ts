@@ -213,7 +213,7 @@ test('the App-bound merge check is required only once Graphyard has published it
     // The merge queue lands a candidate that is deliberately behind the base branch.
     assert.equal(payload.required_status_checks.strict, false);
     assert.equal(payload.enforce_admins, true);
-    assert.equal(payload.required_conversation_resolution, true);
+    assert.equal(payload.required_conversation_resolution, false, 'the review gate is the verdict; threads block nothing');
     assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 1);
     assert.ok(summary.nextSteps.some(step => step.includes(CHECK_NAME)), 'the operator must be told to rerun once the check exists');
   } finally { await fresh.cleanup(); }

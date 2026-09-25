@@ -8,30 +8,29 @@ import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { masterConfigSchema, mergeBindingChanges, mergeExecutor, mergeRace, type MasterConfig, type MergeExecutor } from '../src/master.js';
-import { emptyDaemonState, mergeRaceRetries, readyToRetry, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { masterConfigSchema, mergeExecutor, transientMergeRace, type MasterConfig, type MergeExecutor } from '../src/master.js';
+import { candidateKey, emptyDaemonState, mergeRaceRetries, runCycle, waitingInMergeQueue, type DaemonEffects } from '../src/master-daemon.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
 
 /**
- * GY-192: a mergeable item lost the guarded merge to its own background revision bumps — an
- * observation refresh, queue and action bookkeeping — and each loss doubled its wait. The merge is
- * bound to what it merges, a racing write is retried at once, an entry behind another in the queue
- * is not attempted, and the loop merges from a read taken immediately before the merge. Each test
- * is named for the proof it produces.
+ * GY-192: the guarded merge is bound to what it merges — head, base, policy revision, queue tip and
+ * the all-gates authorization — not to the whole-document revision that background observations
+ * and bookkeeping bump constantly. A race with such a write is retried at once, a candidate waiting
+ * its queue turn is not attempted, and the loop merges from a fresh read, not its cycle snapshot.
+ * The integration tests run the real engine on a disposable Postgres; GitHub is a stub.
  */
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'ai' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['integration:claim-safety'] };
-const head = 'a'.repeat(40), base = 'b'.repeat(40), mergeSha = 'c'.repeat(40), otherSha = 'd'.repeat(40);
+const head = 'a'.repeat(40), base = 'b'.repeat(40), mergeSha = 'c'.repeat(40);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const validProtection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
 const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true });
-
-// ---- integration: the real engine on a disposable Postgres, GitHub a stub --------------------------
-let pg: EmbeddedPostgres | undefined, store: Store | undefined, engine: Engine;
+let pg: EmbeddedPostgres, store: Store, engine: Engine;
 let serial = 0;
+
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 192;
   pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-merge-binding-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -42,43 +41,38 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
 const id = () => randomUUID();
-const reload = async (workId: string) => (await store!.list()).find(item => item.id === workId)!;
-const events = async (workId: string, kind: string) => (await store!.pool.query('SELECT payload FROM events WHERE work_id=$1 AND kind=$2 ORDER BY seq', [workId, kind])).rows;
-const dbNow = async () => ((await store!.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
+const reload = async (workId: string) => (await store.list()).find(item => item.id === workId)!;
+const dbNow = async () => ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
 const observation = (work: Work, extra: Partial<Observation> = {}): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces[0].branch, author: 'implementer' },
   checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }],
   protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString(), ...extra });
+/** An unrelated write: a fresh GitHub observation of the same candidate, which bumps the revision. */
+const refreshObservation = async (workId: string) => { const current = await reload(workId); return engine.observe(workId, current.revision, observation(current)); };
+
 /** A candidate at the merge stage with every gate passed and its queue tip published. */
 async function candidate() {
   const n = ++serial;
   let w = await engine.execute(operator, 'create', null, { title: `Merge binding ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/merge-binding-${n}`, branch: `graphyard/gy-192-${n}` }, id());
-  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 1900 + n }, id());
-  await store!.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
+  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, id());
+  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
   w = await engine.observe(w.id, w.revision, observation(w));
   w = await engine.execute(producer, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
-  await store!.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
   w = await engine.observe(w.id, (await reload(w.id)).revision, observation(w));
   assert.equal(w.stage, 'merge'); assert.ok(w.gates.every(gate => gate.passed), w.gates.flatMap(gate => gate.reasons).join('; '));
   return w;
 }
-/** A background write that moves the revision and nothing the merge is bound to: GitHub observed again. */
-async function refreshObservation(workId: string) {
-  const before = await reload(workId);
-  const after = await engine.observe(workId, before.revision, observation(before));
-  assert.ok(after.revision > before.revision, 'the observation refresh bumped the document revision');
-  assert.deepEqual(mergeBindingChanges(before, after), [], 'the refresh changed nothing the merge is bound to');
-  return after;
-}
-/** The broker's transport in process; `beforeAcquire` runs between the executor's read and the engine's grant. */
-const transport = (actor: Principal, beforeAcquire: (workId: string) => Promise<unknown> = async () => {}) => async (path: string, data: any, key: string = randomUUID()) => {
+/** The broker's transport, in process, with refusals reported the way the CLI transport reports them. */
+const transport = (actor: Principal, beforeStep: (step: string, workId: string) => Promise<unknown> = async () => {}) => async (path: string, data: any, key: string = randomUUID()) => {
   const match = /^work\/([^/]+)\/merge-(acquire|cancel|verify|commit)$/.exec(path);
   if (!match) throw new Error(`Unexpected mutation ${path}`);
   const [, workId, step] = match;
+  await beforeStep(step, workId);
   try {
-    if (step === 'acquire') { await beforeAcquire(workId); return await engine.acquireMerge(actor, workId, data, key); }
+    if (step === 'acquire') return await engine.acquireMerge(actor, workId, data, key);
     if (step === 'cancel') return await engine.cancelMerge(actor, workId, data, key);
     if (step === 'commit') return await engine.commitMerge(actor, workId, data, key);
     const replay = await engine.replayMergeVerification(actor, workId, data, key); if (replay) return replay;
@@ -97,158 +91,143 @@ const github = (calls: string[][] = []) => (_command: string, args: string[]) =>
   if (args[1] === '--method') return JSON.stringify({ merged: true, sha: mergeSha });
   return JSON.stringify(validProtection);
 };
-const snapshot = async () => ({ work: await store!.list(), now: await dbNow() });
+const snapshot = async () => ({ work: await store.list(), now: await dbNow() });
 const executor = (): MergeExecutor => ({ principal: coordinator.id, instance: `daemon-${randomUUID()}` });
 
-test('integration:merge-binding-not-revision — an observation refresh between read and merge bumps the revision and the merge proceeds; a moved head, base or policy revision is still refused', async () => {
-  // The master's own checks: the item is read, a background observation refresh bumps its revision,
-  // and the guarded merge from that read proceeds — it compares the binding, not the revision.
+test('integration:merge-binding-not-revision — observation refreshes before the read, after GitHub verification and inside acquire do not refuse the merge; a changed head, base, policy revision or queue tip still does', async () => {
   const work = await candidate();
-  const read = await reload(work.id);
-  const refreshed = await refreshObservation(work.id);
-  assert.notEqual(read.revision, refreshed.revision);
+  // Read at revision R; an observation refresh lands before the merge reads the record again.
+  const stale = await reload(work.id);
+  await refreshObservation(work.id);
+  let reads = 0;
+  const racingSnapshot = async () => {
+    // The second read is the one after GitHub verification: another refresh lands just before it.
+    if (++reads === 2) await refreshObservation(work.id);
+    return snapshot();
+  };
+  // And one more lands inside acquire, after the broker chose the revision it read, so the engine
+  // sees an expectedRevision behind its own.
+  let acquireBumped = false;
+  const mutate = transport(coordinator, async (step, workId) => { if (step === 'acquire' && !acquireBumped) { acquireBumped = true; await refreshObservation(workId); } });
   const calls: string[][] = [];
-  const merged = await mergeExecutor(config, snapshot, transport(coordinator), executor(), randomUUID(), github(calls))(read) as { result: string };
-  assert.match(merged.result, /merge requested/);
-  assert.equal((await events(work.id, 'merge.execution.acquired')).length, 1, 'the merge acquired its execution despite the revision bump');
-  assert.equal((await events(work.id, 'merge.execution.committed')).length, 1);
-  assert.equal(calls.filter(args => args[1] === '--method').length, 1, 'the provider merge was called');
+  const result = await mergeExecutor(config, racingSnapshot, mutate, executor(), randomUUID(), github(calls))(stale);
+  assert.match(result.result, /merge requested/, 'three unrelated revision bumps did not refuse the merge');
+  const merged = await reload(work.id);
+  assert.ok(merged.revision > stale.revision + 3, `the record moved on from ${stale.revision} to ${merged.revision} during the attempt`);
+  assert.ok(merged.mergeExecution?.committingAt, 'the execution was granted and committed');
+  assert.ok(merged.mergeExecution!.authorizationRevision > stale.revision, 'the grant records the revision the engine re-validated in its transaction');
+  assert.equal(calls.filter(args => args[1] === '--method').length, 1, 'the provider merge was called once');
 
-  // The engine's check: the revision moves between the executor's final read and the grant it asks for.
+  // What is merged changing still refuses, at the broker and at the engine.
   const second = await candidate();
-  let bumped = 0;
-  const raced = await mergeExecutor(config, snapshot, transport(coordinator, async workId => { await refreshObservation(workId); bumped++; }), executor(), randomUUID(), github())(await reload(second.id)) as { result: string };
-  assert.equal(bumped, 1); assert.match(raced.result, /merge requested/);
-  const acquired = await events(second.id, 'merge.execution.acquired');
-  assert.equal(acquired.length, 1, 'the engine granted the execution on the unchanged binding');
-  // The engine directly, with a revision two writes stale: granted on the binding, refused on any moved field.
-  const third = await candidate();
-  const stale = third.revision; await refreshObservation(third.id); await refreshObservation(third.id);
-  const binding = { expectedRevision: stale, sha: head, baseSha: base, policyRevision: third.policyRevision, queueTip: head, executor: 'engine-direct' };
-  await assert.rejects(engine.acquireMerge(coordinator, third.id, { ...binding, sha: otherSha }, id()), /Merge binding changed before merge execution; retry/, 'a moved head SHA is refused');
-  await assert.rejects(engine.acquireMerge(coordinator, third.id, { ...binding, baseSha: otherSha }, id()), /Merge binding changed before merge execution; retry/, 'a moved base is refused');
-  await assert.rejects(engine.acquireMerge(coordinator, third.id, { ...binding, policyRevision: third.policyRevision + 1 }, id()), /Merge binding changed before merge execution; retry/, 'a moved policy revision is refused');
-  await assert.rejects(engine.acquireMerge(coordinator, third.id, { ...binding, queueTip: otherSha }, id()), /Merge binding changed before merge execution; retry/, 'a moved queue tip is refused');
-  const granted = await engine.acquireMerge(coordinator, third.id, binding, id());
-  assert.equal(granted.execution.sha, head); assert.equal(granted.execution.authorizationRevision, (await reload(third.id)).revision - 1, 'the execution records the revision it was granted at');
-  await engine.cancelMerge(coordinator, third.id, { executionId: granted.execution.id, reason: 'engine-direct check done', executor: 'engine-direct' }, id());
-
-  // The master's checks refuse, as a race, a read whose head, base or policy revision has since moved.
-  for (const [field, path, value] of [['sha', '{candidate,sha}', JSON.stringify(otherSha)], ['baseSha', '{candidate,baseSha}', JSON.stringify(otherSha)], ['policyRevision', '{policyRevision}', String(third.policyRevision + 1)]] as const) {
-    const item = await candidate();
-    const before = await reload(item.id);
-    await store!.pool.query('UPDATE work_items SET document=jsonb_set(document,$2::text[],$3::jsonb) WHERE id=$1', [item.id, path, value]);
-    const providerCalls: string[][] = [];
-    const refusal = await mergeExecutor(config, snapshot, transport(coordinator), executor(), randomUUID(), github(providerCalls))(before).then(() => null, (error: Error) => error);
-    assert.ok(refusal, `a moved ${field} is refused`);
-    assert.match(refusal!.message, new RegExp(`changed before GitHub verification \\(.*${field}.*\\); retry`), refusal!.message);
-    assert.ok(mergeRace(refusal), 'the refusal is a race the loop re-reads and retries');
-    assert.equal((await events(item.id, 'merge.execution.acquired')).length, 0, `no execution is acquired when ${field} moved`);
-    assert.equal(providerCalls.length, 0, 'GitHub is not asked');
-  }
+  const current = await reload(second.id);
+  const guarded = mergeExecutor(config, snapshot, transport(coordinator), executor(), randomUUID(), github());
+  for (const [what, read] of [
+    ['head', { ...current, candidate: { ...current.candidate!, sha: 'd'.repeat(40) } }],
+    ['base', { ...current, candidate: { ...current.candidate!, baseSha: 'e'.repeat(40) } }],
+    ['policy revision', { ...current, policyRevision: current.policyRevision + 1 }],
+    ['queue tip', { ...current, queue: { ...current.queue!, speculation: { ...current.queue!.speculation!, tip: 'f'.repeat(40) } } }],
+  ] as [string, Work][]) await assert.rejects(guarded(read), /changed before GitHub verification; retry/, `a read whose ${what} differs from the record is refused even at the same revision`);
+  assert.equal((await reload(second.id)).mergeExecution ?? null, null, 'no execution was granted on a changed binding');
+  await refreshObservation(second.id);
+  const bound = { expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision, queueTip: head };
+  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, sha: 'd'.repeat(40) }, id()), /Merge authorization is no longer current/);
+  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, baseSha: 'e'.repeat(40), queueTip: undefined }, id()), /Merge authorization is no longer current/);
+  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, policyRevision: current.policyRevision + 1 }, id()), /Merge authorization is no longer current/);
+  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, queueTip: 'f'.repeat(40) }, id()), /Task changed before merge execution; retry/);
+  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, expectedRevision: current.revision + 50 }, id()), /Task changed before merge execution; retry/, 'a revision the caller cannot have read is refused');
+  // The same binding at a stale revision is granted: the engine re-validated it in the transaction.
+  const granted = await engine.acquireMerge(coordinator, second.id, bound, id());
+  assert.equal(granted.execution.sha, head);
+  assert.ok(granted.execution.authorizationRevision > current.revision);
 });
 
-// ---- unit: the loop's merge step with fabricated items and a stubbed guarded merge -----------------
-const at = '2026-09-24T23:30:00.000Z';
-function item(key: string, overrides: Partial<Work> = {}): Work {
-  const candidate = { sha: head, baseSha: base, pr: 168, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
-  return { id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'], criteria: [],
-    policy: { checks: ['test'], review: true }, stage: 'merge', revision: 40, policyRevision: 2, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
-    lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 168 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    observation: { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], at },
-    blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'merge', passed: true, reasons: [] }], violations: [], ...overrides } as Work;
+// ---- The loop, with fakes --------------------------------------------------------------------
+const iso = (offsetMs = 0) => new Date(Date.parse('2030-01-01T00:00:00Z') + offsetMs).toISOString();
+const clock = Date.parse('2030-01-01T00:00:00Z');
+function mergeable(overrides: Partial<Work> = {}): Work {
+  return {
+    id: 'work-1', key: 'GY-42', title: 'Merge me', description: '', type: 'feature', priority: 1, dependencies: [],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    stage: 'merge', revision: 3, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(), stageEnteredAt: iso(-60_000), ready: true, epoch: 1,
+    lease: null, workspaces: [], submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+    candidate: { sha: head, baseSha: base, pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' },
+    gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], ...overrides,
+  } as Work;
 }
-const raceError = (key: string) => new Error(`${key} changed before GitHub verification (authorization); retry`);
-function effects(read: () => Work[], merge: (work: Work) => Promise<unknown>, extra: Partial<DaemonEffects> = {}): DaemonEffects & { merges: Work[] } {
-  const merges: Work[] = [];
-  return { merges, agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: read(), now: at }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async work => { merges.push(work); return merge(work); },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {}, ...extra };
+function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
+  return { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    merge: async () => ({ result: 'merge requested' }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, ...overrides };
 }
-const mergeAction = (state: DaemonState, work: Work) => Object.entries(state.actions).find(([key]) => key.startsWith(`merge:${work.id}:`))?.[1];
+const race = (key: string) => Object.assign(new Error(JSON.stringify({ error: `${key} changed before GitHub verification; retry` })), { confirmedRefusal: false });
 
-test('unit:merge-race-retried-immediately — two racing refusals are re-read and retried in the same cycle and the third call merges; a persistent non-race refusal still backs off', async () => {
-  const work = item('GY-168');
-  let calls = 0, reads = 0;
-  const racing = effects(() => [work], async target => { if (++calls <= 2) throw raceError(target.key); return { result: 'merge requested' }; },
-    { readItem: async () => { reads++; return { ...work, revision: work.revision + reads }; } });
+test('unit:merge-race-retried-immediately — two races then a success merge in one cycle and count nothing toward the backoff; a persistent non-race refusal still backs off', async () => {
+  assert.equal(transientMergeRace(new Error('GY-1 changed after GitHub verification; retry')), true);
+  assert.equal(transientMergeRace(new Error('{"error":"Task changed before merge execution; retry"}')), true, 'the engine refusal, as the CLI transport reports it');
+  assert.equal(transientMergeRace(new Error('GY-1 merge deferred: GitHub does not yet show Graphyard / merge as passed on abc (in_progress); retry once it is')), false);
+  assert.equal(transientMergeRace(new Error('GY-1 does not have a current all-gates-passing merge authorization')), false);
+
+  const item = mergeable();
+  let calls = 0;
   const state = emptyDaemonState(config);
-  const cycle = await runCycle(config, state, racing);
-  assert.equal(racing.merges.length, 3, 'the guarded merge was asked three times in one cycle');
-  assert.deepEqual(racing.merges.map(entry => entry.revision), [41, 42, 43], 'each retry is asked from a fresh read, not the cycle snapshot');
-  const done = cycle.actions.find(action => action.kind === 'merge')!;
-  assert.equal(done.state, 'done', done.detail); assert.match(done.detail, /after 2 immediate retries of a racing write/);
-  assert.equal(done.attempts, 1, 'the races were not counted as attempts');
-  assert.ok(mergeRaceRetries >= 2);
+  const performed = await runCycle(config, state, effects({ snapshot: async () => ({ work: [item], now: iso() }),
+    merge: async target => { calls++; if (calls <= 2) throw race(target.key); return { result: 'merge requested' }; } }), () => clock);
+  assert.equal(calls, 3, 'the third call, in the same cycle, merged');
+  const action = state.actions[candidateKey('merge', item)];
+  assert.equal(action.state, 'done', action.detail);
+  assert.equal(action.attempts, 1, 'the races were retried inside one attempt');
+  assert.equal(performed.actions.filter(entry => entry.kind === 'merge' && entry.state === 'failed').length, 0, 'no failed merge action was recorded');
 
-  // A race that outlasts the immediate retries is retried next cycle, without widening the backoff.
-  const endless = effects(() => [work], async target => { throw raceError(target.key); }, { readItem: async () => work });
-  const racedState = emptyDaemonState(config);
-  await runCycle(config, racedState, endless);
-  assert.equal(endless.merges.length, 1 + mergeRaceRetries, 'the retries are bounded within the cycle');
-  const raced = mergeAction(racedState, work)!;
-  assert.equal(raced.state, 'failed'); assert.equal(raced.attempts, 0, 'a race never counts toward the exponential backoff');
-  assert.ok(readyToRetry(raced, racedState.cycle + 1), 'the item is attempted again on the very next cycle');
+  // Races that outlast the retries are recorded, but not counted: the next cycle tries again.
+  const always = mergeable({ id: 'work-2', key: 'GY-43' });
+  let raced = 0;
+  const racing = effects({ snapshot: async () => ({ work: [always], now: iso() }), merge: async target => { raced++; throw race(target.key); } });
+  const raceState = emptyDaemonState(config);
+  await runCycle(config, raceState, racing, () => clock);
+  assert.equal(raced, 1 + mergeRaceRetries, `the first call and ${mergeRaceRetries} retries ran in the one cycle`);
+  assert.equal(raceState.actions[candidateKey('merge', always)].state, 'failed');
+  assert.equal(raceState.actions[candidateKey('merge', always)].attempts, 0, 'a lost race is not counted toward the exponential backoff');
+  await runCycle(config, raceState, racing, () => clock + 20_000);
+  assert.equal(raced, 2 * (1 + mergeRaceRetries), 'the next cycle attempted again at once');
 
-  // A refusal that is not a race backs off exponentially as before.
-  const refusing = effects(() => [work], async target => { throw new Error(`${target.key} does not have a current all-gates-passing merge authorization`); }, { readItem: async () => work });
+  // A refusal that judged the candidate is not retried in the cycle and backs off as before.
+  const refused = mergeable({ id: 'work-3', key: 'GY-44' });
+  let refusals = 0;
+  const refusing = effects({ snapshot: async () => ({ work: [refused], now: iso() }), merge: async () => { refusals++; throw new Error('GY-44 base branch main advanced outside the merge queue'); } });
   const refusedState = emptyDaemonState(config);
-  await runCycle(config, refusedState, refusing);
-  assert.equal(refusing.merges.length, 1, 'a non-race refusal is not retried within the cycle');
-  assert.equal(mergeAction(refusedState, work)!.attempts, 1);
-  await runCycle(config, refusedState, refusing);
-  assert.equal(refusing.merges.length, 2, 'the first retry waits one cycle');
-  assert.equal(mergeAction(refusedState, work)!.attempts, 2);
-  await runCycle(config, refusedState, refusing);
-  assert.equal(refusing.merges.length, 2, 'after the second refusal the retry waits two cycles: backed off');
-  await runCycle(config, refusedState, refusing);
-  assert.equal(refusing.merges.length, 3);
+  for (let cycle = 0; cycle < 4; cycle++) await runCycle(config, refusedState, refusing, () => clock + cycle * 20_000);
+  assert.equal(refusals, 3, 'cycles 1 and 2 attempted, cycle 3 backed off, cycle 4 attempted: no in-cycle retry');
+  assert.equal(refusedState.actions[candidateKey('merge', refused)].attempts, 3);
 });
 
-test('unit:queue-position-not-attempted — with two queued candidates only position 1 is asked to merge; the entry behind neither fails nor accrues backoff', async () => {
-  const first = item('GY-168');
-  const second = item('GY-186', { gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-168 is ahead'] }] });
-  const loop = effects(() => [first, second], async () => ({ result: 'merge requested' }), { readItem: async work => work.id === first.id ? first : second });
+test('unit:queue-position-not-attempted — of two queued candidates only the one at position 1 is attempted; the one behind neither fails nor accrues backoff', async () => {
+  const first = mergeable({ id: 'work-1', key: 'GY-1' });
+  const second = mergeable({ id: 'work-2', key: 'GY-2', candidate: { sha: 'd'.repeat(40), baseSha: base, pr: 43, branch: 'graphyard/gy-2-1', author: 'worker' },
+    gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-1 is ahead'] }] });
+  assert.equal(waitingInMergeQueue(second), true); assert.equal(waitingInMergeQueue(first), false);
+  assert.equal(waitingInMergeQueue(mergeable({ gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-1 is ahead', 'Pull request is not mergeable against the current base'] }] })), false, 'a real refusal beside the position is still attempted and recorded');
+  const attempted: string[] = [];
   const state = emptyDaemonState(config);
-  for (let cycle = 0; cycle < 3; cycle++) await runCycle(config, state, loop);
-  assert.ok(loop.merges.length >= 1);
-  assert.deepEqual([...new Set(loop.merges.map(work => work.key))], ['GY-168'], 'only position 1 is attempted');
-  assert.equal(mergeAction(state, second), undefined, 'the entry behind records no merge action: no failure, no backoff');
-  assert.equal(Object.values(state.actions).filter(action => action.work === 'GY-186' && action.state === 'failed').length, 0);
-
-  // The same holds when the cycle snapshot showed it mergeable but the fresh read finds it queued behind.
-  const late = item('GY-187');
-  const queuedNow = { ...late, gates: [{ name: 'merge', passed: false, reasons: ['Waiting for GY-168 to publish its speculative tip'] }] } as Work;
-  const behind = effects(() => [late], async () => ({ result: 'merge requested' }), { readItem: async () => queuedNow });
-  const behindState = emptyDaemonState(config);
-  await runCycle(config, behindState, behind);
-  assert.equal(behind.merges.length, 0, 'the fresh read shows its queue position, so it is not attempted');
-  assert.equal(mergeAction(behindState, late), undefined);
+  const deps = effects({ snapshot: async () => ({ work: [first, second], now: iso() }), merge: async target => { attempted.push(target.key); return { result: 'merge requested' }; } });
+  for (let cycle = 0; cycle < 3; cycle++) await runCycle(config, state, deps, () => clock + cycle * 20_000);
+  assert.deepEqual(attempted, ['GY-1'], 'only the candidate at position 1 was attempted');
+  assert.equal(state.actions[candidateKey('merge', second)], undefined, 'the candidate behind has no failed merge action and no backoff');
 });
 
-test('unit:merge-uses-fresh-read — a write to a mergeable item after the cycle snapshot and before the merge step does not cost the attempt: the merge proceeds in that cycle from a fresh read', async () => {
-  // The store the loop reads: the cycle snapshot is taken, then the item is written to (an
-  // observation refresh bumps its revision) before the merge step runs.
-  let stored = item('GY-168');
-  const snapshotRevision = stored.revision;
-  let snapshots = 0;
-  // The guarded merge as it stood before GY-192 would refuse anything but the item as it is now.
-  const strict = async (target: Work) => { if (target.revision !== stored.revision) throw raceError(target.key); return { result: 'merge requested' }; };
-  const loop = effects(() => [stored], strict, {
-    snapshot: async () => {
-      snapshots++;
-      const cycleRead = { work: [stored], now: at };
-      // The write lands after the cycle has read its snapshot.
-      stored = { ...stored, revision: stored.revision + 1, observation: { ...stored.observation!, at: new Date(Date.parse(at) + 5_000).toISOString() } };
-      return cycleRead;
-    },
-    readItem: async work => work.id === stored.id ? stored : null,
-  });
+test('unit:merge-uses-fresh-read — a write after the cycle snapshot and before the merge step does not stop the merge in that cycle, which runs on the item as it stands', async () => {
+  const snapshotItem = mergeable({ revision: 3 });
+  const written = mergeable({ revision: 5, observation: { at: iso(30_000) } as Work['observation'] });
+  let reads = 0;
+  const merged: Work[] = [];
+  // The cycle's own snapshot is read first; everything after it sees the write.
   const state = emptyDaemonState(config);
-  const cycle = await runCycle(config, state, loop);
-  assert.equal(snapshots, 1, 'one cycle snapshot was taken');
-  assert.equal(loop.merges.length, 1, 'the merge was asked once, and did not race');
-  assert.equal(loop.merges[0].revision, snapshotRevision + 1, 'the merge was asked from the item as written after the snapshot');
-  const action = cycle.actions.find(entry => entry.kind === 'merge')!;
-  assert.equal(action.state, 'done', action.detail); assert.doesNotMatch(action.detail, /retr/);
+  await runCycle(config, state, effects({ snapshot: async () => ({ work: [reads++ ? written : snapshotItem], now: iso() }),
+    // The guarded merge refuses a read older than the record, as it does for any read it cannot trust.
+    merge: async target => { merged.push(target); if (target.revision !== 5) throw new Error(`${target.key} was invoked on a stale snapshot`); return { result: 'merge requested' }; } }), () => clock);
+  assert.ok(reads >= 2, 'the merge step read the item again');
+  assert.equal(merged.length, 1, 'one guarded merge, in this cycle');
+  assert.equal(merged[0].revision, 5, 'the guarded merge ran on the item as it stood, not the cycle-start snapshot');
+  assert.equal(state.actions[candidateKey('merge', written)].state, 'done');
 });
