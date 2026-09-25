@@ -39,7 +39,7 @@ Profiles default to `"approvals": "auto"` so sessions never block on a permissio
 
 ### Configure the fleet
 
-The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and role policies, proposed from `~/.coding_agents`:
+The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies, proposed from `~/.coding_agents`:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -70,7 +70,7 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 
 ### Add a role
 
-Most preferred account first; policy flags apply next launch:
+Most preferred account first; policy applies next launch:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Prefer Claude; Codex is overflow"
