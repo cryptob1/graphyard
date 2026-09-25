@@ -129,6 +129,12 @@ export const dispatchCursorSchema = z.object({
    * never persisted in the cursor itself.
    */
   accounts: z.object({ environments: z.record(z.string(), z.any()), skipped: z.array(z.any()) }).optional(),
+  /**
+   * Each awaited bot reviewer as the last read of its repository activity found it (GY-349): one
+   * whose latest word since its last review is a usage-limit notice is exhausted, and no reviewer
+   * launch waits for it. Kept across ticks, so a failed read leaves the last judgment standing.
+   */
+  botReviewers: z.array(z.object({ login: z.string().max(100), state: z.enum(['available', 'exhausted']), since: z.string().nullable(), checkedAt: z.string() }).strict()).max(10).default([]),
 }).strict();
 export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 
@@ -269,6 +275,33 @@ export function selectReviewerProfile(config: MasterConfig): { profile: Reviewer
 /** The automatic bot reviewers a reviewer launch waits for when `run.awaitReviewers` is unset, and for how long. */
 export const defaultAwaitReviewers = { logins: ['chatgpt-codex-connector[bot]'], minutes: 8 };
 /**
+ * A bot reviewer's notice that its provider's quota is spent (GY-349), as the Codex connector words
+ * it on each new head ('You have reached your Codex usage limits for code reviews').
+ */
+export const botLimitNotice = /reached your [\w .-]{0,40}usage limits?|usage limits? (?:has|have) been reached/i;
+/** One review or issue comment an awaited bot reviewer posted on the repository. */
+export interface BotActivity { login: string; kind: 'review' | 'comment'; at: string; body?: string }
+export interface BotReviewerState { login: string; state: 'available' | 'exhausted'; since: string | null }
+/**
+ * Whether each awaited bot reviewer can answer (GY-349). A bot whose latest activity is a
+ * usage-limit notice is exhausted since the first notice after its last review, and stays so until
+ * it next posts a review on any head: only a review shows its quota is back. `held` is the last
+ * judgment: an exhausted bot whose notice has aged out of the read stays exhausted since it.
+ */
+export function botReviewerStates(awaited: readonly string[], activity: readonly BotActivity[], held: readonly BotReviewerState[] = []): BotReviewerState[] {
+  return awaited.map(login => {
+    const mine = activity.filter(entry => entry.login.toLowerCase() === login.toLowerCase() && Number.isFinite(Date.parse(entry.at)));
+    const reviewed = Math.max(-Infinity, ...mine.filter(entry => entry.kind === 'review').map(entry => Date.parse(entry.at)));
+    const kept = held.filter(bot => bot.login.toLowerCase() === login.toLowerCase() && bot.state === 'exhausted' && bot.since).map(bot => Date.parse(bot.since!));
+    const notices = [...mine.filter(entry => entry.kind === 'comment' && botLimitNotice.test(entry.body ?? '')).map(entry => Date.parse(entry.at)), ...kept].filter(time => Number.isFinite(time) && time > reviewed);
+    return notices.length ? { login, state: 'exhausted' as const, since: new Date(Math.min(...notices)).toISOString() } : { login, state: 'available' as const, since: null };
+  });
+}
+/** How many of the most recently updated pull requests one bot-activity read looks in for a review since a limit notice. */
+export const botReviewPullLimit = 30;
+/** The status line for one awaited bot reviewer. */
+export const botReviewerLine = (bot: { login: string; state: string; since: string | null }) => bot.state === 'exhausted' ? `${bot.login}: exhausted since ${bot.since}` : `${bot.login}: available`;
+/**
  * How long one tick waits on the bot-review reads, all started together, before treating the
  * unanswered ones as failed reads (which launch). Well inside the 30-second launch bound, so a slow
  * or hung GitHub read never holds producers, or any other item's review, past it.
@@ -290,6 +323,12 @@ export interface DispatchEffects {
    * bot reviewers have spoken (`run.awaitReviewers`); a dispatcher wired without it never waits.
    */
   headReviewers?: (work: Work, request: DispatchRequest) => Promise<string[]>;
+  /**
+   * The awaited bot reviewers' recent reviews and issue comments on the repository (GY-349), read
+   * once per tick while a launch would wait on them; a bot whose latest word is a usage-limit
+   * notice is not waited for. A dispatcher wired without it waits on every awaited bot.
+   */
+  botActivity?: (logins: string[], requests: DispatchRequest[], held: BotReviewerState[]) => Promise<BotActivity[]>;
   /**
    * Records a launched reviewer or producer session's durable handle on the item. Without it a
    * launched session is visible only in this host's own ledger, which is the relaying the handle
@@ -518,7 +557,7 @@ export function reportClosure(entry: SessionReportEntry): SessionClosure {
  */
 export const herdrSessionListing = (agents: HerdrAgent[]): HerdrAgent[] => agents.map(entry => ({ ...entry, agent: entry.agent || null }));
 
-export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean }
+export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean; reason?: string }
 export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
@@ -741,16 +780,33 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const awaited = config.run.awaitReviewers ?? defaultAwaitReviewers.logins, minutes = config.run.awaitReviewersMinutes ?? defaultAwaitReviewers.minutes;
   const waitUntil = (review: DispatchRequest) => Date.parse(review.requestedAt) + minutes * 60_000;
   const botReads = new Map<string, Promise<string[] | null>>();
+  // A bot that has announced its quota is spent posts no review until it returns (GY-349): its
+  // activity is read once, beside the head reads and under the same deadline, and a launch does
+  // not wait for an exhausted bot. A failed read keeps the last judgment the cursor holds.
+  let botStates: Promise<BotReviewerState[]> = Promise.resolve(cursor.botReviewers);
+  // The launch reasons of reviews that skipped an exhausted bot's wait, by request id.
+  const skippedWaits = new Map<string, string>();
   if (awaited.length && minutes > 0 && effects.headReviewers) {
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), botReadTimeoutMs); timer.unref?.(); });
+    const waiting: DispatchRequest[] = [];
     for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
       const review = item.autoDispatch!.review;
       if (review?.state !== 'requested' || review.provider !== 'github' || !(now() < waitUntil(review))) continue;
       const read = effects.headReviewers(item, review).then(logins => logins.map(login => login.toLowerCase()), () => null);
       botReads.set(review.id, Promise.race([read, deadline]));
+      waiting.push(review);
     }
-    if (botReads.size) void Promise.allSettled([...botReads.values()]).then(() => clearTimeout(timer)); else clearTimeout(timer);
+    if (waiting.length && effects.botActivity) {
+      const held = cursor.botReviewers.map(({ login, state, since }) => ({ login, state, since }));
+      const activity = Promise.race([effects.botActivity([...awaited], waiting, held).catch(() => null), deadline]);
+      botStates = activity.then(entries => {
+        if (entries) cursor.botReviewers = botReviewerStates(awaited, entries, held).slice(0, 10).map(bot => ({ ...bot, checkedAt: new Date(now()).toISOString() }));
+        return cursor.botReviewers;
+      });
+    }
+    const reads = [...botReads.values(), botStates];
+    if (botReads.size) void Promise.allSettled(reads).then(() => clearTimeout(timer)); else clearTimeout(timer);
   }
   const awaitingBotReview = async (item: Work, review: DispatchRequest) => {
     const read = botReads.get(review.id);
@@ -759,9 +815,12 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     if (now() >= until) return false;
     const seen = await read;
     if (!seen) return false;
+    const exhausted = new Map((await botStates).filter(bot => bot.state === 'exhausted').map(bot => [bot.login.toLowerCase(), bot]));
     const missing = awaited.filter(login => !seen.includes(login.toLowerCase()));
-    if (!missing.length) return false;
-    wait('review', item, review, `review of ${item.key} at ${review.sha.slice(0, 12)} waits up to ${minutes} min (until ${new Date(until).toISOString()}) for ${missing.join(', ')}'s review of the head, so its findings are judged in the same round`);
+    const skipped = missing.filter(login => exhausted.has(login.toLowerCase())).map(login => `skipped: ${login} exhausted since ${exhausted.get(login.toLowerCase())!.since}`).join('; ');
+    const waitingOn = missing.filter(login => !exhausted.has(login.toLowerCase()));
+    if (!waitingOn.length) { if (skipped) skippedWaits.set(review.id, `awaited-reviewer wait ${skipped}`); return false; }
+    wait('review', item, review, `review of ${item.key} at ${review.sha.slice(0, 12)} waits up to ${minutes} min (until ${new Date(until).toISOString()}) for ${waitingOn.join(', ')}'s review of the head, so its findings are judged in the same round${skipped ? `; ${skipped}` : ''}`);
     return true;
   };
   // A reviewer with a bot read is decided the moment that read settles, beside the producer pass
@@ -832,7 +891,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
           if (!launched) busy();
           else {
             delete cursor.failures[review.id]; delete cursor.capacity.review;
-            tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
+            tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}), ...(skippedWaits.has(review.id) ? { reason: skippedWaits.get(review.id) } : {}) });
           }
         } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
         await persist();
@@ -889,7 +948,8 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
   cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
     closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
-    reasons: composed().map(([reason]) => reason) };
+    // A launch that skipped an exhausted bot's wait says so beside the waits (GY-349).
+    reasons: [...composed().map(([reason]) => reason), ...tick.launched.filter(launch => launch.reason).map(launch => bounded(`${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)}: launched; ${launch.reason}`, cursorTextLimit))].slice(0, 20) };
   await persist();
   return tick;
 }
@@ -943,7 +1003,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       }
       const tick = await runDispatchTick(config, cursor, effects, now, tickReadTimeout(cursor.consecutiveFailures, interval, options.readTimeoutMs));
       ticks.push(tick);
-      for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}`);
+      for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}${launch.reason ? `; ${launch.reason}` : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
       for (const event of tick.threads ?? []) log(`[graphyard-dispatch] ${event}`);
       for (const closure of tick.closed) log(`[graphyard-dispatch] closed ${closure.role} session ${closure.id} on ${closure.key}: ${closure.outcome}`);
@@ -983,6 +1043,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
   const current = typeof config === 'function' ? config : () => config;
   const headReviewerReads = new Map<string, { at: number; logins: string[] }>(), headReviewerInFlight = new Map<string, Promise<string[]>>();
+  let botActivityRead: { key: string; at: number; activity: Promise<BotActivity[]> } | null = null;
   const log = deps.log ?? (line => console.error(line));
   // A repair is logged once per path: the same over-long string would otherwise be reported on
   // every tick that persists it, when one line naming the path is what a reader needs.
@@ -1028,6 +1089,39 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
       headReviewerInFlight.set(key, read);
       return read;
     },
+    // The awaited bots' latest words (GY-349): the repository's newest issue comments, where a bot
+    // posts its usage-limit notice, and its reviews on any pull request since its latest notice, so
+    // a review on a head nobody is waiting on still ends the exhaustion. Those are read from the
+    // waiting pull requests and every pull request updated since that notice (a review updates
+    // it), at most `botReviewPullLimit` of the most recently updated. One read a minute at most,
+    // shared while in flight; only the awaited logins' entries are kept.
+    botActivity: (logins, requests, held = []) => {
+      const repository = current().repository, waiting = [...new Set(requests.map(request => request.pr))].sort((a, b) => a - b);
+      const at = (deps.now ?? Date.now)(), key = `${logins.join(',')}|${waiting.join(',')}|${held.map(bot => `${bot.login}:${bot.since}`).join(',')}`;
+      if (botActivityRead && botActivityRead.key === key && at - botActivityRead.at < 60_000) return botActivityRead.activity;
+      const wanted = new Set(logins.map(login => login.toLowerCase()));
+      const lines = (output: unknown) => String(output).split('\n').map(line => line.split('\t'));
+      const rows = (output: unknown) => lines(output).filter(([login, time]) => login && time && wanted.has(login.toLowerCase()));
+      const activity = (async () => {
+        const comments = rows(await run('gh', ['api', `repos/${repository}/issues/comments?sort=created&direction=desc&per_page=100`, '--jq', '.[] | [.user.login, .created_at, ((.body // "") | .[0:300] | gsub("[\\t\\n\\r]"; " "))] | @tsv']))
+          .map(([login, time, body]): BotActivity => ({ login, kind: 'comment', at: time, body }));
+        // Each bot's latest notice, or the one the last judgment still holds when it aged out of the
+        // comment read; the earliest of them bounds which pull requests' reviews can end one.
+        const latest = [...wanted].map(login => Math.max(-Infinity,
+          ...comments.filter(entry => entry.login.toLowerCase() === login && botLimitNotice.test(entry.body ?? '')).map(entry => Date.parse(entry.at)),
+          ...held.filter(bot => bot.login.toLowerCase() === login && bot.state === 'exhausted' && bot.since).map(bot => Date.parse(bot.since!)))).filter(Number.isFinite);
+        const cutoff = latest.length ? Math.min(...latest) : null;
+        const updated = cutoff === null ? [] : lines(await run('gh', ['api', `repos/${repository}/pulls?state=all&sort=updated&direction=desc&per_page=${botReviewPullLimit}`, '--jq', '.[] | [.number, .updated_at] | @tsv']))
+          .filter(([pr, time]) => pr && Date.parse(time) >= cutoff).map(([pr]) => Number(pr)).filter(Number.isSafeInteger);
+        const prs = [...new Set([...waiting, ...updated])];
+        const reviews = (await Promise.all(prs.map(pr => run('gh', ['api', '--paginate', `repos/${repository}/pulls/${pr}/reviews?per_page=100`, '--jq', '.[] | [.user.login, .submitted_at] | @tsv']))))
+          .flatMap(output => rows(output).map(([login, time]): BotActivity => ({ login, kind: 'review', at: time })));
+        return [...comments, ...reviews];
+      })();
+      botActivityRead = { key, at, activity };
+      activity.catch(() => { if (botActivityRead?.activity === activity) botActivityRead = null; });
+      return activity;
+    },
     // The handle goes where every Graphyard reader already looks, so watching a reviewer or
     // producer session the loop launched never means reading this host's own ledger.
     recordSession: (work: Work, handle: SessionHandleInput) => mutate(`work/${work.id}/session`, handle, randomUUID()),
@@ -1043,7 +1137,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
 }
 
 /** The compact dispatcher view `master status` joins onto the per-candidate requests. */
-export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs: number) {
+export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs: number, awaited: readonly string[] = []) {
   const lastTickAt = cursor.lastTickAt ? Date.parse(cursor.lastTickAt) : Number.NaN;
   const lagMs = Number.isFinite(lastTickAt) ? now - lastTickAt : null;
   return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
@@ -1057,6 +1151,10 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
     abandoned: Object.entries(cursor.abandoned).map(([requestId, entry]) => ({ requestId, ...entry })),
     // A role with no account left, as one entry per role rather than a failure per request.
     capacity: Object.entries(cursor.capacity ?? {}).map(([kind, hold]) => ({ role: kind === 'review' ? 'reviewer' : 'producer', ...hold })),
+    // Each awaited bot reviewer, available or exhausted since its usage-limit notice (GY-349); a bot
+    // no read has judged yet is available, since nothing it said says otherwise.
+    botReviewers: awaited.map(login => cursor.botReviewers.find(bot => bot.login.toLowerCase() === login.toLowerCase()) ?? { login, state: 'available' as const, since: null, checkedAt: null })
+      .map(bot => ({ ...bot, line: botReviewerLine(bot) })),
     // Each agent account as the last launch check saw it, and the launches that skipped one and why.
     accounts: cursor.accounts ? {
       environments: Object.values(cursor.accounts.environments).map((health: any) => ({ environment: health.name, kind: health.kind, loggedIn: health.loggedIn, quota: health.quota, healthy: health.healthy, reason: health.reason, usage: health.usage, login: health.login, checkedAt: health.checkedAt })),

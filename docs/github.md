@@ -39,7 +39,7 @@ The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head app
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; repaired, it re-enters at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge: queue, auto-merge, or a [direct merge](#direct-merges). Branch protection decides; withdrawal fails and dequeues it. Refusals (`merge.enqueue.refused`) show in `master status`.
+A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; repaired, it re-enters at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge: queue, auto-merge, or a [direct merge](#direct-merges). Branch protection decides; withdrawal fails and dequeues it. `master status` shows refusals (`merge.enqueue.refused`).
 
 ### Bindings and carry
 
@@ -49,7 +49,7 @@ Carry ignores reviewed files if that conflict-free Graphyard merge kept the chan
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4, 1 disables; `POST /api/merge-queue` publishes it) batches entries onto one CI-tested tip; members merge in order once it passes; a failing batch halves until the culprit is ejected, naming the check (`mergeStep`).
+`mergeQueue.batchSize` (master config, default 4, 1 disables; `POST /api/merge-queue` publishes it) batches entries onto one CI-tested tip; members merge in order when it passes, or it halves until ejecting the culprit, naming the check (`mergeStep`).
 
 ### Direct merges
 
