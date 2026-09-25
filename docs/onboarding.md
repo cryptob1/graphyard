@@ -7,7 +7,7 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 
 ## 2. Add machines
 
-Each concurrent session needs its own worker identity and host ID: rerun the installer with a higher `--workers`, or connect a machine:
+Each concurrent session needs a worker identity and host ID: rerun the installer with a higher `--workers`, or connect a machine:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -17,7 +17,7 @@ Commit the updated `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graph
 
 ### Documentation policy
 
-`init --scan --apply` writes the documentation paths it finds (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to the committed `graphyard.json`, e.g. `{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`. Set the printed `GRAPHYARD_DOCUMENTATION` on the deployment (default `docs/`, `README.md`, `AGENTS.md`). Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
+`init --scan --apply` writes the documentation paths it finds (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to the committed `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Set the printed `GRAPHYARD_DOCUMENTATION` on the deployment (default `docs/`, `README.md`, `AGENTS.md`). Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
 
 ### What the generated instructions authorize
 
@@ -85,7 +85,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-For worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
+When adding workers, for worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -106,7 +106,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it, and the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 ## What stays manual
 
