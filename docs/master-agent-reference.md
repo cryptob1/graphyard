@@ -53,7 +53,7 @@ A harness classifier refuses routine administration, so `master harness claude -
 
 The control plane names one typed action per item (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements, listed under `actions.needsHuman`.
 
-Three consecutive failures with an unchanged reason mark a row stalled rather than retrying: the signal for a fleet that reads as idle and is not. Once in no count and no list, it shows in `actions.stalled` and on the item's own card, rechecking every minute: backoff never outlives its cause.
+Three failures with an unchanged reason mark a row stalled rather than retrying, signalling a fleet that reads as idle and is not. Once in no count and no list, it shows in `actions.stalled` and on the item's own card. Old backoff never outlives it; rechecks double from one minute.
 
 ### Loop failure recovery
 
