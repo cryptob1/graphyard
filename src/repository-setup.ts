@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
-import { npmCiArgs, npmCiEnvironment } from './cli/test-isolation.js';
+import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
 export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
@@ -641,8 +641,10 @@ function parseJson(text: string): any {
 export type DependencyInstaller = (cwd: string, signal?: AbortSignal) => Promise<void>;
 /** `npm ci` in the worktree, the full tree (npmCiArgs), its output on stderr so a caller's JSON on stdout stays whole. */
 export const npmCi: DependencyInstaller = (cwd, signal) => new Promise((done, fail) => {
-  // An aborted signal stops npm (SIGTERM) and rejects with the abort.
-  const child = spawn('npm', npmCiArgs, { cwd, env: npmCiEnvironment(), stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
+  // Contained (containedInstall): the lifecycle scripts it runs cannot open a credential file.
+  // An aborted signal stops bubblewrap (SIGTERM), which takes npm with it, and rejects with the abort.
+  const { command, args } = containedInstall(cwd);
+  const child = spawn(command, args, { cwd, env: npmCiEnvironment(), stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
   child.once('error', fail);
   child.once('close', code => code === 0 ? done() : fail(new Error(`npm ci exited with ${code}`)));
 });
@@ -693,5 +695,23 @@ async function installFoldersExist(installed: { packages?: Record<string, any> }
   const names = Object.keys(installed.packages ?? {}).filter(Boolean);
   const missing = await Promise.all(names.map(async name => (await stat(resolve(root, name)).catch(() => null))?.isDirectory() ? null : name));
   const first = missing.find(name => name !== null);
-  return first ? `${first} is recorded in the install's hidden lockfile but its folder ${resolve(root, first)} is missing` : true;
+  if (first) return `${first} is recorded in the install's hidden lockfile but its folder ${resolve(root, first)} is missing`;
+  return binLinksExist(installed, root);
+}
+
+/**
+ * An install made with bin-links=false holds every package folder but no node_modules/.bin, so
+ * tsc and tsx never run from it. Each executable a package declares is linked in the .bin of the
+ * node_modules that holds the package (npm's layout, a nested one for a nested package); the link
+ * must resolve. On Windows npm writes a .cmd shim beside it, which counts.
+ */
+async function binLinksExist(installed: { packages?: Record<string, any> }, root: string): Promise<true | string> {
+  const links = Object.entries(installed.packages ?? {}).flatMap(([path, entry]) => {
+    const at = path.lastIndexOf('node_modules/');
+    if (at < 0 || entry?.link || !entry?.bin || typeof entry.bin !== 'object') return [];
+    return Object.keys(entry.bin).map(name => ({ path, link: resolve(root, path.slice(0, at), 'node_modules', '.bin', name) }));
+  });
+  const absent = await Promise.all(links.map(async entry => (await stat(entry.link).catch(() => null)) || (await stat(`${entry.link}.cmd`).catch(() => null)) ? null : entry));
+  const first = absent.find(entry => entry !== null);
+  return first ? `${first.path} declares the executable ${first.link}, which the install never linked (an install made with bin-links=false)` : true;
 }

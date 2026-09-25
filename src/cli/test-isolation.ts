@@ -1,4 +1,9 @@
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { homedir } from 'node:os';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * What a clean test run needs from the host, done by the tooling rather than remembered by the
@@ -156,6 +161,104 @@ export function npmCiEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.P
  * GitHub token. npm's own registry settings stay: they are what the install needs.
  */
 const withheldFromInstall = /^(GRAPHYARD_|HERDR_|GH_TOKEN$|GITHUB_TOKEN$|GH_ENTERPRISE_TOKEN$|GITHUB_ENTERPRISE_TOKEN$)/;
+
+/** Whether `path` is `parent` or lies inside it. */
+const within = (path: string, parent: string) => { const from = relative(parent, path); return from !== '..' && !from.startsWith('../') && !isAbsolute(from); };
+/** An executable named `name` on the PATH `env` carries, or null. */
+function onPath(name: string, env: NodeJS.ProcessEnv): string | null {
+  for (const directory of (env.PATH ?? '').split(delimiter)) if (directory && existsSync(join(directory, name))) return join(directory, name);
+  return null;
+}
+
+export interface ContainedInstall { command: string; args: string[] }
+/**
+ * `npm ci` for a managed worktree, contained so its lifecycle scripts cannot read a credential
+ * file. The install runs the checkout's scripts and its dependencies' as the coordinator's user,
+ * outside any agent sandbox, and an environment without the launcher's variables is not enough:
+ * the scripts could still open ~/.config/graphyard/<install>/tokens/*.token, a GitHub CLI login or
+ * an SSH key by path. So npm runs under bubblewrap with the home directory, the Graphyard and XDG
+ * config homes and the token file's directory replaced by empty ones; only what the install
+ * writes (the worktree, npm's cache, TMPDIR) and what runs it (node, the PATH, ~/.npmrc for the
+ * registry) are put back. A host without bubblewrap installs nothing rather than install
+ * uncontained: the worktree reports the failed install, with this reason.
+ */
+export function containedInstall(cwd: string, env: NodeJS.ProcessEnv = process.env, options: { bwrap?: string | null; node?: string } = {}): ContainedInstall {
+  const bwrap = options.bwrap === undefined ? onPath('bwrap', env) : options.bwrap;
+  if (!bwrap) throw new Error('bubblewrap (bwrap) is not installed, and dependencies are never installed without it: the checkout\'s install scripts would run with read access to this host\'s credential files. Install bubblewrap (e.g. apt install bubblewrap) and recreate the worktree');
+  const home = resolve(env.HOME || homedir());
+  const directory = (path: string) => { try { return lstatSync(path).isDirectory(); } catch { return false; } };
+  const credentials = [...new Set([
+    env.GRAPHYARD_CONFIG_HOME, env.XDG_CONFIG_HOME, join(home, '.config'), join(home, '.ssh'),
+    env.GRAPHYARD_TOKEN_FILE ? dirname(env.GRAPHYARD_TOKEN_FILE) : undefined,
+  ].filter((path): path is string => !!path && isAbsolute(path)).map(path => resolve(path)))].filter(directory);
+  const cache = resolve(env.npm_config_cache || join(home, '.npm'));
+  if (within(cache, home)) mkdirSync(cache, { recursive: true });
+  // node and npm are often installed under the home directory (nvm, mise, fnm): the folder above
+  // each one's real executable holds the rest of it (node's prefix; npm's package, for npm-cli.js).
+  const tools = [options.node ?? process.execPath, onPath('node', env), onPath('npm', env)].flatMap(path => { try { return path ? [dirname(dirname(realpathSync(path)))] : []; } catch { return []; } });
+  const readable = [...tools, ...(env.PATH ?? '').split(delimiter).filter(isAbsolute), join(home, '.npmrc'), env.npm_config_userconfig]
+    .filter((path): path is string => !!path).map(path => resolve(path));
+  const writable = [cache, env.TMPDIR ? resolve(env.TMPDIR) : null].filter((path): path is string => !!path);
+  const args = ['--dev-bind', '/', '/', '--die-with-parent', '--tmpfs', home], made = new Set<string>();
+  // A path put back inside the emptied home keeps the symlinks on its way (mise's installs/node/26
+  // -> 26.10.0, from which npm's own links resolve), each recreated and followed to what it names.
+  const expose = (path: string, flag: string, depth = 0): void => {
+    if (depth > 16 || !within(path, home) || path === home || !existsSync(path) || credentials.some(parent => within(path, parent))) return;
+    for (let at = path; at !== home; at = dirname(at)) {
+      if (!lstatSync(at).isSymbolicLink()) continue;
+      const target = readlinkSync(at);
+      if (!made.has(at)) { made.add(at); args.push('--symlink', target, at); }
+      return expose(join(resolve(dirname(at), target), relative(at, path)), flag, depth + 1);
+    }
+    if (!made.has(path)) { made.add(path); args.push(flag, path, path); }
+  };
+  for (const path of readable) expose(path, '--ro-bind');
+  for (const path of writable) expose(path, '--bind');
+  // Emptied last, so no folder put back above re-exposes one; outside the home directory too.
+  for (const path of credentials) if (!within(path, home) || [...made].some(exposed => within(path, exposed))) args.push('--tmpfs', path);
+  args.push('--bind', resolve(cwd), resolve(cwd), '--chdir', resolve(cwd), '--', 'npm', ...npmCiArgs);
+  return { command: bwrap, args };
+}
+
+/**
+ * A digest of everything a transpiler loads when the trusted unit runner passes it to `--import`:
+ * the package `entry` resolves into and every package it depends on, found as node finds them
+ * (a nested node_modules first, then each one above), each package's whole folder (a nested
+ * node_modules added to shadow a dependency changes its parent's digest), and the node binary
+ * that runs it. The candidate's `npm ci` runs lifecycle scripts as the runner's user, which can
+ * write the harness's own node_modules; the runner records this digest before that install and
+ * refuses to run, or to judge a run, when it differs afterwards.
+ */
+export function loaderDigest(entry: string, node: string = process.execPath): string {
+  const file = entry.startsWith('file:') ? fileURLToPath(entry) : resolve(entry);
+  let root = dirname(file);
+  while (!existsSync(join(root, 'package.json')) || !/(^|\/)node_modules\/(@[^/]+\/)?[^/@]+$/.test(root)) {
+    if (dirname(root) === root) throw new Error(`${file} does not lie in an installed package`);
+    root = dirname(root);
+  }
+  const hash = createHash('sha256'), seen = new Set<string>(), queue = [root];
+  const walk = (path: string, label: string) => {
+    const info = lstatSync(path);
+    if (info.isSymbolicLink()) hash.update(`link ${label} ${readlinkSync(path)}\n`);
+    else if (info.isDirectory()) { hash.update(`dir ${label}\n`); for (const name of readdirSync(path).sort()) walk(join(path, name), `${label}/${name}`); }
+    else hash.update(`file ${label} ${info.mode} `).update(readFileSync(path)).update('\n');
+  };
+  while (queue.length) {
+    const directory = queue.shift()!;
+    if (seen.has(directory)) continue;
+    seen.add(directory); walk(directory, directory);
+    const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+    for (const name of Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies })) {
+      for (let at = directory; ; at = dirname(at)) {
+        const candidate = basename(at) === 'node_modules' ? null : join(at, 'node_modules', name);
+        if (candidate && existsSync(join(candidate, 'package.json'))) { queue.push(candidate); break; }
+        if (dirname(at) === at) break;
+      }
+    }
+  }
+  hash.update(`node ${node} `).update(readFileSync(node));
+  return hash.digest('hex');
+}
 
 /**
  * Why a TAP stream cannot decide the required titles, or null. The verdict of a required case is

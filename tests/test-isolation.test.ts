@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { abnormalTestExit, isolatedTestEnvironment, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
+import { abnormalTestExit, containedInstall, isolatedTestEnvironment, loaderDigest, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
 import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
@@ -153,6 +153,20 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.equal(hollow.state, 'failed', hollow.reason);
     assert.match(hollow.reason, /npm ci exited 0 without installing it: node_modules\/left-pad is recorded .* is missing/);
     await rm(join(worktree, 'node_modules'), { recursive: true }); await mkdir(join(root, 'node_modules', 'left-pad'));
+    // An install made with bin-links=false holds every folder but no node_modules/.bin: it is not current, and npm ci reruns.
+    const withBin = { name: 'app', lockfileVersion: 3, packages: { '': { name: 'app' }, 'node_modules/left-pad': { version: '1.0.0', integrity: 'sha512-1.0.0', bin: { 'left-pad': 'cli.js' } } } };
+    await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(withBin));
+    await writeFile(join(root, 'node_modules', '.package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/left-pad': withBin.packages['node_modules/left-pad'] } }));
+    const linkless = await ensureWorktreeDependencies(worktree, async cwd => { await installer(cwd); await mkdir(join(cwd, 'node_modules', '.bin'), { recursive: true }); await writeFile(join(cwd, 'node_modules', '.bin', 'left-pad'), ''); });
+    assert.equal(linkless.state, 'installed', linkless.reason);
+    assert.match(linkless.reason, /node_modules\/left-pad declares the executable .*node_modules\/\.bin\/left-pad, which the install never linked/);
+    assert.equal((await ensureWorktreeDependencies(worktree, async () => { throw new Error('not reinstalled'); })).state, 'current', 'with its links in place the install is current');
+    await rm(join(worktree, 'node_modules', '.bin'), { recursive: true });
+    const unlinked = await ensureWorktreeDependencies(worktree, installer);
+    assert.equal(unlinked.state, 'failed', 'npm ci exiting 0 without the links is a failed install');
+    assert.match(unlinked.reason, /exited 0 without installing it: .*which the install never linked/);
+    await rm(join(worktree, 'node_modules'), { recursive: true }); installs.length = 0;
+    await writeFile(join(root, 'node_modules', '.package-lock.json'), JSON.stringify({ name: 'app', lockfileVersion: 3, packages: { 'node_modules/left-pad': { version: '1.0.0', integrity: 'sha512-1.0.0' } } }));
 
     await writeFile(join(worktree, 'package-lock.json'), JSON.stringify(lock('2.0.0')));
     const changed = await ensureWorktreeDependencies(worktree, installer);
@@ -247,6 +261,40 @@ test('unit:test-isolation the managed worktree installs dependencies when packag
     assert.deepEqual(npmCiEnvironment({ PATH: '/bin', npm_config_registry: 'https://registry.example/', GRAPHYARD_TOKEN_FILE: '/secret', GRAPHYARD_TOKEN: 't', GRAPHYARD_URL: 'http://plane', HERDR_PANE: 'p', GH_TOKEN: 'g', GITHUB_TOKEN: 'g' }),
       { PATH: '/bin', npm_config_registry: 'https://registry.example/' });
 
+    // Filtering the environment is not containment: npm runs under bubblewrap with the home directory and every credential
+    // location emptied, and only node, npm, the PATH, ~/.npmrc, npm's cache and the worktree put back.
+    assert.throws(() => containedInstall(worktree, { PATH: '/usr/bin', HOME: root }, { bwrap: null }), /bubblewrap \(bwrap\) is not installed, and dependencies are never installed without it/);
+    const home = join(root, 'home'), outside = join(root, 'secrets');
+    await mkdir(join(home, '.config', 'graphyard', 'tokens'), { recursive: true }); await mkdir(join(home, '.ssh')); await mkdir(outside);
+    await writeFile(join(home, '.config', 'graphyard', 'tokens', 'worker.token'), 'secret'); await writeFile(join(outside, 'worker.token'), 'secret');
+    await writeFile(join(home, '.ssh', 'id_ed25519'), 'secret'); await writeFile(join(home, '.npmrc'), 'registry=https://registry.npmjs.org/\n');
+    // A tool installed under the home directory through a version symlink (mise's node/26 -> 26.10.0), npm linking into its lib.
+    const tool = join(home, '.local', 'share', 'tool');
+    await mkdir(join(tool, '26.10.0', 'bin'), { recursive: true }); await mkdir(join(tool, '26.10.0', 'lib'), { recursive: true }); await symlink('26.10.0', join(tool, '26'));
+    await writeFile(join(tool, '26.10.0', 'lib', 'npm-cli.sh'), `#!/bin/sh\ncat "${join(home, '.config', 'graphyard', 'tokens', 'worker.token')}" "${join(outside, 'worker.token')}" "${join(home, '.ssh', 'id_ed25519')}" > leaked.txt 2>/dev/null\ncat "${join(home, '.npmrc')}" > npmrc.txt\necho "$@" > args.txt\n`);
+    await chmod(join(tool, '26.10.0', 'lib', 'npm-cli.sh'), 0o755); await symlink('../lib/npm-cli.sh', join(tool, '26.10.0', 'bin', 'npm'));
+    const env = { PATH: `${join(tool, '26', 'bin')}:/usr/bin:/bin`, HOME: home, GRAPHYARD_TOKEN_FILE: join(outside, 'worker.token') };
+    const contained = containedInstall(worktree, env, { bwrap: '/usr/bin/bwrap', node: '/usr/bin/node' });
+    assert.equal(contained.command, '/usr/bin/bwrap');
+    const pairs = (flag: string) => contained.args.flatMap((arg, index) => arg === flag ? [contained.args[index + 1]] : []);
+    assert.deepEqual(pairs('--tmpfs'), [home, outside], 'the home directory and the token file\'s directory outside it are emptied');
+    assert.deepEqual(pairs('--symlink'), ['26.10.0'], 'the version symlink on the way to npm is recreated');
+    assert.ok(pairs('--ro-bind').includes(join(tool, '26.10.0', 'bin')) && pairs('--ro-bind').includes(join(home, '.npmrc')), 'npm and the registry config are put back, read-only');
+    assert.ok(pairs('--bind').includes(join(home, '.npm')) && pairs('--bind').includes(worktree), 'npm\'s cache and the worktree are writable');
+    assert.ok(![...pairs('--ro-bind'), ...pairs('--bind')].some(path => path.startsWith(join(home, '.config')) || path.startsWith(join(home, '.ssh')) || path.startsWith(outside)), 'no credential location is put back');
+    assert.deepEqual(contained.args.slice(contained.args.indexOf('--')), ['--', 'npm', ...npmCiArgs]);
+    assert.match(await readFile(new URL('src/repository-setup.ts', repository), 'utf8'), /const \{ command, args \} = containedInstall\(cwd\);\n\s*const child = spawn\(command, args,/, 'the worktree install runs contained');
+    // Where bubblewrap runs, the contained install's scripts really cannot read a credential file.
+    if (spawnSync('bwrap', ['--dev-bind', '/', '/', 'true']).status === 0) {
+      const live = containedInstall(worktree, env, { node: process.execPath });
+      const ran = spawnSync(live.command, live.args, { cwd: worktree, env, encoding: 'utf8' });
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.equal(await readFile(join(worktree, 'leaked.txt'), 'utf8'), '', 'no token or key was readable');
+      assert.match(await readFile(join(worktree, 'npmrc.txt'), 'utf8'), /registry=/);
+      assert.equal((await readFile(join(worktree, 'args.txt'), 'utf8')).trim(), npmCiArgs.join(' '));
+      for (const file of ['leaked.txt', 'npmrc.txt', 'args.txt']) await rm(join(worktree, file));
+    }
+
     // A refused lease heartbeat stops the install and fails the worktree command.
     await rm(join(worktree, 'node_modules'), { recursive: true, force: true });
     let stoppedBy: unknown = null, renewals = 0, started = 0;
@@ -323,9 +371,32 @@ test('an ordinary case of the same file', () => { writeFileSync(${JSON.stringify
     assert.match(runner, /const repeated = repeatedRequiredTitle\(run\.stdout \?\? '', selected\.requiredCases\.map\(id => selected\.titles\[id\]\)\);\n\s*if \(repeated\) throw/, 'the trusted unit runner fails a required title reported twice');
     // The transpiler loads from the protected harness, never from the tsx the candidate's lockfile installed.
     assert.doesNotMatch(runner, /'--import', 'tsx'/);
-    assert.match(runner, /\['--import', transpiler, '--test'/);
+    assert.match(runner, /\['--import', transpiler\.href, '--test'/);
     assert.match(runner, /const transpiler = harnessTranspiler\(\);\n\s*execFileSync\('npm', \['ci'/, 'the transpiler is resolved before any candidate code runs');
-    assert.match(runner, /try \{ return import\.meta\.resolve\('tsx'\); \}/);
+    assert.match(runner, /try \{ href = import\.meta\.resolve\('tsx'\); \}/);
+    // The candidate's install can write the harness's node_modules: what the transpiler loads is digested before that
+    // install and checked before and after the run, and the harness's own fallback install is the hardened one.
+    assert.match(runner, /return \{ href, digest: loaderDigest\(href\) \};/);
+    assert.match(runner, /assertLoaderUnchanged\(transpiler, 'before the inventory ran'\);\n\s*const run = spawnSync/);
+    assert.match(runner, /if \(run\.error\) throw run\.error;\n\s*assertLoaderUnchanged\(transpiler, 'while the inventory ran'\);/);
+    assert.match(runner, /execFileSync\('npm', npmCiArgs, \{ cwd: harness/);
+    const loaderRoot = join(project, 'harness'), loaderModules = join(loaderRoot, 'node_modules');
+    const pkg = async (path: string, manifest: object, file = 'index.js') => { await mkdir(path, { recursive: true }); await writeFile(join(path, 'package.json'), JSON.stringify(manifest)); await writeFile(join(path, file), `// ${JSON.stringify(manifest)}`); };
+    await pkg(join(loaderModules, 'tsx'), { name: 'tsx', dependencies: { esbuild: '1' } }, 'loader.mjs');
+    await pkg(join(loaderModules, 'esbuild'), { name: 'esbuild', optionalDependencies: { '@esbuild/linux-x64': '1', '@esbuild/aix-ppc64': '1' } });
+    await pkg(join(loaderModules, '@esbuild', 'linux-x64'), { name: '@esbuild/linux-x64' }, 'esbuild');
+    await pkg(join(loaderModules, 'unrelated'), { name: 'unrelated' });
+    const entry = `file://${join(loaderModules, 'tsx', 'loader.mjs')}`, before = loaderDigest(entry);
+    await writeFile(join(loaderModules, 'unrelated', 'index.js'), 'changed');
+    assert.equal(loaderDigest(entry), before, 'a package the loader does not load is not its business');
+    await writeFile(join(loaderModules, '@esbuild', 'linux-x64', 'esbuild'), 'a substituted binary');
+    assert.notEqual(loaderDigest(entry), before, 'a rewritten platform binary two dependencies down is caught');
+    await pkg(join(loaderModules, '@esbuild', 'linux-x64'), { name: '@esbuild/linux-x64' }, 'esbuild');
+    assert.equal(loaderDigest(entry), before);
+    await pkg(join(loaderModules, 'tsx', 'node_modules', 'esbuild'), { name: 'esbuild', shadow: true });
+    assert.notEqual(loaderDigest(entry), before, 'a nested package added to shadow a dependency is caught');
+    await rm(join(loaderModules, 'tsx', 'node_modules'), { recursive: true });
+    assert.notEqual(loaderDigest(entry, join(loaderModules, 'unrelated', 'index.js')), before, 'so is a different node binary');
     const tap = ['ok 1 - unit:demo first case', 'ok 2 - unit:demo-other is another proof # SKIP test name does not match pattern', 'ok 3 - an ordinary case # SKIP', '    not ok 1 - unit:demo nested case', 'ok 4 - unit:demo skipped case # SKIP'].join('\n');
     assert.deepEqual(countProofCases(tap, 'unit:demo'), { executed: 2, failed: 1, skipped: 1 });
     for (const file of ['src/cli/verify.ts', 'scripts/run-unit-acceptance.mjs'])

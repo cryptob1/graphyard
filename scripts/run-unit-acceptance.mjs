@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { contract } from './contracts.mjs';
 import { judgeUnitCases } from './unit-contract.mjs';
-import { abnormalTestExit, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.ts';
+import { abnormalTestExit, loaderDigest, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.ts';
 
 const [metadataFile, candidateDirectory, output, proof] = process.argv.slice(2);
 if (!metadataFile || !candidateDirectory || !output || !proof) throw new Error('Usage: run-unit-acceptance metadata.json candidate-directory output.json proof');
@@ -25,7 +25,12 @@ try {
   // skip the devDependencies (or, from an .npmrc omit=optional, the platform packages) the suite
   // needs while npm still exits 0, and an ignore-scripts or bin-links=false setting would skip the
   // install scripts or node_modules/.bin links it runs on. What the harness contributes is fixed
-  // before any candidate code runs: the inventory's bytes and the transpiler that loads it.
+  // before any candidate code runs: the inventory's bytes and the transpiler that loads it, with a
+  // digest of every file that transpiler loads. The install runs as this job's user and can write
+  // the harness checkout, so the loader is checked against that digest before the run and again
+  // after it: a lifecycle script (or a process it left behind) that rewrote tsx, a dependency of it
+  // or node itself fails the proof instead of substituting passing cases. This job holds no
+  // Graphyard or GitHub credential for the install to read: the report is published by another job.
   const protectedInventory = await readFile(join(harness, selected.file));
   const transpiler = harnessTranspiler();
   execFileSync('npm', ['ci', '--include=dev', '--include=optional', '--no-dry-run', '--ignore-scripts=false', '--bin-links', '--no-audit', '--no-fund'], { cwd: candidate, env: npmCiEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] });
@@ -45,9 +50,11 @@ try {
   // The transpiler is the protected harness's own: a bare `--import tsx` from the candidate
   // checkout would resolve the tsx its lockfile installed, which loads before the inventory and
   // could hook module loading to substitute passing cases.
-  const run = spawnSync(process.execPath, ['--import', transpiler, '--test', '--test-reporter=tap', selected.file],
+  assertLoaderUnchanged(transpiler, 'before the inventory ran');
+  const run = spawnSync(process.execPath, ['--import', transpiler.href, '--test', '--test-reporter=tap', selected.file],
     { cwd: candidate, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (run.error) throw run.error;
+  assertLoaderUnchanged(transpiler, 'while the inventory ran');
   process.stderr.write(run.stderr ?? '');
   cases = judgeUnitCases(selected, run.stdout ?? '');
   // A required title reported twice (a module the inventory imports registering its own case under
@@ -68,11 +75,18 @@ finally {
 
 /**
  * tsx resolved from this harness checkout, installed from the harness's own lockfile when the job
- * has not installed it: never from the candidate's node_modules.
+ * has not installed it (the full tree, overriding any .npmrc: npmCiArgs): never from the
+ * candidate's node_modules. `digest` is what it loads, recorded before any candidate code runs.
  */
 function harnessTranspiler() {
-  try { return import.meta.resolve('tsx'); } catch {
-    execFileSync('npm', ['ci', '--include=dev', '--no-audit', '--no-fund'], { cwd: harness, env: npmCiEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] });
-    return import.meta.resolve('tsx');
+  let href;
+  try { href = import.meta.resolve('tsx'); } catch {
+    execFileSync('npm', npmCiArgs, { cwd: harness, env: npmCiEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] });
+    href = import.meta.resolve('tsx');
   }
+  return { href, digest: loaderDigest(href) };
+}
+
+function assertLoaderUnchanged(transpiler, when) {
+  if (loaderDigest(transpiler.href) !== transpiler.digest) throw new Error(`the harness transpiler (${fileURLToPath(transpiler.href)}, its dependencies or the node binary) changed after the candidate's install, ${when}`);
 }
