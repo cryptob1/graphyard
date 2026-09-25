@@ -589,7 +589,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
         ...(threadReadFailure ? { threadReadFailure } : {}),
         recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
-    });
+    }, agentName);
   } catch (error) { await release(error); throw error; }
 }
 

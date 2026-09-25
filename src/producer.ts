@@ -288,7 +288,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
       profile: profile.name, principal: profile.principal, agentName, pane: record.pane, checkout: checkout.directory, expiresAt: record.expiresAt, approvals: launch.plan.approvals, delivery,
       account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
       recorded: 'the launch is recorded; master status reconciles the evidence and closes the session' };
-  });
+  }, agentName);
 }
 
 /** What the control plane holds for one proof on the exact head the session was launched for. */

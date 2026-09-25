@@ -5,7 +5,9 @@ import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile,
   type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
-import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimes, type AgentRegistry, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type SessionSkip } from './model/registry.js';
+import { sessionName } from './session-name.js';
+import type { HerdrAgent } from './master.js';
+import { accountIneligibility, fleetRoles, launchGraceMs, liveSessions, proposedConcurrency, proposedRuntimes, type AgentRegistry, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type SessionSkip } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -19,7 +21,8 @@ import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, pr
  * role at a time.
  */
 export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
-export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient }
+export interface FleetProbe extends EnvironmentProbe { work?: string; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
+  /** Herdr's inventory as the launcher read it: a registry session whose runtime session is not in it is not live (GY-190). */ agents?: HerdrAgent[] }
 /** The three calls an executor makes. */
 export interface FleetClient {
   document(): Promise<AgentRegistry>;
@@ -136,6 +139,13 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }) } : null;
   }));
   const observations = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
+  // A session whose runtime is gone from Herdr holds no seat: it is ended before the choice, so the
+  // control plane's own concurrency count is of sessions actually running (GY-190).
+  if (probe.agents) {
+    const unrun = unrunFleetSessions(registry, await readFleetLaunches(config), probe.agents, host, probe.now?.() ?? Date.now()).filter(entry => entry.session.role === role);
+    for (const entry of unrun) await client.end(entry.session.id, entry.reason).catch(() => {});
+    if (unrun.length) await forgetFleetLaunches(config, unrun.map(entry => entry.session.id)).catch(() => {});
+  }
   const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, observations: observations.map(({ account, quota }) => ({ account, quota })) });
   const at = new Date(probe.now?.() ?? Date.now()).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
@@ -143,7 +153,9 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${chosen.reason}`, skipped);
   const account: FleetLaunchAccount = { name: chosen.account.name, kind: chosen.runtime.launch.kind, home: chosen.account.credential.home,
     fleet: { runtime: chosen.runtime.name, contract: chosen.runtime.launch, model: chosen.model.name, modelId: chosen.model.id, session: chosen.session.id, reason: chosen.reason } };
-  return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string) => client.end(chosen.session!.id, reason).catch(() => {}) };
+  return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string) => client.end(chosen.session!.id, reason).catch(() => {}),
+    /** Pairs the registry session with the Herdr session the launch started, so its end can be seen. */
+    record: (agentName: string) => recordFleetLaunch(config, { session: chosen.session!.id, role, work: probe.work ?? null, agentName, at }).catch(() => {}) };
 }
 
 /**
@@ -161,11 +173,94 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
     const reason = account ? accountIneligibility(fleet.registry, account, now, host) : `${name} is not a registered account`;
     return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown', resetsAt: account?.quota.resetsAt ?? null };
   });
-  const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
+  // Only sessions actually running count toward the limit: one whose runtime session is gone is
+  // not a seat, whether or not its end has been recorded yet (GY-190).
+  const unrun = probe.agents ? new Set(unrunFleetSessions(fleet.registry, await readFleetLaunches(config), probe.agents, host, now).map(entry => entry.session.id)) : new Set<string>();
+  const running = liveSessions(fleet.registry).filter(session => session.role === role && !unrun.has(session.id)).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
   const usable = !full && accounts.some(account => account.healthy);
   return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts };
 }
+
+// ---------------------------------------------------------------------------
+// Ending the sessions that no longer run (GY-190).
+// ---------------------------------------------------------------------------
+
+/**
+ * Which Herdr session each registry session this executor launched became. The registry records a
+ * choice, not the runtime it started, so without this pairing a session that finished stayed live
+ * until its outer window passed and its role filled to its limit with sessions nothing ran.
+ */
+export interface FleetLaunchRecord { session: string; role: FleetRoleName; work: string | null; agentName: string; at: string }
+export const retainedFleetLaunches = 200;
+const fleetLaunchesPath = (config: Pick<MasterConfig, 'credentialFile'>) => resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.sessions.json`);
+export async function readFleetLaunches(config: Pick<MasterConfig, 'credentialFile'>): Promise<FleetLaunchRecord[]> {
+  try { const parsed = JSON.parse(await readFile(fleetLaunchesPath(config), 'utf8')); return Array.isArray(parsed?.launches) ? parsed.launches : []; } catch { return []; }
+}
+async function writeFleetLaunches(config: Pick<MasterConfig, 'credentialFile'>, launches: FleetLaunchRecord[]) {
+  await atomicPrivateWrite(fleetLaunchesPath(config), { launches: launches.slice(-retainedFleetLaunches) });
+}
+export async function recordFleetLaunch(config: Pick<MasterConfig, 'credentialFile'>, record: FleetLaunchRecord) {
+  await writeFleetLaunches(config, [...(await readFleetLaunches(config)).filter(entry => entry.session !== record.session), record]);
+}
+export async function forgetFleetLaunches(config: Pick<MasterConfig, 'credentialFile'>, sessions: string[]) {
+  const launches = await readFleetLaunches(config), gone = new Set(sessions);
+  if (launches.some(entry => gone.has(entry.session))) await writeFleetLaunches(config, launches.filter(entry => !gone.has(entry.session)));
+}
+
+/** The name prefixes an approver session for `work` takes (see `approverSessionName`). */
+export const approverNamePrefixes = (work: string) => [`${sessionName('graphyard-approver', work)}-`, `${sessionName('gy-approver', work)}-`];
+
+/**
+ * The live registry sessions placed on `host` that no runtime session runs: one whose paired Herdr
+ * session is gone, and — for an approver launched before sessions were paired — one past its launch
+ * grace whose item has no approver session in Herdr at all. Pure over what it is given.
+ */
+export function unrunFleetSessions(registry: Pick<AgentRegistry, 'sessions'>, launches: readonly FleetLaunchRecord[], agents: readonly HerdrAgent[], host: string | null, now: number) {
+  const names = new Set(agents.map(agent => agent.name).filter((name): name is string => !!name));
+  const unrun: { session: FleetSession; reason: string }[] = [];
+  for (const session of liveSessions(registry)) {
+    if (host && session.host !== host) continue;
+    const launch = launches.find(entry => entry.session === session.id);
+    if (launch) { if (!names.has(launch.agentName)) unrun.push({ session, reason: `runtime session ${launch.agentName} is gone from Herdr` }); continue; }
+    if (session.role !== 'approver' || !session.work || now - Date.parse(session.selectedAt) < launchGraceMs) continue;
+    const prefixes = approverNamePrefixes(session.work);
+    if (![...names].some(name => prefixes.some(prefix => name.startsWith(prefix)))) unrun.push({ session, reason: `no approver session for ${session.work} is running in Herdr` });
+  }
+  return unrun;
+}
+
+const fleetClient = (config: FleetConfig, probe: FleetProbe) => probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000) : null);
+
+/**
+ * The loop's reconciliation: ends every live registry session this host launched whose runtime
+ * session is gone from Herdr, and every one whose Herdr session is named in `finished` (an approver
+ * whose decision is judged, closed or idle at its prompt). Returns what it ended. Only an inventory
+ * Herdr actually answered may be passed: an unreadable Herdr lists nothing, and would end them all.
+ */
+export async function reconcileFleetSessions(config: FleetConfig, agents: readonly HerdrAgent[], finished: { agentName: string; reason: string }[] = [], probe: FleetProbe = {}) {
+  const client = fleetClient(config, probe);
+  if (!client) return [];
+  const registry = await client.document(), launches = await readFleetLaunches(config);
+  const live = new Set(liveSessions(registry).map(session => session.id));
+  const ending = new Map(unrunFleetSessions(registry, launches, agents, config.hostId ?? null, probe.now?.() ?? Date.now()).map(entry => [entry.session.id, entry]));
+  for (const done of finished) for (const launch of launches.filter(entry => entry.agentName === done.agentName)) {
+    const session = registry.sessions.find(entry => entry.id === launch.session && !entry.endedAt);
+    if (session && !ending.has(session.id)) ending.set(session.id, { session, reason: done.reason });
+  }
+  const ended: { session: string; role: FleetRoleName; work: string | null; reason: string }[] = [];
+  for (const { session, reason } of ending.values()) {
+    await client.end(session.id, reason.slice(0, 500));
+    ended.push({ session: session.id, role: session.role, work: session.work, reason });
+  }
+  // A pairing whose session has ended, by this pass or any other, has nothing left to watch.
+  const stale = launches.filter(entry => !live.has(entry.session) || ending.has(entry.session)).map(entry => entry.session);
+  if (stale.length) await forgetFleetLaunches(config, stale);
+  return ended;
+}
+
+/** Whether a launch was refused because its role holds all its seats, which frees without any change to the launch. */
+export const roleAtCapacity = (error: unknown) => /is at its concurrency limit/.test(error instanceof Error ? error.message : String(error));
 
 // ---------------------------------------------------------------------------
 // Setup: discover what the host already has, and propose a registry from it.
