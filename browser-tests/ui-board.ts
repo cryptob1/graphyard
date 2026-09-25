@@ -6,6 +6,7 @@
 // about the same board.
 // @ts-expect-error Dependency-free fixture script.
 import { NOW, fixtureApi, fixtureStatus, fixtureWork, flowApi } from '../scripts/dashboard-fixture.mjs';
+import { boardFromStatus } from '../src/model/board';
 
 export { NOW };
 const minute = 60_000, hour = 60 * minute;
@@ -110,6 +111,8 @@ export function boardApi(path: string, role = 'admin') {
   const work = boardWork();
   if (route === 'status') return boardStatus(role);
   if (route === 'work-snapshot') return { work, jobs: [], now: at(0) };
+  // GET /api/board (GY-200): the server's own module over this board, which the Work page renders.
+  if (route === 'board') return boardFromStatus(work as any, NOW, boardStatus(role));
   if (route === 'work') return work;
   if (route.startsWith('analytics/flow')) return flowApi(work, role)(path);
   if (route === 'interventions') return { total: 1, deliveries: 3, ratePerDelivery: 0.33, window: { days: 30 }, open: 1, waitedMs: 10 * hour, ledger: { truncated: false, rows: 40 },
