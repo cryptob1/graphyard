@@ -2474,7 +2474,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
       continue;
     }
-    if (watch) { if (!watch.settledAt) await supervise(item, decision, key, watch); continue; }
+    // A settled watch is supervised no more, but a registry session its close could not end still
+    // holds the role's slot: ending it is tried again each cycle until the registry is told.
+    if (watch) {
+      if (!watch.settledAt) await supervise(item, decision, key, watch);
+      else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
+      continue;
+    }
     const previous = state.actions[key];
     // A `done` entry with no watch is a cursor written before requests were supervised; the
     // request path adopts the decision it left standing and launches an approver for it.

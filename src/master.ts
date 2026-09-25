@@ -4008,14 +4008,19 @@ export async function readEscalationSessions(root: string): Promise<EscalationSe
 }
 /**
  * Replace the handler of `work`/`trigger` (or drop it with `session` null). A running handler's
- * record is dropped a day after launch; a waiting one is kept until a day past its `retryAt`, so a
- * weekly reset still finds the escalation to launch again.
+ * record is dropped a day after launch, or when more than the retained count are running; a waiting
+ * one is kept until a day past its `retryAt`, however many there are, so a weekly reset still finds
+ * the escalation to launch again.
  */
 export async function saveEscalationSession(root: string, work: string, trigger: string, session: EscalationSession | null, now = Date.now()) {
   const current = (entry: EscalationSession) => now - Date.parse(entry.waiting ? entry.waiting.retryAt : entry.launchedAt) < escalationSessionMs;
   const kept = (await readEscalationSessions(root)).filter(entry => !(entry.work === work && entry.trigger === trigger) && current(entry));
   const file = await escalationSessionsPath(root); await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  await atomicPrivateWrite(file, [...kept, ...(session ? [session] : [])].slice(-retainedEscalationSessions));
+  // The count bounds running and finished records only: a waiting one is the loop's only way to
+  // launch its escalation again, so it stays until the time filter above lets it go.
+  const all = [...kept, ...(session ? [session] : [])], launched = all.filter(entry => !entry.waiting);
+  const evicted = new Set(launched.slice(0, Math.max(0, launched.length - retainedEscalationSessions)));
+  await atomicPrivateWrite(file, all.filter(entry => !evicted.has(entry)));
 }
 
 /**

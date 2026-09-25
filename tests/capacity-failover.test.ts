@@ -19,7 +19,7 @@ import type { CliContext } from '../src/cli/context.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, handlerSettleMs, launchAppearanceMs, maxApproverCloses, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
+import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
 import { describeCapacity, detectExhaustion, parseResetTime } from '../src/model/capacity.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
@@ -824,6 +824,19 @@ test('a waiting escalation handler is kept until its reset, even a weekly one mo
   assert.deepEqual(await readEscalationSessions(root), []);
 });
 
+test('the escalation record bound never evicts a waiting handler, however many running ones follow it', async () => {
+  const root = await localRoot('escalation-record-bound');
+  const at = Date.now(), retryAt = new Date(at + 3 * 86_400_000).toISOString();
+  const handler = (trigger: string, waiting: EscalationSession['waiting']): EscalationSession =>
+    ({ agentName: `esc-${trigger}`, pane: null, work: 'GY-1', trigger, kind: 'claude', account: 'env-a', runtime: 'claude', launchedAt: new Date(at).toISOString(), session: null, waiting });
+  await saveEscalationSession(root, 'GY-1', 'weekly', handler('weekly', { since: new Date(at).toISOString(), retryAt, reason: 'every account is spent' }), at);
+  for (let index = 0; index <= retainedEscalationSessions; index += 1) await saveEscalationSession(root, 'GY-1', `running-${index}`, handler(`running-${index}`, null), at);
+  const records = await readEscalationSessions(root);
+  assert.ok(records.some(entry => entry.trigger === 'weekly' && entry.waiting), 'the waiting handler is still there to launch at its reset');
+  assert.equal(records.filter(entry => !entry.waiting).length, retainedEscalationSessions, 'running records are bounded');
+  assert.equal(records.some(entry => entry.trigger === 'running-0'), false, 'the oldest running record goes first');
+});
+
 /** The snapshot `loop` reads, with escalations standing on the items a test names, by trigger. */
 const standingSnapshot = (now: () => number, standing: () => Record<string, string[]>) => async () => {
   const snapshot = await ok(coordinator, 'GET', 'work-snapshot'), at = new Date(now()).toISOString();
@@ -912,6 +925,31 @@ test('an approver that applies its decision has its registry session ended with 
   assert.deepEqual([...registry.live], [], 'the slot is free for the next decision\'s approver');
   assert.equal(watch.session, null);
   assert.ok(calls.closed.includes('pane-slot-1'), 'and its pane is closed');
+});
+
+test('a settled approver whose registry session cannot be ended keeps it and ends it on a later cycle', async () => {
+  const registry = approverSlot();
+  let refuse = false;
+  const endRegistrySession = registry.effects.endRegistrySession!;
+  const { config, herdr, decisions, cycle } = await approverLoop('registry-settled-retry', ['env-a', 'env-b'], () => ({
+    ...registry.effects,
+    endRegistrySession: async (session, reason) => { if (refuse) throw new Error('the registry answered 503'); await endRegistrySession(session, reason); },
+  }));
+  registry.slot.herdr = herdr;
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  refuse = true;
+  decisions[0].state = 'refused';
+  await cycle(state);
+  const watch = Object.values(state.approvals)[0];
+  assert.ok(watch.settledAt, 'the refusal settles the decision for the loop');
+  assert.equal(watch.session, 'registry-slot-1', 'the session the registry could not end is kept on the watch');
+  assert.deepEqual([...registry.live], ['registry-slot-1']);
+  refuse = false;
+  await cycle(state);
+  assert.deepEqual(registry.ended, ['registry-slot-1'], 'the next cycle ends it');
+  assert.equal(Object.values(state.approvals)[0].session, null);
+  assert.deepEqual([...registry.live], [], 'the slot is free for the next decision\'s approver');
 });
 
 test('an approver that ends without judging has its registry session ended before the replacement, which the role at concurrency 1 then admits', async () => {
