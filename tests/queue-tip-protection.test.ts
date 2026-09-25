@@ -80,8 +80,11 @@ class Repo {
   }
   pull(pr: number) {
     const entry = this.pulls.get(pr)!;
-    return { number: pr, head: { sha: this.refs.get(`heads/${entry.head}`), ref: entry.head, repo: { full_name: 'owner/project' } }, base: { sha: this.refs.get('heads/main'), ref: 'main', repo: { full_name: 'owner/project' } },
-      user: { login: entry.user, id: 7 }, state: entry.state, draft: entry.draft, merged: false, mergeable: true, merge_commit_sha: null, merged_at: null, created_at: '2026-09-22T08:00:00Z' };
+    // GitHub computes mergeability against the base branch head: a pair declared conflicting is reported so.
+    const head = this.refs.get(`heads/${entry.head}`)!, main = this.refs.get('heads/main')!;
+    const mergeable = !this.conflicts.has(`${head}+${main}`) && !this.conflicts.has(`${main}+${head}`);
+    return { number: pr, head: { sha: head, ref: entry.head, repo: { full_name: 'owner/project' } }, base: { sha: main, ref: 'main', repo: { full_name: 'owner/project' } },
+      user: { login: entry.user, id: 7 }, state: entry.state, draft: entry.draft, merged: false, mergeable, merge_commit_sha: null, merged_at: null, created_at: '2026-09-22T08:00:00Z' };
   }
   adapter() {
     const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
