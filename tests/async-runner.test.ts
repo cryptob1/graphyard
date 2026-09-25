@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -95,8 +95,10 @@ test('unit:no-sync-child-processes — the loop, the dispatcher, the merge broke
   // The five modules the item names, and the helpers those modules reach at runtime for
   // Herdr, gh, git and systemctl. None may hold a synchronous child call, a blocking sleep, or
   // its own import of node:child_process: the runner is the only way out of the process.
-  const loop = ['src/master.ts', 'src/master-daemon.ts', 'src/auto-dispatch.ts', 'src/producer.ts', 'src/reviewer.ts'];
-  const reached = ['src/containment-probe.ts', 'src/harness.ts', 'src/install/worktree-root.ts', 'src/cli/master.ts', 'src/cli/master-status.ts'];
+  // The first three are re-export barrels over their modules under src/master/, src/daemon/ and src/cli/master/ (GY-177).
+  const split = async (directory: string) => (await readdir(join(repository, directory))).filter(name => name.endsWith('.ts')).sort().map(name => `${directory}/${name}`);
+  const loop = ['src/master.ts', ...await split('src/master'), 'src/master-daemon.ts', ...await split('src/daemon'), 'src/auto-dispatch.ts', 'src/producer.ts', 'src/reviewer.ts'];
+  const reached = ['src/containment-probe.ts', 'src/harness.ts', 'src/install/worktree-root.ts', 'src/cli/master.ts', ...await split('src/cli/master'), 'src/cli/master-status.ts'];
   // The dispatcher that runs outside the daemon: the stateless executor claims dispatch rows and
   // launches sessions from its own process, and must renew its claim while a launch is in flight.
   const standalone = ['scripts/graphyard-executor.mjs'];
