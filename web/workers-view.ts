@@ -1,5 +1,6 @@
 import type { Work } from '../src/model';
 import type { SessionHandle } from '../src/model/sessions';
+import { sessionObservationFreshMs, sessionView, type SessionView } from '../src/model/session-state';
 import { leftFlowAt, noRelease, type ReleaseView } from './release';
 
 /**
@@ -14,22 +15,22 @@ import { leftFlowAt, noRelease, type ReleaseView } from './release';
  */
 
 /**
- * How old a running handle's `updatedAt` may be before the tab stops presenting it as live. A
- * handle is written when its launcher records it, when the session fills in its own coordinates,
- * and when the liveness sweep or the session ends it — so a running handle nothing has touched for
- * a quarter of an hour is either working silently or gone, and the reader is told which is not
- * known rather than shown a live session. The sweep (GY-113) is what ends a dead one; this is only
- * the badge in the meantime. `docs/dashboard.md` states the threshold.
+ * How old a session's latest observation may be before the tab stops presenting it as live — the
+ * one freshness bound every reader applies (GY-172, src/model/session-state.ts). The loop observes
+ * every session it can see on each dispatch tick and refreshes the record well inside the bound, so
+ * an open session not seen for a quarter of an hour is one no observer is reporting, and the reader
+ * is told so rather than shown a live session. `docs/dashboard.md` states the threshold.
  */
-export const sessionStaleThresholdMs = 15 * 60_000;
+export const sessionStaleThresholdMs = sessionObservationFreshMs;
 
-/** Why a running handle is stale, or null while it was seen inside the threshold or has finished. */
-export function staleSession(handle: Pick<SessionHandle, 'state' | 'updatedAt'>, now: Date, thresholdMs = sessionStaleThresholdMs): { since: string; idleMs: number } | null {
+/**
+ * Why an open handle is not shown running, or null while it is (or has finished): 'seen' is its
+ * latest observation, and a session observed working or idle inside the threshold is running.
+ */
+export function staleSession(handle: Pick<SessionHandle, 'state' | 'updatedAt' | 'observed' | 'observedAt'>, now: Date, thresholdMs = sessionStaleThresholdMs): { since: string; idleMs: number } | null {
   if (handle.state !== 'running') return null;
-  const seen = Date.parse(handle.updatedAt);
-  if (!Number.isFinite(seen)) return { since: handle.updatedAt, idleMs: 0 };
-  const idleMs = now.getTime() - seen;
-  return idleMs > thresholdMs ? { since: handle.updatedAt, idleMs } : null;
+  const view = sessionView(handle, now, thresholdMs);
+  return view.live ? null : { since: view.seenAt ?? handle.updatedAt, idleMs: view.unseenMs ?? 0 };
 }
 
 /**
@@ -109,7 +110,7 @@ export function reconciledClosure(handle: Pick<SessionHandle, 'state' | 'outcome
   return null;
 }
 
-export interface WorkerRow extends SessionHandle {
+export interface WorkerRow extends Omit<SessionHandle, 'observed'>, SessionView {
   workId: string; key: string; roleKind: SessionRoleKind;
   /** Live for a running handle (now − startedAt) and fixed for a finished one (endedAt − startedAt). */
   spentMs: number;
@@ -136,14 +137,15 @@ const parsed = (iso: string | null) => { const at = Date.parse(iso ?? ''); retur
 /** One handle as a tab row: how long it has spent, its two attach forms, and whether it is stale or was reconciled. */
 export function workerRow(work: Pick<Work, 'id' | 'key'> & Partial<Work>, handle: SessionHandle, now: Date, thresholdMs = sessionStaleThresholdMs, release: ReleaseView = noRelease): WorkerRow {
   const startedAt = parsed(handle.startedAt) ?? now.getTime();
+  const view = sessionView(handle, now, thresholdMs);
   const stale = staleSession(handle, now, thresholdMs);
   // Stage done is not enough: merged work still at Deploy keeps its sessions open until it leaves the flow.
   // Work merged before delivery records existed has nothing left to wait on, as the board reads it (groupOf).
   const finished = work.stage !== 'done' ? null : work.closure ? 'closed' : !work.delivery || leftFlowAt(work as Work, release) !== null ? 'delivered' : null;
   const leftOn = stale && stale.idleMs > endedItemIdleMs ? finished : null;
   // A session left on a finished item stopped counting when it was last seen, not at the page clock.
-  const endedAt = handle.state === 'running' && !leftOn ? now.getTime() : parsed(handle.endedAt) ?? parsed(handle.updatedAt) ?? startedAt;
-  return { ...handle, workId: work.id, key: work.key, roleKind: sessionRoleKind(handle), spentMs: Math.max(0, endedAt - startedAt),
+  const endedAt = handle.state === 'running' && !leftOn ? now.getTime() : parsed(handle.endedAt) ?? parsed(leftOn ? stale?.since ?? null : null) ?? parsed(handle.updatedAt) ?? startedAt;
+  return { ...handle, ...view, workId: work.id, key: work.key, roleKind: sessionRoleKind(handle), spentMs: Math.max(0, endedAt - startedAt),
     local: localAttachCommand(handle), remote: remoteAttachCommand(handle),
     stale, reconciled: reconciledClosure(handle), leftOn };
 }
@@ -165,7 +167,8 @@ export function workersView(all: (Pick<Work, 'id' | 'key' | 'sessions'> & Partia
   const seats = new Map<string, WorkerRow[]>();
   for (const row of rows) if (['worker', 'reviewer', 'producer'].includes(row.roleKind)) seats.set(row.principal, [...seats.get(row.principal) ?? [], row]);
   const principals = [...seats].map(([principal, handles]): PrincipalSummary => {
-    const live = handles.filter(open).sort((a, b) => (parsed(b.startedAt) ?? 0) - (parsed(a.startedAt) ?? 0))[0];
+    // What it is on now is what every other reader shows running: an open record observed lately (GY-172).
+    const live = handles.filter(row => open(row) && row.live).sort((a, b) => (parsed(b.startedAt) ?? 0) - (parsed(a.startedAt) ?? 0))[0];
     const latest = handles.reduce((last, row) => (parsed(row.startedAt) ?? 0) >= (parsed(last.startedAt) ?? 0) ? row : last);
     return { principal, roleKind: (live ?? latest).roleKind,
       current: live ? { key: live.key, workId: live.workId, epoch: live.epoch, sinceMs: live.spentMs } : null,

@@ -710,7 +710,8 @@ test('unit:item-failure-isolated — one item whose handling throws fails only i
     assert.equal(isolated.work, 'GY-1');
     assert.match(isolated.detail, /reading 'pane'/);
     // Every other item was still handled, in the same step and in every step after it.
-    assert.deepEqual(log, ['session:GY-2', 'dispatch:GY-3', 'session:GY-3', 'merge:GY-4']);
+    // The ready item's session is registered before its launch dispatches (GY-172: every launch registers first).
+    assert.deepEqual(log, ['session:GY-2', 'session:GY-3', 'dispatch:GY-3', 'merge:GY-4']);
     assert.ok(Object.keys(state.actions).some(key => key.startsWith('session:blocked:beta:')), 'the other blocked worker is still recorded');
     assert.equal(state.actions[dispatchKey(ready)].state, 'done');
     assert.equal(state.actions[candidateKey('merge', mergeable)].state, 'done');

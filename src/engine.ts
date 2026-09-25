@@ -14,6 +14,7 @@ import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
+import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
@@ -21,7 +22,7 @@ import { claimCandidatesParams, claimCandidatesSql } from './model/action-candid
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
 import { livenessFallback, livenessOf, livenessRepairEntry, repairLiveness } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
-import { recordSession, sessionHandleSchema } from './model/sessions.js';
+import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
@@ -69,7 +70,9 @@ const commands = {
   autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
   release: z.object({ epoch }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
-  submit: z.object({ epoch, pr: z.number().int().positive() }).strict(),
+  // `documentation` is the worker's explicit statement that the change alters no documented
+  // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
+  submit: z.object({ epoch, pr: z.number().int().positive(), documentation: z.string().trim().min(1).max(1000).optional() }).strict(),
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
   // An empty request clears this attempt's open one; otherwise it must ask for something the
   // planned scope does not already carry. `paths` widens, and the two fields the loop never
@@ -323,6 +326,8 @@ export class Engine {
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
   private conflictTransitions = new WeakMap<Work, ReviewConflictTransition[]>();
   // The launch fence is a deployment-independent safety default; only tests shorten it.
+  /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
+  documentation: DocumentationPolicy = configuredDocumentation();
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr: number }, key: string): Promise<Observation | null> {
     if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
@@ -413,6 +418,10 @@ export class Engine {
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
         // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
         work!.proofGaps = await unauthorizedProofs(db, this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])], data.producerProofs);
+        // Every feature and bug carries the standard documentation criterion, naming the paths this
+        // repository configures (GY-215); nobody writes it into the ticket.
+        const documentation = documentationObligation(data.type, this.documentation);
+        if (documentation) work!.documentation = documentation;
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
@@ -436,8 +445,12 @@ export class Engine {
       // a runtime fact, never a decision — it decides no gate, ends no lease and binds no
       // candidate — and this one may only finish a handle the item already carries, so nothing new
       // is recorded on a delivered item and nothing it holds is reopened.
-      const deliveredSessionClosure = work.stage === 'done' && command === 'session' && data.state === 'finished'
-        && (work.sessions ?? []).some(handle => handle.id === data.id);
+      // The loop's observation of a session still open on it is the same kind of runtime fact
+      // (GY-172): a session that outlives its item's delivery is still observed, or every reader
+      // would show a live session as unseen until it closed. It keeps the handle open, never reopens one.
+      const deliveredSessionClosure = work.stage === 'done' && command === 'session'
+        && (work.sessions ?? []).some(handle => handle.id === data.id
+          && (data.state === 'finished' || handle.state === 'running' && data.observed !== undefined && ['coordinator', 'admin'].includes(actor.role)));
       preserveAssignment(work); retainQuarantineFence(work);
       if (!containmentCleanup.includes(command) && !postDeployment && work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
       // Revocation is the one mutation an in-flight merge execution cannot outrun: freezing it
@@ -786,7 +799,21 @@ export class Engine {
         // any credential that happens to reach this item.
         demand(!existing || existing.principal === actor.id || actor.role === 'coordinator' || actor.role === 'admin',
           `Session handle ${data.id} belongs to ${existing?.principal}; only that session, its launcher or an admin may update it`, 403);
-        recordSession(work, data, actor.id, now);
+        // What the loop observed of a session is the one state every reader shows (GY-172): only
+        // the observer writes it, never the session it describes, and never ahead of the clock.
+        demand(!sessionObservationFields.some(field => data[field] !== undefined) || actor.role === 'coordinator' || actor.role === 'admin',
+          'Only the coordinator that observes sessions, or an admin, records what was observed of one', 403);
+        // A running handle belongs to the launch attempt that registered it (GY-172): two launches
+        // for one request racing from the same snapshot both reach this point, and the one the
+        // launcher then refuses must neither close nor re-coordinate the session the other started.
+        // So a launch writes only a handle no other live attempt holds; an attempt whose runtime did
+        // start after its registration was refused supersedes the record, since the launcher let it run.
+        demand(!data.launch || data.supersede || existing?.state !== 'running' || !existing.launch || existing.launch === data.launch,
+          `Session handle ${data.id} is held by another launch attempt that is still recorded running`, 409);
+        // An observation dated ahead of this clock would read fresh for good, so it is stored as of now.
+        const observedAt = data.observedAt && Date.parse(data.observedAt) > now.getTime() ? now.toISOString() : data.observedAt;
+        const { supersede: _supersede, ...handle } = data;
+        recordSession(work, { ...handle, ...(observedAt ? { observedAt } : {}) }, actor.id, now);
       }
       if (command === 'request') {
         demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
@@ -856,6 +883,7 @@ export class Engine {
           demand(!regressions.length, `Submission refused for ${work.key}: ${regressions.join('; ')}`);
         }
         work.submission = { epoch: data.epoch, pr: data.pr };
+        if (work.documentation) work.documentation = { ...work.documentation, submission: recordDocumentationSubmission(work.documentation, work.submission, observation?.files ?? null, data.documentation, now) };
         work.reworkRequested = false;
         recordSubmission(work, data.epoch, now);
         // Binding the candidate ends the implementation lease in the same transaction: submitted
