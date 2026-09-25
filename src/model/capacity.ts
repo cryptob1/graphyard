@@ -11,10 +11,20 @@ import { z } from 'zod';
 // naming each account and when it resets — and the role is not launched again until the first
 // of them does. Neither case is a launch failure, and neither delays an item that needs a
 // different role.
+//
+// Every launched role is a capacity role (GY-182): an approver or an escalation handler that runs
+// out of credits stops on the same notice as a worker, and a decision nobody judges stalls the
+// item just as surely as an unreviewed head. An account is spent for the whole fleet, not for the
+// role that found out: every role's launch skips it until its reset.
 // ---------------------------------------------------------------------------
 
+/** The roles launched into session slots: a worker's lease, a reviewer's or producer's ledger record. */
 export const capacityRoles = ['worker', 'reviewer', 'producer'] as const;
-export type CapacityRole = typeof capacityRoles[number];
+/** The roles that judge or request decisions; their sessions hold no slot, but spend quota the same way. */
+export const decisionRoles = ['approver', 'escalation-handler'] as const;
+/** Every role whose session can run out of provider quota: each fails over, and each skips an account any of them saw spent. */
+export const quotaRoles = [...capacityRoles, ...decisionRoles] as const;
+export type CapacityRole = typeof quotaRoles[number];
 
 /** What a session's own output says about its provider quota. */
 export interface ExhaustionSignal {
@@ -140,10 +150,13 @@ export const attemptEndCauses = ['quota', 'interrupted'] as const;
 export const exhaustionReportSchema = z.object({
   event: z.literal('exhausted'),
   cause: z.enum(attemptEndCauses).optional(),
-  role: z.enum(capacityRoles),
-  /** The worker attempt the exhausted session held; a reviewer or producer session holds none. */
+  role: z.enum(quotaRoles),
+  /** The worker attempt the exhausted session held; no other role's session holds one. */
   epoch: z.number().int().positive().optional(),
-  /** The dispatch request a reviewer or producer session answered. */
+  /**
+   * What the session answered: a reviewer's or producer's dispatch request, an approver's decision,
+   * an escalation handler's trigger.
+   */
   requestId: z.string().min(1).max(64).optional(),
   profile: z.string().min(1).max(80),
   /** The agent account (environment) the session ran on; null when the profile names none. */
@@ -161,10 +174,10 @@ export const capacityAccountSchema = z.object({
 }).strict();
 export type CapacityAccount = z.infer<typeof capacityAccountSchema>;
 export const capacityEscalationSchema = z.object({
-  event: z.literal('escalated'), role: z.enum(capacityRoles),
+  event: z.literal('escalated'), role: z.enum(quotaRoles),
   accounts: z.array(capacityAccountSchema).min(1).max(40),
 }).strict();
-export const capacityRestoredSchema = z.object({ event: z.literal('restored'), role: z.enum(capacityRoles), reason: z.string().trim().min(1).max(500) }).strict();
+export const capacityRestoredSchema = z.object({ event: z.literal('restored'), role: z.enum(quotaRoles), reason: z.string().trim().min(1).max(500) }).strict();
 export const capacityEventSchema = z.union([exhaustionReportSchema, capacityEscalationSchema, capacityRestoredSchema]);
 
 export interface ExhaustionRecord extends Omit<ExhaustionReport, 'event'> { at: string; owner: string | null; recordedBy: string }

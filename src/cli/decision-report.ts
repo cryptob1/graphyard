@@ -1,4 +1,5 @@
 import { agentOwner, approverSessionName, type AttentionItem, type HerdrAgent } from '../master.js';
+import { standingCapacity, type CapacityState } from '../model/capacity.js';
 import { elapsed } from '../model/sessions.js';
 
 type DecisionRow = { id: string; action: string; state: string; requestedAt: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
@@ -10,11 +11,13 @@ export interface UnansweredDecision { work: string; id: string; action: string; 
  * launched for it — or, for one a master launched by hand, the name `master approver` gives it —
  * is gone from Herdr or reports `done`, and no outcome was ever recorded. That is a stall, not a
  * judgement: an approver that declines records `master refuse`, and its decision ends `refused`.
- * Nothing is concluded while Herdr cannot be read.
+ * Nothing is concluded while Herdr cannot be read. An item waiting for an approver account to
+ * reset is not one: the loop launches no approver before then, and master status names that wait
+ * once, as the approver capacity line, not as a stall per decision (GY-182).
  */
-export function unansweredDecisions(items: { key: string; decisions: DecisionRow[] }[], approvals: ApprovalWatch[], runtime: { available: boolean; agents: HerdrAgent[] }, now: number): UnansweredDecision[] {
+export function unansweredDecisions(items: { key: string; decisions: DecisionRow[]; capacity?: CapacityState | null }[], approvals: ApprovalWatch[], runtime: { available: boolean; agents: HerdrAgent[] }, now: number): UnansweredDecision[] {
   if (!runtime.available) return [];
-  return items.flatMap(item => item.decisions.flatMap(decision => {
+  return items.flatMap(item => standingCapacity(item, 'approver').length ? [] : item.decisions.flatMap(decision => {
     if (decision.state !== 'requested') return [];
     const session = approvals.find(watch => watch.decision === decision.id)?.agentName ?? approverSessionName(item, decision.id);
     const live = runtime.agents.find(agent => agent.name === session);
@@ -34,17 +37,17 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
  * never raises attention. A refusal is answered, never retried: the server refuses an identical
  * request, so the next step is a request that cites the refused decision with what it lacked.
  */
-export async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string }[],
+export async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string; capacity?: CapacityState | null }[],
   sessions: { approvals: ApprovalWatch[]; runtime: { available: boolean; agents: HerdrAgent[] }; now: number }) {
   const listed: { work: string; id: string; action: string; state: string; reason: string | null; race?: unknown; refusedBy?: string; refusedAt?: string }[] = [];
   const attentionItems: AttentionItem[] = [];
-  const histories: { key: string; decisions: DecisionRow[] }[] = [];
+  const histories: { key: string; decisions: DecisionRow[]; capacity?: CapacityState | null }[] = [];
   let refused = 0;
   for (const item of work) {
     if (item.stage === 'done') continue;
     const history = await masterApi(`work/${item.id}/decisions`).catch(() => null);
     const decisions: DecisionRow[] = history?.decisions ?? [];
-    histories.push({ key: item.key, decisions });
+    histories.push({ key: item.key, decisions, capacity: item.capacity });
     const latest = new Map<string, string>();
     for (const decision of decisions) latest.set(decision.action, decision.id);
     for (const decision of decisions) {
