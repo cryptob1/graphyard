@@ -10,7 +10,7 @@ import { projectFlow } from '../flow-analytics.js';
 import { openPatternItems } from '../interventions.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
-import { ProductionWatch, railwayProvider } from '../production-watch.js';
+import { ProductionWatch, railwayProvider, startProductionWatch } from '../production-watch.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
 import { startDirectMerge } from '../direct-merge.js';
@@ -71,11 +71,49 @@ export async function main() {
   mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
   mark('validation.expireArtifacts'); await validation.expireArtifacts();
   mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
-  let running = false;
+  // The production watch runs beside the tick, never in it: a deploy used to hold the tick for
+  // minutes while it re-compared every delivery (GY-186), and observations and merges stalled behind it.
+  // Incidents it raises land in the ledger and in /api/status, and are announced here once each.
+  const watching = startProductionWatch(production, {
+    announce: incident => console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`),
+    failed: error => console.error('production watch failed', error instanceof Error ? error.message : 'unknown'),
+  });
   // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
   // it runs once a minute rather than every tick.
   let patternsAt = 0, receiptsPrunedAt = 0;
-  let tickStartedAt = 0, stallReportedAt = 0, tickStep = 'idle';
+  const reconciliation = startReconciliation(async step => {
+    // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
+    // backlog of observations drains across ticks without ever skipping one.
+    await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
+    await step('engine.reconcile', () => engine.reconcile()); await step('delivery.sweep', () => delivery.sweep());
+    await step('projectFlow', () => projectFlow(engine.store, { batches: 4 }));
+    // Bounded, on the pool, never under the coordination lock: receipts past the replay window go.
+    if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
+    // The pattern scan's ledger query is quadratic in the events table and held the whole tick for
+    // good once the table grew (2026-09-23): it runs only where an operator opts in until it is bounded.
+    if (process.env.GRAPHYARD_INTERVENTION_PATTERNS === '1' && Date.now() - patternsAt >= 60_000) {
+      patternsAt = Date.now();
+      for (const work of (await step('openPatternItems', () => openPatternItems(engine, http.services.interventionPolicy))).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
+    }
+    if (github) {
+      const preflight = await step('github.preflight', () => github.preflightIfDue());
+      if (preflight) await announcePreflight(preflight);
+      await step('processJob', () => Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))));
+    }
+  }, 2000);
+  http.listen(Number(process.env.PORT ?? 4310), process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${process.env.PORT ?? 4310}; GitHub ${github ? 'connected' : 'not configured'}`));
+  const shutdown = () => { reconciliation.stop(); watching.stop(); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
+  process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+}
+
+export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Promise<T>;
+/**
+ * The serial reconciliation tick: one run at a time every `intervalMs`, each named step timed, and a
+ * tick that never finishes reported with the step it is stuck in. Anything that may wait on a slow
+ * provider for minutes (the production watch) runs on its own timer instead of as a step here.
+ */
+export function startReconciliation(tick: (step: ReconciliationStep) => Promise<void>, intervalMs = 2000) {
+  let running = false, tickStartedAt = 0, stallReportedAt = 0, tickStep = 'idle';
   const timer = setInterval(async () => {
     if (running) {
       // A tick that never finishes stops every later one, so name the step it is stuck in.
@@ -83,35 +121,10 @@ export async function main() {
       return;
     }
     running = true; tickStartedAt = Date.now();
-    const step = async <T>(name: string, run: () => Promise<T>) => { tickStep = name; const started = Date.now(); try { return await run(); } finally { if (Date.now() - started > 10_000) console.error(`reconciliation step ${name} took ${Date.now() - started} ms`); } };
-    // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
-    // backlog of observations drains across ticks without ever skipping one.
-    try {
-      await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
-      await step('engine.reconcile', () => engine.reconcile()); await step('delivery.sweep', () => delivery.sweep());
-      await step('projectFlow', () => projectFlow(engine.store, { batches: 4 }));
-      // Bounded, on the pool, never under the coordination lock: receipts past the replay window go.
-      if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
-      // The pattern scan's ledger query is quadratic in the events table and held the whole tick for
-      // good once the table grew (2026-09-23): it runs only where an operator opts in until it is bounded.
-      if (process.env.GRAPHYARD_INTERVENTION_PATTERNS === '1' && Date.now() - patternsAt >= 60_000) {
-        patternsAt = Date.now();
-        for (const work of (await step('openPatternItems', () => openPatternItems(engine, http.services.interventionPolicy))).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
-      }
-      // Provider polling is bounded inside the watch to once a minute; incidents it raises
-      // land in the ledger and in /api/status, and are announced here once each.
-      const before = production.status().incidents.map(incident => incident.id);
-      for (const incident of (await step('production.tick', () => production.tick())).incidents) if (!before.includes(incident.id)) console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`);
-      if (github) {
-        const preflight = await step('github.preflight', () => github.preflightIfDue());
-        if (preflight) await announcePreflight(preflight);
-        await step('processJob', () => Promise.all(Array.from({ length: 4 }, () => processJob(engine, github))));
-      }
-    }
+    const step: ReconciliationStep = async (name, run) => { tickStep = name; const started = Date.now(); try { return await run(); } finally { if (Date.now() - started > 10_000) console.error(`reconciliation step ${name} took ${Date.now() - started} ms`); } };
+    try { await tick(step); }
     catch (error) { console.error('reconciliation failed', error instanceof Error ? error.message : 'unknown'); }
-    finally { running = false; }
-  }, 2000);
-  http.listen(Number(process.env.PORT ?? 4310), process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${process.env.PORT ?? 4310}; GitHub ${github ? 'connected' : 'not configured'}`));
-  const shutdown = () => { clearInterval(timer); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
-  process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+    finally { running = false; tickStep = 'idle'; }
+  }, intervalMs);
+  return { stop: () => clearInterval(timer) };
 }
