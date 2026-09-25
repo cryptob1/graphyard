@@ -14,6 +14,7 @@ import { pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusa
 import { mechanicalFailure, mechanicalVerdicts } from './model/mechanical-proofs.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
+import { registeredLaunch } from './model/session-state.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { annotatePaneShell, closablePane, endedScopeStates } from './quarantine.js';
 import { baseRefreshConflict, botThread, describeThread, openThreads, pendingBaseRefresh, queueSequencingReason, threadsAwaitReview, type ReviewThread } from './merge-queue.js';
@@ -27,9 +28,10 @@ import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { followUpThreadIds, launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, baseText, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
-import { defaultAwaitReviewers, unexercisedFindings } from './auto-dispatch.js';
+import { defaultAwaitReviewers, launchedSessionHandle, unexercisedFindings } from './auto-dispatch.js';
+import type { DispatchRequest } from './model/dispatch.js';
 import { classifyRuntimePrompt, continueAfterDecline, deliverPrompt, inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, readCredentialFile, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity, type RuntimePrompt } from './master.js';
-import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, buildMasterStatus, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, herdrJson, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, transientMergeRace, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
+import { agentOwner, agentToken, approvedMerge, approverSessionId, approverSessionName, assertDispatchable, buildMasterStatus, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, herdrJson, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, transientMergeRace, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
 import { qualifyTimingFailures, type CheckAnnotations } from './cli/timing-failures.js';
@@ -2708,16 +2710,16 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     taken.add(choice.profile.name);
     await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'started', detail: `Dispatching ${item.key} to ${choice.profile.name}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
-      const dispatched = await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined;
-      clearProfileFailure(state, choice.profile);
-      // The session is now running somewhere. Put the handle where every Graphyard reader looks,
-      // so watching this specific agent never means asking this loop to relay its pane id.
-      await effects.recordSession?.(item, {
+      // The session is registered before its runtime starts (GY-172), where every Graphyard reader
+      // looks, and its pane written once it has: watching this specific agent never means asking
+      // this loop to relay its pane id, and the session report observes it from its first tick.
+      const dispatched = await registeredLaunch(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
         id: `${choice.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: choice.profile.principal, runtime: choice.profile.kind ?? choice.profile.mode, host: config.hostId,
         ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-        ...(dispatched?.pane ? { pane: dispatched.pane, attach: `herdr pane attach ${dispatched.pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
         subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-      }).catch(() => { /* the dispatch landed; a handle that could not be written is not a failed dispatch */ });
+      }, async () => await effects.dispatch(item, choice.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined,
+      launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
+      clearProfileFailure(state, choice.profile);
       performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: choice.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${choice.profile.name}; the worker launcher claimed under ${choice.profile.principal}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       recordProfileFailure(state, choice.profile, message(error), now());
@@ -2780,7 +2782,14 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     const session = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
     if (!session?.pane_id) return true;
     const key = `close:approver:${watch.decision}:${session.pane_id}`;
-    try { await effects.closeSession(session.pane_id); inventory = null; await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true; }
+    try {
+      await effects.closeSession(session.pane_id); inventory = null;
+      // Its launcher closed it, so the record ends now with why, rather than waiting for the
+      // session report to find the pane gone (GY-172).
+      const handle = (item.sessions ?? []).find(entry => entry.id === approverSessionId(watch.decision) && entry.state === 'running');
+      if (handle) await effects.recordSession?.(item, { id: handle.id, kind: handle.kind, runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${why}`.slice(0, 500) }).catch(() => { /* the report closes it once the pane is gone */ });
+      await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true;
+    }
     catch (error) { inventory = null; watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
   };
   /** Put a watched decision to an approver session. The launch is counted before it is made. */
@@ -3752,6 +3761,46 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
+/**
+ * The quota failover's relaunch of a reviewer or producer session, registered like every other
+ * launch (GY-172 AC-2). The session that ran out was ended on its ledger, but its record still
+ * names its pane and its launch; it is closed with that reason, and the next session for the same
+ * request is registered through `registeredLaunch` before its runtime starts and coordinated once
+ * it has, so the relaunched session is observed and closed by the session report like the one it
+ * replaces rather than running unrecorded while the report loses the old pane.
+ */
+export async function relaunchSession(config: MasterConfig, session: LaunchedSession, work: Work, agents: HerdrAgent[], launch: {
+  review: (profile: MasterConfig['reviewers'][number], request: DispatchRequest, agents: HerdrAgent[]) => Promise<unknown>;
+  producer: (profile: MasterConfig['producers'][number], request: DispatchRequest, agents: HerdrAgent[]) => Promise<unknown>;
+  record?: (handle: SessionHandleInput) => Promise<unknown>;
+}): Promise<{ profile: string }> {
+  const request = session.role === 'reviewer' ? work.autoDispatch?.review : work.autoDispatch?.producers.find(entry => entry.id === session.requestId);
+  if (!request || request.id !== session.requestId || request.state !== 'requested') throw new Error(`${work.key} no longer requests this ${session.role} session`);
+  const kind = session.role === 'reviewer' ? 'review' as const : 'proof' as const;
+  const subject = kind === 'review' ? `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})` : `${work.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`;
+  const previous = work.sessions?.find(handle => handle.id === request.id && handle.state === 'running');
+  if (previous && launch.record) {
+    await launch.record({ id: previous.id, kind: previous.kind, runtime: previous.runtime, host: previous.host, subject: previous.subject, state: 'finished',
+      outcome: `ended on its provider's quota notice (${session.agentName} on profile ${session.profile}); its request is launched again on another account` }).catch(() => {});
+  }
+  // The profile that just ran out goes last: its other accounts are still its own failover.
+  const order = <P extends { name: string; agentName: string }>(profiles: P[]) => [...profiles.filter(profile => profile.name !== session.profile), ...profiles.filter(profile => profile.name === session.profile)].filter(profile => !agents.some(agent => agent.name === profile.agentName));
+  const skipped: string[] = [];
+  // As in the dispatcher: only skips that were all spent quota make this a wait for capacity.
+  let capacity = true;
+  const attach = (pane: string) => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`;
+  for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
+    try {
+      const principal = session.role === 'producer' ? (profile as MasterConfig['producers'][number]).principal : undefined;
+      await registeredLaunch(launch.record, launchedSessionHandle(kind, request, subject, config.hostId, undefined, profile.kind, config.herdrWorkspace, principal),
+        () => session.role === 'reviewer' ? launch.review(profile as MasterConfig['reviewers'][number], request, agents) : launch.producer(profile as MasterConfig['producers'][number], request, agents), undefined, attach);
+      return { profile: profile.name };
+    } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
+  }
+  if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
+  throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
+}
+
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
@@ -3822,7 +3871,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane, session: launched.session }; };
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run, {}, handle => deps.mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, session: launched.session }; };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
@@ -3857,25 +3906,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       if (session.role === 'reviewer') await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry); });
       else { const ledger = await readProducerLedger(root); await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === session.record && entry.state === 'pending' ? { ...entry, ...ended } : entry) }); }
     },
-    relaunch: async (session, work, snapshot) => {
-      const config = current(), agents = await listHerdrAgents(run);
-      const request = session.role === 'reviewer' ? work.autoDispatch?.review : work.autoDispatch?.producers.find(entry => entry.id === session.requestId);
-      if (!request || request.id !== session.requestId || request.state !== 'requested') throw new Error(`${work.key} no longer requests this ${session.role} session`);
-      // The profile that just ran out goes last: its other accounts are still its own failover.
-      const order = <P extends { name: string; agentName: string }>(profiles: P[]) => [...profiles.filter(profile => profile.name !== session.profile), ...profiles.filter(profile => profile.name === session.profile)].filter(profile => !agents.some(agent => agent.name === profile.agentName));
-      const skipped: string[] = [];
-      // As in the dispatcher: only skips that were all spent quota make this a wait for capacity.
-      let capacity = true;
-      for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
-        try {
-          if (session.role === 'reviewer') await launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id });
-          else await launchProducer(root, work, request, profile as MasterConfig['producers'][number], agents, snapshot.now, { run });
-          return { profile: profile.name };
-        } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
-      }
-      if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
-      throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
-    },
+    relaunch: async (session, work, snapshot) => relaunchSession(current(), session, work, await listHerdrAgents(run), {
+      review: (profile, request, agents) => launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id }),
+      producer: (profile, request, agents) => launchProducer(root, work, request, profile, agents, snapshot.now, { run }),
+      record: handle => deps.mutate(`work/${work.id}/session`, handle),
+    }),
     roleHealth: async () => {
       const config = current();
       return {

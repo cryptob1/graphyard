@@ -3,7 +3,7 @@ import WorkCard from '../components/work-card';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../duration';
-import { classify, groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, humanOnlyIds, summarySentence, type OpenGroup } from '../groups';
+import { classify, groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, humanOnlyIds, summarySentence, upNextMeaning, type OpenGroup } from '../groups';
 import { leftFlowAt, releaseView } from '../release';
 import { stalledCards } from './actionless';
 import { groupFaults, statusFaults, workFaults } from '../../src/model/fault-classes';
@@ -50,7 +50,7 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   // production observation nothing is claimed: a smoke-gated merge is not "not live" by default.
   // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
   const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && leftFlowAt(w, release) === null).length;
-  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
+  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>
@@ -75,7 +75,7 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
     </section>}
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
       <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
-        <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{groupMeaning[group]}</small>
+        <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{group === 'up-next' ? upNextMeaning(byGroup['up-next'], work, now) : groupMeaning[group]}</small>
       </button>)}</div>
       {only && <p className="filter-note">Showing {groupLabel[only]} only · <button type="button" className="text-button" onClick={() => setOnly(null)}>Show every group</button></p>}
       {section('needs-you', humanOnly.size ? 'only you can decide these' : undefined)}
