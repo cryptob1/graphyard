@@ -5,14 +5,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { childRunner, type ChildRun } from './child-runner.js';
 import type { Work } from './model.js';
+import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEntry } from './model/session-state.js';
 import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
 import { runtimeEndedStates } from './harness.js';
-import type { DispatchRequest } from './model/dispatch.js';
+import { answeringVerdicts, type DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
-import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { agentOwner, assertOutsideWorktrees, deliverPrompt, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
-import { launchReview, reconcileReviews, type ReviewRecord } from './reviewer.js';
+import { launchReview, reconcileReviews, reviewRetryPrompt, type ReviewRecord } from './reviewer.js';
 import { independentProducerProfiles, launchProducer, reconcileProducers, sessionRetry, type ProducerRecord } from './producer.js';
 
 /**
@@ -29,6 +30,13 @@ import { independentProducerProfiles, launchProducer, reconcileProducers, sessio
  * A session that started and then failed or expired does not strand its request until the head
  * changes: the request is launched again as its next attempt after a widening wait (producer.ts
  * `sessionRetry`), up to a bound, and master status reports the attempts and the next one.
+ *
+ * Nor does a session that settled — completed, cancelled, vanished or exited — while its request
+ * still stands for the same head (GY-193). Every request ends in a verdict or an automatic next
+ * attempt: the next tick launches a fresh one, on a profile no earlier attempt used when there is
+ * one, up to `dispatchFailureLimit` sessions, and then raises one attention item naming the request
+ * and every attempt (`unansweredAttempts`). A reviewer still open in Herdr is first reminded, once,
+ * to post the verdict it judged, and relaunched only if none follows within `reviewerReminderMs`.
  *
  * Each reviewer and producer profile runs as many sessions at once as its `concurrency` declares
  * (GY-107; master.ts profileSessions): a launch takes the first profile with a slot left, a request
@@ -77,6 +85,17 @@ const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), rea
 export const tickFailureSchema = z.object({ at: z.string(), reason: z.string().max(cursorTextLimit),
   field: z.string().max(200).optional(), kind: z.enum(['review', 'producer']).optional(), request: z.string().max(64).optional(), work: z.string().max(40).optional() }).strict();
 export type TickFailure = z.infer<typeof tickFailureSchema>;
+/**
+ * A request whose sessions settled without answering it (GY-193): every attempt as one line, the
+ * reminder sent to a reviewer still open in Herdr, and when the attempts ran out. Bounded where it
+ * is composed like every other cursor string.
+ */
+export const unansweredEntrySchema = z.object({
+  kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40),
+  attempts: z.array(z.string().max(dispatchFailureReasonLimit)).max(50),
+  remindedFor: z.string().max(100).optional(), remindedAt: z.string().optional(), exhaustedAt: z.string().optional(),
+}).strict();
+export type UnansweredEntry = z.infer<typeof unansweredEntrySchema>;
 export const dispatchCursorSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   ticks: z.number().int().min(0).default(0),
@@ -87,6 +106,8 @@ export const dispatchCursorSchema = z.object({
   lastFailure: tickFailureSchema.nullable().default(null),
   /** Launches that refused, by request id, with the widening retry time; cleared by the launch that succeeds. */
   failures: z.record(z.string(), dispatchFailureSchema).default({}),
+  /** Requests whose sessions settled without answering them, by request id; cleared with the request. */
+  unanswered: z.record(z.string(), unansweredEntrySchema).default({}),
   /**
    * Both halves of the last tick: what it could launch and what it did. A dispatcher that is
    * ticking but launching nothing looks identical to a stopped one from the tick count alone,
@@ -120,6 +141,8 @@ export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 
 /** A refused launch retries on a widening interval, never more often than this and never later than this. */
 export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatchFailureLimit = 12;
+/** How long a reviewer still open in Herdr is given to post its verdict after the reminder before the request is launched afresh. */
+export const reviewerReminderMs = 120_000;
 /** How long a role with no account left is not launched before its accounts are read again. */
 export const capacityRecheckMs = 60_000;
 /** How many missing session handles the cursor remembers between ticks; a file, not a database. */
@@ -255,6 +278,12 @@ export interface DispatchEffects {
    * GY-113 exists to end, so the shipped `dispatchEffects` always wires it.
    */
   endSession?: (closure: SessionClosure) => Promise<unknown>;
+  /**
+   * Sends the post-your-verdict reminder (reviewer.ts `reviewRetryPrompt`) to a reviewer session
+   * that settled without answering its request but is still open in Herdr (GY-193). A dispatcher
+   * wired without it relaunches such a request at once.
+   */
+  remindReviewer?: (work: Work, record: ReviewRecord, message: string) => Promise<unknown>;
   persist: (cursor: DispatchCursor) => Promise<void>;
 }
 
@@ -355,7 +384,9 @@ export function launchedSessionHandle(kind: 'review' | 'proof', request: Dispatc
  * coordinator mutation, so one sweep answers a status reader and this loop alike.
  */
 export type ClosureCause = 'vanished' | 'ended' | 'superseded' | 'duplicate';
-export interface SessionClosure { workId: string; key: string; id: string; kind: SessionKind; role: string; runtime: string; host: string; subject: string; cause: ClosureCause; outcome: string }
+export interface SessionClosure { workId: string; key: string; id: string; kind: SessionKind; role: string; runtime: string; host: string; subject: string; cause: ClosureCause; outcome: string;
+  /** The session report entry that closed it, when the runtime's observation did rather than the item. */
+  report?: SessionReportEntry }
 /** How one handle is named between ticks: the item it sits on, and its own id. */
 export const sessionHandleKey = (workId: string, id: string) => `${workId}\u0000${id}`;
 /** Whose vocabulary a reported state is judged by, whose runtime answers for a handle, and how long a handle the runtime has stopped reporting is left alone. */
@@ -436,19 +467,41 @@ export function reconcileSessionLiveness(all: Work[], runtime: RuntimeSession[] 
   }
   return { closures, missing };
 }
-/** What a closure is written back as: the handle's own identity, ended, carrying why. */
+/** What a closure is written back as: the handle's own identity, ended, carrying why — and, for one the session report closed, the observation that closed it. */
 export function closureHandle(closure: SessionClosure): SessionHandleInput {
-  return { id: closure.id, kind: closure.kind, runtime: closure.runtime, host: closure.host, subject: closure.subject, state: 'finished', outcome: closure.outcome };
+  return { id: closure.id, kind: closure.kind, runtime: closure.runtime, host: closure.host, subject: closure.subject, state: 'finished', outcome: closure.outcome,
+    ...(closure.report ? reportedHandle(closure.report) : {}) };
 }
+/**
+ * A record the session report closed, as a closure: `ended` when the runtime reports the session
+ * over or its pane holds no agent, and `vanished` — the report's `lost` — when it was absent from
+ * consecutive reports.
+ */
+export function reportClosure(entry: SessionReportEntry): SessionClosure {
+  return { workId: entry.workId, key: entry.key, id: entry.id, kind: entry.kind, role: entry.role, runtime: entry.runtime, host: entry.host, subject: entry.subject,
+    cause: entry.closed === 'lost' ? 'vanished' : 'ended', outcome: (entry.outcome ?? '').slice(0, 500), report: entry };
+}
+
+/**
+ * Herdr's listing as the session report reads it. Herdr names the agent it detects in each pane
+ * and leaves the field out for a pane with none — a shell, where an agent that exited leaves its
+ * named pane behind, still reported `idle`. That absence is the fact the report needs (a dead
+ * worker otherwise stays "Builds code" for as long as its pane stays open), so it is made explicit.
+ */
+export const herdrSessionListing = (agents: HerdrAgent[]): HerdrAgent[] => agents.map(entry => ({ ...entry, agent: entry.agent || null }));
 
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean }
 export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
+  /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
+  sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
   /** Review threads this tick resolved on an approval's word, and the ones it named but could not resolve. */
   threads?: string[] }
 
+/** What the dispatcher reads of a reviewer or producer ledger record. */
+type SessionRecord = { id?: string; requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null; profile?: string; agentName?: string; verdict?: { state: string } | null };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math.max(0, attempts - 1), dispatchRetryMaxMs);
 
@@ -501,12 +554,30 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
   // is made before anything launches, because the slot check below reads it.
-  const sweep = reconcileSessionLiveness(snapshot.work, herdr, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId, missing: cursor.sessionMisses });
-  const closures = sweep.closures;
-  // What the runtime did not report this tick, for the next one to measure the grace against. The
-  // map holds only handles currently missing, so it is bounded by the graph's live sessions; the
+  // The item's own facts first — a review or proof session bound to something the item moved past,
+  // or a second session in one slot. The runtime is not consulted here: what the runtime says is
+  // the session report below, the one observation every reader shares (GY-172).
+  const sweep = reconcileSessionLiveness(snapshot.work, null, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId });
+  const superseded = new Set(sweep.closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
+  const report = observeSessions(snapshot.work, herdr, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId, settled: superseded, firstMissed: cursor.sessionMisses });
+  const closures = [...sweep.closures, ...report.entries.filter(entry => entry.closed).map(reportClosure)];
+  // What the runtime did not report this tick, for the closing reason to say how long. The map
+  // holds only handles currently missing, so it is bounded by the graph's live sessions; the
   // ceiling is there because the cursor is a file, not a database.
-  cursor.sessionMisses = Object.fromEntries(Object.entries(sweep.missing).slice(0, sessionMissLimit));
+  // A tick that could not read the runtime reported nothing, so it leaves them as they were.
+  if (herdr) cursor.sessionMisses = Object.fromEntries(Object.entries(report.missing).slice(0, sessionMissLimit));
+  const byId = new Map(snapshot.work.map(item => [item.id, item]));
+  tick.sessions = { observed: report.entries.length, written: 0, failures: [] };
+  for (const entry of report.entries.filter(entry => !entry.closed && entry.changed)) {
+    const item = byId.get(entry.workId);
+    // A delivered item takes the observation too (engine.ts): a session that outlives the delivery
+    // is still one every reader shows, so its record is kept as fresh as any other.
+    if (!item || !effects.recordSession) continue;
+    // The observation is the record every reader shows; one that could not be written is
+    // retried by the next tick's report, which finds the stored record still behind.
+    try { await effects.recordSession(item, reportedHandle(entry)); tick.sessions.written++; }
+    catch (error) { tick.sessions.failures.push({ work: entry.key, id: entry.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
+  }
   for (const closure of closures) {
     // A closure that cannot be written back still stands as a judgment — the session is over
     // whichever way the record went — so the slot is freed either way and the tick says what failed.
@@ -525,6 +596,11 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   const inventory = () => [...agents, ...started];
   const launchedName = (profile: { agentName: string; concurrency?: number }, request: DispatchRequest, result: unknown) =>
     typeof (result as { agentName?: unknown })?.agentName === 'string' ? (result as { agentName: string }).agentName : sessionAgentName(profile, { id: request.id, requestId: request.id });
+  // Registration (GY-172 AC-2): the recorder every launch below registers through, and the
+  // coordinates a launcher's result carries once its runtime has started.
+  const record = (item: Work) => effects.recordSession ? (handle: SessionHandleInput) => effects.recordSession!(item, handle) : undefined;
+  const coordinates = (profile: { agentName: string; concurrency?: number }, request: DispatchRequest, result: unknown) => ({ pane: (result as { pane?: string | null } | undefined)?.pane ?? null, agentName: launchedName(profile, request, result) });
+  const attachTo = (pane: string) => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`;
   /**
    * The slots recorded sessions still hold. A handle is the durable record of a live session, so a
    * session this host has not listed yet — or one another host launched — holds its profile's slot
@@ -592,22 +668,61 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   };
   const retryable = (request: DispatchRequest) => { const failure = cursor.failures[request.id]; return !failure || failure.attempts < dispatchFailureLimit && Date.parse(failure.nextAt) <= now(); };
   // Whether the request already has its session, waits to relaunch one that failed or expired, or may launch now.
-  const session = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string }[]) => {
+  const session = async (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: SessionRecord[]) => {
     const retry = sessionRetry(records, request.id, now());
     if (retry.settled) {
-      tick.skipped++;
-      // A session that settled while its request stands answered nothing the gates accept, and no
-      // attempt follows a settled session. The tick says so rather than passing over it in silence:
-      // a request nothing is running for and nothing refused is otherwise invisible until somebody
-      // notices the item has not moved.
-      if (retry.last && retry.last.state !== 'pending') wait(kind, item, request, `${kind === 'review' ? 'reviewer' : 'producer'} session attempt ${retry.attempts} ${retry.last.state} without satisfying the request: ${retry.last.resolution ?? 'no reason recorded'}; no automatic attempt follows a settled session${kind === 'review' ? `, force one with master review ${item.key}` : ''}`);
-      return false;
+      if (!retry.last || retry.last.state === 'pending') { tick.skipped++; return false; }
+      // A session that settled while its request still stands for this head answered nothing the
+      // gates accept, so the request is attempted again (GY-193) rather than left for somebody to force.
+      const launch = await unanswered(kind, item, request, records.filter(record => record.requestId === request.id));
+      if (!launch) tick.skipped++;
+      return launch;
     }
     if (retry.launch) return true;
     const last = `${kind === 'review' ? 'reviewer' : 'producer'} session attempt ${retry.attempts} ${retry.last!.state}: ${retry.last!.resolution ?? 'no reason recorded'}`;
     wait(kind, item, request, retry.exhausted ? `${last}; no further automatic attempt after ${retry.attempts} sessions${kind === 'review' ? ', launch it with master review once the cause is fixed' : ''}` : `${last}; attempt ${retry.attempts + 1} of ${retry.limit} at ${retry.nextAt}`);
     return false;
   };
+  /**
+   * The next attempt for a request whose last session settled without answering it (GY-193). A
+   * verdict the gate will read on its next observation is an answer on its way, and a producer whose
+   * evidence was recorded as not exercising its criterion is the worker's to fix on a new head, not a
+   * producer's to repeat: neither is launched again. A reviewer still open in Herdr is reminded once
+   * and given `reviewerReminderMs` to post; anything else launches on this tick, until the request
+   * has had `dispatchFailureLimit` sessions, after which the attention item names every attempt.
+   */
+  const unanswered = async (kind: 'review' | 'producer', item: Work, request: DispatchRequest, attempts: SessionRecord[]) => {
+    const last = attempts.at(-1)!;
+    if (kind === 'review' && last.verdict && answeringVerdicts.includes(last.verdict.state)) return false;
+    const role = kind === 'review' ? 'reviewer' : 'producer';
+    const entry = cursor.unanswered[request.id] = { ...cursor.unanswered[request.id], kind, work: item.key, sha: request.sha,
+      attempts: attempts.slice(-dispatchFailureLimit).map((record, index) => bounded(`attempt ${attempts.length - Math.min(attempts.length, dispatchFailureLimit) + index + 1}${record.profile ? ` on ${record.profile}` : ''}${record.agentName ? ` (${record.agentName})` : ''} ${record.state}${record.verdict ? ` with verdict ${record.verdict.state}` : ''}: ${record.resolution ?? 'no reason recorded'}`, dispatchFailureReasonLimit)) };
+    const settled = `${role} session attempt ${attempts.length} ${last.state} without satisfying the request: ${last.resolution ?? 'no reason recorded'}`;
+    if (attempts.length >= dispatchFailureLimit) {
+      entry.exhaustedAt ??= new Date(now()).toISOString();
+      wait(kind, item, request, `${settled}; no further automatic attempt after ${attempts.length} sessions, and the attention item names each of them`);
+      return false;
+    }
+    if (kind === 'review' && effects.remindReviewer && last.id && last.agentName && herdr?.some(agent => agent.name === last.agentName)) {
+      if (entry.remindedFor !== last.id) {
+        entry.remindedFor = last.id; entry.remindedAt = new Date(now()).toISOString();
+        await effects.remindReviewer(item, last as ReviewRecord, reviewRetryPrompt(config.repository, last as ReviewRecord, item.criteria)).catch(() => { /* the bound below relaunches whether or not the reminder landed */ });
+        wait(kind, item, request, `${settled}; reminded ${last.agentName} to post the verdict it judged, and the request launches afresh at ${new Date(now() + reviewerReminderMs).toISOString()} if none follows`);
+        return false;
+      }
+      const due = Date.parse(entry.remindedAt ?? '') + reviewerReminderMs;
+      if (now() < due) { wait(kind, item, request, `${settled}; ${last.agentName} was reminded to post its verdict at ${entry.remindedAt}, and the request launches afresh at ${new Date(due).toISOString()} if none follows`); return false; }
+    }
+    return true;
+  };
+  // The profiles an earlier session of the request used go last: the next attempt prefers one that has not settled it unanswered.
+  const untriedFirst = <P extends { name: string }>(profiles: P[], request: DispatchRequest, records: SessionRecord[]) => {
+    const tried = new Set(records.filter(record => record.requestId === request.id && record.profile).map(record => record.profile!));
+    return [...profiles.filter(profile => !tried.has(profile.name)), ...profiles.filter(profile => tried.has(profile.name))];
+  };
+  // Evidence the control plane recorded as not exercising its criterion is the worker's to fix: a
+  // producer launched again on the same head would only record the same finding (GY-193).
+  const unexercisedEvidence = (item: Work, request: DispatchRequest) => item.evidence.find(entry => entry.sha === request.sha && !!entry.unexercised && (request.proofs ?? []).includes(entry.proof));
   // A reviewer launched before the repository's automatic bot reviewers have spoken approves a head
   // whose bot findings arrive minutes later as unresolved threads, and each costs a rework round.
   // The launch waits for them, up to `awaitReviewersMinutes` from the request, then goes ahead: a
@@ -684,7 +799,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
     return turn;
   };
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
-    if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
+    if (!await session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
     else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
     else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
@@ -693,7 +808,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       // The selected profile answers; the other reviewer profiles are its failover when none of
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.
-      const candidates = profile ? [profile, ...config.reviewers.filter(other => other.name !== profile.name)] : [];
+      const candidates = profile ? untriedFirst([profile, ...config.reviewers.filter(other => other.name !== profile.name)], review, reviews) : [];
       const withRoom = () => candidates.filter(candidate => room(candidate, reviews).free > 0);
       const busy = () => wait('review', item, review, `every reviewer profile is busy: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
       if (!profile) wait('review', item, review, reason!);
@@ -701,14 +816,15 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
       else {
         try {
-          const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => effects.launchReview(item, review, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
+          // The session is registered before its runtime starts and its coordinates written once it
+          // has (GY-172), where every Graphyard reader looks — so watching this reviewer never means
+          // reading this host's local ledger, and the session report observes it from the start.
+          const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => registeredLaunch(record(item),
+            launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace),
+            () => effects.launchReview(item, review, candidate, inventory(), observedAt), result => coordinates(candidate, review, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
           if (!launched) busy();
           else {
             delete cursor.failures[review.id]; delete cursor.capacity.review;
-            // The session is running somewhere; put its coordinates where every Graphyard reader
-            // looks, so watching this reviewer never means reading this host's local ledger.
-            await effects.recordSession?.(item, launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, review, launched.result) }, launched.profile.kind, config.herdrWorkspace))
-              .catch(() => { /* the launch landed; a handle that could not be written is not a failed launch */ });
             tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
           }
         } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
@@ -726,14 +842,16 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
       const review = item.autoDispatch!.review;
       if (review?.state === 'requested' && review.provider === 'github' && !botReads.has(review.id)) await inReviewTurn(item, review);
       for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
-        if (!session('producer', item, request, producers)) continue;
+        const unexercised = unexercisedEvidence(item, request);
+        if (unexercised) { wait('producer', item, request, `trusted evidence cannot come from this head: ${unexercised.unexercised}; the loop requests a rework decision, and no further producer is launched for ${request.sha.slice(0, 12)}`); continue; }
+        if (!await session('producer', item, request, producers)) continue;
         if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
         if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
         if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
         // Independence is per item, never per process: a profile whose principal held an assignment
         // on this item is skipped for this item however many slots it has, and the launcher selects
         // among the rest up to each one's concurrency.
-        const independent = independentProducerProfiles(item, config.producers);
+        const independent = untriedFirst(independentProducerProfiles(item, config.producers), request, producers);
         const available = independent.filter(profile => credentials[profile.name]?.available !== false);
         const usable = () => available.filter(profile => room(profile, producers).free > 0);
         const busy = () => wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
@@ -741,12 +859,12 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
           : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
         if (!usable().length) { busy(); continue; }
         try {
-          const launched = await launchInTurns(request, usable(), profile => room(profile, producers).free > 0, candidate => effects.launchProducer(item, request, candidate, inventory(), observedAt), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
+          const launched = await launchInTurns(request, usable(), profile => room(profile, producers).free > 0, candidate => registeredLaunch(record(item),
+            launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal),
+            () => effects.launchProducer(item, request, candidate, inventory(), observedAt), result => coordinates(candidate, request, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
           if (!launched) busy();
           else {
             delete cursor.failures[request.id]; delete cursor.capacity.producer;
-            await effects.recordSession?.(item, launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, { ...(launched.result as { pane?: string | null }), agentName: launchedName(launched.profile, request, launched.result) }, launched.profile.kind, config.herdrWorkspace, launched.profile.principal))
-              .catch(() => { /* as above: the session exists whether or not its handle could be written */ });
             tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
           }
         } catch (error) { if (!outOfCapacity('producer', item, request, error)) refuse('producer', item, request, error); }
@@ -758,6 +876,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
   // A failure for a request the control plane resolved is history the cursor need not keep.
   const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
+  for (const id of Object.keys(cursor.unanswered)) if (!live.has(id)) delete cursor.unanswered[id];
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
   cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
     closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
@@ -873,7 +992,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   });
   return {
     snapshot: deps.snapshot,
-    agents: () => listHerdrAgents(run).catch(() => null),
+    agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
@@ -906,6 +1025,8 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     // And ends one when the sweep finds it over. The same coordinator mutation: a record that says
     // running is what holds the role slot, so closing it is as much this loop's job as opening it.
     endSession: (closure: SessionClosure) => mutate(`work/${closure.workId}/session`, closureHandle(closure), randomUUID()),
+    // The same confirmed delivery reconcileReviews prompts a stopped reviewer with.
+    remindReviewer: (_work, record, text) => deliverPrompt(record.agentName, text, run),
     // The same three moves the coordination loop makes for a session exhausted mid-work.
     selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
     holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.()),
@@ -925,6 +1046,8 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
       missing: Object.keys(cursor.sessionMisses).length, failures: cursor.lastTick?.closeFailures ?? [] },
     lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure, lastTick: cursor.lastTick ?? null,
     failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
+    // Requests whose sessions settled without answering them, and the attempts each has had (GY-193).
+    unanswered: Object.entries(cursor.unanswered).map(([requestId, entry]) => ({ requestId, ...entry })),
     // A role with no account left, as one entry per role rather than a failure per request.
     capacity: Object.entries(cursor.capacity ?? {}).map(([kind, hold]) => ({ role: kind === 'review' ? 'reviewer' : 'producer', ...hold })),
     // Each agent account as the last launch check saw it, and the launches that skipped one and why.
@@ -944,7 +1067,23 @@ export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs:
  * raises the same. Addressed to the master, with what fixes each.
  */
 export const dispatchFailureAttentionThreshold = 3;
-export function dispatchFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
+export function dispatchFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string; unanswered?: (UnansweredEntry & { requestId: string })[] }): AttentionItem[] {
+  return [...tickFailureAttention(dispatch), ...unansweredAttempts(dispatch.unanswered ?? [])];
+}
+/**
+ * One attention item per request whose sessions all settled without answering it, once the
+ * dispatcher has spent `dispatchFailureLimit` of them (GY-193): the request, its head and every
+ * attempt — which profile and session, how it settled and why — so the master fixes the cause
+ * from one line rather than reconstructing it from the ledgers.
+ */
+export function unansweredAttempts(entries: (UnansweredEntry & { requestId: string })[]): AttentionItem[] {
+  return entries.filter(entry => entry.exhaustedAt).map(entry => ({ subject: entry.work,
+    text: `The ${entry.kind === 'review' ? 'review' : 'producer'} request ${entry.requestId} for ${entry.work} at ${entry.sha.slice(0, 12)} has had ${entry.attempts.length} sessions settle without answering it, and no further automatic attempt follows (since ${entry.exhaustedAt}): ${entry.attempts.join('; ')}`,
+    ...(entry.kind === 'review'
+      ? agentOwner('master', `Fix what the attempts name, then graphyard master review ${entry.work} [PROFILE] launches the next attempt`)
+      : agentOwner('master', `Fix what the attempts name, then graphyard master decide ${entry.work} rework REASON so the proofs are requested afresh on the next head`, 'approver')) }));
+}
+function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
   if (dispatch.error) return [{ subject: 'dispatch', text: `The dispatch cursor cannot be read, so whether any reviewer or producer is being launched is unknown: ${dispatch.error}`,
     ...agentOwner('master', 'graphyard master restart re-reads the dispatch cursor beside the coordinator credential and repairs an over-long string in it; a cursor for another server or repository is removed by hand first') }];
   const failures = dispatch.consecutiveFailures ?? 0, failure = dispatch.lastFailure;

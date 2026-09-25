@@ -1,4 +1,5 @@
 import { deliveryState, isClosed, type Work } from '../src/model';
+import { dispatchHold } from '../src/coordination';
 import { parkedOnHuman, type HumanRequestRow } from '../src/model/human-request';
 import { shortShas } from './format';
 import { phaseOf, plainReason, plainStatus } from './plain-status';
@@ -133,7 +134,7 @@ export const timedGroups: ReadonlySet<Group> = new Set(['moving', 'blocked']);
  * Who acts next on an item, as a role a newcomer recognises (never a worker's code name), and
  * what they do, in plain words.
  */
-export function nextActor(work: Work, group: Group | null, now: number, release: ReleaseView = noRelease): { who: string; does: string } {
+export function nextActor(work: Work, group: Group | null, now: number, release: ReleaseView = noRelease, all: Work[] = []): { who: string; does: string } {
   if (group === 'needs-you') return { who: 'You', does: work.humanRequest ? shortShas(work.humanRequest.needed) : 'Answer the decision it is waiting on' };
   if (group === 'backlog') {
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
@@ -143,9 +144,31 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   // a refusal no retry fixes, a failed check after deploying): the master agent acts next.
   if (group === 'blocked') return { who: 'Master agent', does: release.failed.has(work.key) && work.stage === 'done' ? 'Find out why production has not deployed it, and record the cause' : 'Clear what blocks it, or hand the decision to an approver agent' };
   if (group === 'up-next') {
-    const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
-    return dependency ? { who: 'Nobody yet', does: plainReason(dependency, 'ready').text } : { who: 'Graphyard (assigns a builder)', does: 'Hands it to the next free builder agent' };
+    const held = upNextHold(work, all, now);
+    return held ? { who: 'Nobody yet', does: held.text } : { who: 'Graphyard (assigns a builder)', does: 'Hands it to the next free builder agent' };
   }
   const steps = prSteps(work, now, release);
   return { who: steps.who, does: steps.label };
+}
+
+/**
+ * Why an item in Up next is not waiting for a worker at all (GY-172): it is held by a dependency
+ * that has not shipped — "Waiting for GY-N to ship first" — or by a planned-file overlap with work
+ * already in flight, which names that work and the files. Null for an item a free builder takes
+ * next. The overlap is the dispatcher's own hold (`dispatchHold`), so the page says what the loop
+ * does; a hold past its bound no longer holds, and the item is not described as held.
+ */
+export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'overlap'; text: string } | null {
+  const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
+  if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready').text };
+  const hold = all.length ? dispatchHold(work, all, now) : null;
+  if (!hold || hold.overdue) return null;
+  return { kind: 'overlap', text: `Waiting for ${hold.ahead.map(entry => entry.key).join(', ')} to land first: its planned files overlap (${[...new Set(hold.ahead.flatMap(entry => entry.paths))].join(', ')})` };
+}
+/** What the Up next tile says under its count: waiting for a worker only when that is true of what it counts. */
+export function upNextMeaning(items: Work[], all: Work[], now: number): string {
+  const held = items.map(item => upNextHold(item, all, now)).filter(hold => !!hold);
+  if (!held.length) return groupMeaning['up-next'];
+  if (held.length === items.length) return held.length === 1 ? held[0]!.text : 'Held behind other work';
+  return `${items.length - held.length} waiting for a worker · ${held.length} held`;
 }
