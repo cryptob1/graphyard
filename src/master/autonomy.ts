@@ -24,7 +24,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
-import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, startNarrowRun } from '../runner/roles.js';
+import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, startNarrowRun } from '../runner/roles.js';
 import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
@@ -268,7 +268,26 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // headless run under the same session name. Its verdict comes back as a validated
   // graphyard_decide call and is applied here as the approver identity, on the route `master
   // approve`/`master refuse` use, so the server's separation rules decide exactly as they do today.
-  if (!explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
+  // GY-170: when the registry defines the approver role, its choice decides the runtime too — an
+  // account of a `pi` runtime runs headless with that account's home, model and the role's policy,
+  // and `run.runtimes`/`run.pi` configure only an approver the registry does not define.
+  const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: { agents, available: true }, ...probe, work: work.key }));
+  if (registry && registry.account.kind === 'pi') {
+    let started: ReturnType<typeof startNarrowRun>;
+    try {
+      started = startNarrowRun({ runner: headless.runner ?? registryRunner(registry.account), name, role: 'approver', work: work.key, subject: decision,
+        prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
+        options: approverRunOptions(root, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
+        apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
+    } catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
+    // The run is the session: the registry's slot is given back the moment it ends.
+    const settled = started.settled.finally(() => registry.release(`the headless approver run for ${work.key} ended`));
+    settled.catch(() => { /* the run's own record carries its failure */ });
+    return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: registry.account.fleet.session,
+      account: { environment: registry.account.name, kind: registry.account.kind, quota: registry.health?.quota ?? null, skipped: registry.skipped },
+      run: started.record, settled: settled as Promise<RunRecord> | undefined };
+  }
+  if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
     const pi = piRuntimeSchema.parse(config.run.pi ?? {});
     const started = startNarrowRun({ runner: headless.runner ?? narrowRunner(pi), name, role: 'approver', work: work.key, subject: decision,
       prompt: piApproverPrompt(config, work.key, decision, config.approver!.id),
@@ -284,7 +303,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // is not launched on again before its reset, whichever form of the command asked for it.
   // The sessions Herdr lists are what the role's count is judged against (GY-190): an approver that
   // judged its decision and exited no longer holds a slot the next one needs.
-  const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe, explicitKind) : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: { agents, available: true }, ...probe });
+  const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe, explicitKind)
+    : registry ? { fleet: registry, account: registry.account, profile: approverProfile, skipped: registry.skipped } satisfies ApproverSelection
+    : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: { agents, available: true }, ...probe });
   const selected = chosen?.fleet ?? null;
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.

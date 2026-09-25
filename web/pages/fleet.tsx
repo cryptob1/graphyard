@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { capabilityTiers, fleetRoles, quotaStates, type FleetAccountView, type FleetView } from '../../src/model/registry';
+import { capabilityTiers, fleetRoles, looksLikeSecret, quotaStates, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
 import type { Dashboard } from './dashboard';
 
 const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '—';
@@ -17,21 +17,33 @@ export function AccountCard({ account }: { account: FleetAccountView }) {
   </div>;
 }
 
-/** The fleet page body, pure over the view so it renders the same in a test as in the browser. */
+/** A role's launch policy in one line: its flags, its tool allowlist and the model it runs. */
+export const policyText = (policy: RolePolicy | undefined) => {
+  const parts = [policy?.args.length ? `flags ${policy.args.join(' ')}` : 'no extra flags', policy?.tools.length ? `tools ${policy.tools.join(', ')}` : 'every tool the runtime allows', policy?.model ? `model ${policy.model}` : 'each account\'s own model'];
+  return parts.join(' · ');
+};
+
+/** The Agents page body, pure over the view so it renders the same in a test as in the browser. */
 export function FleetOverview({ fleet }: { fleet: FleetView }) {
+  const running = fleet.sessions.filter(session => !session.endedAt);
   return <>
     {!fleet.configured && <div className="notice">No role is configured yet, so sessions still launch from each host's local profiles. Add a runtime, then an account, then a role — or run <code>graphyard master registry propose --apply</code> on a host whose agent CLIs are logged in.</div>}
     {fleet.attention.map(line => <div role="alert" className="notice danger" key={line}>{line}</div>)}
     <section><div className="section-title"><h2>Roles <span className="count">{fleet.roles.length}</span></h2></div>
-      {fleet.roles.map(role => <div className="criterion" key={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
+      {fleet.roles.map(role => <div className="criterion" key={role.role} data-role={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p><p>Launch policy: {policyText(role.policy)}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
       {!fleet.roles.length && <p>No role is configured.</p>}
+    </section>
+    <section><div className="section-title"><h2>Running sessions <span className="count">{running.length}</span></h2></div>
+      {running.length > 0 && <table className="flow-data" aria-label="Running sessions by account"><thead><tr><th>Role</th><th>Work</th><th>Account</th><th>Runtime</th><th>Model</th><th>Host</th><th>Since</th></tr></thead>
+        <tbody>{[...running].reverse().map(session => <tr key={session.id} data-session={session.id}><td>{session.role}</td><td>{session.work ?? '—'}</td><td>{session.account}</td><td>{session.runtime}</td><td>{session.model}</td><td>{session.host}</td><td>{when(session.selectedAt)}</td></tr>)}</tbody></table>}
+      {!running.length && <p>No session launched from the registry is running.</p>}
     </section>
     <section><div className="section-title"><h2>Accounts <span className="count">{fleet.accounts.length}</span></h2></div>
       {fleet.accounts.map(account => <AccountCard key={account.name} account={account}/>)}
       {!fleet.accounts.length && <p>No account is registered.</p>}
     </section>
     <section><div className="section-title"><h2>Runtimes <span className="count">{fleet.runtimes.length}</span></h2></div>
-      {fleet.runtimes.map(runtime => <div className="criterion" key={runtime.name}><strong>{runtime.name}{runtime.description ? ` · ${runtime.description}` : ''}</strong><p>Launch contract: <code>{[runtime.launch.kind, ...runtime.launch.args].join(' ')}</code> · account home in <code>{runtime.launch.homeVariable ?? 'the default login'}</code> · model flag <code>{runtime.launch.modelFlag ?? 'none'}</code></p>{runtime.launch.login && <p className="muted">Log in with: <code>{runtime.launch.login}</code></p>}</div>)}
+      {fleet.runtimes.map(runtime => <div className="criterion" key={runtime.name} data-runtime={runtime.name}><strong>{runtime.name}{runtime.description ? ` · ${runtime.description}` : ''}</strong><p>Launch contract: <code>{[runtime.launch.kind, ...runtime.launch.args].join(' ')}</code> · account home in <code>{runtime.launch.homeVariable ?? 'the default login'}</code> · model flag <code>{runtime.launch.modelFlag ?? 'none'}</code> · tools flag <code>{runtime.launch.toolsFlag ?? 'none'}</code></p>{runtime.launch.login && <p className="muted">Log in with: <code>{runtime.launch.login}</code></p>}</div>)}
       {!fleet.runtimes.length && <p>No runtime is registered.</p>}
     </section>
     <section><div className="section-title"><h2>Recent selections <span className="count">{fleet.sessions.length}</span></h2></div>
@@ -42,7 +54,7 @@ export function FleetOverview({ fleet }: { fleet: FleetView }) {
   </>;
 }
 
-/** The agent fleet: what the control plane launches on, and the forms that configure it. */
+/** Settings › Agents: every agent the control plane launches, and the forms that configure them (GY-170). */
 export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'status'>) {
   const [fleet, setFleet] = useState<FleetView | null>(status?.fleet ?? null);
   const [loadError, setLoadError] = useState('');
@@ -59,6 +71,8 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
   const submit = (path: (form: FormData) => string, body: (form: FormData) => unknown) => async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const target = event.currentTarget, form = new FormData(target);
+    // The registry holds references, never secrets: a pasted credential is refused before it leaves the browser.
+    if ([...form.values()].some(value => typeof value === 'string' && value.split(/[\s,]+/).some(looksLikeSecret))) { setFormError('That looks like a credential. The registry stores where a login lives (host and home), never the secret itself; log the account in on its host instead.'); return; }
     setBusy(true); setFormError('');
     try { await api(path(form), body(form)); target.reset(); await load(); }
     catch (error) { setFormError((error as Error).message); }
@@ -67,20 +81,22 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
   const field = (form: FormData, name: string) => String(form.get(name) ?? '').trim();
   const optional = (form: FormData, name: string) => field(form, name) || null;
   const amount = (form: FormData, name: string) => field(form, name) ? Number(field(form, name)) : null;
-  return <><header><div className="breadcrumb">Settings <span>/</span> Agent fleet</div><a href="/docs/onboarding#configure-the-fleet">Read the guide ↗</a></header>
-    <div className="page-heading"><div><div className="eyebrow">THE FLEET LIVES IN THE CONTROL PLANE</div><h1>Agent fleet</h1><p>Runtimes, the accounts logged in to them, the model each runs, and the roles that say which accounts may serve them and how many at once. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit.</p></div></div>
-    {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the fleet</button></div>}
-    {!fleet && !loadError && <p role="status">Loading the agent fleet…</p>}
+  const list = (form: FormData, name: string, separator: string) => field(form, name).split(separator).map(entry => entry.trim()).filter(Boolean);
+  return <><header><div className="breadcrumb">Settings <span>/</span> Agents</div><a href="/docs/onboarding#configure-the-fleet">Read the guide ↗</a></header>
+    <div className="page-heading"><div><div className="eyebrow">EVERY AGENT IS CONFIGURED HERE</div><h1>Agents</h1><p>Runtimes, the accounts logged in to them, the model each runs, and the roles that say which accounts may serve them, how many at once, and the launch policy — permission flags, tools and model — every session of the role starts with. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit. Credentials stay on the host that holds them: this page shows where a login lives, never the secret.</p></div></div>
+    {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the agents</button></div>}
+    {!fleet && !loadError && <p role="status">Loading the agents…</p>}
     {fleet && <FleetOverview fleet={fleet}/>}
     {fleet && canEdit && <section><div className="section-title"><h2>Configure</h2></div>
       <p className="muted">Add a runtime, then an account, then a role — in that order, because each names the one before. The registry stores where a login lives, never the credential. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
-      <form className="grant-form" aria-label="Add or change a runtime" onSubmit={submit(() => 'agent-registry/runtimes', form => ({ runtime: { name: field(form, 'name'), launch: { kind: field(form, 'kind') || field(form, 'name'), args: field(form, 'args').split(/\s+/).filter(Boolean), homeVariable: optional(form, 'homeVariable'), modelFlag: optional(form, 'modelFlag'), login: optional(form, 'login'), loginFile: optional(form, 'loginFile') } }, reason: field(form, 'reason') }))}>
+      <form className="grant-form" aria-label="Add or change a runtime" onSubmit={submit(() => 'agent-registry/runtimes', form => ({ runtime: { name: field(form, 'name'), launch: { kind: field(form, 'kind') || field(form, 'name'), args: field(form, 'args').split(/\s+/).filter(Boolean), homeVariable: optional(form, 'homeVariable'), modelFlag: optional(form, 'modelFlag'), toolsFlag: optional(form, 'toolsFlag'), login: optional(form, 'login'), loginFile: optional(form, 'loginFile') } }, reason: field(form, 'reason') }))}>
         <label>Runtime<input name="name" required placeholder="muse"/></label>
         <label>Executable / Herdr kind<input name="kind" placeholder="muse"/></label>
         <label>Startup arguments<input name="args" placeholder="--approval-mode never --trust-workspace"/></label>
         <label>Account home variable<input name="homeVariable" placeholder="CLAUDE_CONFIG_DIR"/></label>
         <label>Model flag<input name="modelFlag" placeholder="--model"/></label>
+        <label>Tools flag<input name="toolsFlag" placeholder="--allowedTools"/></label>
         <label>Login command<input name="login" placeholder="muse login"/></label>
         <label>Login file in the home<input name="loginFile" placeholder="auth.json"/></label>
         <label>Audit reason<input name="reason" required placeholder="Adding the Muse runtime"/></label>
@@ -107,10 +123,14 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
         <label>Audit reason<input name="reason" required placeholder="Second Claude subscription"/></label>
         <button disabled={busy}>Save account</button>
       </form>
-      <form className="grant-form" aria-label="Set a role" onSubmit={submit(() => 'agent-registry/roles', form => ({ role: { name: field(form, 'name'), accounts: field(form, 'accounts').split(',').map(entry => entry.trim()).filter(Boolean), concurrency: Number(field(form, 'concurrency')) }, reason: field(form, 'reason') }))}>
+      <form className="grant-form" aria-label="Set a role" onSubmit={submit(() => 'agent-registry/roles', form => ({ role: { name: field(form, 'name'), accounts: list(form, 'accounts', ','), concurrency: Number(field(form, 'concurrency')),
+        policy: { args: field(form, 'args').split(/\s+/).filter(Boolean), tools: list(form, 'tools', ','), model: optional(form, 'model') } }, reason: field(form, 'reason') }))}>
         <label>Role<select name="name" required>{fleetRoles.map(role => <option key={role}>{role}</option>)}</select></label>
         <label>Accounts, most preferred first<input name="accounts" required placeholder="claude-b, claude-c, codex-a"/></label>
         <label>Concurrency limit<input name="concurrency" type="number" min="0" max="100" step="1" required defaultValue={2}/></label>
+        <label>Permission and approval flags<input name="args" placeholder="--permission-mode bypassPermissions"/></label>
+        <label>Allowed tools<input name="tools" placeholder="Read, Grep, Bash(git:*)"/></label>
+        <label>Model for this role<select name="model" defaultValue=""><option value="">each account's own</option>{fleet.models.map(model => <option key={model.name}>{model.name}</option>)}</select></label>
         <label>Audit reason<input name="reason" required placeholder="Prefer the cheaper account for reviews"/></label>
         <button disabled={busy}>Save role</button>
       </form>

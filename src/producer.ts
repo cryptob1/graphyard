@@ -4,8 +4,8 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
-import type { FleetProbe } from './fleet.js';
+import { accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -14,7 +14,7 @@ import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, registeredRun } from './runner/registry.js';
-import { narrowRunner, piProducerPrompt, producerRunOptions, startNarrowRun, submitEvidence } from './runner/roles.js';
+import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
 /**
@@ -260,11 +260,15 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     if (!judged.remaining.length) throw new ClosedQuestionsDecided(work.key, judged.decided);
     binding = { ...binding, proofs: judged.remaining };
   }
-  if (narrowRoleRuntime(config.run, 'producer', binding.group) === 'pi')
-    return launchHeadlessProducer(root, config, work, binding, request, profile, { id, agentName, credential, attempt: prior.length + 1 }, { ...dependencies, now });
   // The group is part of the request: a producer session answers one proof group of one item, so a
   // relaunch for that group replaces its own predecessor instead of being refused by it.
-  const selected = await selectAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key, group: binding.group });
+  // GY-170: when the registry defines the producer role its choice decides the runtime: a unit-group
+  // session on a `pi` account runs headless on that account; `run.runtimes` covers only a producer
+  // role the registry does not define.
+  const registry = await selectRegistryAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key, group: binding.group });
+  if (registry ? registry.account.kind === 'pi' && binding.group === 'unit' : narrowRoleRuntime(config.run, 'producer', binding.group) === 'pi')
+    return launchHeadlessProducer(root, config, work, binding, request, profile, { id, agentName, credential, attempt: prior.length + 1 }, { ...dependencies, now, registry });
+  const selected = registry ?? await selectAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key, group: binding.group });
   // Everything past the choice can fail; the session it chose is given back at once when it does.
   return onSelectedSession(selected, `producer launch for ${work.key} ${binding.group} proofs failed`, async () => {
     // A producer builds in a detached worktree that commits into the repository's Git directory. Its
@@ -321,9 +325,14 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
  * the run ends its record is kept on the session record, and reconciliation settles it as usual.
  */
 async function launchHeadlessProducer(root: string, config: MasterConfig, work: Work, binding: ProducerBinding, request: DispatchRequest, profile: ProducerProfile,
-  session: { id: string; agentName: string; credential: string; attempt: number }, dependencies: { now: () => Date; runner?: Runner; fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
-  const pi = piRuntimeSchema.parse(config.run.pi ?? {});
-  const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, session.id, dependencies.filesystem);
+  session: { id: string; agentName: string; credential: string; attempt: number }, dependencies: { now: () => Date; runner?: Runner; fetcher?: typeof fetch; filesystem?: FilesystemProbe; registry?: Awaited<ReturnType<typeof selectFleetSession>> }) {
+  const pi = piRuntimeSchema.parse(config.run.pi ?? {}), registry = dependencies.registry ?? null;
+  // The runner and the name evidence is attributed to come from the registry's choice when it made one.
+  const runner = dependencies.runner ?? (registry ? registryRunner(registry.account) : narrowRunner(pi));
+  const via = registry ? `${registry.account.fleet.runtime} ${registry.account.fleet.modelId ?? registry.account.fleet.model} on ${registry.account.name}` : `pi ${pi.model} via ${pi.command}`;
+  let checkout: Awaited<ReturnType<typeof allocateManagedCheckout>>;
+  try { checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, session.id, dependencies.filesystem); }
+  catch (error) { await registry?.release(`producer run for ${binding.key} failed before it started: ${error instanceof Error ? error.message : String(error)}`.slice(0, 400)); throw error; }
   const requestedAt = dependencies.now();
   const timeoutMs = config.run.producerTimeoutMinutes * 60_000;
   const record: ProducerRecord = producerRecordSchema.parse({ id: session.id, requestId: request.id, attempt: session.attempt, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
@@ -333,23 +342,26 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
     delivery: 'request', acknowledgedAt: requestedAt.toISOString(), checkout: checkout.directory, runtime: 'pi' });
   const ledger = await readProducerLedger(root);
   try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
-  catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); throw error; }
+  catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); await registry?.release('the producer record could not be written'); throw error; }
   const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
   let started: ReturnType<typeof startNarrowRun>;
   try {
-    started = startNarrowRun({ runner: dependencies.runner ?? narrowRunner(pi), name: session.agentName, role: 'producer', work: binding.key, subject: session.id,
+    started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id,
       prompt: piProducerPrompt(config, binding, work.criteria, checkout, root),
       options: producerRunOptions(checkout.directory, binding, environment, timeoutMs),
-      apply: async result => { const applied = []; for (const payload of result.payloads) applied.push(await submitEvidence(config.url, session.credential, { id: binding.id }, payload, `pi ${pi.model} via ${pi.command}`, dependencies.fetcher)); return applied; } });
+      apply: async result => { const applied = []; for (const payload of result.payloads) applied.push(await submitEvidence(config.url, session.credential, { id: binding.id }, payload, via, dependencies.fetcher)); return applied; } });
   } catch (error) {
     await updateProducerRecord(root, session.id, entry => ({ ...entry, state: 'failed', resolution: `the headless run could not start: ${error instanceof Error ? error.message : String(error)}`.slice(0, 900), closedAt: new Date().toISOString() }));
     await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
+    await registry?.release(`producer run for ${binding.key} failed to start`);
     throw error;
   }
-  const settled = started.settled.then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
+  // A registry session is the run: its slot is given back the moment the run ends.
+  const settled = started.settled.finally(() => registry?.release(`the headless producer run for ${binding.key} ended`)).then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
   settled.catch(() => { /* reconciliation settles the record on its expiry */ });
   return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
-    profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null, checkout: checkout.directory, expiresAt: record.expiresAt, runtime: 'pi' as const, delivery: 'request' as const, account: null, approvals: null,
+    profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null, checkout: checkout.directory, expiresAt: record.expiresAt, runtime: 'pi' as const, delivery: 'request' as const,
+    account: registry ? { environment: registry.account.name, kind: registry.account.kind, quota: registry.health?.quota ?? null, skipped: registry.skipped } : null, approvals: null,
     run: started.record, settled, recorded: 'the headless run is recorded; its evidence is submitted as it arrives and master status reconciles it' };
 }
 async function updateProducerRecord(root: string, id: string, change: (record: ProducerRecord) => ProducerRecord) {
