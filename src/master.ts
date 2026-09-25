@@ -3412,6 +3412,16 @@ export function assertMergeCheckPublished(payload: any, key: string, sha: string
 export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot: () => Promise<{ work: Work[]; now: string }>, acquire: (work: Work, authorization: ReturnType<typeof assertMergeCandidate>) => Promise<{ execution: MergeExecution }>, cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, verify: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; verifiedAt: string; providerDelayMs: number; clockOffset?: { min: number; max: number } }>, run: ChildRun = defaultChildRun, executionOwner?: string, commit?: (work: Work, execution: MergeExecution) => Promise<{ executionId: string; sha: string; committingAt: string }>, repost?: (work: Work, carried: CarriedApproval) => Promise<CarriedApprovalRepost>, refresh?: (work: Work) => Promise<unknown>) {
   let before = await freshSnapshot(); let current = before.work.find(item => item.id === work.id);
   if (!current || current.revision !== work.revision) throw new Error(`${work.key} changed before GitHub verification; retry`);
+  // A committed execution whose provider call ended without an answer is one GitHub read away
+  // from its outcome (GY-202): merged, the delivery is recorded and the attempt is over; open at
+  // the same head, the provider did not merge, so the execution is cancelled and the guarded
+  // merge below runs again in this same attempt rather than waiting for the authority to lapse.
+  if (current.mergeExecution?.committingAt) {
+    const reconciled = await reconcileUnknownMerge(config, current, before.now, freshSnapshot, cancel, run, executionOwner, refresh);
+    if (reconciled.merged) return { key: current.key, pr: current.candidate!.pr, sha: current.candidate!.sha, method: config.mergeMethod, merged: reconciled.merged, result: reconciled.result, ...({} as { carriedApproval?: CarriedApprovalRepost }) };
+    before = await freshSnapshot(); current = before.work.find(item => item.id === work.id);
+    if (!current || current.mergeExecution || current.candidate?.sha !== work.candidate?.sha) throw new Error(`${work.key} changed while its unknown merge outcome was reconciled; retry`);
+  }
   // The engine bounds a merge execution by the GitHub observation it was granted on (two minutes
   // from observation.at), and the provider call needs about 92 s of it. An attempt that starts
   // on an observation already ~20 s old runs out of window after committing (GY-159, 2026-09-24),
@@ -3427,10 +3437,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!current || current.candidate?.sha !== work.candidate?.sha) throw new Error(`${work.key} changed while GitHub was re-read before merging; retry`);
   }
   const authorization = assertMergeCandidate(current, before.now, executionOwner);
-  // Only a recorded provider commit marks an unknown provider outcome: the broker may already
-  // have called GitHub, so nothing is retried until observation reconciles the execution. A
-  // verified execution that never reached the commit resumes below; the provider was not attempted.
-  if (current.mergeExecution?.committingAt) return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'the provider commit was already recorded; Graphyard retained the execution until GitHub reconciles the provider outcome and refuses a new attempt until then' };
+  // A verified execution that never reached the commit resumes below; the provider was not attempted.
   // The pull request answers for its own head, base branch name and state; the base tip is read
   // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
   const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
@@ -3459,7 +3466,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   const granted = resumed ? { execution: latest.mergeExecution } : await acquire(latest, latestAuthorization);
   if (!granted.execution || granted.execution.sha !== authorization.sha || granted.execution.baseSha !== authorization.baseSha || granted.execution.policyRevision !== authorization.policyRevision || !resumed && granted.execution.authorizationRevision !== authorization.revision) throw new Error(`${work.key} received an invalid merge execution authority`);
   const remainingAtSnapshot = Date.parse(granted.execution.expiresAt) - Date.parse(after.now);
-  let providerStarted = false; let cancelled = false;
+  let providerStarted = false; let cancelled = false; let mergeSha = '';
   let verificationStarted = false; let verificationCompleted = false;
   try {
     const lockedPr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
@@ -3556,6 +3563,7 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
       await cancel(latest, granted.execution, provider.message || 'GitHub confirmed that it did not merge the candidate'); cancelled = true;
       throw new Error(provider.message || 'GitHub did not merge the candidate');
     }
+    mergeSha = provider.sha;
   }
   catch (error) {
     // A confirmed refusal that says the step was already performed on this execution means
@@ -3567,10 +3575,47 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
     if (!providerStarted && verificationStarted && !verificationCompleted && !(error as any)?.confirmedRefusal) throw new Error(`${error instanceof Error ? error.message : 'Final GitHub verification failed'}; the verification outcome is unknown, so Graphyard retained execution ${granted.execution.id} for an idempotent retry`);
     if (!providerStarted) try { await cancel(latest, granted.execution, error instanceof Error ? error.message : 'GitHub merge failed before provider invocation'); }
     catch { throw new Error(`${work.key} GitHub merge failed before provider invocation and Graphyard could not cancel execution ${granted.execution.id}`); }
-    if (providerStarted && !cancelled) throw new Error(`${error instanceof Error ? error.message : 'GitHub merge call failed'}; the merge outcome is unknown, so Graphyard retained execution ${granted.execution.id} until observation or expiry`);
+    if (providerStarted && !cancelled) throw new Error(`${error instanceof Error ? error.message : 'GitHub merge call failed'}; the merge outcome is unknown, so Graphyard retained execution ${granted.execution.id}; the next attempt reads the pull request from GitHub to resolve it`);
     throw error;
   }
-  return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, result: 'merge requested; Graphyard will mark Done only after observing the merge', ...(reposted ? { carriedApproval: reposted } : {}) };
+  return { key: authorization.key, pr: authorization.pr, sha: authorization.sha, method: config.mergeMethod, merged: { sha: mergeSha, at: null }, result: 'merge requested; Graphyard will mark Done only after observing the merge', ...(reposted ? { carriedApproval: reposted } : {}) };
+}
+
+/**
+ * Resolve a committed merge execution's unknown provider outcome from the pull request itself
+ * (GY-202). Merging is idempotent on GitHub, so `GET /pulls/N` answers what the lost provider call
+ * did: `merged` with its `merge_commit_sha`, or still open at the committed head, which means it
+ * did not merge. Merged, the observation that records the delivery from that merge commit is
+ * asked for and awaited, and the delivery closes the execution. Open at the same head against
+ * the same base, the execution is cancelled so the caller retries the guarded merge at once. A
+ * head that moved, a closed pull request or a different base is not retried: the candidate the
+ * execution was granted for is gone, and observation reconciles the execution.
+ */
+export async function reconcileUnknownMerge(config: MasterConfig, work: Work, now: string, freshSnapshot: () => Promise<{ work: Work[]; now: string }>,
+  cancel: (work: Work, execution: MergeExecution, reason: string) => Promise<unknown>, run: ChildRun, executionOwner?: string, refresh?: (work: Work) => Promise<unknown>): Promise<{ merged: { sha: string; at: string | null } | null; result: string }> {
+  const execution = work.mergeExecution!; const pr = work.candidate?.pr ?? work.submission?.pr;
+  const pull = JSON.parse(await run('gh', ['api', `repos/${config.repository}/pulls/${pr}`]));
+  if (pull?.merged === true) {
+    if (typeof pull.merge_commit_sha !== 'string' || !pull.merge_commit_sha) throw new Error(`${work.key}: GitHub shows pull request #${pr} merged without a merge commit; retry the read`);
+    const merged = { sha: pull.merge_commit_sha as string, at: typeof pull.merged_at === 'string' ? pull.merged_at : null };
+    const recorded = (item: Work | undefined) => item?.stage === 'done' && item.delivery?.mergeSha === merged.sha;
+    let delivered = recorded((await freshSnapshot()).work.find(item => item.id === work.id));
+    if (!delivered && refresh) {
+      await refresh(work);
+      for (let step = 0; step < mergeObservationWaitSteps && !delivered; step++) {
+        delivered = recorded((await freshSnapshot()).work.find(item => item.id === work.id));
+        if (!delivered) await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    return { merged, result: `GitHub shows pull request #${pr} merged as ${merged.sha.slice(0, 12)}; ${delivered ? `the delivery is recorded from that merge commit and execution ${execution.id} is closed` : `the observation that records the delivery from that merge commit and closes execution ${execution.id} was requested`}` };
+  }
+  const head = pull?.head?.sha, base = pull?.base?.ref, state = pull?.state;
+  if (state !== 'open' || head !== execution.sha || base !== config.baseBranch)
+    throw new Error(`${work.key}: GitHub shows pull request #${pr} ${state ?? 'unreadable'} and unmerged at head ${String(head ?? 'unknown').slice(0, 12)} against ${base ?? 'an unknown base'}, not open at committed head ${execution.sha.slice(0, 12)}; the candidate moved, so the merge is not retried and observation reconciles execution ${execution.id}`);
+  if (Date.parse(execution.expiresAt) > Date.parse(now) && execution.owner !== executionOwner)
+    throw new Error(`${work.key}: merge execution ${execution.id} is held by ${execution.owner} until ${execution.expiresAt}; this executor stands down without cancelling it`);
+  await cancel(work, execution, `GitHub shows pull request #${pr} open and unmerged at committed head ${execution.sha.slice(0, 12)}: the provider did not merge, so the execution is cancelled and the guarded merge retried`);
+  return { merged: null, result: `execution ${execution.id} cancelled: the provider did not merge` };
 }
 
 /**

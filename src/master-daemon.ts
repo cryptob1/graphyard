@@ -694,6 +694,20 @@ export function readyToRetry(previous: DaemonAction | undefined, cycle: number, 
   return cycle - previous.cycle >= Math.min(2 ** Math.max(0, previous.attempts - 1), maxBackoffCycles);
 }
 
+/**
+ * The guarded merge retries on time, not cycles (GY-202): while the candidate head, base and policy
+ * are unchanged — the action key — a refused or unobserved merge is asked again after 15 s,
+ * doubling to a one-minute cap, until GitHub shows the pull request merged or the head moves and
+ * the key with it. A merge recorded done is never asked again for that key.
+ */
+export const mergeRetryCapMs = 60_000;
+export const mergeRetryDelayMs = (attempts: number) => Math.min(15_000 * 2 ** Math.max(0, attempts - 1), mergeRetryCapMs);
+export function mergeRetryDue(previous: DaemonAction | undefined, now: number) {
+  if (!previous) return true;
+  if (previous.state !== 'failed') return false;
+  return now - Date.parse(previous.at) >= mergeRetryDelayMs(previous.attempts);
+}
+
 export function recordProfileFailure(state: DaemonState, profile: WorkerProfile, reason: string, now: number) {
   const previous = state.profiles[profile.name] ?? { failures: 0, reason: null, cooldownUntil: null };
   state.profiles[profile.name] = { failures: previous.failures + 1, reason: reason.slice(0, 500), cooldownUntil: new Date(now + profileCooldownMs).toISOString() };
@@ -2701,7 +2715,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   for (const item of mergeCandidates) await isolate('merge', item, item.key, async () => {
     const key = candidateKey('merge', item);
     const previous = state.actions[key];
-    if (!readyToRetry(previous, state.cycle)) return;
+    if (!mergeRetryDue(previous, now())) return;
     // With automatic merging off the guarded merge runs for exactly the candidate an approver
     // agent approved (step 4c requested it). Until that approval is applied, the loop waits on the
     // approver rather than on a person, and says which decision it is waiting for.
@@ -2725,8 +2739,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     }
     await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
-      const result = await effects.merge(item);
-      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${(result as { result?: string })?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      const result = await effects.merge(item) as { result?: string; merged?: { sha: string } | null } | undefined;
+      // Done only on a merged observation: GitHub's own answer that it merged. An attempt that
+      // ends without one stays retryable on the same key until GitHub shows the merge.
+      const unobserved = result?.merged === null;
+      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: unobserved ? 'failed' : 'done', detail: unobserved ? `Guarded merge for ${item.key} ended without GitHub showing the pull request merged: ${result?.result ?? 'no merged observation'}; retrying while the head is unchanged` : `Guarded merge accepted for ${item.key}: ${result?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       // A refusal is the gate working, not a daemon fault: record it and keep cycling.
       performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));

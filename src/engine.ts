@@ -1186,8 +1186,13 @@ export class Engine {
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
       // Only the instance that acquired the execution may cancel it: a second executor under the
-      // same credential that lost the race stands down instead (GY-92).
-      demand(work.mergeExecution?.id === data.executionId && work.mergeExecution.owner === mergeExecutionOwner(actor, data.executor), ownedByAnother);
+      // same credential that lost the race stands down instead (GY-92). A committed execution
+      // whose authority lapsed can no longer authorize any merge, so a later instance of the same
+      // principal — the loop after a restart — may close it once GitHub shows the candidate
+      // unmerged, instead of leaving it until an observation happens to run (GY-202).
+      const execution = work.mergeExecution;
+      const lapsed = !!execution?.committingAt && Date.parse(execution.expiresAt) <= now.getTime() && !!data.executor && execution.owner.startsWith(`${actor.id}#`);
+      demand(execution?.id === data.executionId && (execution.owner === mergeExecutionOwner(actor, data.executor) || lapsed), ownedByAnother);
       work.mergeExecution = null; this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, 'merge.execution.cancelled', now, { executionId: data.executionId, reason: data.reason });
