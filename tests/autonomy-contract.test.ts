@@ -11,7 +11,7 @@ import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { autonomyContract, withAutonomyContract } from '../src/autonomy.js';
 import { browserProfileMissing, setupHealth } from '../src/cli/master-setup.js';
-import { assertLaunchRecipe, launchPlan, LaunchRefusedError, registryContractRefusal, nonInteractiveLaunch, refusedLaunchKinds } from '../src/harness.js';
+import { assertLaunchRecipe, launchPlan, LaunchRefusedError, trustClaudeFolder, registryContractRefusal, nonInteractiveLaunch, refusedLaunchKinds } from '../src/harness.js';
 import { accountLaunch, agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchCommand, launchDelivery, launchEscalationHandler, launchRequestContracts, launchRoleContracts, openCodeAllowAll, requestContractRefusal, requestPlaceholder, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
@@ -241,15 +241,26 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
 
     // Claude Code's folder-trust dialog has no flag that skips it, bypassPermissions included: the
     // session's working directory is recorded as trusted in the config home the session reads, the
-    // record the dialog's "Yes, proceed" writes, before anything is typed into the pane.
+    // record the dialog's "Yes, proceed" writes, before anything is typed into the pane — but only
+    // for a launch that loads none of the repository's own settings, which that record would enable.
     const home = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-claude-home-')), worktree = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-worktree-'));
     try {
       const config = join(home, '.claude.json');
       await writeFile(config, JSON.stringify({ numStartups: 3, projects: { '/elsewhere': { hasTrustDialogAccepted: true, lastCost: 1 } } }));
+      const userOnly = ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', '/h/role.json'];
+      // The worktree carries the repository's own settings: a launch that would load them is refused, not trusted into them.
+      mkdirSync(join(worktree, '.claude')); await writeFile(join(worktree, '.claude/settings.json'), JSON.stringify({ hooks: {} }));
+      for (const args of [['--permission-mode', 'bypassPermissions'], ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user,project'], ['--permission-mode', 'bypassPermissions', '--setting-sources=local,project']]) {
+        const loads: string[][] = [];
+        await assert.rejects(startAgentSession('settings-claude', 'claude', 'pane-c', args, 'Implement GY-184', (_command, call) => { loads.push(call); return startedAtOnce(call) ?? JSON.stringify({ result: {} }); }, { directory, cwd: worktree, environment: { CLAUDE_CONFIG_DIR: home } }),
+          (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'claude' && error.message.includes(`carries the repository's own Claude configuration ${join(realpathSync(worktree), '.claude/settings.json')}`), args.join(' '));
+        assert.deepEqual(loads, [], 'refused before anything reached Herdr');
+        assert.equal(JSON.parse(await readFile(config, 'utf8')).projects[realpathSync(worktree)], undefined, 'no trust is recorded for a launch that would load the repository\'s settings');
+      }
       const seen: unknown[] = [];
       const claude = herdr();
       const claudeRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') seen.push(JSON.parse(readFileSync(config, 'utf8')).projects[realpathSync(worktree)]); return claude.run(command, args); };
-      const trusted = await startAgentSession('trusted-claude', 'claude', 'pane-c', ['--permission-mode', 'bypassPermissions'], 'Implement GY-184', claudeRun, { directory, cwd: worktree, environment: { CLAUDE_CONFIG_DIR: home }, attempts: 1 });
+      const trusted = await startAgentSession('trusted-claude', 'claude', 'pane-c', userOnly, 'Implement GY-184', claudeRun, { directory, cwd: worktree, environment: { CLAUDE_CONFIG_DIR: home }, attempts: 1 });
       assert.deepEqual(seen, [{ hasTrustDialogAccepted: true }], 'the folder was trusted before the launch line reached the pane');
       assert.deepEqual(trusted.trust, { file: config, directory: realpathSync(worktree), written: true });
       const recorded = JSON.parse(await readFile(config, 'utf8'));
@@ -258,10 +269,20 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
       const nested = join(worktree, 'nested'); mkdirSync(nested);
       const again = await startAgentSession('trusted-again', 'claude', 'pane-c', ['--permission-mode', 'bypassPermissions'], 'Implement GY-184', herdr().run, { directory, cwd: nested, environment: { CLAUDE_CONFIG_DIR: home }, attempts: 1 });
       assert.equal(again.trust!.written, false); assert.equal(JSON.parse(await readFile(config, 'utf8')).projects[realpathSync(nested)], undefined);
+      // A folder that carries no repository configuration is trusted whatever the setting sources,
+      // and sessions of one account launched at once each keep their record: the writes are serialized, none is lost.
+      const folders = await Promise.all(Array.from({ length: 6 }, () => mkdtemp(join(tmpdir(), 'graphyard-autonomy-concurrent-'))));
+      try {
+        const results = await Promise.all(folders.map((folder, index) => trustClaudeFolder(folder, { CLAUDE_CONFIG_DIR: home }, index % 2 ? userOnly : ['--permission-mode', 'bypassPermissions'])));
+        assert.ok(results.every(result => result.written));
+        const projects = JSON.parse(await readFile(config, 'utf8')).projects;
+        for (const folder of folders) assert.deepEqual(projects[realpathSync(folder)], { hasTrustDialogAccepted: true }, folder);
+        assert.ok(projects[realpathSync(worktree)].hasTrustDialogAccepted, 'the earlier record survives');
+      } finally { await Promise.all(folders.map(folder => rm(folder, { recursive: true, force: true }))); }
       // A config that cannot be read refuses the launch, naming the runtime, before anything reaches Herdr.
       await writeFile(config, '{ not json');
       const untrusted: string[][] = [];
-      await assert.rejects(startAgentSession('untrusted-claude', 'claude', 'pane-c', ['--permission-mode', 'bypassPermissions'], 'Implement GY-184', (_command, args) => { untrusted.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory, cwd: worktree, environment: { CLAUDE_CONFIG_DIR: home } }),
+      await assert.rejects(startAgentSession('untrusted-claude', 'claude', 'pane-c', userOnly, 'Implement GY-184', (_command, args) => { untrusted.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory, cwd: worktree, environment: { CLAUDE_CONFIG_DIR: home } }),
         (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'claude' && /refuses to launch the claude runtime in .*folder-trust dialog/.test(error.message));
       assert.deepEqual(untrusted, [], 'refused before anything reached Herdr');
     } finally { await rm(home, { recursive: true, force: true }); await rm(worktree, { recursive: true, force: true }); }

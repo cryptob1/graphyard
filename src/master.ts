@@ -1181,13 +1181,13 @@ export const requestContractRefusal = (kind: string) => `Graphyard refuses to la
 /** The most bytes a launch command line may hold: the runtime, its flags and two file paths, never the request. */
 export const launchCommandLimit = 512;
 export const launchDirectory = (directory: string) => resolve(directory, '.graphyard/launch');
-/** The session's launch files: `stem` is `DIR/.graphyard/launch/NAME`, and each file present is `STEM.role` or `STEM.request`. */
+/** The session's launch files: `stem` is `DIR/.graphyard/launch/NAME`, and each file present is `STEM.role` or `STEM.request` (and `STEM.launch`, the runtime's words, for a line that would exceed the bound). */
 export interface LaunchFiles { stem: string; role: string | null; request: string | null }
 /** A word for the pane's shell: bare when it needs no quoting, single-quoted otherwise. */
 export const shellWord = (value: string) => /^[A-Za-z0-9_./:=@%+,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 /** The shell variable the command line binds to the stem, so each file is referenced once and the line stays short. */
 export const launchVariable = 'GY';
-const roleReference = `"$${launchVariable}.role"`, requestReference = `"$(cat "$${launchVariable}.request")"`;
+const roleReference = `"$${launchVariable}.role"`, requestReference = `"$(cat "$${launchVariable}.request")"`, launchScriptReference = `"$${launchVariable}.launch"`;
 /**
  * Writes the session's request and role authorization where its command line reads them: private
  * files under the checkout's own `.graphyard/launch/`, holding the exact text, replaced on every
@@ -1212,9 +1212,19 @@ export function launchCommand(kind: string, args: string[], files: LaunchFiles, 
   // A registry runtime's request goes where its contract places `{request}`; a built-in one drops the marker.
   const placed = args.map(argument => argument !== requestPlaceholder ? shellWord(argument) : files.request && !own ? requestReference : null).filter((word): word is string => word !== null);
   const binding = role || request || placed.includes(requestReference) ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
-  const command = [...binding, ...prefix.map(shellWord), kind, ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  const runtime = [...prefix.map(shellWord), kind, ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  let command = [...binding, runtime].join(' ');
+  // The runtime's flags can name long paths (a producer's checkout and the shared Git directory as
+  // Codex writable roots), so a line over the bound moves them into `STEM.launch`, beside the other
+  // launch files, and the typed line only binds the stem and sources it: the pane's own shell still
+  // starts the runtime on the same words, and the request is still its first argument. Only a stem
+  // too long to leave room for that is refused.
+  if (Buffer.byteLength(command) > launchCommandLimit) {
+    command = `${launchVariable}=${shellWord(files.stem)}; . ${launchScriptReference}`;
+    if (Buffer.byteLength(command) <= launchCommandLimit) { writeFileSync(`${files.stem}.launch`, `${runtime}\n`, { mode: 0o600 }); chmodSync(`${files.stem}.launch`, 0o600); return command; }
+  }
   const bytes = Buffer.byteLength(command);
-  if (bytes > launchCommandLimit) throw new Error(`the launch command line is ${bytes} bytes, over the ${launchCommandLimit}-byte bound; it holds only the runtime, its flags and the paths of the session's request and role files, so shorten the repository path, the managed worktree root or the profile's agent arguments: ${command.slice(0, 160)}…`);
+  if (bytes > launchCommandLimit) throw new Error(`the launch command line is ${bytes} bytes, over the ${launchCommandLimit}-byte bound; it holds only the path of the session's launch files, so shorten the repository path or the managed worktree root: ${command.slice(0, 160)}…`);
   return command;
 }
 
@@ -1368,7 +1378,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   if (delivery !== 'request') throw new LaunchRefusedError(kind, requestContractRefusal(kind));
   // A runtime whose trust prompt no flag suppresses has its working directory recorded as trusted
   // first, or the launch is refused naming it (GY-184): nothing is typed into a session that would wait.
-  const trust = await nonInteractiveLaunch[kind]?.trust?.(options.cwd ?? options.directory, options.environment ?? {});
+  const trust = await nonInteractiveLaunch[kind]?.trust?.(options.cwd ?? options.directory, options.environment ?? {}, args);
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
   // otherwise at the start of its first request (GY-184).
   const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });

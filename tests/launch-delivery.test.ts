@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -173,9 +174,19 @@ test('unit:launch-command-bounded — the typed launch command line is short and
     assert.ok(Buffer.byteLength(worker) <= launchCommandLimit, `${Buffer.byteLength(worker)} bytes`);
     assert.match(worker, / watch GY-121 1 -- claude /);
     assert.equal(positionalOf(expandTypedCommand(worker).words.slice(expandTypedCommand(worker).words.indexOf('--') + 2)), request);
-    // A line that would exceed the bound is refused before anything is typed, naming its length.
-    const deep = join(directory, 'a'.repeat(300));
-    assert.throws(() => launchCommand('claude', producerArgs, { stem: join(deep, '.graphyard/launch/produce-a'), role: 'x', request: 'y' }), /the launch command line is \d+ bytes, over the 512-byte bound/);
+    // A line that would exceed the bound — long writable roots beside a long stem — moves the
+    // runtime's words into STEM.launch and the typed line sources it: still bounded, same words.
+    const deep = join(directory, 'a'.repeat(100), 'b'.repeat(100), 'c'.repeat(100));
+    const long = writeLaunchFiles(deep, 'produce-a', { role, request });
+    const sourced = launchCommand('claude', [...producerArgs, '--add-dir', deep], long);
+    assert.ok(Buffer.byteLength(sourced) <= launchCommandLimit, `${Buffer.byteLength(sourced)} bytes`);
+    assert.equal(sourced, `GY=${long.stem}; . "$GY.launch"`);
+    assert.equal(statSync(`${long.stem}.launch`).mode & 0o777, 0o600);
+    // The pane's own shell runs it: a stand-in `claude` prints the words it is started on.
+    const sourcedWords = execFileSync('bash', ['-c', `claude() { printf '%s\\0' "$@"; }; ${sourced}`], { encoding: 'utf8' }).split('\0').slice(0, -1);
+    assert.equal(positionalOf(sourcedWords), request); assert.ok(sourcedWords.includes(deep)); assert.equal(sourcedWords[sourcedWords.indexOf('--append-system-prompt-file') + 1], long.role);
+    // Only a stem too long for even that line is refused before anything is typed, naming its length.
+    assert.throws(() => launchCommand('claude', producerArgs, { stem: join(directory, 'a'.repeat(500), '.graphyard/launch/produce-a'), role: 'x', request: 'y' }), /the launch command line is \d+ bytes, over the 512-byte bound/);
     // Words are quoted only when the shell needs it; a quote inside is escaped the POSIX way.
     assert.equal(launchCommand('codex', ['--model', 'o3', '-c', 'writable_roots=["/tmp/a b"]', "it's"], { stem: '/s', role: null, request: null }), `codex --model o3 -c 'writable_roots=["/tmp/a b"]' 'it'\\''s'`);
 

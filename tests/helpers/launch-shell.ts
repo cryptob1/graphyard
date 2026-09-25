@@ -11,8 +11,10 @@ export interface TypedLaunch { stem: string | null; words: string[]; kind: strin
 export function expandTypedCommand(command: string): TypedLaunch {
   const bound = /^GY=(\S+); (.*)$/s.exec(command);
   const stem = bound ? bound[1].replace(/^'(.*)'$/s, '$1').replaceAll("'\\''", "'") : null;
+  // A line over the bound sources the runtime's words from `STEM.launch` (master.ts launchCommand).
+  const body = bound && bound[2] === '. "$GY.launch"' ? readFileSync(`${stem}.launch`, 'utf8').trim() : bound ? bound[2] : command;
   const words: string[] = [];
-  for (const match of (bound ? bound[2] : command).matchAll(/'((?:[^']|'\\'')*)'|("\$GY\.role")|("\$\(cat "\$GY\.request"\)")|(\S+)/g)) {
+  for (const match of body.matchAll(/'((?:[^']|'\\'')*)'|("\$GY\.role")|("\$\(cat "\$GY\.request"\)")|(\S+)/g)) {
     if (match[1] !== undefined) words.push(match[1].replaceAll("'\\''", "'"));
     else if (match[2]) words.push(`${stem}.role`);
     else if (match[3]) words.push(readFileSync(`${stem}.request`, 'utf8'));
