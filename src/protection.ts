@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { CHECK_NAME, nativeReviewRequired, reviewProviderOf, reviewProviders, type ReviewProvider, type Work } from './model.js';
 
 export interface ReviewProtection { mode: 'native' | 'agent'; requiredApprovals: number; requireLastPushApproval: boolean; dismissStaleReviews: boolean }
@@ -19,6 +21,75 @@ export function requiredReviewProtection(work: Work[]) {
     ? { mode: 'agent', requiredApprovals: 0, requireLastPushApproval: false, dismissStaleReviews: true }
     : { mode: 'native', requiredApprovals: 1, requireLastPushApproval: true, dismissStaleReviews: true };
   return { protection, items };
+}
+
+export interface WorkflowFile { path: string; text: string }
+
+/** The managed repository's GitHub Actions workflows, read from the checkout the command runs in. */
+export function readWorkflows(root = process.cwd()): WorkflowFile[] {
+  const directory = join(root, '.github', 'workflows');
+  let names: string[];
+  try { names = readdirSync(directory); } catch { return []; }
+  return names.filter(name => /\.ya?ml$/.test(name)).sort().map(name => ({ path: `.github/workflows/${name}`, text: readFileSync(join(directory, name), 'utf8') }));
+}
+
+const unquote = (value: string) => value.trim().replace(/^(['"])(.*)\1$/, '$2');
+/** The lines of the block a `key:` line at `indent` opens, or its inline value. */
+function yamlBlock(lines: string[], key: string, indent: number) {
+  const start = lines.findIndex(line => line.startsWith(`${' '.repeat(indent)}${key}:`) && !line.startsWith(`${' '.repeat(indent + 1)}`));
+  if (start < 0) return null;
+  const inline = lines[start].slice(indent + key.length + 1).replace(/\s+#.*$/, '').trim();
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    if (line.length - line.trimStart().length <= indent) break;
+    body.push(line);
+  }
+  return { inline, body };
+}
+
+/**
+ * A line-level reading of the workflow shapes that decide run cancellation: whether pull requests
+ * trigger it, its jobs (the check-run names a branch requires), and its concurrency settings, top
+ * level and per job. It reads only these keys and is no general YAML parser.
+ */
+export function readWorkflow(text: string) {
+  const lines = text.split(/\r?\n/);
+  const trigger = yamlBlock(lines, 'on', 0) ?? yamlBlock(lines, '"on"', 0) ?? yamlBlock(lines, "'on'", 0);
+  const triggers = trigger ? [...`${trigger.inline}\n${trigger.body.filter(line => /^ {2}[\w-]+:/.test(line) || /^ {2}- /.test(line)).join('\n')}`.matchAll(/[\w-]+/g)].map(match => match[0]) : [];
+  const concurrencyOf = (block: string[], indent: number) => {
+    const found = yamlBlock(block, 'concurrency', indent);
+    if (!found) return null;
+    const field = (name: string) => { const line = found.body.find(entry => entry.trimStart().startsWith(`${name}:`)); return line === undefined ? null : unquote(line.trimStart().slice(name.length + 1)); };
+    return found.inline ? { group: unquote(found.inline), cancelInProgress: null } : { group: field('group'), cancelInProgress: field('cancel-in-progress') };
+  };
+  const jobsBlock = yamlBlock(lines, 'jobs', 0)?.body ?? [];
+  const jobs = jobsBlock.flatMap((line, index) => {
+    const id = line.match(/^ {2}([\w-]+):\s*$/)?.[1];
+    if (!id) return [];
+    const end = jobsBlock.findIndex((next, at) => at > index && /^ {2}\S/.test(next));
+    const body = jobsBlock.slice(index + 1, end < 0 ? undefined : end);
+    const name = body.find(entry => /^ {4}name:/.test(entry));
+    return [{ id, name: name ? unquote(name.replace(/^ {4}name:/, '')) : id, concurrency: concurrencyOf(body, 4) }];
+  });
+  return { pullRequest: triggers.some(name => name === 'pull_request' || name === 'pull_request_target'), push: triggers.includes('push'), concurrency: concurrencyOf(lines, 0), jobs };
+}
+
+const cancels = (concurrency: { cancelInProgress: string | null } | null) => !!concurrency?.cancelInProgress && concurrency.cancelInProgress !== 'false';
+export const CI_CONCURRENCY_ADVICE = 'add a concurrency group per pull request with cancel-in-progress for pull_request events, so a run for a superseded head stops holding an Actions runner';
+
+/**
+ * Advisories, never blockers: each required check whose pull-request workflow keeps running for a
+ * superseded head. Every base refresh and rework push then adds a full run while the older ones
+ * still hold the repository's concurrent-runner limit, and every item waits in Test behind them.
+ */
+export function ciConcurrencyAdvisories(checks: string[], workflows: WorkflowFile[]) {
+  return [...new Set(checks)].sort().flatMap(check => workflows.flatMap(({ path, text }) => {
+    const workflow = readWorkflow(text);
+    const job = workflow.pullRequest ? workflow.jobs.find(entry => entry.name === check || entry.id === check) : undefined;
+    if (!job || cancels(workflow.concurrency) || cancels(job.concurrency)) return [];
+    return [`Required check ${check} runs in ${path} (job ${job.id}), which never cancels superseded pull-request runs; ${CI_CONCURRENCY_ADVICE}`];
+  }));
 }
 
 // ---- GitHub's merge queue (GY-258) -------------------------------------------------------------
@@ -54,7 +125,7 @@ export function mergeQueueState(rules: unknown, githubAppId: number): { queue: b
 /** Where readProtection attaches the branch's active rules beside GitHub's protection document. */
 const branchRules = Symbol.for('graphyard.branchRules');
 
-export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules]) {
+export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows()) {
   const { protection, items } = requiredReviewProtection(work);
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
@@ -82,7 +153,8 @@ export function protectionPlan(current: any, config: { repository: string; baseB
     ...(queue && !queue.queue ? [`merge queue on ${config.baseBranch}: none to ruleset "${mergeQueueRulesetName}"`] : []),
     ...(queue && !queue.requiredCheck ? [`merge queue required check ${CHECK_NAME}: missing to required from App ${config.githubAppId}`] : []),
   ];
-  return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, changes, blockers,
+  const advisories = ciConcurrencyAdvisories(work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks), workflows);
+  return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, changes, blockers, advisories,
     // GitHub performs the merge through its queue (GY-258); null when the branch rules were not read.
     mergeQueue: queue ? { ...queue, ruleset: mergeQueueRuleset(config) } : null,
     consistent: !changes.length && !blockers.length,

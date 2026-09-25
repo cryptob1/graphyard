@@ -19,7 +19,9 @@
 // starts one instance per slot with `--slot N`: the slot takes its kinds and poll interval from the
 // declaration, claims under a stable name, and answers systemd's watchdog on every poll and every
 // claim renewal. `--install` writes that declaration and enables the units (src/repository-setup.ts
-// installExecutorSupervision); `graphyard init` does the same on a coordinator host.
+// installExecutorSupervision); `graphyard init` does the same on a coordinator host. Exactly one
+// component merges (GY-245): where the master loop is installed or running, `--install` declares
+// every kind but `merge`, and a slot that still serves merge refuses merge rows while the loop lives.
 //
 // The modules are loaded once, here, and the checkout they came from keeps moving (GY-126). The
 // process records the release it loaded beside the coordinator credential, re-reads the checkout's
@@ -199,7 +201,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     intervalSeconds: options.intervalSeconds, root, release, supervisor: f.detectSupervisorUnit({ named: options.unit }) });
   await registrar.started();
   let fenceSeen = null;
-  const guarded = x.releaseGuardedEffects(effects, {
+  // Exactly one component merges (GY-245): while a live master loop on this installation runs the
+  // guarded merge, this executor leaves merge rows to it rather than claiming one, since the claim
+  // itself writes the item and defeats the loop's revision check.
+  const single = x.loopMergeGuardedEffects(effects, () => x.detectLoopMerger(root, { config: current() }), line => console.error(line));
+  const guarded = x.releaseGuardedEffects(single, {
     loaded: release, current: () => f.readCommit(root),
     claimed: action => registrar.claimed(action), settled: () => registrar.settled(),
     // A fleet restart raises a fence beside the records; no claim starts while it stands.

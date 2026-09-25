@@ -74,7 +74,7 @@ test('unit:tree-identical-base-still-refreshed — a queue head bound to a base 
   assert.deepEqual(refresh.writes, ['PATCH /git/refs/heads/graphyard/gy-100-1', 'POST /merges', `PATCH /git/${queueRef('GY-100')}`]);
   assert.deepEqual(speculation.merge?.parents, [H, M], 'the new tip has the base tip commit itself as a parent');
   // The merge broker refuses the head, before any approval is re-posted, naming the missing ancestry.
-  const master = await readFile(new URL('../src/master.ts', import.meta.url), 'utf8');
+  const master = await readFile(new URL('../src/master/merge.ts', import.meta.url), 'utf8');
   assert.match(master, /const unancestored = missingBaseAncestry\(current\);\n\s*if \(unancestored\) throw new Error\(`\$\{work\.key\} merge refused: \$\{missingAncestryReason\(unancestored\)\}`\);\n[^]*?const carried = carriedApproval\(current\);\n\s*const reposted = carried && repost/);
   // A base tip that IS an ancestor of the head keeps the carry: nothing is republished.
   const ancestor = queued({ baseTipAncestor: true });
