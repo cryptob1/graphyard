@@ -9,7 +9,7 @@ Only three decisions are human-only: goals and priorities, spending money or ope
 
 ## Operate
 
-Keep cycling: status, dispatch, review and proofs, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
 
 1. `master status`.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -20,7 +20,7 @@ Keep cycling: status, dispatch, review and proofs, guarded merge, then deploymen
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is this loop as a process under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it with `systemctl --user restart graphyard-master` when `daemon.liveness` is `stalled` or `absent`.
+`master run` runs this loop under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it with `systemctl --user restart graphyard-master` when `daemon.liveness` is `stalled` or `absent`.
 
 ### System-driven items
 
@@ -29,7 +29,7 @@ The loop drives every item. Unless created `"systemDriven": false`, one refuses 
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10 seconds, 30 at most), storing each observation. A handle the runtime stops reporting closes at the second consecutive sweep
+manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10 seconds, 30 at most). A handle the runtime stops reporting closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
 that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
 
@@ -49,11 +49,11 @@ another session's handle finished to free a slot.
 
 ## Automatic dispatch at submit
 
-When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`) for the head. The review request follows once the head's unit and integration proofs pass (`proofs-pending` until then; a failed one returns the head to its worker). `*-postmerge` proofs are refused (use `policy.deploySmoke`). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch first awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables).
+When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`). The review request follows once the head's unit and integration proofs pass (`proofs-pending` until then; a failure returns it to its worker). `*-postmerge` proofs are refused (use `policy.deploySmoke`). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch first awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that last posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) is how many sessions it runs at once, each with a name unique to its request above one. Changes apply without a restart; lowering it drains sessions first; status reports `longestWaitMs`; a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles as `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`; close its pane. Unanswered sessions relaunch on another profile (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded, then relaunched.
+**Requests always settle.** A gone pane (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch on another profile (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded, then relaunched.
 
 **Every role, approvers too, fails over on spent quota**, skipping the account until reset, or waits as one `capacity` line.
 
