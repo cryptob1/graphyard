@@ -18,7 +18,7 @@ before(async () => {
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-store-init-'));
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'work']) await postgres.createDatabase(name);
+  for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work']) await postgres.createDatabase(name);
 });
 after(async () => { if (postgres) await postgres.stop(); });
 
@@ -144,6 +144,56 @@ test('integration:migration-lock-bounded lock waits inside one table\'s DDL shar
     assert.ok(boot.ms < 2300, `startup failed only after ${boot.ms} ms, past its 1500 ms deadline`);
     assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} gave up after 1500 ms waiting for a lock on table production_observation_merges`));
   } finally { clearTimeout(handoff); await (released ?? observations()); await merges(); await next.close(); await deployed.close(); }
+});
+
+test('integration:migration-lock-bounded a migration whose watchdog loses its connection fails at the deadline instead of waiting without one', async () => {
+  const deployed = new Store(url('watchdog'));
+  await deployed.init();
+  await deployed.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
+  // As above, lock_timeout alone lets the second statement's wait outlast the deadline; this
+  // time the watchdog that would cancel it has lost its connection before the deadline.
+  const observations = await liveReplica('watchdog', async db => { await db.query('SELECT count(*) FROM production_observations'); });
+  const merges = await liveReplica('watchdog', async db => { await db.query('SELECT count(*) FROM production_observation_merges'); });
+  let released: Promise<void> | undefined;
+  const handoff = setTimeout(() => { released = observations(); }, 1200);
+  const cut = setTimeout(() => { void deployed.pool.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='graphyard migration watchdog'"); }, 300);
+  const next = new Store(url('watchdog'));
+  try {
+    const boot = await timed(() => next.init({ lockTimeoutMs: 1500 }));
+    assert.ok(boot.error, 'the migration cannot continue without its watchdog');
+    assert.ok(boot.ms < 2300, `startup failed only after ${boot.ms} ms, past its 1500 ms deadline`);
+    assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} lost the connection its lock-wait watchdog needs .* past its 1500 ms deadline`));
+    assert.match(boot.error.message, /startup fails instead of outlasting the health check/);
+  } finally { clearTimeout(handoff); clearTimeout(cut); await (released ?? observations()); await merges(); await next.close(); }
+  // The abandoned migration rolled back, and the next one completes.
+  const retry = new Store(url('watchdog'));
+  try {
+    await retry.init({ lockTimeoutMs: 1500 });
+    assert.equal(await retry.schema(), schemaVersion);
+  } finally { await retry.close(); await deployed.close(); }
+});
+
+test('integration:migration-lock-bounded a migration that cannot reserve its watchdog connection fails by its deadline without taking a lock', async () => {
+  // The release's role is at its connection limit once the migration holds its own connection.
+  const admin = new pg.Client({ connectionString: url('postgres') });
+  await admin.connect();
+  await admin.query("CREATE ROLE reserve LOGIN PASSWORD 'testing-only'");
+  await admin.query('CREATE DATABASE reserve OWNER reserve');
+  const store = new Store(`postgres://reserve:testing-only@127.0.0.1:${port}/reserve`);
+  try {
+    await store.init();
+    await store.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
+    await admin.query('ALTER ROLE reserve CONNECTION LIMIT 1');
+    const boot = await timed(() => store.init({ lockTimeoutMs: 500 }));
+    assert.ok(boot.error, 'a migration without a watchdog must not start');
+    assert.ok(boot.ms < 2000, `startup failed only after ${boot.ms} ms`);
+    assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} could not reserve the connection its lock-wait watchdog needs \\(.*too many connections`));
+    const { rows } = await admin.query("SELECT count(*)::int AS locks FROM pg_locks WHERE locktype='advisory'");
+    assert.equal(rows[0].locks, 0, 'no coordination lock was taken');
+    await admin.query('ALTER ROLE reserve CONNECTION LIMIT -1');
+    await store.init({ lockTimeoutMs: 500 });
+    assert.equal(await store.schema(), schemaVersion, 'with a connection to spare the migration completes');
+  } finally { await store.close(); await admin.end(); }
 });
 
 test('integration:migration-lock-bounded the budget bounds lock waits only: a migration whose own work outlasts it completes', async () => {
