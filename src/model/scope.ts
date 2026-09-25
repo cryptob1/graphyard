@@ -244,10 +244,11 @@ export type ScopeRequestOutcome = { state: 'pending' | 'ended'; text: string } |
  * answer: the loop puts it to the independent approver, so it is still pending. An approval by
  * any path — the rule, a finding, the approver or a master — shows as the paths now planned.
  * A lease past its deadline ends the wait even before reconciliation clears it: no approval or
- * refusal can reach that attempt any more.
+ * refusal can reach that attempt any more. `now` is the control plane's time (a snapshot's `now`),
+ * since the deadline is one it issued: a worker host's clock is never compared with it.
  */
 export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly string[]; lease?: { epoch: number; expiresAt: string } | null; scopeRequest?: ScopeRequestState | null; scopeDecision?: ScopeDecision | null },
-  ask: { epoch: number; at: string; paths: readonly string[] }, cli = 'graphyard', now = Date.now()): ScopeRequestOutcome {
+  ask: { epoch: number; at: string; paths: readonly string[] }, now: number, cli = 'graphyard'): ScopeRequestOutcome {
   const own = item.scopeRequest?.epoch === ask.epoch && item.scopeRequest.at === ask.at ? item.scopeRequest : null;
   const decided = item.scopeDecision?.requestedAt === ask.at ? item.scopeDecision : null;
   const covered = ask.paths.every(path => (item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));

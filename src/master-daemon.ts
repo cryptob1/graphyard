@@ -717,6 +717,11 @@ export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
 export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string }; scope?: NonNullable<ApprovalWatch['scope']> }
 /**
+ * Whether two decisions answer the same scope request. Compared field by field: the ledger keeps
+ * the input as jsonb, which does not keep key order, so a serialised comparison never matches.
+ */
+const sameAnswers = (a: any, b: any) => !a || !b ? !a && !b : a.epoch === b.epoch && a.at === b.at;
+/**
  * The scope decision one item needs right now, or null (GY-176). A worker's additive request the
  * implication rule refused and no review finding grounds (`judged`: the loop has read the findings
  * for this request and policy revision and they named none of it) is put to the independent
@@ -2190,7 +2195,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // and asks again for the same paths with a better reason makes a new request, and it is asked.
       const judged = decision.action === 'requirements' ? history.find(entry => entry.action === 'requirements' && entry.state === 'refused'
         && JSON.stringify(entry.input?.plannedFiles) === JSON.stringify(decision.input?.plannedFiles) && entry.input?.expectedPolicyRevision === item.policyRevision
-        && JSON.stringify(entry.input?.answers) === JSON.stringify(decision.input?.answers)) : undefined;
+        && sameAnswers(entry.input?.answers, decision.input?.answers)) : undefined;
       if (judged) {
         const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: judged.id, requestedAt: stamp, settledAt: stamp, scope: decision.scope ?? null });
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${judged.id} for this widening was already refused by ${judged.refusal?.approver ?? 'its approver'}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
@@ -2207,10 +2212,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // names (`answers`). One standing for a request the worker has since withdrawn and asked again
       // can never apply — the server refuses it as no longer open — so adopting it would settle this
       // request unasked. As with a merge for an earlier candidate, the loop takes it back and asks.
-      if (standing && decision.action === 'requirements' && JSON.stringify(standing.input?.answers) !== JSON.stringify(decision.input?.answers)) {
+      if (standing && decision.action === 'requirements' && !sameAnswers(standing.input?.answers, decision.input?.answers)) {
         const stale = `requirements decision ${standing.id} is ${standing.state} for ${standing.input?.answers ? `the scope request made at ${standing.input.answers.at}` : 'a widening that answers no scope request'}, not the one ${item.key}'s worker made at ${decision.scope?.at ?? 'now'}`;
         if (!standing.input?.answers || standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}; ${!standing.input?.answers ? 'it is left to its requester' : effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}, and this one is requested once it settles: graphyard master decisions ${item.key}`);
         await effects.withdraw(item, standing.id, `${stale}; the request it answers was withdrawn, so it can never apply and is withdrawn for a decision that answers the current request`);
+        standing = undefined;
+      }
+      // Nor is one requested against requirements a policy revision has since superseded: the
+      // server rejects its approval and leaves its refusal unattached, so adopting it would settle
+      // this watch on a decision that can never answer the request. As with a merge for an earlier
+      // candidate, the loop takes it back and asks against the current revision.
+      if (standing && decision.action === 'requirements' && standing.input?.expectedPolicyRevision !== item.policyRevision) {
+        const stale = `requirements decision ${standing.id} is ${standing.state} against policy revision ${String(standing.input?.expectedPolicyRevision)}, not ${item.key}'s current revision ${item.policyRevision}`;
+        if (!standing.input?.answers || standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}; ${!standing.input?.answers ? 'it is left to its requester' : effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}, and this one is requested once it settles: graphyard master decisions ${item.key}`);
+        await effects.withdraw(item, standing.id, `${stale}; it was judged against superseded requirements, so it can never apply and is withdrawn for a decision against the current revision`);
         standing = undefined;
       }
       // A rework request names the observation it was decided from (GY-144), so its approver sees

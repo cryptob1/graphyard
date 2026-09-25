@@ -252,7 +252,7 @@ test('unit:scope-approver-routine — a decision standing for a withdrawn reques
   await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: current.id, reason: 'Still no ground in the criteria' });
   await loop.cycle(state);
   work = await reload(work.id);
-  assert.equal(scopeRequestOutcome(work, { epoch: again.epoch, at: again.scopeRequest!.at, paths: [helper] }).state, 'refused', 'the refusal reaches the request the worker is waiting on');
+  assert.equal(scopeRequestOutcome(work, { epoch: again.epoch, at: again.scopeRequest!.at, paths: [helper] }, Date.now()).state, 'refused', 'the refusal reaches the request the worker is waiting on');
   assert.deepEqual(work.plannedFiles, [layout]);
 });
 
@@ -338,7 +338,7 @@ test('unit:scope-outcome-delivered — the worker reads the outcome in its sessi
   assert.match(heard.text, /you keep your lease: continue the work/);
   assert.match(heard.text, /src\/widget\/measure\.ts/);
   await approved.cycle(approvedState);
-  assert.equal(scopeRequestOutcome(await reload(work.id), { epoch: asked.epoch, at: asked.scopeRequest!.at, paths: [helper] }).state, 'approved', 'and it stays readable after the loop moves on');
+  assert.equal(scopeRequestOutcome(await reload(work.id), { epoch: asked.epoch, at: asked.scopeRequest!.at, paths: [helper] }, Date.now()).state, 'approved', 'and it stays readable after the loop moves on');
   // An approval clears the request: a worker that only starts waiting afterwards still hears it.
   assert.equal((await reload(work.id)).scopeRequest, null);
   const late = await own(await reload(work.id));
@@ -381,19 +381,19 @@ test('unit:scope-outcome-delivered — a wait on a request whose lease passed it
   assert.doesNotMatch(heard.text, /you keep your lease/);
   const at = lapsed.scopeRequest!.at, paths = lapsed.scopeRequest!.paths;
   const deadline = Date.parse(lapsed.lease!.expiresAt);
-  assert.equal(scopeRequestOutcome(lapsed, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'pending', 'while the lease is live the request is still pending');
-  assert.equal(scopeRequestOutcome(lapsed, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline).state, 'ended');
+  assert.equal(scopeRequestOutcome(lapsed, { epoch: lapsed.epoch, at, paths }, deadline - 1).state, 'pending', 'while the lease is live the request is still pending');
+  assert.equal(scopeRequestOutcome(lapsed, { epoch: lapsed.epoch, at, paths }, deadline).state, 'ended');
   // A decision that landed before the deadline is not the attempt's to act on once it has passed:
   // neither an approval (the request cleared, the paths covered) nor a refusal says to go on.
   const approvedLate = { ...lapsed, scopeRequest: null, plannedFiles: [...lapsed.plannedFiles, ...paths] };
-  assert.equal(scopeRequestOutcome(approvedLate, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'approved');
-  const approvedAfter = scopeRequestOutcome(approvedLate, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline);
+  assert.equal(scopeRequestOutcome(approvedLate, { epoch: lapsed.epoch, at, paths }, deadline - 1).state, 'approved');
+  const approvedAfter = scopeRequestOutcome(approvedLate, { epoch: lapsed.epoch, at, paths }, deadline);
   assert.equal(approvedAfter.state, 'ended', 'an approval read after the deadline does not say to continue');
   assert.doesNotMatch(approvedAfter.text, /continue/);
   const refusedLate = { ...lapsed, scopeRequest: { ...lapsed.scopeRequest!, decision: { state: 'refused' as const, reason: 'Not this item', at, decidedBy: approver.id } } } as Work;
-  assert.equal(scopeRequestOutcome(refusedLate, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'refused');
-  assert.equal(scopeRequestOutcome(refusedLate, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline).state, 'ended', 'nor does a refusal');
-  assert.equal(scopeRequestOutcome({ ...approvedLate, lease: null }, { epoch: lapsed.epoch, at, paths }, 'graphyard', deadline - 1).state, 'ended', 'nor either once reconciliation has cleared the lease');
+  assert.equal(scopeRequestOutcome(refusedLate, { epoch: lapsed.epoch, at, paths }, deadline - 1).state, 'refused');
+  assert.equal(scopeRequestOutcome(refusedLate, { epoch: lapsed.epoch, at, paths }, deadline).state, 'ended', 'nor does a refusal');
+  assert.equal(scopeRequestOutcome({ ...approvedLate, lease: null }, { epoch: lapsed.epoch, at, paths }, deadline - 1).state, 'ended', 'nor either once reconciliation has cleared the lease');
 });
 
 test('unit:scope-outcome-delivered — a request a master widens by hand with master scope is recorded as approved, so the waiting worker reads it', async () => {
@@ -429,7 +429,7 @@ test('unit:scope-approver-routine — a refusal judged against a superseded poli
   assert.equal(work.scopeRequest!.decision!.decidedBy, 'graphyard');
   assert.equal(work.blocker, before.blocker, 'no approver blocker is written');
   assert.equal((await events(work)).filter(entry => entry.kind === 'scope.refused').length, 0);
-  assert.equal(scopeRequestOutcome(work, { epoch: work.epoch, at: work.scopeRequest!.at, paths: ['src/server/routes/work.ts'] }).state, 'pending', 'the worker is not told to withdraw');
+  assert.equal(scopeRequestOutcome(work, { epoch: work.epoch, at: work.scopeRequest!.at, paths: ['src/server/routes/work.ts'] }, Date.now()).state, 'pending', 'the worker is not told to withdraw');
 });
 
 test('unit:scope-outcome-delivered — an outcome recorded before decisions carried their epoch is read by the attempt that asked it, and by no other', async () => {
@@ -447,4 +447,58 @@ test('unit:scope-outcome-delivered — an outcome recorded before decisions carr
   // A legacy outcome asked before this epoch's claim belongs to an earlier attempt.
   const earlier = { ...legacy, scopeDecision: { ...legacy.scopeDecision!, requestedAt: new Date(Date.parse(legacy.lastAssignment!.claimedAt!) - 1_000).toISOString() } };
   await assert.rejects(awaitScopeOutcome({ api: path => ok(token(implementer), 'GET', path) }, earlier, work.epoch, { waitMs: 0 }), /no scope request for epoch/);
+});
+
+test('unit:scope-approver-routine — a decision still requested against a superseded policy revision is withdrawn and asked again against the current one', async () => {
+  let work = await claimed('stale standing decision');
+  await ask(work, [helper], 'The layout measures its breakpoints through a helper');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [first] = await standing(work);
+  assert.equal(first.state, 'requested');
+  const before = await reload(work.id);
+  assert.equal(first.input.expectedPolicyRevision, before.policyRevision);
+  // The requirements move on (a reviewpolicy change, say) while the decision is still requested.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{policyRevision}',to_jsonb($2::int)) WHERE id=$1", [work.id, before.policyRevision + 1]);
+  // A loop that restarted since holds no watch for it, so nothing but the request path meets it.
+  const restarted = emptyDaemonState(loopConfig());
+  for (let cycles = 0; cycles < 3 && (await standing(work)).filter((decision: any) => decision.state === 'requested' && decision.input.expectedPolicyRevision === before.policyRevision + 1).length === 0; cycles++) await loop.cycle(restarted);
+  const decisions = await standing(work);
+  assert.equal(decisions.find((decision: any) => decision.id === first.id)?.state, 'withdrawn', 'the stale decision is taken back rather than adopted');
+  const current = decisions.filter((decision: any) => decision.state === 'requested');
+  assert.equal(current.length, 1, 'one decision is asked against the current revision');
+  assert.equal(current[0].input.expectedPolicyRevision, before.policyRevision + 1);
+  assert.ok(loop.launched.includes(current[0].id), 'and an approver is launched for it');
+  // Its approval now answers the request: the widening applies and the worker keeps its lease.
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: current[0].id, reason: 'The helper is AC-1 spelled out' });
+  work = await reload(work.id);
+  assert.ok(work.plannedFiles.includes(helper));
+  assert.equal(work.lease?.epoch, before.epoch);
+});
+
+test('unit:scope-outcome-delivered — the wait judges lease liveness on the control plane clock, not the worker host', async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString(), at = new Date().toISOString();
+  const item = { id: 'clock-item', key: 'GY-9', plannedFiles: [layout], lease: { epoch: 2, owner: implementer.id, expiresAt }, scopeRequest: { epoch: 2, paths: [helper], reason: 'needed', requestedBy: implementer.id, at } } as unknown as Work;
+  const wait = (now: string) => awaitScopeOutcome({ api: async path => { assert.equal(path, 'work-snapshot'); return { work: [item], now }; } }, item, 2, { waitMs: 0 });
+  // The local clock says the lease is live; the server's says it has lapsed: the wait ends.
+  assert.equal((await wait(new Date(Date.parse(expiresAt) + 1_000).toISOString())).state, 'ended');
+  // And the other way round: a server that still holds the lease live keeps the request pending.
+  const later = { ...item, lease: { ...item.lease!, expiresAt: new Date(Date.now() - 60_000).toISOString() } } as Work;
+  const heard = await awaitScopeOutcome({ api: async () => ({ work: [later], now: new Date(Date.now() - 120_000).toISOString() }) }, later, 2, { waitMs: 0 });
+  assert.equal(heard.state, 'pending', 'a lease the server still holds live is not ended by a host clock ahead of it');
+});
+
+test('unit:scope-approver-routine — a restarted loop adopts the decision already standing for the same request rather than withdrawing it', async () => {
+  const work = await claimed('adopted after restart');
+  await ask(work, [helper], 'The layout measures its breakpoints through a helper');
+  const loop = harness();
+  await loop.cycle(emptyDaemonState(loopConfig()));
+  const [first] = await standing(work);
+  assert.equal(first.state, 'requested');
+  // The ledger returns `answers` with its keys reordered (jsonb): it is still the same request.
+  const restarted = emptyDaemonState(loopConfig());
+  for (let cycles = 0; cycles < 3 && !Object.values(restarted.approvals).some(watch => watch.decision === first.id); cycles++) await loop.cycle(restarted);
+  const decisions = await standing(work);
+  assert.deepEqual(decisions.map((decision: any) => [decision.id, decision.state]), [[first.id, 'requested']], 'the standing decision is adopted, not withdrawn and asked again');
+  assert.ok(Object.values(restarted.actions).some(action => action.work === work.key && /^Adopted decision/.test(action.detail)));
 });

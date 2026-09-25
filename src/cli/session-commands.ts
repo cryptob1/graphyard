@@ -42,7 +42,8 @@ export const scopeRequestCommand: CliCommand = {
  * The outcome of this attempt's open scope request, read from the item as the control plane holds
  * it (GY-176): the worker's own command reads durable state, so nothing is pasted into its session.
  * Polls until the request is decided or no longer open, or the wait (bounded under a shell tool's
- * ten-minute limit) runs out, and reports it pending then. An approval clears the request, so one
+ * ten-minute limit) runs out, and reports it pending then. Every read carries the control
+ * plane's own time, which is what the lease deadline is measured against. An approval clears the request, so one
  * decided before the worker waits is read from the decision this attempt's request received.
  */
 export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: Work, epoch: number, options: { waitMs?: number; everyMs?: number; cli?: string } = {}) {
@@ -51,11 +52,14 @@ export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: 
   if (!request) throw new Error(`${work.key} has no scope request for epoch ${epoch}; ask with scope-request ${work.key} ${epoch} PATH... -- REASON`);
   const ask = { epoch, at: request.at, paths: request.paths }, cli = options.cli ?? 'graphyard';
   const deadline = Date.now() + (options.waitMs ?? 540_000);
-  for (let item = work; ; ) {
-    const outcome = scopeRequestOutcome(item, ask, cli);
+  for (;;) {
+    // Liveness is judged on the control plane's clock, from the same read as the item: the lease
+    // deadline it issued is compared with its own `now`, never this host's.
+    const snapshot = await context.api('work-snapshot') as { work: Work[]; now: string };
+    const item = snapshot.work.find(entry => entry.id === work.id) ?? work;
+    const outcome = scopeRequestOutcome(item, ask, Date.parse(snapshot.now), cli);
     if (outcome.state !== 'pending' || Date.now() >= deadline) return { key: work.key, epoch, paths: ask.paths, ...outcome, ...(outcome.state === 'pending' ? { next: `Run scope-request ${work.key} ${epoch} --wait again` } : {}) };
     await new Promise(resolve => setTimeout(resolve, Math.min(options.everyMs ?? 10_000, Math.max(0, deadline - Date.now()))));
-    item = ((await context.api('work')) as Work[]).find(entry => entry.id === work.id) ?? item;
   }
 }
 
