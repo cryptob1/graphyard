@@ -177,30 +177,65 @@ test('unit:clean-candidate-not-refreshed — GitHub reporting a clean unqueued c
   assert.equal(neededDecision(other, { autoMerge: false })?.action, 'rework');
 });
 
-test('unit:no-other-refresh-path — reconcile, the landing check and ejection re-entry leave a clean unqueued candidate behind a moved base as it is', async () => {
-  const main = sha40('c1'), moved = sha40('c2'), head = sha40('c3');
+test('unit:no-other-refresh-path — reconcile, the landing check and ejection re-entry leave a clean unqueued candidate behind a moved base as it is, even when GitHub reports it conflicting', async () => {
+  const main = sha40('c1'), head = sha40('c3');
   let work = await validated(await submitted('No other path'), { sha: head, baseSha: main });
   const before = snapshot(work), stage = work.stage;
-  const behind = (extra: Partial<Observation> = {}) => (item: Work) => seen(item, { sha: head, baseSha: main }, { baseTip: moved, baseTree: treeOf(moved), baseTipContained: false, ...extra });
+  const behind = (tip: string, extra: Partial<Observation> = {}) => (item: Work) => seen(item, { sha: head, baseSha: main }, { baseTip: tip, baseTree: treeOf(tip), baseTipContained: false, ...extra });
+  const settled = async (path: string) => {
+    work = await reload(work);
+    assert.deepEqual(snapshot(work), before, `${path}: head, review and proofs are unchanged`);
+    assert.ok(stages.indexOf(work.stage) >= stages.indexOf(stage), `${path}: the stage does not move backwards (${stage} → ${work.stage})`);
+    assert.deepEqual([baseRefreshNeeded(work), pendingRestore(work), ejectedTipRestore(work, await store.list()), syncConflict(work)], [null, null, null, null], `${path}: nothing owes a refresh`);
+    assert.equal(behindBaseHold(work), null, `${path}: the head stays reviewable`);
+    assert.notEqual(neededDecision(work, { autoMerge: false })?.action, 'rework', `${path}: no rework is asked for`);
+    assert.deepEqual([(await events(work, 'base.refreshed')).length, (await events(work, 'base.conflict')).length], [0, 0], `${path}: no refresh or conflict was recorded`);
+  };
+  // GitHub reads the candidate mergeable: nothing is even confirmed.
   const unchanged = async (path: string, observation: (item: Work) => Observation) => {
     await onlyJob(work);
     const job = adapter(observation);
     await processJob(engine, job.github);
     assert.deepEqual(job.called, [], `${path}: no refresh, restore, merge or republish`);
-    work = await reload(work);
-    assert.deepEqual(snapshot(work), before, `${path}: head, review and proofs are unchanged`);
-    assert.ok(stages.indexOf(work.stage) >= stages.indexOf(stage), `${path}: the stage does not move backwards (${stage} → ${work.stage})`);
-    assert.deepEqual([baseRefreshNeeded(work), pendingRestore(work), ejectedTipRestore(work, await store.list()), syncConflict(work)], [null, null, null, null], `${path}: nothing owes a refresh`);
+    await settled(path);
   };
+  // GitHub reads the candidate conflicting with a tip it merges onto cleanly — the stale
+  // `mergeable: false` right after main moves (GY-274, GY-349). The only branch work is the
+  // confirmation's test merge on a scratch branch; the candidate's own branch is never written.
+  const stale = async (path: string, tip: string, observation: (item: Work) => Observation) => {
+    const clean = provider(work, tip, 'clean');
+    await onlyJob(work);
+    const job = adapter(observation, clean.github);
+    await processJob(engine, job.github);
+    assert.ok(job.called.every(name => name === 'refreshCandidateBase'), `${path}: no restore, merge or republish (${job.called.join(', ')})`);
+    assert.ok(clean.writes.every(write => write.includes('graphyard-merge-check/') || write === 'POST /merges'), `${path}: only the scratch branch is written (${clean.writes.join(', ')})`);
+    work = await reload(work);
+    assert.equal(work.observation!.conflicting, false, `${path}: the stale conflict is stored disproved`);
+    assert.equal(staleMergeability(work)?.base, tip, `${path}: the stale reading is recorded for the new tip`);
+    await settled(`${path} (stale conflict reading)`);
+    // GitHub keeps repeating the reading: the next pass confirms nothing again and changes nothing.
+    await onlyJob(work);
+    const again = adapter(observation);
+    await processJob(engine, again.github);
+    assert.deepEqual(again.called, [], `${path}: a repeated stale reading is not confirmed again`);
+    work = await reload(work);
+    assert.equal(work.observation!.conflicting, false, `${path}: the repeated stale conflict is stored disproved`);
+    await settled(`${path} (repeated stale conflict reading)`);
+  };
+  const conflicting = { mergeable: false, conflicting: true };
 
   // Reconcile: the observation job on a clean candidate behind the moved base.
-  await unchanged('reconcile', behind());
+  await unchanged('reconcile', behind(sha40('d1')));
+  await stale('reconcile', sha40('d2'), behind(sha40('d2'), conflicting));
   // Landing check: the landing comparison against the moved tip lists base changes, but no other
   // item's commits and nothing this head drops.
-  await unchanged('landing check', behind({ landing: { base: moved, files: [], carried: [], foreign: [], examined: [] } }));
+  const landing = (tip: string) => ({ landing: { base: tip, files: [], carried: [], foreign: [], examined: [] } });
+  await unchanged('landing check', behind(sha40('d3'), landing(sha40('d3'))));
+  await stale('landing check', sha40('d4'), behind(sha40('d4'), { ...landing(sha40('d4')), ...conflicting }));
   // Ejection re-entry (GY-321): the candidate was ejected for a predecessor conflict, the
   // predecessor is gone, and the same head re-enters rather than being rebuilt onto the base.
   work = await patch(work, { queueEjection: { at: new Date().toISOString(), sequence: 1, reason: `Speculative merge of ${head.slice(0, 12)} into graphyard/gy-x conflicts and cannot be resolved by Graphyard`, sha: head, policyRevision: work.policyRevision, predecessors: ['GY-9999'] },
     queueHistory: [{ at: new Date().toISOString(), event: 'predicted', sequence: 1, tip: sha40('c4'), predecessors: ['GY-9999'], from: head }] });
-  await unchanged('ejection re-entry', behind());
+  await unchanged('ejection re-entry', behind(sha40('d5')));
+  await stale('ejection re-entry', sha40('d6'), behind(sha40('d6'), conflicting));
 });
