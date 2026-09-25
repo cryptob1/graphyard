@@ -32,10 +32,16 @@ async function sidebarEntry(page: Page, entry: string) {
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: entry, exact: true }).click();
 }
 const openWork = (page: Page) => sidebarEntry(page, 'Work');
-async function openPage(page: Page, section: 'Insights' | 'Settings', tab: string) {
+async function openPage(page: Page, section: 'Shipped' | 'Settings', tab: string) {
   await sidebarEntry(page, section);
   await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: tab, exact: true }).click();
 }
+/** Insights is one page (GY-168): the shipping pulse and flow analytics are under its one Show details. */
+async function openInsightsDetails(page: Page) {
+  await sidebarEntry(page, 'Insights');
+  await page.locator('.insight-details > summary').click();
+}
+const pulse = (page: Page) => page.locator('.pulse');
 const itemPage = (page: Page, name?: string) => name ? page.getByRole('article', { name }) : page.locator('article.item-page');
 const moreDetails = (page: Page) => itemPage(page).getByText('More details', { exact: true }).click();
 const editMenu = (page: Page) => itemPage(page).getByText('Edit', { exact: true }).click();
@@ -281,7 +287,7 @@ const pulseFixture = (overrides: Record<string, unknown> = {}) => ({ generatedAt
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) test(`shipping pulse exposes exact metrics, links and chart text on ${viewport.name}`, async ({ page }) => {
   await page.setViewportSize(viewport); await fixture(page);
   await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture() }));
-  await login(page); await openPage(page, 'Insights', 'Shipping pulse');
+  await login(page); await openInsightsDetails(page);
   await expect(page.getByRole('heading', { name: 'Shipping pulse' })).toBeVisible();
   await expect(page.getByLabel('Delivery metrics')).toContainText('3');
   await expect(page.getByText('12.5h')).toBeVisible(); await expect(page.getByText('7 included · 1 excluded')).toBeVisible();
@@ -304,7 +310,7 @@ test('shipping pulse labels sparse and unavailable production samples without fa
   // unknown. An unknown total must never be drawn as 0/0, which would read as a clean record.
   const unresolved = { key: 'GY-10', title: 'Unretained authorization', pullRequest: 43, mergeSha: 'bcdef01234567890abcdef1234567890abcdef12', mergedAt: '2026-09-14T12:00:00.000Z', quality: { passingProofs: null, requiredProofs: null, violations: [], unavailableReason: 'The immutable snapshot that authorized this delivery is no longer in the retained ledger, so recorded proof totals are unknown.' } };
   await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: 1, excluded: 1, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': 1 }, split: { prToMergeAverageHours: null, mergeToProductionAverageHours: null } }, recent: [...pulseFixture().recent, unresolved] }) }));
-  await login(page); await openPage(page, 'Insights', 'Shipping pulse');
+  await login(page); await openInsightsDetails(page);
   await expect(page.getByText('Sparse sample.')).toBeVisible();
   await expect(page.getByLabel('Pull request to production metrics')).toContainText('Unavailable');
   await page.getByText('Why records were excluded').click();
@@ -324,19 +330,19 @@ test('shipping pulse distinguishes loading, unavailable, empty, partial, and sta
     if (mode === 'empty') return route.fulfill({ json: pulseFixture({ recent: [], counts: { days7: 0, days30: 0 }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: 0 })) }) });
     return route.fulfill({ json: pulseFixture({ completeness: 'partial', partialReason: 'More production observations matched a merge than the query cap reads.' }) });
   });
-  await login(page); await openPage(page, 'Insights', 'Shipping pulse');
-  await expect(page.getByRole('status')).toContainText('Loading shipping pulse');
-  mode = 'unavailable'; release(); await expect(page.getByRole('alert')).toContainText('unavailable');
-  mode = 'empty'; await openWork(page); await openPage(page, 'Insights', 'Shipping pulse');
+  await login(page); await openInsightsDetails(page);
+  await expect(page.getByRole('status').filter({ hasText: 'Loading shipping pulse' })).toBeVisible();
+  mode = 'unavailable'; release(); await expect(page.getByRole('alert').filter({ hasText: 'Shipping pulse unavailable' })).toContainText('unavailable');
+  mode = 'empty'; await openWork(page); await openInsightsDetails(page);
   await expect(page.getByText('No deliveries in this window')).toBeVisible(); await expect(page.getByLabel('Delivery metrics')).toHaveCount(0);
-  mode = 'partial'; await openWork(page); await openPage(page, 'Insights', 'Shipping pulse');
+  mode = 'partial'; await openWork(page); await openInsightsDetails(page);
   await expect(page.getByText('Partial history.')).toBeVisible(); await expect(page.getByText('More production observations matched a merge than the query cap reads.')).toBeVisible();
   // Partial at the production cap does not truncate the delivery sample, so the durations
   // are not labelled as sampled here; only the delivery cap does that.
   await expect(page.getByText('Sampled durations:')).toHaveCount(0);
   // Staleness is measured from this browser's own last successful read, so it appears
   // when a refresh fails while data is on screen - never from a repository/browser clock gap.
-  mode = 'unavailable'; await page.getByRole('button', { name: 'Refresh' }).click();
+  mode = 'unavailable'; await pulse(page).getByRole('button', { name: 'Refresh' }).click();
   await expect(page.getByText('Data is stale.')).toBeVisible();
   await expect(page.getByText('Partial history.')).toBeVisible();
 });
@@ -346,7 +352,7 @@ test('truncated history labels durations as newest-delivery samples, never as bo
   // The delivery cap makes counts lower bounds but leaves the durations a sample of the
   // newest work, so every duration group must say so rather than read as a bound.
   await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ completeness: 'partial', truncated: true, partialReason: 'More than 1000 exact deliveries occurred in the bounded window; only the newest 1000 were read. The counts are lower bounds. The durations are not bounds.' }) }));
-  await login(page); await openPage(page, 'Insights', 'Shipping pulse');
+  await login(page); await openInsightsDetails(page);
   await expect(page.getByText('Partial history.')).toBeVisible();
   await expect(page.getByText('The counts are lower bounds. The durations are not bounds.')).toBeVisible();
   const sampled = page.getByText('Sampled durations:');
@@ -360,7 +366,7 @@ test('the analytics pages are not offered to operator agents whose scoped API ca
   await fixture(page, 'operator-agent'); await login(page);
   const primary = page.getByRole('navigation', { name: 'Primary' });
   await expect(primary.getByRole('button', { name: 'Work', exact: true })).toBeVisible();
-  // Flow, Shipping pulse and Flow analytics all read analytics/flow*; with no other Insights page configured the entry is gone.
+  // Insights reads analytics/flow*, and it is the section's one page (GY-168), so the entry is gone.
   await expect(primary.getByRole('button', { name: 'Insights', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Shipping pulse|Flow analytics/ })).toHaveCount(0);
   expect(analytics).toEqual([]);
@@ -683,7 +689,7 @@ test('releases view labels verification precisely, shows membership and reports 
     reason: 'Incident', automatic: true, requestedBy: 'graphyard', requestedAt: '2026-01-01T00:00:00Z', repairWorkId: null, state: 'applied', verifiedAt: null, interval: null, history: [],
     operation: { id: 'op-12345678', registration: { id: 'rollback', revision: 1 }, principal: 'railway-rollback', epoch: 1, fencing: 'provider', claimedAt: '2026-01-01T00:00:10Z', precondition: { environment: 'production', generation: 2, expectedRunning: 'g', token: 't' }, outcome: 'applied', settledAt: '2026-01-01T00:00:40Z', providerOperationId: 'dep-9', detail: null, resolvedBy: null, evidence: null, reports: [] } };
   await page.route('**/api/delivery', route => route.fulfill(fail ? { status: 503, json: { error: 'Delivery state unavailable' } } : { json: { environments: [environment], releases: [release], rollbacks: [rollback], now: '2026-01-01T00:02:00Z' } }));
-  await login(page); await openPage(page, 'Insights', 'Releases');
+  await login(page); await openPage(page, 'Shipped', 'Releases');
   await expect(page.getByRole('heading', { name: 'Releases', level: 1 })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Delivery state unavailable');
   await expect(page.getByText('No release selected yet.')).toHaveCount(0);
@@ -712,7 +718,7 @@ test('validation view reports failures honestly and bounds request history', asy
     const older = new URL(route.request().url()).searchParams.has('cursor'); if (older) olderReads++;
     return route.fulfill(fail ? { status: 503, json: { error: 'Validation unavailable' } } : { json: { candidates: [], requests: older ? requests.slice(20) : requests.slice(0,20), nextCursor: older ? null : 'page-two' } });
   });
-  await login(page); await openPage(page, 'Insights', 'Validation');
+  await login(page); await openPage(page, 'Shipped', 'Validation');
   await expect(page.getByRole('heading', { name: 'Validation requests' })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Validation unavailable');
   await expect(page.getByText('No validation requested yet.')).toHaveCount(0);
@@ -767,7 +773,9 @@ test('merge queue shows each entry with its position in line, and its predicted 
 const prHref = 'https://github.com/fixture/repository/pull/1', commitHref = `https://github.com/fixture/repository/commit/${work.candidate!.sha}`;
 const cardPrLink = (page: Page) => page.getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' });
 const detailPrLink = (page: Page) => itemPage(page).getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' });
-const detailShaLink = (page: Page) => itemPage(page).getByRole('link', { name: `${work.candidate!.sha}, open commit for GY-1 in GitHub` });
+// A commit reads as its first eight characters (GY-168); the whole SHA is its title and link.
+const shortSha = work.candidate!.sha.slice(0, 8);
+const detailShaLink = (page: Page) => itemPage(page).getByRole('link', { name: `${shortSha}, open commit for GY-1 in GitHub` });
 // The accent token (web/style.css --accent, the approved #c5e69b).
 const focusRing = { outlineStyle: 'solid', outlineWidth: '2px', outlineColor: 'rgb(197, 230, 155)' };
 const outline = (target: Locator) => target.evaluate(e => { const s = getComputedStyle(e); return { outlineStyle: s.outlineStyle, outlineWidth: s.outlineWidth, outlineColor: s.outlineColor }; });
@@ -796,7 +804,8 @@ test('card and ownership candidate references link to the exact PR and commit in
     await expect(link).toHaveAttribute('target', '_blank');
     await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   }
-  await expect(shaLink.locator('code')).toHaveText(work.candidate!.sha);
+  await expect(shaLink.locator('code')).toHaveText(shortSha);
+  await expect(shaLink.locator('code')).toHaveAttribute('title', work.candidate!.sha);
   // The pull request is linked once, in the page header.
   await expect(dialog.locator('.pr-button')).toContainText('PR #1');
   await expect(dialog.getByRole('link', { name: /open pull request/ })).toHaveCount(1);
@@ -847,22 +856,23 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(detailShaLink(page)).toBeFocused();
     expect(await outline(detailShaLink(page))).toEqual(focusRing);
     // Linking the SHA must not turn it into an unreadable widget: the text stays
-    // selectable with the ordinary gestures, so the SHA is still copyable.
+    // selectable with the ordinary gestures, and the whole SHA is its title.
     await page.route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
     const shaText = detailShaLink(page).locator('code');
     expect(await shaText.evaluate(e => getComputedStyle(e).userSelect)).toBe('text');
     await page.evaluate(() => window.getSelection()?.removeAllRanges());
-    await expect(shaText).toHaveText(work.candidate!.sha);
+    await expect(shaText).toHaveText(shortSha);
+    await expect(shaText).toHaveAttribute('title', work.candidate!.sha);
     // A wrapped SHA would break the drag gesture below and hide characters on mobile.
     expect(await shaText.evaluate(e => e.getClientRects().length)).toBe(1);
     await shaText.dblclick();
-    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(work.candidate!.sha);
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(shortSha);
     await page.evaluate(() => window.getSelection()?.removeAllRanges());
     const shaBox = (await shaText.boundingBox())!;
     await page.mouse.move(shaBox.x - 3, shaBox.y + shaBox.height / 2);
     await page.mouse.down();
     await page.mouse.move(shaBox.x + shaBox.width + 3, shaBox.y + shaBox.height / 2, { steps: 10 });
-    expect(await page.evaluate(() => window.getSelection()?.toString())).toContain(work.candidate!.sha);
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toContain(shortSha);
     await page.mouse.up();
     await page.keyboard.press('Escape'); await expect(dialog).toHaveCount(0);
     await expect(page.locator('.work-row').first()).toBeVisible();
@@ -881,15 +891,15 @@ test('an unconfigured GitHub repository renders candidate references as non-link
   await cardSelect(page).click();
   const dialog = itemPage(page);
   await expect(dialog.locator('.pr-button').getByText('PR #1', { exact: true })).toBeVisible();
-  await expect(dialog.getByText(work.candidate!.sha, { exact: true })).toBeVisible();
+  await expect(dialog.getByText(shortSha, { exact: true })).toBeVisible();
   await expect(dialog.getByRole('link', { name: /open pull request|open commit/ })).toHaveCount(0);
 });
 
 test('legacy abbreviated SHAs and invalid candidate references never become links', async ({ page }) => {
   await fixture(page);
   const cases = [
-    { candidate: { pr: 1, sha: 'abcdef123456' }, shaText: 'abcdef123456', prHref, commitHref: null },
-    { candidate: { pr: 0, sha: work.candidate!.sha }, shaText: work.candidate!.sha, prHref: null, commitHref },
+    { candidate: { pr: 1, sha: 'abcdef123456' }, shaText: 'abcdef12', prHref, commitHref: null },
+    { candidate: { pr: 0, sha: work.candidate!.sha }, shaText: shortSha, prHref: null, commitHref },
     { candidate: { pr: 1, sha: 'not-a-sha' }, shaText: 'not-a-sha', prHref, commitHref: null }];
   for (const { candidate, shaText, prHref: expectedPr, commitHref: expectedCommit } of cases) {
     await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [{ ...work, candidate }], now: '2026-01-01T00:00:00Z' } }));

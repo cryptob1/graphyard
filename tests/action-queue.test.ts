@@ -1314,7 +1314,8 @@ test('integration:session-handles-visible — every launched session records a d
   };
   const markup = renderToStaticMarkup(createElement(WorkDetails, { ...dashboard, item: current }));
   assert.ok(markup.includes('Sessions running now'), 'the drawer names the sessions running on this item');
-  assert.ok(markup.includes('review head aaaaaaaaaaaa'));
+  assert.ok(markup.includes('review head aaaaaaaa<') || markup.includes('review head aaaaaaaa '), 'the subject, its commit shown as 8 characters (GY-168)');
+  assert.ok(!markup.includes('aaaaaaaaa'), 'never the longer hex run');
   assert.ok(markup.includes('herdr pane attach pane-7'), 'the drawer carries the command that attaches to a specific agent');
   assert.ok(markup.includes('/home/agent/.claude/transcripts/gy-87.jsonl'), 'a finished session links its transcript');
   assert.ok(markup.includes('Next action'), 'the drawer names the typed action the control plane computed');
