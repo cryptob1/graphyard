@@ -2,6 +2,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, defaultChildTimeoutMs, type BoundChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import type { MasterConfig } from './profiles.js';
+import { withRunnerAgents } from '../runner/registry.js';
 
 /**
  * The configured Herdr workspace, checked against Herdr's own inventory: a workspace closed since
@@ -38,7 +39,9 @@ export async function herdrJson(args: string[], run: ChildRun = defaultChildRun)
   return parsed.result ?? parsed;
 }
 export async function herdrRun(args: string[], run: ChildRun = defaultChildRun) { await run('herdr', args); }
-export async function listHerdrAgents(run?: ChildRun): Promise<HerdrAgent[]> { return (await herdrJson(['agent', 'list'], run)).agents ?? []; }
+// The headless runs this process started (GY-169) are listed beside Herdr's sessions, so every
+// supervision that reads the inventory sees a live run under its session name and an ended one as gone.
+export async function listHerdrAgents(run?: ChildRun): Promise<HerdrAgent[]> { return withRunnerAgents((await herdrJson(['agent', 'list'], run)).agents ?? []); }
 export async function observeHerdrAgents(run?: ChildRun) {
   try { return { agents: await listHerdrAgents(run), available: true, reason: null }; }
   catch { return { agents: [] as HerdrAgent[], available: false, reason: 'Herdr session health is unavailable; Graphyard work state remains authoritative' }; }
