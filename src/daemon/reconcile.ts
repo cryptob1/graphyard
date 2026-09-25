@@ -2,7 +2,8 @@
 import type { Work } from '../model.js';
 import { type ScopeRequestState, unplannedPaths } from '../model/scope.js';
 import type { WorkerProfile } from '../master.js';
-import type { DaemonAction, DaemonActionKind, DaemonState } from './state.js';
+import { faultActionKey, storeAction, type DaemonAction, type DaemonActionKind, type DaemonState } from './state.js';
+import { openFaultClassItem, type FaultClass } from '../model/fault-classes.js';
 import type { RoutineDecision } from './decisions.js';
 
 /**
@@ -64,11 +65,18 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = state.approvals[key] ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: the decision was requested before the restart; its approver session is supervised from here'
         : 'Resumed: no request was recorded before the restart; a standing one is adopted, otherwise it is requested again';
+    } else if (action.kind === 'fault') {
+      // Filing a recurring class's item is idempotent under its key: the item the filing made stands open naming the
+      // class, and later instances link to it; without one, the class files again under the same key.
+      const filed = openFaultClassItem(work, key.slice(faultActionKey('').length) as FaultClass);
+      next.state = filed ? 'done' : 'failed';
+      next.work = filed?.key ?? null;
+      next.detail = filed ? `Resumed: ${filed.key} stands open for the class; later instances link to it` : 'Resumed: no item stands for the class, so it is filed again under the same idempotency key';
     } else {
       next.state = 'indeterminate';
       next.detail = `Resumed: the ${action.kind} request was interrupted and its effect is unknown`;
     }
-    state.actions[key] = next; resumed.push(next);
+    resumed.push(storeAction(state, key, next));
   }
   return resumed;
 }
