@@ -679,6 +679,15 @@ export function dismissalResolution(record: Pick<ReviewRecord, 'key' | 'sha' | '
  */
 /** A session Herdr reports finished or blocked is given this long to post its verdict before it is recorded as failed. */
 export const reviewIdleGraceMs = reviewLedgerSpec.idleGraceMs;
+/**
+ * GY-193: a session that took up its request and then stopped without posting has judged the head
+ * and only failed to post. The post-your-verdict reminder goes to it once, and when no verdict
+ * follows within this bound the session is settled as failed, so the dispatcher relaunches the
+ * request at once rather than after the full idle grace and a retry wait.
+ */
+export const reviewVerdictReminderMs = 120_000;
+/** The resolutions a judged session that never posted settles with; the dispatcher relaunches these at once. */
+export const unpostedVerdict = /^the reviewer session (?:finished \(|ended waiting on input)/;
 
 export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'baseSha' | 'policyRevision'>, work: Work[] | undefined): string | null {
   const item = work?.find(candidate => candidate.key === record.key);
@@ -798,7 +807,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
           try { await retry(record, reviewRetryPrompt(config.repository, record)); }
           catch { /* the grace period records the session as failed when the prompt cannot reach it */ }
         }
-        else if (now.getTime() - Date.parse(record.idleSince) >= reviewIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
+        else if (now.getTime() - Date.parse(record.idleSince) >= (record.acknowledgedAt ? reviewVerdictReminderMs : reviewIdleGraceMs) && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
           ? `the reviewer session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without a verdict on ${record.sha.slice(0, 12)}`
           : `the reviewer session finished (${agent?.agent_status ?? 'gone from Herdr'}) without posting a verdict on ${record.sha.slice(0, 12)}`);
       } else if (record.idleSince) { delete record.idleSince; changed++; }

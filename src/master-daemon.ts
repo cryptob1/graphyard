@@ -9,7 +9,8 @@ import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
+import { pathScope, pathScopeContains, pinningTestGround, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, scopeRefusalBlocker, testFile, type ScopeRequestState } from './model/scope.js';
+import { mechanicalFailure, mechanicalVerdicts } from './model/mechanical-proofs.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
@@ -24,8 +25,8 @@ import { stalledItems } from './model/action-account.js';
 import { humanNeededActions } from './model/next-action.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reclaimCheckouts, saveProducerLedger } from './producer.js';
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
-import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
-import { defaultAwaitReviewers } from './auto-dispatch.js';
+import { basePaths, baseText, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
+import { defaultAwaitReviewers, unexercisedFindings } from './auto-dispatch.js';
 import { inspectProducerCredentials, inspectProfileAccounts, preservePartialWork, profileAccount, readEnvironmentLog, recordObservedExhaustion, roleCapacity, selectionKey, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, transientMergeRace, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
@@ -761,7 +762,7 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   return null;
 }
 
-export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve'] as const;
+export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item (a resolve's trigger). */
 /** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
@@ -775,7 +776,8 @@ export interface RoutineDecision { action: RoutineDecisionAction; reason: string
 export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
   const needed = neededDecision(work, config);
   if (!needed) return null;
-  if (needed.action === 'merge') return needed;
+  // A scope decision widens the live attempt's planned files; its worker keeps working, so nothing is attested about it.
+  if (needed.action === 'merge' || needed.action === 'requirements') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
   if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
@@ -789,6 +791,10 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
   }
+  // A scope request the widening rule refused goes to an independent approver (GY-199) rather than
+  // waiting as a blocker on a master session; its worker keeps its lease meanwhile.
+  const scope = scopeDecision(work);
+  if (scope) return scope;
   // Like a verdict, a conflict keeps matching the head it was found on until a new one is pushed,
   // and the engine's `rework` does not clear it: once the round is requested the item needs a
   // worker, not a second decision, even when that round's worker dies before pushing.
@@ -805,6 +811,11 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
+  // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
+  // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
+  // which waits for one — must not hold this rework.
+  const proofs = proofRework(work);
+  if (proofs) return { action: 'rework', ...proofs };
   // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
   // opened them — a bot's COMMENTED review leaves no verdict, so without this the item waited on a human.
   // The review of the current head judges those threads first: its approval names the ones fixed and
@@ -823,6 +834,81 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
 }
+/**
+ * GY-193. The rework a head's own proofs call for, or null. A trusted proof that failed on the head
+ * (the build gate returns it to its worker before review) and evidence the producer recorded as not
+ * exercising its criterion (the proof also passed with the change removed) both leave a head no
+ * review will ever judge, so the rework is asked for now, whatever threads stand open on it: the
+ * rule that waits for a review to judge the threads first would wait for a review that never comes.
+ * The reason quotes each finding and names the open threads, so the worker takes both in one round.
+ */
+export function proofRework(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const failed = mechanicalVerdicts(work, [work], new Date()).filter(verdict => verdict.outcome === 'failed');
+  const unexercised = unexercisedFindings(work);
+  if (!failed.length && !unexercised.length) return null;
+  const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
+  const findings = [
+    ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalFailure(verdict, candidate.sha)).join('; ')}`] : []),
+    ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}"`).join('; ')}`] : []),
+  ];
+  const named = threads.slice(0, 5).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
+  const open = threads.length ? ` ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} also unresolved on the pull request (${named.join('; ')}${threads.length > named.length ? `; and ${threads.length - named.length} more` : ''}); address them in the same round.` : '';
+  return { reason: `${work.key}: ${findings.join('. ')}. No review judges a head whose proof did not pass, so the item returns to a worker now to fix what the proof found.${open}`,
+    binding: `${candidate.sha}:proof:${[...failed.map(verdict => verdict.proof), ...unexercised.map(entry => `unexercised:${entry.proof}`)].sort().join(',')}` };
+}
+
+/**
+ * GY-199. The scope decision a refused request needs, or null. A purely additive request the
+ * widening rule refused, and that no review finding or pinning test granted, is put to an
+ * independent approver agent as a requirements decision that widens planned files by exactly the
+ * outstanding paths: approved, the control plane applies it to the live attempt (a live-scope
+ * widening keeps the lease) and the answered request and its blocker clear; refused, the approver's
+ * refusal is what the item stays blocked on. The reason carries what the approver judges from: the
+ * request, the item's criteria, the review threads standing on the head and where each file's diff is.
+ */
+export function scopeDecision(work: Work): RoutineDecision | null {
+  const request = work.scopeRequest;
+  if (!request || request.decision?.state !== 'refused' || !work.blocker?.startsWith(scopeRefusalBlocker) || work.stage === 'done') return null;
+  if (request.remove?.length || request.criteria?.length || redecidableScopeRefusal(work)) return null;
+  if (!work.lease || work.lease.epoch !== request.epoch) return null;
+  const paths = [...new Set(request.paths)].filter(path => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+  if (!paths.length) return null;
+  const cut = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  const threads = work.candidate && work.observation?.candidate.sha === work.candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
+  const cited = threads.filter(thread => paths.some(path => pathScopeContains(path, thread.path)));
+  const files = (work.observation?.scopeFiles ?? []).filter(file => paths.some(path => pathScopeContains(path, file.path)));
+  const diff = work.candidate ? ` Diffs: ${files.length ? files.map(file => `${file.path} (${file.status}, +${file.additions}/-${file.deletions})`).join(', ') : 'no requested file is changed on the head yet'}; read them with gh pr diff ${work.candidate.pr}.` : '';
+  const reason = `${work.key}: ${request.requestedBy} (epoch ${request.epoch}) asks to widen planned files by ${namePaths(paths, 400)} because ${cut(request.reason, 400)}. The widening rule refused it: ${cut(request.decision.reason, 300)}. `
+    + `Criteria: ${work.criteria.map(criterion => `${criterion.id} ${cut(criterion.text, 160)}`).join(' | ')}. `
+    + `Review threads on the head: ${cited.length ? cited.map(describeThread).join('; ') : threads.length ? `none names a requested file (${threads.length} unresolved)` : 'none unresolved'}.${diff} `
+    + 'Approve when the files are part of the change the criteria describe; refuse when they are new scope, and the item stays blocked on the refusal.';
+  return { action: 'requirements', reason, binding: `scope:${request.epoch}:${request.at}`, input: { plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])] } };
+}
+
+/**
+ * GY-199. What grants each requested path without an approver, or the first refusal: a trusted
+ * review finding naming it (review-scope.ts findingScope), or — for a test file — the pinning rule
+ * (model/scope.ts pinningTestGround), read from the base branch's texts outside every transaction.
+ */
+export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>): Promise<{ grounds: { path: string; ground: string }[] } | { refusal: string }> {
+  const grounds: { path: string; ground: string }[] = [];
+  let planned: { path: string; text: string | null }[] | null = null;
+  for (const path of paths) {
+    const named = findingScope([path], findings, exists);
+    if ('grounds' in named) { grounds.push(...named.grounds); continue; }
+    if (read && testFile(path) && exists(path)) {
+      const text = await read(path);
+      planned ??= await Promise.all((item.plannedFiles ?? []).filter(scope => !pathScope(scope).prefix && !scope.includes('*')).slice(0, 50).map(async scope => ({ path: scope, text: await read(scope) })));
+      const ground = pinningTestGround(path, request.reason, text, planned);
+      if (ground) { grounds.push({ path, ground }); continue; }
+    }
+    return named;
+  }
+  return { grounds };
+}
+
 /** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
 const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
 /**
@@ -970,7 +1056,7 @@ export function workerStopped(work: Work, now: number, assessment?: ContainmentA
 /** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
 export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
   const needed = neededDecision(work, config);
-  if (!needed || needed.action === 'merge' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
+  if (!needed || needed.action === 'merge' || needed.action === 'requirements' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
   const unverified = workerStopped(work, now, assessment).unverified;
   return unverified ? { action: needed.action, reason: `${work.key} needs a ${needed.action} decision, but it attests that the previous worker is stopped and that is not verified: ${unverified}` } : null;
 }
@@ -1455,6 +1541,8 @@ export interface DaemonEffects {
   reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
   /** Which of the paths exist on the base branch, read from one fetch of it per decision. */
   basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
+  /** A file's text on the base branch as `basePaths` fetched it, or null when it has none: what the pinning-test rule reads (GY-199). */
+  baseText?: (path: string) => Promise<string | null>;
   /**
    * The master's own additive scope widening — the revision `master scope` applies — with its
    * audited reason, bound to the scope request it answers (`answeringWidening`).
@@ -1900,6 +1988,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   //     a refusal on the findings is judged again every findingRecheckMs, never cached for good.
   //     The reads take seconds; the widening names the request it answers, so a claim or lease
   //     end that clears that request meanwhile makes the control plane refuse it, never apply it.
+  // Items whose scope the loop widened this cycle: the decision step reads the cycle's snapshot, which
+  // still shows the refusal, and must not put the answered request to an approver as well.
+  const scopeWidened = new Set<string>();
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<boolean> => {
     if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return false;
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return false;
@@ -1914,7 +2005,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     try {
       const findings = await effects.reviewFindings(item);
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
-      const scoped = findingScope(paths, findings, path => existing.has(path));
+      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText);
       if ('refusal' in scoped) {
         const detail = boundDetail(`Not widened on a review finding: ${scoped.refusal}`);
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
@@ -1924,8 +2015,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       }
       const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
-        `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+        `Additive scope ${item.key}'s own change calls for — a review finding names it, or a test pins text a planned file holds: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       await effects.widenScope(item, request, paths, reason);
+      scopeWidened.add(item.id);
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return true;
     } catch (error) {
@@ -1961,7 +2053,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
           : `Refused ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'} ${waited}: ${decision.reason}`),
         attempts, cycle: state.cycle }, now(), effects.persist));
       if (decision.state === 'refused' && await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision })) return;
-      if (decision.state === 'refused') {
+      // A loop that can request decisions puts the refusal to an approver next cycle (GY-199); only
+      // one that cannot leaves it to a master session.
+      if (decision.state === 'refused' && !(effects.decide && effects.approver && scopeDecision(decided))) {
         const escalationKey = `escalation:scope:${item.id}:${request.at}`;
         performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
           detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.length ? namePaths(request.paths) : 'a requirements change'} because ${boundDetail(request.reason, 400)}, and the loop refused it because ${boundDetail(decision.reason, 500)}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
@@ -2315,7 +2409,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       }
       // A request whose response was lost is already standing on the item, and the server refuses a
       // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
-      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
+      // A requirements decision is adopted only when it is this very widening: a master's own
+      // requirements revision standing on the item is not a scope decision (GY-199).
+      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved')
+        && (decision.action !== 'requirements' || JSON.stringify(entry.input?.plannedFiles) === JSON.stringify(decision.input?.plannedFiles)));
       // Only a merge decision names what it binds. One standing for an earlier candidate can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
       if (standing && decision.action === 'merge' && !(standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision)) {
@@ -2420,6 +2517,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
     const decision = routineDecision(item, config, clock, assessment);
+    if (decision?.action === 'requirements' && scopeWidened.has(item.id)) return;
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config);
@@ -3211,6 +3309,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
       trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
+    baseText: path => baseText(root, current().baseBranch, path, run),
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;

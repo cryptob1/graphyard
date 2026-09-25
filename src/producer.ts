@@ -98,6 +98,8 @@ export const producerIdleGraceMs = producerLedgerSpec.idleGraceMs;
  * Such sessions have a bound of their own, `unstartedRetryLimit`, because a request whose
  * sessions keep not starting has a launcher problem that more launches will not fix.
  */
+/** Every session one request may have in all, however each ended: the dispatch failure limit (auto-dispatch.ts). */
+export const requestAttemptLimit = 12;
 export const sessionRetryLimit = 4, sessionRetryBaseMs = 60_000, sessionRetryMaxMs = 30 * 60_000, unstartedRetryLimit = 3;
 export const sessionRetryDelay = (attempts: number) => Math.min(sessionRetryBaseMs * 4 ** Math.max(0, attempts - 1), sessionRetryMaxMs);
 const retriedStates = ['failed', 'expired'];
@@ -221,10 +223,14 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const pending = ledger.producers.find(record => record.state === 'pending' && record.key === work.key && record.group === binding.group);
   if (pending) throw new Error(`A producer session for ${work.key} ${binding.group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
   // One live session per request: a request whose sessions all failed or expired may be launched
-  // again, as its next attempt, until the retry limit.
+  // again, as its next attempt, until the retry limit. A session that settled any other way while
+  // the request still stands answered nothing, and the dispatcher attempts it again (GY-193), up to
+  // `requestAttemptLimit` sessions for the request in all.
   const prior = ledger.producers.filter(record => record.requestId === request.id);
-  if (prior.some(record => !retriedStates.includes(record.state))) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
-  if (prior.length >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions fail or expire; no further automatic attempt`);
+  if (prior.some(record => record.state === 'pending')) throw new Error(`Request ${request.id} was already launched for ${work.key}; one session per request`);
+  const failedRuns = prior.filter(record => retriedStates.includes(record.state)).length;
+  if (retriedStates.includes(prior.at(-1)?.state ?? '') && failedRuns >= sessionRetryLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${failedRuns} sessions fail or expire; no further automatic attempt`);
+  if (prior.length >= requestAttemptLimit) throw new Error(`Request ${request.id} for ${work.key} already had ${prior.length} sessions; no further automatic attempt`);
   // The profile's room (GY-107): one session per name, and no more sessions than it declares.
   // A name this session would take that Herdr already shows is the same launch twice.
   const id = randomUUID();

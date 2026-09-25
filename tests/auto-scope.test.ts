@@ -11,8 +11,8 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import { actionDetailMax, emptyDaemonState, findingRecheckMs, runCycle, scopeBudget, scopeKey, answeringWidening, type DaemonEffects, type DaemonState, type ScopeMeasurement } from '../src/master-daemon.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
+import { decisionInput, masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, pinningTestGround, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
@@ -626,4 +626,142 @@ test('unit:review-finding-scope — only a file on the base that a finding names
     : JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
       { id: 4, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'APPROVED', body: 'ok' }]]);
   assert.ok(!(await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: [] }, approved)).some(entry => entry.ground.startsWith('review ') && !entry.ground.startsWith('review thread')), 'an approval after the change request withdraws it');
+});
+
+// ---- GY-199: agents approve agents — a refused scope request goes to an independent approver ------
+// unit:refused-scope-goes-to-approver, unit:review-named-and-pinning-tests-granted.
+
+const scopeApprover = { id: 'scope-approver', token: `scope-approver-${'a'.repeat(32)}`, capabilities: ['decision:approve'] };
+let scopeApproverReady = false;
+async function ensureScopeApprover() {
+  if (scopeApproverReady) return;
+  await ok(token(operator), 'POST', 'operator-agents', { id: scopeApprover.id, displayName: scopeApprover.id, capabilities: scopeApprover.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: scopeApprover.token, reason: 'Onboarding provisions the independent approver agent' });
+  scopeApproverReady = true;
+}
+/**
+ * The loop's decision effects against the real control plane: its own operator-agent requests, and an
+ * approver launch it records. Items earlier tests left in the database are the loop's too; only the
+ * decisions about `mine` are recorded.
+ */
+type Decided = { id: string; action: string; reason: string; input: Record<string, unknown> };
+function scopeDecisionEffects(decided: Decided[], approvers: string[], mine: () => string[]): Partial<DaemonEffects> {
+  return {
+    herdr: async () => ({ agents: [], available: true }),
+    decide: async (item, action, reason, input = {}) => {
+      const requested = await ok(master.token, 'POST', `work/${item.id}/decide`, { action, input: decisionInput(action, item, input), reason });
+      if (mine().includes(item.id)) decided.push({ id: requested.id, action, reason, input });
+      return requested;
+    },
+    decisions: item => ok(master.token, 'GET', `work/${item.id}/decisions`),
+    withdraw: (item, decision, reason) => ok(master.token, 'POST', `work/${item.id}/decide`, { action: 'withdraw', decision, reason }),
+    approver: async (item, decision) => { if (mine().includes(item.id)) approvers.push(decision); return { agentName: `graphyard-approver-${approvers.length}`, pane: null }; },
+  };
+}
+const widenAsMaster = (widened: string[][]) => async (item: Work, asked: ScopeRequestState, paths: string[], reason: string) => {
+  widened.push(paths);
+  return ok(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
+};
+
+test('unit:refused-scope-goes-to-approver — a request the widening rule refuses becomes a scope decision within one cycle, put to an independent approver whose grant widens the item and clears its blocker, and whose refusal alone keeps it blocked', async () => {
+  await ensureScopeApprover();
+  let work = await claimed('refused scope goes to an approver');
+  const state = emptyDaemonState(loopConfig());
+  const decided: Decided[] = [], approvers: string[] = [], widened: string[][] = [];
+  const overrides: Partial<DaemonEffects> = { ...scopeDecisionEffects(decided, approvers, () => [work.id]), reviewFindings: async () => [], basePaths: async paths => new Set(paths), widenScope: widenAsMaster(widened) };
+  const route = 'src/server/routes/work.ts';
+  // The thread the request cites is not a trusted finding the loop could grant on, so the rule refuses it.
+  await request(work, { paths: [route], reason: `Review thread PRRT_route01 names ${route}: the route still returns the stale revision` });
+  await cycle(state, overrides);
+  work = await reload(work.id);
+  assert.equal(work.scopeRequest!.decision!.state, 'refused', 'the widening rule refuses it');
+  assert.ok(work.blocker?.startsWith(scopeRefusalBlocker));
+  assert.ok(!escalations(state).some(entry => entry.key.startsWith(`escalation:scope:${work.id}`)), 'it is not left to a master session');
+  // Within one cycle: a scope decision is requested with the master's own identity and an approver launched.
+  await cycle(state, overrides);
+  assert.equal(decided.length, 1, JSON.stringify(decided));
+  assert.equal(decided[0].action, 'requirements');
+  assert.deepEqual(decided[0].input, { plannedFiles: [layout, route] }, 'it widens by exactly the requested file');
+  assert.match(decided[0].reason, /PRRT_route01/, 'the approver reads the request and the thread it cites');
+  assert.match(decided[0].reason, /AC-1 The widget layout renders/, 'and the item\'s criteria');
+  assert.match(decided[0].reason, /The widening rule refused it/);
+  assert.deepEqual(approvers, [decided[0].id], 'an independent approver is launched for it');
+  assert.equal(widened.length, 0, 'nothing is widened without the approver');
+  // The approver grants it: the control plane applies it to the live attempt and the blocker clears.
+  await ok(scopeApprover.token, 'POST', `work/${work.id}/approve`, { decision: decided[0].id, reason: 'The route is the file the review thread names on this change' });
+  work = await reload(work.id);
+  assert.ok(work.plannedFiles.includes(route), `widened: ${work.plannedFiles}`);
+  assert.equal(work.scopeRequest, null, 'the answered request is cleared');
+  assert.equal(work.blocker, null, 'the blocker clears');
+  assert.ok(work.lease && work.lease.epoch === work.epoch, 'the attempt keeps its lease');
+  await cycle(state, overrides);
+  assert.equal(decided.length, 1, 'an applied decision is not requested again');
+
+  // An approver's refusal is recorded, and it is the one thing the item then stays blocked on.
+  const other = 'src/billing/invoice.ts';
+  await request(work, { paths: [other], reason: 'The invoice module would be tidier too' });
+  await cycle(state, overrides);
+  await cycle(state, overrides);
+  assert.equal(decided.length, 2);
+  await ok(scopeApprover.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: decided[1].id, reason: 'The invoice module is new scope no criterion describes' });
+  await cycle(state, overrides);
+  await cycle(state, overrides);
+  work = await reload(work.id);
+  assert.ok(!work.plannedFiles.includes(other));
+  assert.ok(work.blocker?.startsWith(scopeRefusalBlocker), 'the item stays blocked on the recorded refusal');
+  assert.equal(decided.length, 2, 'a refused decision is not requested again');
+  assert.ok(escalations(state).some(entry => entry.key === `escalation:decision-refused:${decided[1].id}`), 'the refusal stands for the master to answer');
+});
+
+test('unit:review-named-and-pinning-tests-granted — a file an unresolved review finding names, and a test whose failing assertion quotes text a planned file holds, are granted without an approver; an unrelated source file still goes to the approver', async () => {
+  await ensureScopeApprover();
+  const state = emptyDaemonState(loopConfig());
+  const decided: Decided[] = [], approvers: string[] = [], widened: string[][] = [];
+  const mine: string[] = [];
+  const pinning = 'tests/widget.test.ts', heading = 'Old palette heading';
+  const texts: Record<string, string> = {
+    [pinning]: `test('layout', () => { assert.match(render(), /${heading}/); });\n`,
+    [layout]: `export const heading = '${heading}';\n`,
+    'tests/unrelated.test.ts': `test('other', () => { assert.equal(total(), 'Some other text entirely'); });\n`,
+  };
+  const findings = [{ ground: 'review thread PRRT_named01', text: 'src/merge-queue.ts:85 still marks every item with blocking threads' }];
+  const overrides: Partial<DaemonEffects> = { ...scopeDecisionEffects(decided, approvers, () => mine), reviewFindings: async () => findings, basePaths: async paths => new Set(paths),
+    baseText: async path => texts[path] ?? null, widenScope: async (item, asked, paths, reason) => mine.includes(item.id) ? widenAsMaster(widened)(item, asked, paths, reason) : null };
+
+  // Named by an unresolved review finding on the head: granted by the loop, no approver.
+  let named = await claimed('review-named file granted');
+  await request(named, { paths: ['src/merge-queue.ts'], reason: 'The reviewer thread names src/merge-queue.ts:85' });
+  // A test that pins text the item changes: its failing assertion quotes a planned file's text.
+  let pinned = await claimed('pinning test granted');
+  await request(pinned, { paths: [pinning], reason: `${pinning} fails on its assertion /${heading}/ because AC-1 renames that heading in the layout` });
+  // A test whose quote no planned file holds, and an unrelated source file: the approver's to decide.
+  let unpinned = await claimed('unpinned test goes to the approver');
+  await request(unpinned, { paths: ['tests/unrelated.test.ts'], reason: 'tests/unrelated.test.ts fails on "Some other text entirely"' });
+  let unrelated = await claimed('unrelated file goes to the approver');
+  await request(unrelated, { paths: ['src/server/routes/work.ts'], reason: 'The route would be easier to change here too' });
+  mine.push(named.id, pinned.id, unpinned.id, unrelated.id);
+
+  await cycle(state, overrides);
+  named = await reload(named.id); pinned = await reload(pinned.id); unpinned = await reload(unpinned.id); unrelated = await reload(unrelated.id);
+  assert.ok(named.plannedFiles.includes('src/merge-queue.ts'), `the review-named file is granted: ${named.plannedFiles}`);
+  assert.equal(named.scopeRequest, null); assert.equal(named.blocker, null);
+  assert.ok(pinned.plannedFiles.includes(pinning), `the pinning test is granted: ${pinned.plannedFiles}`);
+  assert.equal(pinned.scopeRequest, null); assert.equal(pinned.blocker, null);
+  const pinnedAction = Object.entries(state.actions).find(([key]) => key.startsWith(`scope:${pinned.id}:`) && key.includes(':finding:'))![1];
+  assert.ok(pinnedAction.detail.includes(`${pinning} pins "${heading}", which planned file ${layout} holds`), pinnedAction.detail);
+  assert.ok(!unpinned.plannedFiles.includes('tests/unrelated.test.ts'), 'a test whose quote no planned file holds is not granted');
+  assert.ok(!unrelated.plannedFiles.includes('src/server/routes/work.ts'), 'an unrelated source file is not granted');
+  assert.equal(decided.length, 0, 'no decision was needed for the granted files');
+  // The next cycle puts the two the rule could not grant to the approver, and nothing else.
+  await cycle(state, overrides);
+  assert.deepEqual(decided.map(entry => entry.action), ['requirements', 'requirements']);
+  assert.deepEqual(decided.map(entry => (entry.input.plannedFiles as string[]).at(-1)).sort(), ['src/server/routes/work.ts', 'tests/unrelated.test.ts']);
+  assert.equal(approvers.length, 2);
+  assert.deepEqual(widened.map(paths => paths.join(',')).sort(), ['src/merge-queue.ts', pinning].sort(), 'only the two automatic grants widened without an approver');
+
+  // The rule itself, on what the loop read.
+  assert.equal(pinningTestGround(pinning, `fails on /${heading}/`, texts[pinning], [{ path: layout, text: texts[layout] }]), `${pinning} pins "${heading}", which planned file ${layout} holds`);
+  assert.equal(pinningTestGround(pinning, `fails on /${heading}/`, texts[pinning], [{ path: layout, text: 'export const heading = "New";' }]), null, 'no planned file holds the quote');
+  assert.equal(pinningTestGround(pinning, 'fails on /Not in the test/', texts[pinning], [{ path: layout, text: 'Not in the test' }]), null, 'the test does not hold the quote');
+  assert.equal(pinningTestGround('src/widget/Other.ts', `fails on /${heading}/`, texts[pinning], [{ path: layout, text: texts[layout] }]), null, 'only a test file is granted this way');
+  assert.equal(pinningTestGround(pinning, 'fails on `short`', 'short', [{ path: layout, text: 'short' }]), null, 'a quote too short to tie the two together');
 });
