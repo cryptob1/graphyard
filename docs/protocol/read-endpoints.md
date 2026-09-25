@@ -1,13 +1,13 @@
 <!-- page: Agent protocol | 2 | status, snapshots and events. -->
 # Read endpoints
 
-- `GET /healthz`: health, no token.
-- `GET /api/status`: principal, integration configuration, `appPermissions`, held and failed jobs, `githubBudget`, server time.
-- `GET /api/work-snapshot`: `{ work, now }` from one database snapshot, including each item's `autoDispatch` requests; age leases against its `now`.
-- `GET /api/work`: every aggregate, in creation order.
-- `GET /api/events?work=UUID`: one item's events, newest first.
-- `GET /api/analytics/flow` and `/api/analytics/attribution`: bounded analytics.
-- `GET /api/deployments`: provider observations recorded by `POST /api/deployments` (`producer` or `admin`; `state` `succeeded`, `failed` or `rolled_back`; they never move a gate).
-- `GET /api/delegation`, `GET /api/proof-grants`, `GET /api/delivery`: slices, live proof authority, release state.
+- `GET /healthz`: unauthenticated health.
+- `GET /api/status`: principal, integrations, `appPermissions`, held/failed jobs, `githubBudget`, server time.
+- `GET /api/work-snapshot`: `{work, now}` from one snapshot, with `autoDispatch` requests; age leases against `now`.
+- `GET /api/work`: every aggregate, creation-ordered.
+- `GET /api/events?work=UUID`: one item's events, newest first; `graphyard events GY-N --all` walks all.
+- `GET /api/analytics/flow`, `/api/analytics/attribution`: bounded. Flow days: UTC midnights to today, the first holding earlier time. `window.covered`/`window.kinds`: scan and per-kind reach; `throughput[].covered: false`: unread, not zero. Merged is Deploy; `stepDwell[].sparse` (n<5): marked, unsplit.
+- `GET /api/deployments`: `POST /api/deployments` observations (`producer`/`admin`; `state` `succeeded`, `failed` or `rolled_back`; never moves a gate).
+- `GET /api/delegation`, `/api/proof-grants`, `/api/delivery`: slices, live proof authority, release state.
 
-Event reads exclude routine `github.observed` and `heartbeat` rows unless `routine=include`; page with `limit` (default 300) and `cursor` (the last `seq`), filter with `kind`, `since` and `until`. `graphyard events GY-N --all` walks an item's whole life.
+Events skip routine `github.observed`/`heartbeat` rows unless `routine=include`; page by `limit` (default 300) and `cursor` (last `seq`); filter by `kind`, `since`, `until`.
