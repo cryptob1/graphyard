@@ -1,6 +1,7 @@
 import { agentOwner, approverSessionName, type AttentionItem, type HerdrAgent } from '../master.js';
 import { standingCapacity, type CapacityState } from '../model/capacity.js';
 import { elapsed } from '../model/sessions.js';
+import { mapBounded, readConcurrency } from '../master/timings.js';
 
 type DecisionRow = { id: string; action: string; state: string; requestedAt: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
 type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null };
@@ -43,9 +44,12 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
   const attentionItems: AttentionItem[] = [];
   const histories: { key: string; decisions: DecisionRow[]; capacity?: CapacityState | null }[] = [];
   let refused = 0;
-  for (const item of work) {
-    if (item.stage === 'done') continue;
-    const history = await masterApi(`work/${item.id}/decisions`).catch(() => null);
+  // One read per open item, at most `readConcurrency` in flight (GY-377): read one after another,
+  // 170 open items at ~0.4 s each held every loop cycle and every status build for over a minute.
+  const open = work.filter(item => item.stage !== 'done');
+  const read = await mapBounded(open, readConcurrency, item => masterApi(`work/${item.id}/decisions`).catch(() => null));
+  for (const [index, item] of open.entries()) {
+    const history = read[index];
     const decisions: DecisionRow[] = history?.decisions ?? [];
     histories.push({ key: item.key, decisions, capacity: item.capacity });
     const latest = new Map<string, string>();

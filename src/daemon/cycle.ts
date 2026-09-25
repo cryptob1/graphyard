@@ -15,6 +15,7 @@ import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
+import { Timings, withTimings } from '../master/timings.js';
 
 /**
  * One coordination cycle: close finished sessions, reclaim the disk finished assignments hold,
@@ -23,22 +24,30 @@ import { faultStep } from './faults.js';
  * them leaves an entry the next start reconciles against Graphyard instead of repeating.
  */
 export async function runCycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number = Date.now) {
-  const effects = boundedPersist(unbounded);
+  // Every step this cycle runs is timed, and every external call beneath it of a second or more is
+  // recorded against the step it was made in (GY-377): the recorder is found through the async
+  // context, so the dispatcher running beside the cycle in the same process keeps its own calls.
+  const timings = new Timings(now);
+  return withTimings(timings, () => cycle(config, state, unbounded, now, timings));
+}
+
+async function cycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number, timings: Timings) {
+  const effects = serialPersist(boundedPersist(unbounded));
   const startedAt = now();
-  const read = await effects.snapshot();
+  const read = await timings.step('snapshot', () => effects.snapshot());
   const readAt = now();
   // Filing runs in the dispatcher, beside this cycle: an approval it has not yet reconciled still
   // sets its threads aside, so the cycle never sends a head back over what that review filed.
-  const snapshot = setAsideFollowUpThreads(read, await effects.followUpThreads?.(read.work, Number.isFinite(Date.parse(read.now)) ? Date.parse(read.now) : readAt).catch(() => undefined));
+  const snapshot = setAsideFollowUpThreads(read, await timings.step('follow-up threads', () => effects.followUpThreads?.(read.work, Number.isFinite(Date.parse(read.now)) ? Date.parse(read.now) : readAt).catch(() => undefined)));
   const observedAt = Date.parse(snapshot.now), clock = Number.isFinite(observedAt) ? observedAt : startedAt;
   // The same bound `master status` uses, from the read that produced this snapshot: containment
   // settlement may only be proposed while the local clock can be compared with the control plane.
   const clockOffset = { min: Math.round(startedAt - clock), max: Math.round(readAt - clock) };
   const performed: DaemonAction[] = [];
   // The merge queue batches by this loop's configuration; a failed publication is retried next cycle.
-  if (effects.publishMergeBatchSize) await effects.publishMergeBatchSize().catch(() => undefined);
+  if (effects.publishMergeBatchSize) await timings.step('merge queue', () => effects.publishMergeBatchSize!().catch(() => undefined));
   const resumed = reconcilePendingActions(state, snapshot.work, clock);
-  if (resumed.length) { performed.push(...resumed); await effects.persist(state); }
+  if (resumed.length) { performed.push(...resumed); await timings.step('reconcile', () => effects.persist(state)); }
   // One item's failure is that item's failed action, never the cycle's (GY-187). Each step handles
   // its items one at a time inside this: a throw — a malformed field, an effect that failed outside
   // its own try, a value no step anticipated — is recorded against the item it was handling, and
@@ -67,45 +76,45 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   };
   spent('observe');
 
-  const agents = await effects.agents();
-  const credentials = await effects.credentials(config.workers);
+  const agents = await timings.step('observe', () => effects.agents());
+  const credentials = await timings.step('credentials', () => effects.credentials(config.workers));
   const open = snapshot.work.filter(item => item.stage !== 'done');
   const owns = (principal: string) => open.some(item => !!item.lease && item.lease.owner === principal && Date.parse(item.lease.expiresAt) > clock);
   /** The item a worker profile holds a live lease on, which a failure while handling that profile is recorded against. */
   const heldBy = (profile: WorkerProfile) => open.find(item => !!item.lease && item.lease.owner === profile.principal && Date.parse(item.lease.expiresAt) > clock) ?? null;
 
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy };
-  await closeStep(cycle);
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings };
+  await timings.step('close', () => closeStep(cycle));
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
-  const health = profileHealth(config.workers, credentials, await effects.agents(), state, clock);
+  const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock);
 
   spent('close');
 
-  const { settled, budget } = await scopeStep(cycle);
+  const { settled, budget } = await timings.step('scope', () => scopeStep(cycle));
   // 2c. Open items planning a file the base split or renamed are re-planned onto its successors.
-  await successorStep(cycle);
+  await timings.step('successors', () => successorStep(cycle));
   spent('decisions');
 
-  const assessments = await reclaimStep(cycle);
+  const assessments = await timings.step('reclaim', () => reclaimStep(cycle));
   spent('close');
 
-  const capacity = await dispatchStep(cycle, health, assessments);
+  const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));
   spent('dispatch');
 
-  await decisionStep(cycle, settled, assessments, capacity);
+  await timings.step('decisions', () => decisionStep(cycle, settled, assessments, capacity));
   spent('decisions');
 
-  await shepherdStep(cycle);
+  await timings.step('reviews and proofs', () => shepherdStep(cycle));
   spent('dispatch');
 
-  await mergeStep(cycle);
+  await timings.step('merges', () => mergeStep(cycle));
   spent('merge');
 
-  await deploymentStep(cycle);
+  await timings.step('deployment verification', () => deploymentStep(cycle));
   // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
-  await faultStep(cycle, assessments);
+  await timings.step('faults', () => faultStep(cycle, assessments));
   spent('deployment');
 
   // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have
@@ -113,6 +122,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   //    watches: ready→claim, ready→first push, approval→merge and how long a mergeable candidate
   //    stayed mergeable. All of it from the snapshot this cycle acted on, so no figure can
   //    disagree with the state that produced it.
+  const measuredFrom = now();
   for (const item of snapshot.work) {
     const sample = observeItemClock(state, item, clock);
     if (sample) state.latency.push(sample);
@@ -122,9 +132,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
+  timings.add('measure', now() - measuredFrom);
   const durationMs = Math.max(0, Math.round(now() - startedAt));
   const childWaitMs = Math.min(durationMs, Object.values(steps).reduce((total, step) => total + step.childWaitMs, 0));
-  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs, steps, open: open.length, actions: performed.length,
+  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs, steps, timings: timings.report(), open: open.length, actions: performed.length,
     actionable: silence.actionable, idleMs: silence.longestIdleMs, stages, lead, production, postDeploy, postDeployFailures,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
@@ -136,6 +147,17 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   return { actions: performed, metrics, deployment: state.deployment, health, silence, budget: latencyBudget(state.latency), scope: budget };
 }
 
+/**
+ * Cursor writes one at a time, in the order they were asked for. Launches run at once (GY-377), and
+ * two writes racing each other could otherwise land the older state last — a kill right after would
+ * leave a cursor missing the action the later write recorded.
+ */
+function serialPersist(effects: DaemonEffects): DaemonEffects {
+  let writing: Promise<unknown> = Promise.resolve();
+  const persist = (state: DaemonState) => { const write = writing.then(() => effects.persist(state)); writing = write.catch(() => {}); return write; };
+  return new Proxy(effects, { get: (target, property, receiver) => property === 'persist' ? persist : Reflect.get(target, property, receiver) });
+}
+
 /** What every step of one cycle reads: the snapshot it acts on, the cursor, and the cycle's own bookkeeping. */
 export interface Cycle {
   config: MasterConfig; state: DaemonState; effects: DaemonEffects; now: () => number;
@@ -144,4 +166,6 @@ export interface Cycle {
   isolate: <T>(kind: DaemonActionKind, item: Work | null, name: string, body: () => Promise<T>) => Promise<T | undefined>;
   agents: HerdrAgent[]; credentials: Awaited<ReturnType<DaemonEffects['credentials']>>; open: Work[];
   owns: (principal: string) => boolean; heldBy: (profile: WorkerProfile) => Work | null;
+  /** This cycle's step and call timings (GY-377); a step may time a phase of its own inside it. */
+  timings: Timings;
 }

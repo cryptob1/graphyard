@@ -13,6 +13,7 @@ import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, en
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, readCredentialFile } from './config.js';
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
+import { timedCall } from './timings.js';
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
@@ -149,8 +150,10 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
   const cacheKey = `${environment.name}\0${environment.home}\0${ceiling}\0${probe.quota !== false}`, cached = healthCache.get(cacheKey);
   if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
-  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } = environment.kind === 'claude' ? await claudeAccount(environment, probe, now)
-    : environment.kind === 'codex' ? await codexAccount(environment, probe)
+  // The probe is an external call like any other: one of a second or more is named on the cycle
+  // or status build that made it, with the account it read (GY-377).
+  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } = environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
+    : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
     : environment.kind === 'opencode' ? { loggedIn: Object.keys((await readJsonFile(resolve(environment.home, 'opencode/auth.json'))) ?? {}).length > 0, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' }
     : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
   const future = (usage: AccountUsage) => !usage.resetsAt || Date.parse(usage.resetsAt) > now;

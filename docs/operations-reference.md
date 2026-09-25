@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely: it reconciles and never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master` the log.
+Restart `graphyard master run` freely: it reconciles and never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master` the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; logs name slowest; status reads a cached intervention report.
 
 ### Perpetual master loop
 
@@ -11,7 +11,7 @@ Restart `graphyard master run` freely: it reconciles and never dispatches twice.
 
 ## Lost worker before submission
 
-The lease expires 120 seconds after the last heartbeat; the next claim gets a higher epoch; keep the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([who may settle what](delegation.md#who-may-settle-what)).
+The lease expires 120 seconds after the last heartbeat; the next claim gets a higher epoch; keep the old worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), which blocks merge until settled ([settling](delegation.md#who-may-settle-what)).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -23,7 +23,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)): the gate closes at once and the merge queue ejects the entry.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)): the gate closes at once and the queue ejects the entry.
 
 ## GitHub request budget
 
@@ -70,7 +70,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Bootstrap mode for a self-proving change
 
-A change shipping its own proof harness cannot prove itself, so an operator or operator agent with `policy:bootstrap` adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes the proof (`graphyard obligations`).
+A change shipping its own proof harness cannot prove itself: a `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to that criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes the proof (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
@@ -82,7 +82,7 @@ A merge production never served is a `delivery.deployment-incident` ([observatio
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: never backfill evidence; repair access and open a follow-up item. To merge directly on purpose, an admin opens a window with `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: never backfill evidence; repair access and open a follow-up item. An admin opens a deliberate direct-merge window with `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -91,12 +91,12 @@ Add or rotate principals in `GRAPHYARD_PRINCIPALS` and redeploy. Scoped operator
 ## Proof authority grants
 
 ```sh
-graphyard grants                                   # live authority per principal
-graphyard grants grant ci "integration:*,unit:*" "CI runner produces integration and unit proof"
+graphyard grants                                   # live authority
+graphyard grants grant ci "integration:*,unit:*" "CI proves integration and unit"
 graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ```
 
-Only an `admin` grants or revokes. A pattern is an exact name, `kind:*`, or a prefix such as `manual:gy-43/*`. Only `producer` principals hold grants.
+Only an `admin` grants or revokes, only to `producer` principals. A pattern is an exact name, `kind:*`, or a prefix such as `manual:gy-43/*`.
 
 ## Setup proposals and drift
 
@@ -108,4 +108,4 @@ Four provider jobs per tick per replica; watch lock wait, job lag and the reques
 
 ### Concurrent reconciliation
 
-A stale snapshot during observation is retried after two seconds.
+A stale observation snapshot is retried after two seconds.
