@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
@@ -981,7 +982,9 @@ export class Engine {
       // A renewal's replay needs only the lease, not a whole document per renewal.
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(command === 'heartbeat' ? compactHeartbeatReceipt(work) : work)]);
       return work;
-    });
+    // A worker's lease renewal takes the reserved connection (GY-274): however busy the pool is, a
+    // live worker is never stopped because its heartbeat could not reach the database.
+    }, command === 'heartbeat' ? { lane: 'lease' } : undefined);
   }
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
@@ -1074,7 +1077,7 @@ export class Engine {
       // the item and without an event of its own, so a long handler costs one update per interval.
       await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work!.id, JSON.stringify(work)]);
       return { action: row, work: { id: work!.id, key: work!.key } };
-    });
+    }, { lane: 'lease' });
   }
   /**
    * The pull model: a free worker session asks for its next assignment instead of waiting for a
@@ -1538,74 +1541,104 @@ export class Engine {
     this.conflictTransitions.delete(work);
     for (const transition of conflicts) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.event, JSON.stringify({ details: { ...transition.conflict, at: now.toISOString() } })]);
   }
+  /**
+   * How long one reconciliation batch may hold the coordination lock before it yields (GY-274).
+   * The first tick after a deploy re-evaluated every item under one lock for 65 s, and every
+   * heartbeat queued behind it until the workers' supervisors gave up.
+   */
+  reconcileBatchMs = 250;
+  /**
+   * Reconcile every item, in batches. Each batch is its own short coordination transaction on the
+   * background lane (a bounded share of the pool): it re-reads the items, so nothing a heartbeat
+   * or a request wrote while it yielded is overwritten, and resumes after the last item it
+   * finished. Between batches the lock is released and the event loop runs, so a renewal waits
+   * at most one batch however long the whole pass takes. One item always completes per batch.
+   */
   async reconcile() {
-    await this.store.transaction(async (db, now) => {
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-      // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
-      await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
-      for (const work of all) {
-        // A delivered item is not re-evaluated, but one still holding rows, a queue entry or an
-        // action from before its delivery — every item delivered before GY-185 — is settled here
-        // once, and the check that finds nothing to settle costs no evaluation.
-        if (work.stage === 'done') {
-          const leftover = !!work.queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
-          if (leftover && settleDelivered(work, all, now)) await save(db, work, 'graphyard', 'delivery.settled', now);
-          continue;
+    let cursor = 0, first = true;
+    for (;;) {
+      const finished = await this.store.transaction(async (db, now) => {
+        const rows = (await db.query('SELECT number, document FROM work_items ORDER BY number')).rows;
+        const all: Work[] = rows.map(row => row.document);
+        // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
+        if (first) { await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now); first = false; }
+        const started = performance.now();
+        let reconciled = 0;
+        for (const [index, row] of rows.entries()) {
+          const number = Number(row.number);
+          if (number <= cursor) continue;
+          if (reconciled && performance.now() - started >= this.reconcileBatchMs) return false;
+          await this.reconcileItem(db, all[index], all, now);
+          cursor = number; reconciled++;
         }
-        const before = JSON.stringify(work);
-        // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
-        // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
-        const stranded = livenessOf(work, all, now).violation;
-        preserveAssignment(work); retainQuarantineFence(work);
-        const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
-        // GitHub executes merges (GY-258): a merge execution recorded before that stays in the
-        // ledger, where delivery attribution reads it, and no longer holds the record.
-        if (work.mergeExecution) work.mergeExecution = null;
-        const ledger: { kind: string; details: Record<string, unknown> }[] = [];
-        // The ledger explains a lapse: the epoch's own blocked report or the admin's stopped-worker
-        // attestation. It is read only where a lapse or a standing lease-loss makes it relevant.
-        const standingLoss = standingEscalations(work).some(entry => entry.trigger === 'lease-loss');
-        const attestations = leaseLost || standingLoss ? await readAttestations(db, work.id) : [];
-        if (leaseLost) {
-          const lost = work.lease!; work.lease = null;
-          // A lease that lapses under the epoch it submitted is the expected end of an attempt
-          // whose candidate is already bound, and one that lapses under a carried blocked report
-          // or after a stopped-worker attestation for its epoch ended because the control plane
-          // acted — recorded as history with its cause, never as an incident. Only an epoch with
-          // no submission, no blocked report and no attestation vanished, and that still escalates.
-          const explained = leaseLapseCause(work, lost, attestations);
-          if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
-          else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
-          endLapsedAttempt(work, lost, now);
-        }
-        // A standing lease-loss for an epoch whose candidate was already bound predates that
-        // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
-        // attestation is in the ledger never needed a human either. Settle both here, on deploy and
-        // on every later tick, with the note that says why and the attestation it rests on, so the
-        // backlog does not wait on one click per item.
-        for (const settled of settleableLeaseLoss(work, attestations)) {
-          resolveEscalation(work, settled.escalation.trigger);
-          ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
-        }
-        const queuedBefore = work.queue?.sequence ?? null;
-        this.evaluate(work, all, now);
-        // A queue entry the evaluation derived out — here, a merged entry whose reconciliation a
-        // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
-        // behind it are woken to predict against the real base.
-        const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
-        if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
-        // Every violation found at the start of the tick is repaired by the evaluation above — the
-        // derivation names its successor and the queue opens its row — and the ledger says so.
-        if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
-        if (JSON.stringify(work) !== before) {
-          for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
-          await this.recordDispatch(db, work, now);
-          await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
-          if (work.submission) await wakeJob(db, work.id);
-          if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
-        }
-      }
-    });
+        return true;
+      }, { lane: 'background' });
+      if (finished) return;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  }
+  /** One item's reconciliation inside a batch's coordination transaction. */
+  private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date) {
+    // A delivered item is not re-evaluated, but one still holding rows, a queue entry or an
+    // action from before its delivery — every item delivered before GY-185 — is settled here
+    // once, and the check that finds nothing to settle costs no evaluation.
+    if (work.stage === 'done') {
+      const leftover = !!work.queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
+      if (leftover && settleDelivered(work, all, now)) await save(db, work, 'graphyard', 'delivery.settled', now);
+      return;
+    }
+    const before = JSON.stringify(work);
+    // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
+    // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
+    const stranded = livenessOf(work, all, now).violation;
+    preserveAssignment(work); retainQuarantineFence(work);
+    const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
+    // GitHub executes merges (GY-258): a merge execution recorded before that stays in the
+    // ledger, where delivery attribution reads it, and no longer holds the record.
+    if (work.mergeExecution) work.mergeExecution = null;
+    const ledger: { kind: string; details: Record<string, unknown> }[] = [];
+    // The ledger explains a lapse: the epoch's own blocked report or the admin's stopped-worker
+    // attestation. It is read only where a lapse or a standing lease-loss makes it relevant.
+    const standingLoss = standingEscalations(work).some(entry => entry.trigger === 'lease-loss');
+    const attestations = leaseLost || standingLoss ? await readAttestations(db, work.id) : [];
+    if (leaseLost) {
+      const lost = work.lease!; work.lease = null;
+      // A lease that lapses under the epoch it submitted is the expected end of an attempt
+      // whose candidate is already bound, and one that lapses under a carried blocked report
+      // or after a stopped-worker attestation for its epoch ended because the control plane
+      // acted — recorded as history with its cause, never as an incident. Only an epoch with
+      // no submission, no blocked report and no attestation vanished, and that still escalates.
+      const explained = leaseLapseCause(work, lost, attestations);
+      if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
+      else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
+      endLapsedAttempt(work, lost, now);
+    }
+    // A standing lease-loss for an epoch whose candidate was already bound predates that
+    // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
+    // attestation is in the ledger never needed a human either. Settle both here, on deploy and
+    // on every later tick, with the note that says why and the attestation it rests on, so the
+    // backlog does not wait on one click per item.
+    for (const settled of settleableLeaseLoss(work, attestations)) {
+      resolveEscalation(work, settled.escalation.trigger);
+      ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
+    }
+    const queuedBefore = work.queue?.sequence ?? null;
+    this.evaluate(work, all, now);
+    // A queue entry the evaluation derived out — here, a merged entry whose reconciliation a
+    // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
+    // behind it are woken to predict against the real base.
+    const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
+    if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
+    // Every violation found at the start of the tick is repaired by the evaluation above — the
+    // derivation names its successor and the queue opens its row — and the ledger says so.
+    if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
+    if (JSON.stringify(work) !== before) {
+      for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+      await this.recordDispatch(db, work, now);
+      await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
+      if (work.submission) await wakeJob(db, work.id);
+      if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
+    }
   }
   async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {

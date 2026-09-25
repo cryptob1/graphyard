@@ -55,7 +55,7 @@ test('integration:supervisor-exits-with-session a supervisor whose agent has lef
   const early: string[] = [];
   let renewals = 0;
   assert.equal(await supervise('ignored', [], 1,
-    async () => ++renewals < 4 ? renewal() : Promise.reject(new Error('lease epoch superseded')),
+    async () => ++renewals < 4 ? renewal() : Promise.reject(Object.assign(new Error('lease epoch superseded'), { confirmedRefusal: true })),
     { containment: { ...child, signal: () => {}, empty: () => true }, detached: false, intervalMs: 20, graceMs: 25, shutdownPollMs: 5,
       session: { visible: () => null, surrender: async cause => { early.push(cause); } },
       quarantine: { establish: async () => {}, settle: async () => {} } }), 1);
