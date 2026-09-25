@@ -443,6 +443,24 @@ export function coveredUntil(dataset: { to?: string; covered?: CoveredWindow; ki
 
 const carryKinds: FlowKind[] = ['stage.changed', 'gates.changed', 'work.created', 'work.released', 'delivered', 'merged', 'candidate.observed', 'lease.claimed', 'lease.released', 'lease.lost', 'dependencies.changed'];
 
+/**
+ * Facts grouped by work id, oldest first as read, built once per fact array and reused: the
+ * per-item reads (`stepMoves` for every step and item, the drill-downs) look up one item's facts
+ * instead of scanning every fact in the report, so the kinds read past the shared scan keep a
+ * report's cost proportional to the facts read rather than facts × items × steps.
+ */
+const factIndexes = new WeakMap<readonly FlowFact[], { length: number; byWork: Map<string, FlowFact[]> }>();
+export function factsOf(facts: readonly FlowFact[], workId: string): readonly FlowFact[] {
+  let index = factIndexes.get(facts);
+  // An array grown after it was indexed is indexed again.
+  if (!index || index.length !== facts.length) {
+    index = { length: facts.length, byWork: new Map() };
+    for (const fact of facts) (index.byWork.get(fact.workId) ?? index.byWork.set(fact.workId, []).get(fact.workId)!).push(fact);
+    factIndexes.set(facts, index);
+  }
+  return index.byWork.get(workId) ?? [];
+}
+
 function rowToFact(row: any): FlowFact {
   return { id: Number(row.id), workId: row.work_id, workKey: row.work_key, kind: row.kind, observedAt: iso(row.observed_at), recordedAt: iso(row.recorded_at), source: row.source, sourceEvent: Number(row.source_event), stage: row.stage, workType: row.work_type, slices: row.slices ?? [], details: row.details ?? {}, dedupe: row.dedupe };
 }
@@ -691,11 +709,9 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const excluded = new Map<string, Set<string>>();
   const exclude = (reason: string, key: string) => { (excluded.get(reason) ?? excluded.set(reason, new Set()).get(reason)!).add(key); };
   const unavailable: { metric: string; reason: string }[] = [];
-  const byWork = new Map<string, FlowFact[]>();
-  for (const fact of dataset.facts) (byWork.get(fact.workId) ?? byWork.set(fact.workId, []).get(fact.workId)!).push(fact);
   const latest = new Map(dataset.latest.map(fact => [`${fact.workId}:${fact.kind}`, fact]));
   const carry = new Map(dataset.carryIn.map(fact => [`${fact.workId}:${fact.kind}`, fact]));
-  const itemFacts = (id: string, kind: FlowKind) => (byWork.get(id) ?? []).filter(fact => fact.kind === kind);
+  const itemFacts = (id: string, kind: FlowKind) => factsOf(dataset.facts, id).filter(fact => fact.kind === kind);
   const scanRead = readByScan(dataset);
 
   const scope = dataset.included.filter(item => {
@@ -724,10 +740,11 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   });
 
   // Step dwell: the same step moves the replay plays, completed stays only (entered and left).
+  // Each item's moves are computed once and shared by the seven steps.
+  const itemMoves = stageScope.map(item => stepMoves(dataset, item, productionEnvironment));
   const stepDwell = flowSteps.map(step => {
     const values: number[] = [];
-    for (const item of stageScope) {
-      const moves = stepMoves(dataset, item, productionEnvironment);
+    for (const moves of itemMoves) {
       moves.forEach((move, index) => {
         const next = moves[index + 1];
         if (move.to === step && next) { const ms = time(next.at)! - time(move.at)!; if (ms >= 0) values.push(ms); }
@@ -847,7 +864,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       const startedAt = time(candidate.recordedAt)!;
       const endsAt = index + 1 < ordered.length ? time(ordered[index + 1].recordedAt)! : Infinity;
       const sha = String(candidate.details.sha ?? '');
-      const facts = (byWork.get(item.id) ?? []).filter(fact => { const at = time(fact.recordedAt)!; return at >= startedAt && at < endsAt && scanRead(fact); });
+      const facts = factsOf(dataset.facts, item.id).filter(fact => { const at = time(fact.recordedAt)!; return at >= startedAt && at < endsAt && scanRead(fact); });
       const matches = (fact: FlowFact) => !fact.details.sha || fact.details.sha === sha;
       const first = (kind: FlowKind, predicate: (fact: FlowFact) => boolean) => facts.filter(fact => fact.kind === kind && matches(fact) && predicate(fact)).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
       const reviewStart = [first('review.requested', () => true), first('review.submitted', () => true)].filter(Boolean).sort((a, b) => time(a!.observedAt)! - time(b!.observedAt)!)[0];
@@ -1267,16 +1284,17 @@ export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { fr
   const end = coveredUntil(dataset, 'gates.changed');
   const cutoff = end !== undefined && time(end) !== null ? time(end)! : Infinity;
   const start = dataset.from !== undefined && time(dataset.from) !== null ? time(dataset.from)! : -Infinity;
-  const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
+  const carried = factsOf(dataset.carryIn, item.id).find(fact => fact.kind === 'gates.changed');
   // The merge moves the item to Deploy when it is observed, whatever its gate facts say (`stepAfterMerge`).
-  const carriedMerge = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'merged');
-  const merge = carriedMerge ?? dataset.facts.find(fact => fact.workId === item.id && fact.kind === 'merged');
+  const own = factsOf(dataset.facts, item.id);
+  const carriedMerge = factsOf(dataset.carryIn, item.id).find(fact => fact.kind === 'merged');
+  const merge = carriedMerge ?? own.find(fact => fact.kind === 'merged');
   const mergedAt = merge ? time(merge.observedAt) : null;
   let at: FlowStep | null = carried ? mergedStep(gateFactStep(carried.details), !!carriedMerge) : null;
   const entered = dataset.stepEntries?.[item.id];
   if (carried && at) moves.push({ at: entered && time(entered) !== null ? entered : carried.observedAt, from: null, to: at, pr: carried.details.pr ?? null, carried: true });
   const mergeCutoff = Math.min(cutoff, time(coveredUntil(dataset, 'merged') ?? '') ?? Infinity);
-  const timeline = dataset.facts.filter(fact => fact.workId === item.id && (fact.kind === 'gates.changed' ? time(fact.observedAt)! <= cutoff : fact === merge && !carriedMerge && time(fact.observedAt)! <= mergeCutoff))
+  const timeline = own.filter(fact => (fact.kind === 'gates.changed' ? time(fact.observedAt)! <= cutoff : fact === merge && !carriedMerge && time(fact.observedAt)! <= mergeCutoff))
     .sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
   for (const fact of timeline) {
     const step = fact.kind === 'merged' ? 'deploy' : stepAfterMerge(fact, mergedAt);
@@ -1355,14 +1373,14 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
       ['merged-to-production', 'merged', 'production'],
     ].filter(([phase]) => !key || phase === key);
     for (const item of scoped) {
-      const candidates = [...(dataset.carryIn.filter(fact => fact.workId === item.id && fact.kind === 'candidate.observed')),
-        ...dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'candidate.observed')]
+      const candidates = [...factsOf(dataset.carryIn, item.id).filter(fact => fact.kind === 'candidate.observed'),
+        ...factsOf(dataset.facts, item.id).filter(fact => fact.kind === 'candidate.observed')]
         .sort((a, b) => time(a.recordedAt)! - time(b.recordedAt)!);
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index], startedAt = time(candidate.recordedAt)!;
         const endsAt = candidates[index + 1] ? time(candidates[index + 1].recordedAt)! : Infinity;
         const sha = String(candidate.details.sha ?? '');
-        const facts = dataset.facts.filter(fact => fact.workId === item.id && time(fact.recordedAt)! >= startedAt && time(fact.recordedAt)! < endsAt && (!fact.details.sha || fact.details.sha === sha) && scanRead(fact));
+        const facts = factsOf(dataset.facts, item.id).filter(fact => time(fact.recordedAt)! >= startedAt && time(fact.recordedAt)! < endsAt && (!fact.details.sha || fact.details.sha === sha) && scanRead(fact));
         const first = (kind: FlowKind, predicate: (fact: FlowFact) => boolean = () => true) => facts.filter(fact => fact.kind === kind && predicate(fact)).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
         const reviewStart = [first('review.requested'), first('review.submitted')].filter((fact): fact is FlowFact => !!fact).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
         const reviewComplete = [first('review.submitted', fact => fact.details.reviewState === 'APPROVED'), first('review.completed', fact => fact.details.approved === true)].filter((fact): fact is FlowFact => !!fact).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
@@ -1389,8 +1407,8 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
           : `${fact.details.result}; trusted=${fact.details.trusted}; identifiers require an authorized role`);
   } else if (metric === 'merge-ready') {
     for (const item of scoped) {
-      const carried = dataset.carryIn.find(fact => fact.workId === item.id && fact.kind === 'gates.changed');
-      const gates = [...(carried ? [carried] : []), ...dataset.facts.filter(fact => fact.workId === item.id && fact.kind === 'gates.changed')];
+      const carried = factsOf(dataset.carryIn, item.id).find(fact => fact.kind === 'gates.changed');
+      const gates = [...(carried ? [carried] : []), ...factsOf(dataset.facts, item.id).filter(fact => fact.kind === 'gates.changed')];
       const merged = latest.get(`${item.id}:merged`);
       for (const interval of mergeReadyIntervals(gates, merged ? time(merged.observedAt) : null, time(dataset.from)!, time(dataset.to)!)) {
         if (!interval.inWindow) continue;

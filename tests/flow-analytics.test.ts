@@ -1169,3 +1169,26 @@ test('unit:sparse-step-marked — a step median from fewer than five samples, or
 });
 
 function escapeHtml(text: string) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;'); }
+
+test('a report reads each fact a bounded number of times however many items and steps it covers, so supplemental kinds past the shared scan keep /api/analytics/flow within its budget', () => {
+  const to = '2026-09-24T22:55:00.000Z', start = Date.parse(to) - 6 * day;
+  const items = Array.from({ length: 200 }, (_, index) => ({ ...calendarItem, id: `31111111-2222-4333-8444-${String(index).padStart(12, '0')}`, key: `GY-${1000 + index}` }) as Work);
+  const facts: FlowFact[] = [];
+  let id = 10;
+  for (const [index, item] of items.entries()) for (let move = 0; move < 100; move++) {
+    const stage = move % 2 ? 'review' : 'test';
+    facts.push({ ...calendarFact('gates.changed', new Date(start + index * 1000 + move * 60_000).toISOString(), id++), workId: item.id, workKey: item.key, details: { stage, unmet: [stage], firstUnmet: stage, hasCandidate: true, reasons: [] } });
+  }
+  facts.sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt));
+  let reads = 0;
+  const counted = new Proxy(facts, { get: (target, key, receiver) => { if (typeof key === 'string' && /^\d+$/.test(key)) reads++; return Reflect.get(target, key, receiver); } });
+  const created = items.map(item => ({ ...calendarFact('work.created', new Date(Date.parse(to) - 10 * day).toISOString(), 1), workId: item.id, workKey: item.key }));
+  const dataset = calendarDataset(to, counted, { work: items, included: items, latest: created });
+  const report = computeFlow(dataset, { days: 7 });
+  assert.ok(report.stepDwell.some(step => step.n > 0), 'the step dwell is still computed from every item\'s moves');
+  // Scanning every fact once per step and item would read 7 × 200 × 20,000 facts; the report reads each a few times.
+  assert.ok(reads < 40 * facts.length, `read ${reads} facts for ${facts.length} facts`);
+  const drilled = flowDrilldown(dataset, report, { metric: 'steps', key: null, authorized: true } as any);
+  assert.ok(drilled.rows.length > 0);
+  assert.ok(reads < 40 * facts.length, `with the steps drill-down, read ${reads} facts for ${facts.length} facts`);
+});
