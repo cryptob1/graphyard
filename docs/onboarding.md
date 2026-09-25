@@ -13,7 +13,7 @@ Each concurrent session needs a worker identity and host ID: rerun the installer
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit the updated `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graphyard/`. Without the master, run a worker under `graphyard watch GY-1 EPOCH -- COMMAND`, which stops it on lease loss.
+Commit `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graphyard/`. Without the master, run a worker under `graphyard watch GY-1 EPOCH -- COMMAND`, which stops it on lease loss.
 
 ### Documentation policy
 
@@ -27,7 +27,7 @@ Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so wi
 
 ### Agent environments
 
-Each agent account has its own login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -85,7 +85,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-For worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
+When adding workers, for worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
