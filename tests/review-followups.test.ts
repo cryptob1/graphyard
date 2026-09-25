@@ -558,6 +558,21 @@ test('unit:review-followups-filed — a long root-level finding is filed whole a
   } finally { await cleanup(); }
 });
 
+test('unit:review-followups-filed — a finding line number past a safe integer is recorded with no line, so the ledger still saves', async () => {
+  const huge = 'Follow-up finding: src/a.ts:999999999999999999999 — x\nFollow-up finding: src/b.ts:' + '9'.repeat(400) + ' — y';
+  assert.deepEqual(parseFollowUpFindings(huge).map(finding => [finding.path, finding.line]), [['src/a.ts', null], ['src/b.ts', null]]);
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github(`AC-1 met.\n${huge}\nResolved threads: none\nFollow-up threads: none`), items = creator();
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    assert.equal(items.created.length, 1);
+    assert.equal(settled.reviews[0].followUps?.item, 'GY-201');
+    assert.deepEqual(settled.reviews[0].followUps?.findings?.map(finding => finding.line), [null, null]);
+    assert.equal((await readReviewLedger(root)).reviews[0].followUps?.item, 'GY-201', 'the ledger saved');
+  } finally { await cleanup(); }
+});
+
 test('unit:review-followups-filed — follow-ups in more than 100 files are coalesced into directories that still cover every file', () => {
   const threads = Array.from({ length: 100 }, (_, index) => ({ id: `PRRT_${String(index).padStart(3, '0')}aaaaaaaa`, author: 'codex', path: `src/area${index % 7}/mod${index}/file.ts`, line: 1, outdated: false, excerpt: 'finding' }));
   const findings = [{ path: 'docs/guide.md', line: 4, text: 'docs/guide.md:4 — stale' }];

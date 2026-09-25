@@ -117,7 +117,8 @@ export const followUpFindingLimit = 50, followUpFindingMax = 500;
  * The findings a verdict writes on its `Follow-up finding: PATH:LINE — text` lines (GY-166): a
  * FOLLOW-UP with no thread is filed in the same item as the Follow-up threads, never left in free
  * text nobody files. A line without a leading PATH[:LINE] is kept whole, with no path; PATH is any
- * token that is not a bare number, so a root-level file such as `Dockerfile:10` is scoped too. Every
+ * token that is not a bare number, so a root-level file such as `Dockerfile:10` is scoped too; a LINE
+ * that is not a safe integer is dropped (the path is kept). Every
  * line is read, and whole: none is dropped past a count or cut to the ledger's bound.
  */
 export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
@@ -129,7 +130,9 @@ export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
     if (!text || /^none\.?$/i.test(text)) continue;
     const located = /^`?([^\s`:]+)(?::(\d+))?`?\s+[—–-]+\s+\S/.exec(text);
     const path = located && !/^\d+$/.test(located[1]!) ? located[1]! : null;
-    findings.push({ path, line: path && located![2] ? Number(located![2]) : null, text });
+    // A line number the ledger's integer schema would refuse (unsafe, or Infinity) is no line at all.
+    const line = path && located![2] ? Number(located![2]) : null;
+    findings.push({ path, line: line !== null && Number.isSafeInteger(line) ? line : null, text });
   }
   return findings;
 }
@@ -311,7 +314,8 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
     type: 'chore', priority: 2, dependencies: [input.workId],
     criteria: [{ id: 'AC-1', text: `Each follow-up listed in the description is addressed in code, or declined with a recorded reason.`, proofs: [followUpTriageProof] }],
     // A producer session judges the triage, so the item is shepherded to completion without an
-    // attestation decision nobody requests.
+    // attestation decision nobody requests. Until a producer holds the name, the created item carries
+    // it as a proof gap (unauthorizedProofs), which raises the operator's grant decision.
     producerProofs: [followUpTriageProof],
     plannedFiles: scopes.slice(0, plannedFilesMax),
     reason: `Follow-ups named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,

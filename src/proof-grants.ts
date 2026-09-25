@@ -47,10 +47,14 @@ export async function authorityRegistry(db: pg.PoolClient, principals: readonly 
       : { principalId: p.id, role: p.role, patterns: p.proofs ?? [], source: 'environment' as const };
   });
 }
-/** Required proof names with no principal currently authorized to produce them. */
-export async function unauthorizedProofs(db: pg.PoolClient, principals: readonly Principal[], proofs: readonly string[]): Promise<string[]> {
+/**
+ * Required proof names with no principal currently authorized to produce them. A manual proof the
+ * work names in `producerProofs` is run by a producer session, never attested, so the admin role's
+ * `manual:*` does not cover it: until a producer holds it, it is a gap the operator is asked to grant.
+ */
+export async function unauthorizedProofs(db: pg.PoolClient, principals: readonly Principal[], proofs: readonly string[], producerProofs: readonly string[] = []): Promise<string[]> {
   const registry = await authorityRegistry(db, principals);
-  return proofs.filter(proof => !registry.some(authority => grantsAuthorize(authority.patterns, proof)));
+  return proofs.filter(proof => !registry.some(authority => (authority.role === 'producer' || !producerProofs.includes(proof)) && grantsAuthorize(authority.patterns, proof)));
 }
 
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
