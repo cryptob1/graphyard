@@ -7,6 +7,7 @@ import { runRecordSchema } from '../runner/types.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
+import { timingsSchema } from '../master/timings.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -75,6 +76,13 @@ export const cycleMetricsSchema = z.object({
   workMs: z.number().int().min(0).optional(),
   /** Where `durationMs` went, step by step. Absent on a cycle recorded before the loop measured its steps. */
   steps: cycleStepsSchema.optional(),
+  /**
+   * Every step the cycle ran, finer than `steps` (snapshot, observe, close, scope, reclaim, dispatch
+   * and its launches, decisions, reviews and proofs, merges, deployment verification, faults), and
+   * its slowest external calls of a second or more — server route, GitHub request kind, Herdr
+   * command, account probe — each with the step it was made in (GY-377). Absent on older cycles.
+   */
+  timings: timingsSchema.optional(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
   /**
    * What the cycle could act on, and the longest any one of those has gone unacted (see

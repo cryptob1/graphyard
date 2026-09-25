@@ -31,6 +31,7 @@ import { readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
+import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord } from '../runner/types.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
@@ -374,14 +375,20 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   /** The child runner; a test's stub, or the process's own bounded asynchronous runner. */
   run?: ChildRun;
   fetcher?: typeof fetch;
+  /** How long a cycle waits for the intervention report when no copy is cached yet; `reportReadBoundMs` by default. */
+  reportReadBoundMs?: number;
 }): DaemonEffects {
   // One runner, one ledger, for everything this loop runs — Herdr, gh, git, systemctl — so the
   // cycle's `childWaitMs` counts the cycle's own children and not the dispatcher's beside it.
   // Every child is awaited on the event loop and bounded by the runner's timeout (GY-125).
   const ledger = new ChildWaitLedger();
-  const run = deps.run ?? childRunner({ timeoutMs: 90_000, ledger });
   const current = typeof source === 'function' ? source : () => source;
-  const fetcher = deps.fetcher ?? fetch;
+  // Every child, server request and mutation is timed against the cycle that made it (GY-377): one
+  // of a second or more is recorded with its step, and the slowest is named on the cycle's line.
+  const run = timedRun(deps.run ?? childRunner({ timeoutMs: 90_000, ledger }));
+  const fetcher = timedFetch(deps.fetcher ?? fetch, () => current().url);
+  const snapshot = () => timedCall('server', 'GET work-snapshot', deps.snapshot);
+  const mutate = (path: string, data: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => deps.mutate(path, data, requestId));
   /**
    * One call as the master's own operator-agent identity — the identity that requests decisions.
    * The coordinator credential cannot, and the approver's
@@ -403,9 +410,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
    * The attention master status adds is read the same way, as `master status` reads it: the
    * intervention report refuses operator-agent callers (routes/interventions.ts).
    */
-  const asCoordinator = async (path: string) => {
+  const asCoordinator = async (path: string, _credential?: string, timeoutMs = 30_000) => {
     const config = current();
-    const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(30_000) });
+    const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(timeoutMs) });
     const result = await response.json();
     if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
     return result;
@@ -422,7 +429,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // the same grounds; otherwise the refusal stands and the next cycle decides afresh. Its
       // approval is pinned by resolvePin, so later heartbeats do not refuse it.
       if (action !== 'resolve' || !/Task revision changed/.test(message(error))) throw error;
-      const fresh = (await deps.snapshot()).work.find(entry => entry.id === work.id);
+      const fresh = (await snapshot()).work.find(entry => entry.id === work.id);
       const before = neededDecision(work, current()), after = fresh ? neededDecision(fresh, current()) : null;
       if (!fresh || !before || !after || after.action !== 'resolve' || after.binding !== before.binding || after.reason !== before.reason) {
         throw new Error(`${message(error)}; ${work.key} ${after?.action === 'resolve' ? `now needs the resolve on other grounds (${after.binding})` : 'no longer needs this resolve'}, so it is not asked again at the new revision`);
@@ -432,7 +439,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run, {}, handle => deps.mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime, session: launched.session, run: launched.run, settled: launched.settled }; };
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run, {}, handle => mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime, session: launched.session, run: launched.run, settled: launched.settled }; };
   const endRegistrySession: DaemonEffects['endRegistrySession'] = async (session, reason) => {
     const config = current();
     if (config.url) await httpFleetClient({ url: config.url, credentialFile: config.credentialFile }).end(session, reason);
@@ -451,7 +458,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // that follows lands in the runtime's input rather than in the closing menu.
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(agent.name ?? agent.pane_id!, text, run); },
-    reportCapacity: (work, event) => deps.mutate(`work/${work.id}/capacity`, event),
+    reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
@@ -474,7 +481,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     relaunch: async (session, work, snapshot) => relaunchSession(current(), session, work, await listHerdrAgents(run), {
       review: (profile, request, agents) => launchReview(root, work, profile.name, agents, snapshot.now, { run, requestId: request.id }),
       producer: (profile, request, agents) => launchProducer(root, work, request, profile, agents, snapshot.now, { run }),
-      record: handle => deps.mutate(`work/${work.id}/session`, handle),
+      record: handle => mutate(`work/${work.id}/session`, handle),
     }),
     escalationSessions: () => readEscalationSessions(root),
     approverLaunch: agentName => readApproverLaunch(root, agentName),
@@ -493,7 +500,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       }
       // The same escalation, from a context assembled again now: the one the ended handler read may be stale.
       const context = verifiedContext(await asOperatorAgent('GET', `work/${encodeURIComponent(session.work)}/context?trigger=${encodeURIComponent(session.trigger)}`));
-      const launched = await launchEscalationHandler(root, current(), context, session.kind as NonNullable<WorkerProfile['kind']>, await listHerdrAgents(run), run, handle => deps.mutate(`work/${encodeURIComponent(session.work)}/session`, handle));
+      const launched = await launchEscalationHandler(root, current(), context, session.kind as NonNullable<WorkerProfile['kind']>, await listHerdrAgents(run), run, handle => mutate(`work/${encodeURIComponent(session.work)}/session`, handle));
       return { agentName: launched.agentName, account: launched.account };
     },
     roleHealth: async () => {
@@ -508,7 +515,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
     stopSupervisor: async (orphan, signal) => { await stopWatchSupervisor(orphan, signal, run); },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
-    snapshot: deps.snapshot,
+    snapshot,
     followUpThreads: async (work, at) => {
       const reviewer = current().reviewer;
       return followUpThreadIds((await readReviewLedger(root)).reviews, work, reviewer ? { reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
@@ -517,8 +524,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reclaimResources: (work, agents) => reclaimResources(root, current(), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
-    recordSession: (work, handle) => deps.mutate(`work/${work.id}/session`, handle),
-    decideScope: work => deps.mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+    recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
+    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
@@ -534,22 +541,22 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
-    merge: work => mergeExecutor(current(), deps.snapshot, deps.mutate, deps.executor, randomUUID(), run)(work),
+    merge: work => mergeExecutor(current(), snapshot, mutate, deps.executor, randomUUID(), run)(work),
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     publishProductionEnvironment: async () => {
       const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
       if (environment === publishedEnvironment) return;
-      await deps.mutate('production-environment', { environment });
+      await mutate('production-environment', { environment });
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
       const batchSize = mergeBatchSize(current());
       if (batchSize === publishedBatchSize) return;
-      await deps.mutate('merge-queue', { batchSize });
+      await mutate('merge-queue', { batchSize });
       publishedBatchSize = batchSize;
     },
-    recordDeployment: (work, observation) => deps.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
+    recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
@@ -590,14 +597,17 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
       // Imported when first read: the status report imports this module, so a static import would be a cycle.
       const reported = await (await import('../cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
-        runtime: { available: observed.available ?? true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true });
+        runtime: { available: observed.available ?? true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true,
+        // The intervention report takes the server close to a minute (GY-377): the cycle uses the
+        // cached copy and refreshes it detached from itself, which is also the copy master status reads.
+        reports: 'background', reportBoundMs: deps.reportReadBoundMs });
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run)) }),
-    settleContainment: (work, assessment) => deps.mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
+    settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
     // wherever NOTIFY_SOCKET is, and the loop only speaks to it when the supervisor set one.
