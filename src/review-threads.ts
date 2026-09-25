@@ -206,14 +206,27 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
  * the one backlog item it filed for them (`item`), and each thread it replied on and resolved.
  * `threads` is the set judged on the first pass, kept so a retry files exactly the same item;
  * `refused` names the named threads that were not eligible, `failure` what a retry is owed.
+ * `classified`: the approval's body was read and its Follow-up lines parsed, so `named` is what it
+ * judged FOLLOW-UP; until then every thread listed to the review may be one (followUpThreadIds).
  */
-export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; findings?: FollowUpFinding[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number }
+export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; findings?: FollowUpFinding[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; classified?: boolean }
 /** The backlog item the follow-ups become: the loop's create payload for the control plane. */
 export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; dependencies: string[]; criteria: { id: string; text: string; proofs: string[] }[]; producerProofs: string[]; plannedFiles: string[]; reason: string }
 /** The follow-up item's one proof: a manual review of the triage that a producer session may run. */
 export const followUpTriageProof = 'manual:review-followups-triaged';
 /** Creates the item, idempotent on `key`: a retry with the same key returns the item already created. */
 export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ key: string }>;
+/** The idempotency key of an approval's follow-up create: one item per approval. */
+export const followUpCreateKey = (repository: string, pr: number, reviewId: number) => `graphyard-followups:${repository}#${pr}:${reviewId}`.slice(0, 200);
+/**
+ * The create an attempt is about to send, with the threads and findings it files and the named
+ * threads it refused. It is kept before the create is sent: a create the server accepted whose
+ * response was lost is retried with exactly this payload under the same key, so the server returns
+ * the item it made instead of refusing a key reused with different input, however the thread lines
+ * or comments have moved on GitHub since.
+ */
+export interface PendingFollowUpCreate { key: string; item: FollowUpItem; threads: LaunchThread[]; findings: FollowUpFinding[]; refused: string[] }
+export interface FollowUpCreateStore { read(key: string): Promise<PendingFollowUpCreate | undefined>; write(pending: PendingFollowUpCreate): Promise<void> }
 
 const replyMutation = 'mutation($thread:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread,body:$body}){comment{id}}}';
 const threadCommentsQuery = 'query($thread:ID!,$after:String){node(id:$thread){... on PullRequestReviewThread{comments(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{body}}}}}';
@@ -305,12 +318,20 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
   const unplanned = scopes.slice(plannedFilesMax);
   const overflow = unplanned.length ? clipEnd(`Planned files name ${plannedFilesMax} of the ${scopes.length} top-level paths these follow-ups touch (the work schema's bound); request scope for the rest: ${unplanned.join(', ')}`, Math.floor(descriptionMax / 4)) : '';
   const head = overflow ? `${intro}\n${overflow}` : intro;
-  const entries = threads.length + findings.length;
-  const budget = Math.floor((descriptionMax - head.length - 1 - entries) / Math.max(1, entries));
+  const render = [...threads.map((thread, index) => (budget: number) => describeFollowUp(thread, index, budget)),
+    ...findings.map((finding, index) => (budget: number) => clipEnd(`${threads.length + index + 1}. Finding with no thread: ${finding.text}`, budget))];
+  // Water-fill the description, shortest entry first: an entry within an even share keeps its whole
+  // text and leaves the rest to the longer ones, so a long finding beside many short threads is kept
+  // whole, and only entries that together overrun the bound are shortened, each to the same share.
+  const whole = render.map(entry => entry(Infinity).length);
+  const shares: number[] = [];
+  let left = descriptionMax - head.length - 1 - render.length;
+  render.map((_, index) => index).sort((a, b) => whole[a]! - whole[b]!).forEach((index, position) => {
+    shares[index] = Math.min(whole[index]!, Math.floor(left / (render.length - position))); left -= shares[index]!;
+  });
   return {
     title: `Follow-ups from the approved review of ${input.key} (PR #${input.pr})`.slice(0, 200),
-    description: [head, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget)),
-      ...findings.map((finding, index) => clipEnd(`${threads.length + index + 1}. Finding with no thread: ${finding.text}`, budget))].join('\n'),
+    description: [head, '', ...render.map((entry, index) => entry(shares[index]!))].join('\n'),
     type: 'chore', priority: 2, dependencies: [input.workId],
     criteria: [{ id: 'AC-1', text: `Each follow-up listed in the description is addressed in code, or declined with a recorded reason.`, proofs: [followUpTriageProof] }],
     // A producer session judges the triage, so the item is shepherded to completion without an
@@ -330,14 +351,16 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * somebody else resolved first is still filed, and left as they resolved it.
  * `listed` names the threads the reviewer's launch prompt listed; a named thread outside it is
  * refused, and a launch that could not read the threads vouches for none. Each step is recorded as it lands, so a retry creates no second item (the item key is kept, and
- * the create is idempotent on the approval) and replies to no thread twice: before replying, the thread
+ * the create is idempotent on the approval, and the payload of an attempted create is kept in `store` before it
+ * is sent and repeated verbatim) and replies to no thread twice: before replying, the thread
  * is read for a reply already naming the item, so a reply whose record was lost is not posted again. Runs outside every
  * coordination transaction.
  */
-export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[] }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
+export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; store?: FollowUpCreateStore }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
+  const createKey = followUpCreateKey(input.repository, input.pr, input.reviewId);
   const base = { at: now.toISOString(), reviewId: input.reviewId, attempts: (previous?.attempts ?? 0) + 1 };
-  const carried = { named: previous?.named ?? [], threads: previous?.threads ?? [], findings: previous?.findings ?? [], replied: previous?.replied ?? [], resolved: previous?.resolved ?? [], refused: previous?.refused ?? [], ...(previous?.item ? { item: previous.item } : {}) };
+  const carried = { named: previous?.named ?? [], threads: previous?.threads ?? [], findings: previous?.findings ?? [], replied: previous?.replied ?? [], resolved: previous?.resolved ?? [], refused: previous?.refused ?? [], ...(previous?.item ? { item: previous.item } : {}), ...(previous?.classified ? { classified: true } : {}) };
   let review: any;
   try { review = JSON.parse(String(await run('gh', ['api', `repos/${input.repository}/pulls/${input.pr}/reviews/${input.reviewId}`]))); }
   catch (error) { return { ...base, ...carried, failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
@@ -345,22 +368,29 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
     return { ...base, ...carried, failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
   const resolvedLine = parseResolvedThreads(review.body);
   const named = parseFollowUpThreads(review.body).filter(id => !resolvedLine.includes(id)).slice(0, listedThreadLimit);
-  // Read from the review itself until the item is created, never from the ledger's bounded record
+  // A create already attempted is repeated exactly as it was sent, never rebuilt from GitHub's data now.
+  let pending: PendingFollowUpCreate | undefined;
+  if (!previous?.item && input.store) {
+    try { pending = await input.store.read(createKey); }
+    catch (error) { return { ...base, ...carried, named, classified: true, failure: `the attempted follow-up create could not be read back: ${firstLine(error)}` }; }
+  }
+  // Read from the review itself until a create is first attempted, never from the ledger's bounded record
   // of them; once created, the item holds every one and the record is kept as it was.
-  const findings = previous?.item ? carried.findings : parseFollowUpFindings(review.body);
-  if (!named.length && !findings.length) return { ...base, named, threads: [], findings, replied: [], resolved: [], refused: [] };
+  const findings = pending ? pending.findings : previous?.item ? carried.findings : parseFollowUpFindings(review.body);
+  if (!named.length && !findings.length && !pending?.threads.length) return { ...base, named, threads: [], findings, replied: [], resolved: [], refused: [], classified: true };
   // Every thread of the pull request, resolved or not: a named thread somebody resolved after the
   // approval is still a finding the reviewer judged FOLLOW-UP, and is filed in the item all the same.
   let all: { thread: LaunchThread; resolved: boolean }[] = [];
-  if (named.length) {
+  if (named.length || pending?.threads.length) {
     try { all = await readReviewThreads(input.repository, input.pr, run); }
-    catch (error) { return { ...base, ...carried, named, failure: `the review threads could not be read: ${firstLine(error)}` }; }
+    catch (error) { return { ...base, ...carried, named, classified: true, failure: `the review threads could not be read: ${firstLine(error)}` }; }
   }
   const open = all.filter(entry => !entry.resolved).map(entry => entry.thread);
   let threads = carried.threads, refused = carried.refused;
-  // Like the findings, the threads are read from GitHub until the item is created, never from the
+  // Like the findings, the threads are read from GitHub until a create is first attempted, never from the
   // ledger's bounded record: a retry must send the create the same payload under the same key.
-  if (!previous?.item) {
+  if (pending) { threads = pending.threads; refused = pending.refused; }
+  else if (!previous?.item) {
     const submitted = Date.parse(String(review.submitted_at ?? ''));
     threads = []; refused = [];
     for (const id of named) {
@@ -374,11 +404,17 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       threads.push(thread);
     }
   }
-  if (!threads.length && !findings.length) return { ...base, named, threads, findings, replied: [], resolved: [], refused };
+  if (!threads.length && !findings.length) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true };
   let item = carried.item;
   if (!item) {
-    try { item = (await create(followUpItem(input, threads, findings), `graphyard-followups:${input.repository}#${input.pr}:${input.reviewId}`.slice(0, 200))).key; }
-    catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
+    const payload = pending?.item ?? followUpItem(input, threads, findings);
+    // Kept before it is sent: a create whose response is lost must be retried with this very payload.
+    if (!pending && input.store) {
+      try { await input.store.write({ key: createKey, item: payload, threads, findings, refused }); }
+      catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up create could not be recorded before it was sent: ${firstLine(error)}` }; }
+    }
+    try { item = (await create(payload, createKey)).key; }
+    catch (error) { return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-up item could not be created: ${firstLine(error)}` }; }
   }
   const replied = [...carried.replied], resolved = [...carried.resolved], failed: string[] = [];
   for (const thread of threads) {
@@ -399,5 +435,5 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       resolved.push(thread.id);
     } catch (error) { failed.push(`${thread.id}: ${firstLine(error)}`.slice(0, 300)); }
   }
-  return { ...base, named, threads, findings, item, replied, resolved, refused, ...(failed.length ? { failure: `${failed.length} follow-up thread(s) could not be answered and resolved: ${failed[0]}` } : {}) };
+  return { ...base, named, threads, findings, item, replied, resolved, refused, classified: true, ...(failed.length ? { failure: `${failed.length} follow-up thread(s) could not be answered and resolved: ${failed[0]}` } : {}) };
 }

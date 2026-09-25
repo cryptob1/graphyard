@@ -757,3 +757,78 @@ test('unit:review-followups-filed — a reply GitHub accepted but whose response
     assert.equal(items.created.length, 1);
   } finally { await cleanup(); }
 });
+
+test('unit:review-followups-filed — a create GitHub data moved past after its response was lost is retried with the payload first sent, so the server returns the item', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const paths: Record<string, string> = {};
+    const gh = github(`${approvalBody}\nFollow-up finding: src/c.ts:9 — the retry is unbounded`, { paths }), config = await loadMasterConfig(root);
+    // The control plane as it answers a keyed create: the first is made but its response is lost;
+    // a replay under the same key must carry the same input, or it is refused.
+    const receipts = new Map<string, string>(), made: string[] = [];
+    let lose = true;
+    const server = async (item: any, key: string) => {
+      const fingerprint = JSON.stringify(item), receipt = receipts.get(key);
+      if (receipt !== undefined) { if (receipt !== fingerprint) throw new Error('Graphyard refused the follow-up item (409): Idempotency key reused with different input'); return { key: 'GY-201' }; }
+      receipts.set(key, fingerprint); made.push(key);
+      if (lose) { lose = false; throw new Error('fetch failed: connection reset'); }
+      return { key: 'GY-201' };
+    };
+    const first = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: server });
+    assert.match(first.reviews[0].followUps!.failure!, /could not be created: fetch failed/);
+    // A carried tip moves the thread to another file before the retry.
+    paths.PRRT_follow001 = 'src/moved.ts';
+    const second = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: server });
+    assert.equal(second.reviews[0].followUps!.item, 'GY-201', 'the retry is answered with the item the lost create made');
+    assert.equal(second.reviews[0].followUps!.failure, undefined);
+    assert.equal(made.length, 1, 'exactly one item');
+    assert.deepEqual(second.reviews[0].followUps!.resolved, ['PRRT_follow001', 'PRRT_follow002']);
+    // Once the item is on the record, the kept payload is cleared.
+    await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: server });
+    const { readdir } = await import('node:fs/promises');
+    assert.deepEqual(await readdir(join(root, '.graphyard/review-followups')), []);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — while the approval body cannot be read, every thread listed to that review stays set aside from rework', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github(approvalBody), items = creator(), config = await loadMasterConfig(root);
+    let unreadable = true;
+    const run = (command: string, args: string[]) => {
+      if (unreadable && args[1] === 'repos/owner/project/pulls/64/reviews/77') throw new Error('gh: HTTP 502');
+      return gh.run(command, args);
+    };
+    const first = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: run, createFollowUpItem: items.create });
+    const filing = first.reviews[0].followUps!;
+    assert.match(filing.failure!, /review 77 could not be read/);
+    assert.deepEqual(filing.named, []);
+    assert.deepEqual([...followUpThreadIds(first.reviews, [work()]).get('GY-64') ?? []].sort(), shown.map(thread => thread.id).sort(), 'no listed thread goes to rework before the body is classified');
+    // Once the body is read, only the threads it named FOLLOW-UP stay aside.
+    unreadable = false;
+    const second = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: run, createFollowUpItem: items.create });
+    assert.equal(second.reviews[0].followUps!.classified, true);
+    assert.deepEqual([...followUpThreadIds(second.reviews, [work()]).get('GY-64') ?? []].sort(), ['PRRT_follow001', 'PRRT_follow002']);
+    // A filing whose retries are all spent unclassified sets nothing aside.
+    const spent = first.reviews.map(record => ({ ...record, followUps: { ...record.followUps!, attempts: threadResolutionAttempts } }));
+    assert.equal(followUpThreadIds(spent, [work()]).get('GY-64'), undefined);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — a long finding beside many short threads is filed whole: unused entry budget goes to the longer entries', () => {
+  const threads = Array.from({ length: 30 }, (_, index) => ({ id: `PRRT_${String(index).padStart(3, '0')}`, author: 'codex', path: `src/f${index}.ts`, line: index + 1, outdated: false, excerpt: 'short finding' }));
+  const tail = 'THE-END-OF-THE-FINDING';
+  const finding = { path: 'src/c.ts', line: 9, text: `src/c.ts:9 — ${'a long finding sentence '.repeat(30)}${tail}` };
+  assert.ok(finding.text.length > 700);
+  const { description } = followUpItem({ key: 'GY-64', workId: 'work-64', pr: 64, sha: H, reviewId: 77 }, threads, [finding]);
+  assert.ok(description.includes(finding.text), 'the finding is kept whole');
+  for (const thread of threads) assert.ok(description.includes(`${thread.id} — ${thread.path}:${thread.line} by codex: "short finding"`), thread.id);
+  // Past the bound, every entry is still listed, and the description fits.
+  const many = Array.from({ length: 100 }, (_, index) => ({ ...threads[0]!, id: `PRRT_x${index}`, excerpt: 'x'.repeat(300) }));
+  const bounded = followUpItem({ key: 'GY-64', workId: 'work-64', pr: 64, sha: H, reviewId: 77 }, many, [finding]).description;
+  assert.ok(bounded.length <= 20000, `${bounded.length}`);
+  for (const thread of many) assert.ok(bounded.includes(`${thread.id} — `), thread.id);
+  assert.ok(bounded.includes('Finding with no thread: src/c.ts:9'));
+});
