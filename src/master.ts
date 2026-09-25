@@ -946,7 +946,7 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * A role the registry does not define yet launches from the profile's own accounts, as before.
  */
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
-export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed. */ release?: (reason: string) => Promise<void> }
+export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed; false when the registry could not be told. */ release?: (reason: string) => Promise<boolean> }
 /**
  * The registry chooses from what this host reports of each login, so an account a session here saw
  * spent is reported spent (GY-182): whichever role found out, the registry hands it to no role
@@ -3908,6 +3908,30 @@ export async function selectApproverAccount(config: MasterConfig, work: string |
   await selectAccount(config, 'approver', { name: approverProfile }, { ...probe, work: work ?? undefined });
   return { fleet: null, account: null, profile: approverProfile, skipped };
 }
+/**
+ * The runtime's own login for a role launched on an explicit runtime: no account is chosen, but a
+ * login a session of any role saw spent is refused until its reset, as `selectAccount` refuses it.
+ */
+export async function heldRuntimeLogin(config: MasterConfig, role: LaunchRole, profile: string, work: string | null, probe: FleetProbe = {}): Promise<ApproverSelection> {
+  const at = probe.now?.() ?? Date.now(), own = (await observedExhaustions(config, at))[profileAccount(profile)];
+  if (own) {
+    const skip: AccountSkip = { at: new Date(at).toISOString(), role, profile, environment: profileAccount(profile), reason: describeObservedExhaustion(`${profile}'s own account`, own), work, cause: 'exhausted' };
+    await recordEnvironmentLog(config, [], [skip]).catch(() => {});
+    throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile}: ${skip.reason}`, [skip]);
+  }
+  return { fleet: null, account: null, profile, skipped: [] };
+}
+/**
+ * Undo a launch that failed after its tab or registry session existed: the tab is closed and the
+ * registry session ended. One the registry could not be told of is named on the returned error
+ * (`registrySession`), so the caller keeps the only id that can free the role's slot later.
+ */
+async function abandonLaunch(error: unknown, pane: string | undefined, tabId: string | undefined, selected: { release: (reason: string) => Promise<boolean>; account: FleetLaunchAccount } | null, reason: string, run?: ChildRun) {
+  if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error is the report */ }
+  const failure = error instanceof Error ? error : new Error(failureText(error));
+  if (selected && !await selected.release(reason)) Object.assign(failure, { registrySession: selected.account.fleet.session });
+  return failure;
+}
 export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, agents: HerdrAgent[], run?: ChildRun, probe: FleetProbe = {}) {
   const config = await loadMasterConfig(root);
   await agentToken(root, config, 'approver');
@@ -3917,7 +3941,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // The approver's runtime and account come from the registry's approver role. An explicit
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
   // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
-  const chosen = explicitKind ? null : await selectApproverAccount(config, work.key, config.approver!.id, probe);
+  // The override picks the runtime, never past a hold: the runtime's own login a session saw spent
+  // is not launched on again before its reset, whichever form of the command asked for it.
+  const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe) : await selectApproverAccount(config, work.key, config.approver!.id, probe);
   const selected = chosen?.fleet ?? null;
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
@@ -3933,14 +3959,15 @@ export async function launchApprover(root: string, work: Work, decision: string,
     pane = created.pane; tabId = created.tab;
     ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry }));
   } catch (error) {
-    if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
-    await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
-    throw error;
+    throw await abandonLaunch(error, pane, tabId, selected, `approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`, run);
   }
   const spentOn = selected?.account.name ?? chosen?.account?.name ?? null;
   // The registry session is kept with the launch, so the loop can end it the moment the session is spent.
   const session = selected?.account.fleet.session ?? null;
-  await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString() }).catch(() => {});
+  // The record is part of the launch: without it an adopted session's spent account and registry
+  // slot are unknown, so a launch whose record cannot be written is closed and fails.
+  try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString() }); }
+  catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, runtime: kind, session,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
       : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null };
@@ -4076,11 +4103,21 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     // that refused a pasted prompt would record no decision and leave the escalation standing.
     ({ delivery } = await startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry }));
   } catch (error) {
-    if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
-    await selected?.release(`escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`);
-    throw error;
+    const failure = await abandonLaunch(error, pane, tabId, selected, `escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`, run);
+    // A registry session that could not be ended is kept on a record due now: the loop ends it
+    // before it launches the escalation again, so the role's slot is never left orphaned.
+    const orphan = (failure as { registrySession?: string }).registrySession;
+    if (orphan) {
+      const at = new Date().toISOString();
+      await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: null, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: at, session: orphan,
+        waiting: { since: at, retryAt: at, reason: `the launch failed (${failureText(error)}) and its registry session could not be ended`.slice(0, 500) } }).catch(() => {});
+    }
+    throw failure;
   }
-  await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), session: selected?.account.fleet.session ?? null, waiting: null }).catch(() => {});
+  // The record is part of the launch: it is how the loop finds a handler that stopped on a limit
+  // notice and ends its registry session, so a launch whose record cannot be written is closed and fails.
+  try { await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), session: selected?.account.fleet.session ?? null, waiting: null }); }
+  catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `escalation handler record for ${context.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
   return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
 }
 

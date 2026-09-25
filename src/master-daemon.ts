@@ -2373,6 +2373,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
       if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, account: null, runtime: null, session: null }); return `the decision waits for approver capacity: ${message(error)}`; }
+      // A registry session the failed launch could not end stays on the watch, so the next launch ends it first.
+      const orphan = (error as { registrySession?: string })?.registrySession;
+      if (orphan) { watch.session = orphan; await effects.persist(state); }
       throw error;
     }
     Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, account: launched?.account ?? null, runtime: launched?.runtime ?? null, session: launched?.session ?? null });
@@ -3306,6 +3309,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     markEscalation: session => saveEscalationSession(root, session.work, session.trigger, session),
     relaunchEscalation: async session => {
+      // A registry session a failed launch could not end is ended first, so the relaunch has its slot.
+      if (session.session) {
+        await endRegistrySession(session.session, `escalation handler for ${session.work} (${session.trigger}) is launched again`);
+        await saveEscalationSession(root, session.work, session.trigger, { ...session, session: null });
+      }
       // The same escalation, from a context assembled again now: the one the ended handler read may be stale.
       const context = verifiedContext(await asOperatorAgent('GET', `work/${encodeURIComponent(session.work)}/context?trigger=${encodeURIComponent(session.trigger)}`));
       const launched = await launchEscalationHandler(root, current(), context, session.kind as NonNullable<WorkerProfile['kind']>, await listHerdrAgents(run), run);

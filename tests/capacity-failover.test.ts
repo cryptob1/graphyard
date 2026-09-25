@@ -19,7 +19,7 @@ import type { CliContext } from '../src/cli/context.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, handlerSettleMs, launchAppearanceMs, maxApproverCloses, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
+import { approverProfile, approverRoleHealth, heldRuntimeLogin, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
 import { describeCapacity, detectExhaustion, parseResetTime } from '../src/model/capacity.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
@@ -27,6 +27,7 @@ import { answerCommand, humanRequestBlocker, openHumanRequests } from '../src/mo
 import type { Observation, Principal, Work } from '../src/model.js';
 import HumanRequestsPage from '../web/pages/human-requests.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 
 // GY-89: mid-session exhaustion and human-only waits must not stall an item or a fleet. A
 // session that runs out of provider quota is detected from its own output and its action moves
@@ -1087,6 +1088,40 @@ test('an escalation handler launched with every account already spent is kept as
   assert.deepEqual([waiting.work, waiting.trigger, waiting.kind, waiting.pane, waiting.session], ['GY-7', 'lease-loss', 'claude', null, null]);
   assert.equal(waiting.waiting?.retryAt, resetsAt, 'due at the first held account\'s reset');
   assert.match(waiting.waiting!.reason, /exhausted its quota mid-session/);
+});
+
+test('an approver launched on an explicit runtime is refused while that runtime\'s login is held, and allowed after its reset', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-explicit-'));
+  const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(home, 'coordinator.token') }) } as MasterConfig;
+  const at = Date.now(), resetsAt = new Date(at + 2 * 86_400_000).toISOString();
+  // An approver on the runtime's own login stopped on its notice: that login is held as profile:approver.
+  await recordObservedExhaustion(config, profileAccount(approverProfile), { at: new Date(at).toISOString(), resetsAt, reason: "You've hit your weekly limit", role: 'approver', profile: approverProfile, work: 'GY-7' }, at);
+  await assert.rejects(heldRuntimeLogin(config, 'approver', approverProfile, 'GY-7', { now: () => at }), (error: Error & { capacityExhausted?: boolean }) => {
+    assert.equal(error.capacityExhausted, true, '`master approver GY-N DECISION AGENT_KIND` waits for capacity rather than relaunching the spent login');
+    return true;
+  });
+  const after = await heldRuntimeLogin(config, 'approver', approverProfile, 'GY-7', { now: () => Date.parse(resetsAt) + 1 });
+  assert.deepEqual([after.account, after.fleet], [null, null], 'after the reset the runtime\'s own login is used again');
+});
+
+test('an escalation handler whose launch record cannot be written is closed and fails, rather than running untracked', async () => {
+  await fresh();
+  const root = await localRoot('escalation-unrecorded'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-esc-unrecorded-'));
+  const operatorToken = join(home, 'master-operator.token');
+  await writeFile(operatorToken, `master-operator-${'m'.repeat(32)}\n`, { mode: 0o600 });
+  const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(home, 'coordinator.token') }), operatorAgent: { id: 'master-operator', credentialFile: operatorToken } } as MasterConfig;
+  // The record file cannot be replaced: a directory stands where it would be written.
+  await mkdir(join(root, '.graphyard', 'escalations', 'sessions.json'), { recursive: true });
+  const context = { key: 'GY-7', escalation: { trigger: 'lease-loss' }, fingerprint: 'f'.repeat(64) } as unknown as EscalationContext;
+  const herdrCalls: string[][] = [];
+  const run = (async (_command: string, args: string[]) => {
+    herdrCalls.push(args);
+    if (args[0] === 'tab' && args[1] === 'create') return JSON.stringify({ result: { root_pane: { pane_id: 'pane-esc', tab_id: 'tab-esc' } } });
+    if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
+    return startedAtOnce(args) ?? JSON.stringify({ result: {} });
+  }) as unknown as ChildRun;
+  await assert.rejects(launchEscalationHandler(root, config, context, 'claude', [], run), /escalation handler record for GY-7 could not be written|EISDIR|directory/);
+  assert.ok(herdrCalls.some(call => call[0] === 'pane' && call[1] === 'close' && call[2] === 'pane-esc'), 'the started handler is closed, not left running with nothing to find it by');
 });
 
 test('an exhausted escalation handler\'s record survives a failed relaunch, which a later cycle retries; with no account left the wait reaches the item through the runtime-login hold', async () => {
