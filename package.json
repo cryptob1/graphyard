@@ -14,10 +14,10 @@
     "build": "tsc --noEmit && vite build",
     "start": "tsx src/server.ts",
     "cli": "tsx src/cli.ts",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "node --import tsx tests/helpers/run-tests.ts",
     "typecheck": "tsc --noEmit",
     "docs:check": "node scripts/check-docs.mjs",
-    "test:browser": "playwright test"
+    "test:browser": "node --import tsx tests/helpers/run-tests.ts --browser"
   },
   "dependencies": {
     "pg": "8.22.0",
