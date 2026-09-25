@@ -248,7 +248,7 @@ test('a refusal settles the loop and the approver is told to record it — the l
   // A decision the server failed or withdrew is still asked again; only a refusal is not.
   assert.equal(approvalStep(watch, { state: 'failed' }, { agents: [], available: true }, at).step, 'rerequest');
 
-  const source = await readFile(fileURLToPath(new URL('../src/master.ts', import.meta.url)), 'utf8');
+  const source = await readFile(fileURLToPath(new URL('../src/master/autonomy.ts', import.meta.url)), 'utf8');
   const launch = source.slice(source.indexOf('export async function launchApprover'), source.indexOf('export function verifiedContext'));
   assert.match(launch, /master refuse \$\{work\.key\} \$\{decision\} "YOUR REASON"/);
   assert.match(launch, /a decline is recorded, never expressed by exiting/);
