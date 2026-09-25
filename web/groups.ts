@@ -1,6 +1,7 @@
 import { deliveryState, isClosed, type Work } from '../src/model';
 import { dispatchHold } from '../src/coordination';
 import { parkedOnHuman, type HumanRequestRow } from '../src/model/human-request';
+import { shortShas } from './format';
 import { phaseOf, plainReason, plainStatus } from './plain-status';
 import { prSteps } from './pr-steps';
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release';
@@ -47,6 +48,14 @@ export function humanOnlyIds(work: Work[], rows: HumanRequestRow[] | null | unde
 export function releasedAt(work: Work, release: ReleaseView = noRelease): number | null {
   const at = servedFor(work, release);
   return at === null || Number.isNaN(Date.parse(at)) ? null : Date.parse(at);
+}
+
+/**
+ * Shipped this week: delivered items the release was seen serving in the last seven days, dated
+ * from that observation. The Work page's footer and the Insights headline read this one count.
+ */
+export function shippedThisWeek(work: Work[], now: number, release: ReleaseView = noRelease): Work[] {
+  return work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped' && releasedAt(w, release) !== null && now - releasedAt(w, release)! <= 7 * 24 * 60 * 60 * 1000);
 }
 
 /** When a delivered item merged. */
@@ -126,7 +135,7 @@ export const timedGroups: ReadonlySet<Group> = new Set(['moving', 'blocked']);
  * what they do, in plain words.
  */
 export function nextActor(work: Work, group: Group | null, now: number, release: ReleaseView = noRelease, all: Work[] = []): { who: string; does: string } {
-  if (group === 'needs-you') return { who: 'You', does: work.humanRequest?.needed ?? 'Answer the decision it is waiting on' };
+  if (group === 'needs-you') return { who: 'You', does: work.humanRequest ? shortShas(work.humanRequest.needed) : 'Answer the decision it is waiting on' };
   if (group === 'backlog') {
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
     return dependency && work.ready ? { who: 'Nobody yet', does: plainReason(dependency, 'ready').text } : { who: 'Master agent', does: 'Release it for work when it is a priority' };

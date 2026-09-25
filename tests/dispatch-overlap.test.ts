@@ -39,7 +39,7 @@ const claimed = (key: string, plannedFiles: string[], sinceMs = hour, overrides:
 /** Submitted `sinceMs` ago with an observed candidate: `files` is what the candidate actually changed. */
 const submitted = (key: string, plannedFiles: string[], files: string[], sinceMs = hour, overrides: Partial<Work> = {}) => work(key, { stage: 'review', plannedFiles, epoch: 1, submission: { epoch: 1, pr: 7 },
   lastAssignment: { owner: `${key}-worker`, epoch: 1, claimedAt: iso(-sinceMs) },
-  candidate: candidateOf(key), observation: { candidate: candidateOf(key), files, at: iso(-60_000), merged: false, checks: [], reviews: [] } as any, ...overrides });
+  candidate: candidateOf(key), observation: { candidate: candidateOf(key), files, at: iso(-60_000), merged: false, prState: 'open', checks: [], reviews: [] } as any, ...overrides });
 const candidateOf = (key: string) => ({ sha: key.toLowerCase().padEnd(40, 'f').replace(/[^0-9a-f]/g, 'e'), baseSha: 'b'.repeat(40), pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' });
 /** Submitted, then sent back for rework: dispatchable again, a peer of the ready items rather than ahead of anything. */
 const rework = (key: string, plannedFiles: string[], files: string[], sinceMs = hour, overrides: Partial<Work> = {}) => submitted(key, plannedFiles, files, sinceMs, { reworkRequested: true, stageEnteredAt: iso(-sinceMs), ...overrides });
@@ -65,7 +65,7 @@ async function daemon(profiles: string[]) {
   return { master, effects, log, state: emptyDaemonState(master), set: (items: Work[], atMs = 0) => { snapshotWork = items; offsetMs = atMs; }, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
 
-test('integration:overlap-uses-changed-files — once an item has a candidate it excludes others on the files that candidate changed, not on the directory it declared; two items changing the same file are still held', async () => {
+test('integration:overlap-uses-changed-files — once an item has a candidate it excludes others on the files that candidate changed, not on the directory it declared; an item whose own pull request is open is never held', async () => {
   // Four items declared the whole tests/ directory. Their candidates each changed one file under it.
   const landed = submitted('GY-a', ['tests/'], ['tests/a.test.ts']);
   const disjoint = rework('GY-b', ['tests/'], ['tests/b.test.ts']);
@@ -78,27 +78,27 @@ test('integration:overlap-uses-changed-files — once an item has a candidate it
   // Overlapping directory scopes, disjoint changed files: nothing is ahead of GY-b, so GY-a and GY-b run together.
   assert.deepEqual(dispatchOverlap(disjoint, all, clock), []);
   assert.doesNotThrow(() => assertDispatchable(disjoint, all, iso(0)));
-  // The same file changed on both sides is a real conflict and still holds.
-  assert.deepEqual(dispatchOverlap(sameFile, all, clock).map(entry => [entry.key, entry.state, entry.paths, entry.theirs]), [['GY-a', 'submitted', ['tests/a.test.ts'], ['tests/a.test.ts']]]);
-  assert.throws(() => assertDispatchable(sameFile, all, iso(0)), /held by planned-file overlap with GY-a \(submitted, review\) on tests\/a\.test\.ts/);
+  // GY-c's pull request is open: holding its rework round prevents no conflict (both changes exist; the merge queue integrates whichever lands second), so it is never held.
+  assert.deepEqual(dispatchOverlap(sameFile, all, clock), []);
+  assert.doesNotThrow(() => assertDispatchable(sameFile, all, iso(0)));
   // A ready item that named its file is not held by a candidate that changed a different file under the same root; one that claimed the root still is.
   assert.deepEqual(dispatchOverlap(narrow, all, clock), []);
   assert.deepEqual(dispatchOverlap(directory, all, clock).map(entry => [entry.key, entry.paths]), [['GY-a', ['tests/']]], 'the reworked GY-b and GY-c are peers waiting for a worker, not items ahead');
 
-  // The durable loop dispatches both unheld items in one cycle with workers to spare, and holds the two real overlaps.
+  // The durable loop dispatches the three unheld items in one cycle with workers to spare, and holds only the fresh directory claim.
   const loop = await daemon(['one', 'two', 'three', 'four']);
   try {
     loop.set(all);
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
-    assert.deepEqual(loop.log, ['GY-d→one', 'GY-b→two'], 'the file-scoped item is offered first, then the rework whose candidate touched nothing in flight; GY-c and GY-e are held');
+    assert.deepEqual(loop.log, ['GY-d→one', 'GY-b→two', 'GY-c→three'], 'the file-scoped item is offered first, then both reworks, whose pull requests are open; only the fresh GY-e is held');
     const plan = dispatchSchedule(all, clock);
-    assert.deepEqual(plan.held.map(entry => [entry.key, entry.ahead.map(item => item.key)]), [['GY-c', ['GY-a']], ['GY-e', ['GY-a']]]);
-    assert.deepEqual(plan.order.map(entry => [entry.key, entry.held]), [['GY-d', false], ['GY-b', false], ['GY-c', true], ['GY-e', true]]);
-    // Once GY-a merges, GY-c is judged against nothing and dispatches too.
+    assert.deepEqual(plan.held.map(entry => [entry.key, entry.ahead.map(item => item.key)]), [['GY-e', ['GY-a']]]);
+    assert.deepEqual(plan.order.map(entry => [entry.key, entry.held]), [['GY-d', false], ['GY-b', false], ['GY-c', false], ['GY-e', true]]);
+    // Once GY-a merges, the fresh GY-e is judged against nothing and dispatches too.
     loop.log.length = 0;
     loop.set([{ ...landed, stage: 'done' } as Work, disjoint, sameFile, narrow, directory]);
     await runCycle(loop.master, loop.state, loop.effects, () => clock + 30_000);
-    assert.deepEqual(loop.log, ['GY-c→one', 'GY-e→two']);
+    assert.deepEqual(loop.log, ['GY-e→one'], 'GY-c was already dispatched in the first cycle; only the now-unheld GY-e remains');
   } finally { await loop.cleanup(); }
 });
 
@@ -149,35 +149,35 @@ test('unit:broad-scope-refused — a tests/ claim is refused where planned files
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
-test('unit:effective-concurrency-reported — master status reports how many items the overlap graph lets run at once beside the idle worker profiles: a fully overlapping graph reports one', () => {
+test('unit:effective-concurrency-reported — master status reports how many items the overlap graph lets run at once beside the idle worker profiles: a fully overlapping graph of fresh items reports one, plus any open pull request', () => {
   const credential = '/credentials/worker.token';
   const profiles = Array.from({ length: 11 }, (_, index) => launchProfile(`worker-${index + 1}`, credential));
-  // Fourteen items that each claimed a root directory: every pair overlaps. GY-1 also names the file
-  // GY-2's candidate changed: a declared directory alone would not hold an open candidate.
+  // Fourteen items that each claimed a root directory: every pair of fresh items overlaps. GY-2's pull
+  // request is open, so nothing holds it and it excludes nobody: the graph admits it beside one other.
   const items = [claimed('GY-1', ['src/', 'src/master.ts']), submitted('GY-2', ['tests/'], ['tests/two.test.ts', 'src/master.ts']), ...Array.from({ length: 12 }, (_, index) => work(`GY-${index + 3}`, { plannedFiles: [['src/', 'tests/', 'docs/'][index % 3], 'src/master.ts'] }))];
   const graph = effectiveConcurrency(items, clock);
-  assert.equal(graph.effective, 1); assert.equal(graph.nodes, 14); assert.equal(graph.edges, 91); assert.equal(graph.exact, true);
+  assert.equal(graph.effective, 2); assert.equal(graph.nodes, 14); assert.equal(graph.edges, 78); assert.equal(graph.exact, true);
   const status = buildMasterStatus({ work: items, now: iso(0) }, profiles, [], {}, {}, { pending: [], completed: [] });
-  assert.equal(status.effectiveConcurrency.effective, 1); assert.equal(status.effectiveConcurrency.idleWorkers, 11); assert.equal(status.effectiveConcurrency.workers, 11);
+  assert.equal(status.effectiveConcurrency.effective, 2); assert.equal(status.effectiveConcurrency.idleWorkers, 11); assert.equal(status.effectiveConcurrency.workers, 11);
   assert.equal(status.effectiveConcurrency.inFlight, 2); assert.equal(status.effectiveConcurrency.dispatchable, 12); assert.equal(status.effectiveConcurrency.held, 12);
-  assert.equal(status.counts.effectiveConcurrency, 1); assert.equal(status.counts.idleWorkers, 11); assert.equal(status.counts.held, 12);
-  assert.match(status.effectiveConcurrency.statement, /^1 item could be in flight at once over 14 open items \(91 overlaps\); 11 of 11 launch profiles idle; 12 held, 0 past the 2h hold bound$/);
+  assert.equal(status.counts.effectiveConcurrency, 2); assert.equal(status.counts.idleWorkers, 11); assert.equal(status.counts.held, 12);
+  assert.match(status.effectiveConcurrency.statement, /^2 items could be in flight at once over 14 open items \(78 overlaps\); 11 of 11 launch profiles idle; 12 held, 0 past the 2h hold bound$/);
   // The same fourteen items with their files named: the graph falls apart and the fleet can use its workers.
   const named = items.map((item, index) => index < 2 ? item : { ...item, plannedFiles: [`web/pages/page-${index}.tsx`] } as Work);
   const open = effectiveConcurrency(named, clock);
-  assert.equal(open.effective, 13, 'only GY-1 (src/) and GY-2 (its candidate changed src/master.ts) still exclude each other');
-  assert.equal(open.edges, 1); assert.ok(!(open.items.includes('GY-1') && open.items.includes('GY-2')) && open.items.length === 13);
+  // GY-1 (src/) and GY-2 no longer exclude each other: GY-2's pull request is open, so it is never held.
+  assert.equal(open.effective, 14); assert.equal(open.edges, 0);
   const busy = buildMasterStatus({ work: named, now: iso(0) }, profiles, [{ name: 'agent-worker-1', agent_status: 'working' }], {}, {}, { pending: [], completed: [] });
   assert.equal(busy.effectiveConcurrency.idleWorkers, 10, 'a profile whose session Herdr reports is not idle');
-  assert.equal(busy.effectiveConcurrency.effective, 13);
+  assert.equal(busy.effectiveConcurrency.effective, 14);
   // A candidate is a node on its changed files: two directory claims whose candidates changed different files are compatible.
   const candidates = [submitted('GY-x', ['tests/'], ['tests/x.test.ts']), rework('GY-y', ['tests/'], ['tests/y.test.ts']), work('GY-z', { plannedFiles: ['tests/'] })];
   // GY-z's declared tests/ holds neither open candidate either, so all three may be in flight at once;
-  // naming a file one of them changed makes that pair exclusive again.
+  // naming a file one of them changed does not make the pair exclusive: the open candidate is never held.
   assert.deepEqual(effectiveConcurrency(candidates, clock), { effective: 3, items: ['GY-x', 'GY-y', 'GY-z'], nodes: 3, edges: 0, exact: true });
   candidates[2] = work('GY-z', { plannedFiles: ['tests/', 'tests/x.test.ts'] });
   const exclusive = effectiveConcurrency(candidates, clock);
-  assert.equal(exclusive.effective, 2); assert.equal(exclusive.edges, 1); assert.ok(exclusive.items.includes('GY-y') && !(exclusive.items.includes('GY-x') && exclusive.items.includes('GY-z')));
+  assert.equal(exclusive.effective, 3); assert.equal(exclusive.edges, 0);
   assert.deepEqual(effectiveConcurrency([], clock), { effective: 0, items: [], nodes: 0, edges: 0, exact: true });
 });
 

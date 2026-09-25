@@ -3,8 +3,8 @@ import WorkCard from '../components/work-card';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../duration';
-import { classify, groupLabel, groupOf, mergedAt, releasedAt, groupMeaning, groups, humanOnlyIds, summarySentence, upNextMeaning, type OpenGroup } from '../groups';
-import { releaseView } from '../release';
+import { classify, groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, humanOnlyIds, summarySentence, upNextMeaning, type OpenGroup } from '../groups';
+import { leftFlowAt, releaseView } from '../release';
 import { stalledCards } from './actionless';
 import type { Dashboard } from './dashboard';
 
@@ -17,8 +17,10 @@ const week = 7 * 24 * 60 * 60 * 1000;
  * those same groups — so a number on the page is always the number of rows it stands for.
  * Needs you comes first, with the one action to take; Backlog is folded away and carries no
  * clock. What shipped is one line at the foot, linking to the Shipped page: shipped means the
- * release was observed serving it, dated from that observation; work that has merged but is not
- * yet seen live is counted apart, as waiting for the release.
+ * release was observed serving it, dated from that observation. The latest is the newest merge
+ * (GY-168), whether or not a release was recorded for it; the merges not yet seen live are the
+ * ones the control plane's production observation holds at Deploy (`leftFlowAt`) — none where
+ * production serves the newest merge, and none claimed where nothing observes production.
  */
 export default function OverviewPage({ work, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, stepMoves }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -29,11 +31,17 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   const humanOnly = humanOnlyIds(work, status?.humanOnly);
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
-  const delivered = work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped');
-  const recent = delivered.filter(w => releasedAt(w, release) !== null && now - releasedAt(w, release)! <= week).sort((a, b) => releasedAt(b, release)! - releasedAt(a, release)!);
-  // Merged this week but not yet seen live, whatever its group: a merge the production watch holds
-  // at Deploy (Moving) or reports failed (Blocked) counts here as much as one already Shipped.
-  const unreleased = work.filter(w => w.stage === 'done' && !isClosed(w) && !!w.delivery && releasedAt(w, release) === null && now - mergedAt(w) <= week).length;
+  const recent = shippedThisWeek(work, now, release);
+  // The latest is the newest merge: most real deliveries carry no release record, so ordering by
+  // release would name an old item, or none. A legacy delivery with no delivery record is dated
+  // from its observed merge (`mergedAt`), so it counts too.
+  const merged = work.filter(w => w.stage === 'done' && !isClosed(w) && !!(w.delivery?.mergedAt ?? w.observation?.mergedAt) && Number.isFinite(mergedAt(w)));
+  const latest = merged.length ? merged.reduce((newest, w) => mergedAt(w) > mergedAt(newest) ? w : newest) : null;
+  // Merged this week but not yet seen live, as the production observation says, whatever its group:
+  // a merge the production watch reports pending or failed, or merged after its last pass. With no
+  // production observation nothing is claimed: a smoke-gated merge is not "not live" by default.
+  // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
+  const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && leftFlowAt(w, release) === null).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
@@ -68,7 +76,7 @@ export default function OverviewPage({ work, status, query, setQuery, setSelecte
       {groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Nothing is open.'}</p>}
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
-        <span><strong>{recent.length} shipped this week.</strong>{recent[0] && <> Latest: <button type="button" className="text-button" onClick={() => setSelected(recent[0].id)}><span className="mono">{recent[0].key}</span> <span data-title>{recent[0].title}</span></button> · {formatAge(new Date(releasedAt(recent[0], release)!).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}</span>
+        <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · merged {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}</span>
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>See what shipped →</button>
       </div>
     </>}

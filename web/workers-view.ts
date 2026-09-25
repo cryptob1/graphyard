@@ -1,6 +1,7 @@
 import type { Work } from '../src/model';
 import type { SessionHandle } from '../src/model/sessions';
 import { sessionObservationFreshMs, sessionView, type SessionView } from '../src/model/session-state';
+import { leftFlowAt, noRelease, type ReleaseView } from './release';
 
 /**
  * The Workers tab (GY-116): every handle across the graph in one table, read for triage.
@@ -31,6 +32,16 @@ export function staleSession(handle: Pick<SessionHandle, 'state' | 'updatedAt' |
   const view = sessionView(handle, now, thresholdMs);
   return view.live ? null : { since: view.seenAt ?? handle.updatedAt, idleMs: view.unseenMs ?? 0 };
 }
+
+/**
+ * How long a running handle on a delivered or closed item may go unseen before the tab files it
+ * with the ended sessions (GY-168). Its item is finished, so nothing will end the session's work;
+ * a handle nobody has touched for an hour is left over from a dead session, not one still working.
+ * Delivered means out of the flow as the board reads it (`leftFlowAt`, or no delivery record at all
+ * for work merged before those records existed): merged work the production
+ * watch still holds at Deploy, or a smoke-gated merge without its passing check, is still moving.
+ */
+export const endedItemIdleMs = 60 * 60_000;
 
 /**
  * The pane a recorded Herdr attach command names. The launchers record
@@ -107,6 +118,11 @@ export interface WorkerRow extends Omit<SessionHandle, 'observed'>, SessionView 
   local: string | null; remote: string | null;
   stale: { since: string; idleMs: number } | null;
   reconciled: 'vanished' | 'superseded' | 'ended' | null;
+  /**
+   * Recorded running, but not seen for more than `endedItemIdleMs` on an item that has left the
+   * flow ('delivered') or is closed ('closed'): listed with the ended sessions, never as open.
+   */
+  leftOn: 'delivered' | 'closed' | null;
 }
 export interface PrincipalSummary {
   principal: string; roleKind: SessionRoleKind;
@@ -119,33 +135,44 @@ export interface WorkersView { running: WorkerRow[]; finished: WorkerRow[]; prin
 
 const parsed = (iso: string | null) => { const at = Date.parse(iso ?? ''); return Number.isFinite(at) ? at : null; };
 /** One handle as a tab row: how long it has spent, its two attach forms, and whether it is stale or was reconciled. */
-export function workerRow(work: Pick<Work, 'id' | 'key'>, handle: SessionHandle, now: Date, thresholdMs = sessionStaleThresholdMs): WorkerRow {
+export function workerRow(work: Pick<Work, 'id' | 'key'> & Partial<Work>, handle: SessionHandle, now: Date, thresholdMs = sessionStaleThresholdMs, release: ReleaseView = noRelease): WorkerRow {
   const startedAt = parsed(handle.startedAt) ?? now.getTime();
-  const endedAt = handle.state === 'running' ? now.getTime() : parsed(handle.endedAt) ?? parsed(handle.updatedAt) ?? startedAt;
-  return { ...handle, ...sessionView(handle, now, thresholdMs), workId: work.id, key: work.key, roleKind: sessionRoleKind(handle), spentMs: Math.max(0, endedAt - startedAt),
+  const view = sessionView(handle, now, thresholdMs);
+  const stale = staleSession(handle, now, thresholdMs);
+  // Stage done is not enough: merged work still at Deploy keeps its sessions open until it leaves the flow.
+  // Work merged before delivery records existed has nothing left to wait on, as the board reads it (groupOf).
+  const finished = work.stage !== 'done' ? null : work.closure ? 'closed' : !work.delivery || leftFlowAt(work as Work, release) !== null ? 'delivered' : null;
+  const leftOn = stale && stale.idleMs > endedItemIdleMs ? finished : null;
+  // A session left on a finished item stopped counting when it was last seen, not at the page clock.
+  const endedAt = handle.state === 'running' && !leftOn ? now.getTime() : parsed(handle.endedAt) ?? parsed(leftOn ? stale?.since ?? null : null) ?? parsed(handle.updatedAt) ?? startedAt;
+  return { ...handle, ...view, workId: work.id, key: work.key, roleKind: sessionRoleKind(handle), spentMs: Math.max(0, endedAt - startedAt),
     local: localAttachCommand(handle), remote: remoteAttachCommand(handle),
-    stale: staleSession(handle, now, thresholdMs), reconciled: reconciledClosure(handle) };
+    stale, reconciled: reconciledClosure(handle), leftOn };
 }
 
 /**
  * The tab, organised for triage: running rows first by time spent descending, finished rows after
  * by end time descending, and one summary per worker, reviewer or producer principal — approver,
  * escalation and master sessions belong to the loop, not to a seat that is either busy or idle.
+ * A running handle left on a finished item (`leftOn`) is filed with the finished rows, dated from
+ * when it was last seen.
  */
-export function workersView(all: Pick<Work, 'id' | 'key' | 'sessions'>[], now: Date, thresholdMs = sessionStaleThresholdMs): WorkersView {
-  const rows = all.flatMap(work => (work.sessions ?? []).map(handle => workerRow(work, handle, now, thresholdMs)));
-  const running = rows.filter(row => row.state === 'running').sort((a, b) => b.spentMs - a.spentMs || a.key.localeCompare(b.key));
-  const finished = rows.filter(row => row.state !== 'running').sort((a, b) => (parsed(b.endedAt) ?? 0) - (parsed(a.endedAt) ?? 0) || a.key.localeCompare(b.key));
+export function workersView(all: (Pick<Work, 'id' | 'key' | 'sessions'> & Partial<Work>)[], now: Date, thresholdMs = sessionStaleThresholdMs, release: ReleaseView = noRelease): WorkersView {
+  const rows = all.flatMap(work => (work.sessions ?? []).map(handle => workerRow(work, handle, now, thresholdMs, release)));
+  const open = (row: WorkerRow) => row.state === 'running' && !row.leftOn;
+  const endedAt = (row: WorkerRow) => parsed(row.leftOn ? row.updatedAt : row.endedAt) ?? 0;
+  const running = rows.filter(open).sort((a, b) => b.spentMs - a.spentMs || a.key.localeCompare(b.key));
+  const finished = rows.filter(row => !open(row)).sort((a, b) => endedAt(b) - endedAt(a) || a.key.localeCompare(b.key));
   const dayAgo = now.getTime() - 24 * 3_600_000;
   const seats = new Map<string, WorkerRow[]>();
   for (const row of rows) if (['worker', 'reviewer', 'producer'].includes(row.roleKind)) seats.set(row.principal, [...seats.get(row.principal) ?? [], row]);
   const principals = [...seats].map(([principal, handles]): PrincipalSummary => {
     // What it is on now is what every other reader shows running: an open record observed lately (GY-172).
-    const live = handles.filter(row => row.live).sort((a, b) => (parsed(b.startedAt) ?? 0) - (parsed(a.startedAt) ?? 0))[0];
+    const live = handles.filter(row => open(row) && row.live).sort((a, b) => (parsed(b.startedAt) ?? 0) - (parsed(a.startedAt) ?? 0))[0];
     const latest = handles.reduce((last, row) => (parsed(row.startedAt) ?? 0) >= (parsed(last.startedAt) ?? 0) ? row : last);
     return { principal, roleKind: (live ?? latest).roleKind,
       current: live ? { key: live.key, workId: live.workId, epoch: live.epoch, sinceMs: live.spentMs } : null,
-      sessionsLast24h: handles.filter(row => row.state === 'running' || (parsed(row.endedAt) ?? parsed(row.updatedAt) ?? 0) >= dayAgo).length };
+      sessionsLast24h: handles.filter(row => open(row) || (parsed(row.leftOn ? row.updatedAt : row.endedAt) ?? parsed(row.updatedAt) ?? 0) >= dayAgo).length };
   }).sort((a, b) => (b.current?.sinceMs ?? -1) - (a.current?.sinceMs ?? -1) || a.principal.localeCompare(b.principal));
   return { running, finished, principals };
 }
