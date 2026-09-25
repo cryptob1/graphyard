@@ -502,3 +502,31 @@ test('unit:scope-approver-routine — a restarted loop adopts the decision alrea
   assert.deepEqual(decisions.map((decision: any) => [decision.id, decision.state]), [[first.id, 'requested']], 'the standing decision is adopted, not withdrawn and asked again');
   assert.ok(Object.values(restarted.actions).some(action => action.work === work.key && /^Adopted decision/.test(action.detail)));
 });
+
+test('unit:scope-approver-routine — a decision still requested when a partial widening moved plannedFiles is withdrawn by a restarted loop, not left to itself as a master\'s revision', async () => {
+  let work = await claimed('stale decision after partial widening');
+  await ask(work, [helper], 'The layout measures its breakpoints through a helper');
+  const loop = harness();
+  await loop.cycle(emptyDaemonState(loopConfig()));
+  const [first] = await standing(work);
+  assert.equal(first.state, 'requested');
+  const before = await reload(work.id), other = 'src/widget/theme.ts';
+  // Another additive widening lands that does not cover the request: plannedFiles and the policy
+  // revision both move, and the request stays open.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(jsonb_set(document,'{policyRevision}',to_jsonb($2::int)),'{plannedFiles}',$3::jsonb) WHERE id=$1", [work.id, before.policyRevision + 1, JSON.stringify([...before.plannedFiles, other])]);
+  assert.ok((await reload(work.id)).scopeRequest, 'the request is still open');
+  const restarted = emptyDaemonState(loopConfig());
+  for (let cycles = 0; cycles < 3 && (await standing(work)).filter((decision: any) => decision.state === 'requested' && decision.input.expectedPolicyRevision === before.policyRevision + 1).length === 0; cycles++) await loop.cycle(restarted);
+  const decisions = await standing(work);
+  assert.equal(decisions.find((decision: any) => decision.id === first.id)?.state, 'withdrawn', 'the loop\'s own stale decision is taken back, not treated as another requester\'s');
+  const current = decisions.filter((decision: any) => decision.state === 'requested');
+  assert.equal(current.length, 1);
+  assert.equal(current[0].input.expectedPolicyRevision, before.policyRevision + 1);
+  assert.ok(current[0].input.plannedFiles.includes(other) && current[0].input.plannedFiles.includes(helper), 'asked against the current file list');
+  assert.ok(loop.launched.includes(current[0].id));
+  assert.ok(!Object.values(restarted.actions).some(action => action.work === work.key && action.state === 'failed' && /left to its requester/.test(action.detail)));
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { decision: current[0].id, reason: 'The helper is AC-1 spelled out' });
+  work = await reload(work.id);
+  assert.ok(work.plannedFiles.includes(helper) && work.plannedFiles.includes(other));
+  assert.equal(work.lease?.epoch, before.epoch);
+});

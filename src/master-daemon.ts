@@ -2202,31 +2202,33 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         await noteScopeOutcome(item, watch, judged);
         return;
       }
-      // The control plane holds one requirements decision at a time. One standing for another
-      // widening (a master's own revision) is not this request's answer: it is left to its
+      // The control plane holds one requirements decision at a time. One that answers no scope
+      // request (a master's own revision) is not this request's answer: it is left to its
       // requester, and this one is asked once it settles.
-      if (standing && decision.action === 'requirements' && JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles)) {
-        throw new Error(`requirements decision ${standing.id} is ${standing.state} for another planned-files revision, not the widening ${item.key}'s scope request asks for; the control plane holds one at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
+      if (standing && decision.action === 'requirements' && !standing.input?.answers) {
+        const other = JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles) ? 'another planned-files revision' : 'a widening that answers no scope request';
+        throw new Error(`requirements decision ${standing.id} is ${standing.state} for ${other}, not the widening ${item.key}'s scope request asks for; it is left to its requester, and the control plane holds one at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
-      // The same widening is not the same decision: a scope decision answers the one request it
-      // names (`answers`). One standing for a request the worker has since withdrawn and asked again
-      // can never apply — the server refuses it as no longer open — so adopting it would settle this
-      // request unasked. As with a merge for an earlier candidate, the loop takes it back and asks.
-      if (standing && decision.action === 'requirements' && !sameAnswers(standing.input?.answers, decision.input?.answers)) {
-        const stale = `requirements decision ${standing.id} is ${standing.state} for ${standing.input?.answers ? `the scope request made at ${standing.input.answers.at}` : 'a widening that answers no scope request'}, not the one ${item.key}'s worker made at ${decision.scope?.at ?? 'now'}`;
-        if (!standing.input?.answers || standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}; ${!standing.input?.answers ? 'it is left to its requester' : effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}, and this one is requested once it settles: graphyard master decisions ${item.key}`);
-        await effects.withdraw(item, standing.id, `${stale}; the request it answers was withdrawn, so it can never apply and is withdrawn for a decision that answers the current request`);
-        standing = undefined;
-      }
-      // Nor is one requested against requirements a policy revision has since superseded: the
-      // server rejects its approval and leaves its refusal unattached, so adopting it would settle
-      // this watch on a decision that can never answer the request. As with a merge for an earlier
-      // candidate, the loop takes it back and asks against the current revision.
-      if (standing && decision.action === 'requirements' && standing.input?.expectedPolicyRevision !== item.policyRevision) {
-        const stale = `requirements decision ${standing.id} is ${standing.state} against policy revision ${String(standing.input?.expectedPolicyRevision)}, not ${item.key}'s current revision ${item.policyRevision}`;
-        if (!standing.input?.answers || standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}; ${!standing.input?.answers ? 'it is left to its requester' : effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}, and this one is requested once it settles: graphyard master decisions ${item.key}`);
-        await effects.withdraw(item, standing.id, `${stale}; it was judged against superseded requirements, so it can never apply and is withdrawn for a decision against the current revision`);
-        standing = undefined;
+      // A scope decision answers the one request it names (`answers`), against the requirements of
+      // one policy revision. One standing for a request the worker has since withdrawn and asked
+      // again, or against a revision a later widening or review-policy bump has superseded (which
+      // may also have moved plannedFiles), can never apply: the server rejects its approval and
+      // leaves its refusal unattached, so adopting it would settle this request unasked. Whatever
+      // the file list now reads, the loop takes it back and asks — as a merge for an earlier
+      // candidate — before treating a differing list as anything but its own stale request.
+      if (standing && decision.action === 'requirements') {
+        const stale = !sameAnswers(standing.input?.answers, decision.input?.answers)
+          ? `requirements decision ${standing.id} is ${standing.state} for the scope request made at ${standing.input?.answers?.at}, not the one ${item.key}'s worker made at ${decision.scope?.at ?? 'now'}`
+          : standing.input?.expectedPolicyRevision !== item.policyRevision
+            ? `requirements decision ${standing.id} is ${standing.state} against policy revision ${String(standing.input?.expectedPolicyRevision)}, not ${item.key}'s current revision ${item.policyRevision}`
+            : JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles)
+              ? `requirements decision ${standing.id} is ${standing.state} for another planned-files revision than the widening ${item.key}'s scope request now asks for`
+              : null;
+        if (stale) {
+          if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}; ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}, and this one is requested once it settles: graphyard master decisions ${item.key}`);
+          await effects.withdraw(item, standing.id, `${stale}; it can never answer the current request, so it is withdrawn for a decision that does, against the current revision`);
+          standing = undefined;
+        }
       }
       // A rework request names the observation it was decided from (GY-144), so its approver sees
       // at once whether the item has moved since; the watch keeps the same pair.
