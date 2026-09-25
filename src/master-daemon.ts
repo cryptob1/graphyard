@@ -1473,6 +1473,8 @@ export interface DaemonEffects {
    */
   escalationSessions?: () => Promise<EscalationSession[]>;
   endEscalation?: (session: EscalationSession, resolution: string, waiting: EscalationSession['waiting']) => Promise<void>;
+  /** Write an escalation handler's record back as given (the loop notes when it first saw the handler stopped). */
+  markEscalation?: (session: EscalationSession) => Promise<void>;
   relaunchEscalation?: (session: EscalationSession) => Promise<{ agentName: string; account: string | null }>;
   /** Account health of the reviewer, producer and approver profiles, as the worker profiles' arrives in `credentials`. */
   roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer' | 'approver' | 'escalation-handler', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
@@ -1525,6 +1527,8 @@ export const preserveKey = (work: Pick<Work, 'id'>, epoch: number) => `preserve:
 export const findingRecheckMs = 120_000;
 /** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
 export const launchAppearanceMs = 120_000;
+/** How long an escalation handler stays stopped with no limit notice before it is taken as finished. */
+export const handlerSettleMs = 180_000;
 /**
  * Keep what a worker that died left behind, the same way an exhausted one's is kept (GY-105).
  *
@@ -1682,12 +1686,40 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `${session.role} session ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
     }
+    /**
+     * A handler that finished — stopped with no limit notice for `handlerSettleMs`, or no longer
+     * listed by Herdr — is ended like a spent one, less the relaunch: its registry session ends, so
+     * the role's slot is free for the next escalation, its pane closes and its record is dropped.
+     * Herdr reports a session idle while a command runs, so one stopped sighting is not an end.
+     */
+    let listing: { agents: HerdrAgent[]; available: boolean } | null = null;
+    const handlerFinished = async (session: EscalationSession, isStopped: boolean) => {
+      listing ??= await Promise.resolve(effects.herdr ? effects.herdr() : { agents, available: true }).catch(() => ({ agents: [], available: false }));
+      if (!listing.available) return;
+      const listed = listing.agents.some(candidate => candidate.name === session.agentName);
+      const gone = !listed && clock - Date.parse(session.launchedAt) > launchAppearanceMs;
+      if (!gone && !isStopped) { if (session.idleSince) await effects.markEscalation?.({ ...session, idleSince: undefined }).catch(() => {}); return; }
+      if (!gone) {
+        if (!session.idleSince) { await effects.markEscalation?.({ ...session, idleSince: new Date(clock).toISOString() }).catch(() => {}); return; }
+        if (clock - Date.parse(session.idleSince) < handlerSettleMs) return;
+      }
+      const key = `close:escalation:${session.work}:${session.trigger}:${session.launchedAt}`, previous = state.actions[key];
+      if (!effects.endEscalation || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
+      const why = gone ? 'Herdr no longer lists it' : `it has been stopped with no limit notice since ${session.idleSince}`;
+      try {
+        await effects.endEscalation(session, `escalation handler for ${session.work} (${session.trigger}) finished: ${why}`, null);
+        performed.push(await record(state, key, { kind: 'close', work: session.work, principal: null, state: 'done', detail: `Ended escalation handler ${session.agentName} for ${session.work} (${session.trigger}): ${why}; its pane${session.session ? ', registry session' : ''} and record are closed, so the role takes the next escalation`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'close', work: session.work, principal: null, state: 'failed', detail: `Could not end finished escalation handler ${session.agentName} for ${session.work}: ${message(error)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      }
+    };
     // An escalation handler is a capacity role too (GY-182): one stopped on its provider's notice
     // is ended, its account held, and the same escalation launched again on another account; with
     // none left it waits for the first reset and is launched again then, by the loop alone.
     for (const session of await effects.escalationSessions?.().catch(() => [] as EscalationSession[]) ?? []) {
       const item = open.find(candidate => candidate.key === session.work);
-      if (!item) continue;
+      // A handler whose item has closed has nothing left to judge: it is ended once it finishes.
+      if (!item) { if (!session.waiting) await handlerFinished(session, !!stopped(session.agentName)); continue; }
       const key = failoverKey('escalation-handler', item, `${session.trigger}:${session.waiting ? `${session.waiting.since}:relaunch` : session.launchedAt}`), previous = state.actions[key];
       if (session.waiting) {
         if (Date.parse(session.waiting.retryAt) > clock || !effects.relaunchEscalation || !readyToRetry(previous, state.cycle)) continue;
@@ -1701,9 +1733,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
         continue;
       }
       const agent = stopped(session.agentName);
-      if (!agent || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
-      const signal = await notice(agent);
-      if (!signal) continue;
+      if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) continue;
+      const signal = agent ? await notice(agent) : null;
+      if (!signal) { await handlerFinished(session, !!agent); continue; }
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
       try {
         const account = session.account ?? profileAccount(escalationProfile);
@@ -3136,8 +3168,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     endEscalation: async (session, resolution, waiting) => {
       if (session.session) await endRegistrySession(session.session, resolution.slice(0, 500));
       try { if (session.pane) await closeHerdrPane(session.pane, run); } catch (error) { if (!paneAlreadyGone(error)) throw error; }
-      await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, pane: null, session: null, waiting } : null);
+      await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, pane: null, session: null, waiting, idleSince: undefined } : null);
     },
+    markEscalation: session => saveEscalationSession(root, session.work, session.trigger, session),
     relaunchEscalation: async session => {
       // The same escalation, from a context assembled again now: the one the ended handler read may be stale.
       const context = verifiedContext(await asOperatorAgent('GET', `work/${encodeURIComponent(session.work)}/context?trigger=${encodeURIComponent(session.trigger)}`));

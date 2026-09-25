@@ -3986,7 +3986,8 @@ export async function escalationRoleHealth(config: MasterConfig, probe: Environm
  * by a master, not by the loop, so this is what lets the loop find one that stopped on its
  * provider's limit notice, hold the account and launch the same escalation again elsewhere.
  * `waiting` is a handler ended for spent quota with no account left: it is launched again once
- * `retryAt` passes.
+ * `retryAt` passes. One that finished — stopped with no notice, or gone from Herdr — is ended by
+ * the loop too, so the registry session it holds does not keep the role's slot.
  */
 export const escalationSessionSchema = z.object({
   agentName: z.string().max(200), pane: z.string().max(200).nullable(), work: z.string().max(40), trigger: z.string().max(64),
@@ -3994,6 +3995,8 @@ export const escalationSessionSchema = z.object({
   /** The agent registry session the handler holds, when the registry chose its account: ended with the handler. */
   session: z.string().max(200).nullable().default(null),
   waiting: z.object({ since: z.string(), retryAt: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
+  /** When the loop first saw the handler stopped with no limit notice: past a grace, it has finished. */
+  idleSince: z.string().optional(),
 }).strict();
 export type EscalationSession = z.infer<typeof escalationSessionSchema>;
 export const retainedEscalationSessions = 50, escalationSessionMs = 86_400_000;

@@ -16,7 +16,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { answerHumanCommand, humanRequestsCommand, parkCommand } from '../src/cli/session-commands.js';
 import type { CliContext } from '../src/cli/context.js';
-import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
+import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, handlerSettleMs, launchAppearanceMs, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, readApproverLaunch, readEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
@@ -928,6 +928,74 @@ test('an exhausted escalation handler\'s record survives a failed relaunch, whic
   assert.equal(relaunches.length >= 3, true, JSON.stringify(relaunches));
   const running = await readEscalationSessions(root);
   assert.deepEqual(running.map(entry => [entry.trigger, entry.waiting]), [['lease-loss', null]]);
+});
+
+test('an escalation handler that finishes with no limit notice has its registry session, pane and record ended, so a second escalation launches at the role\'s concurrency of 1', async () => {
+  const root = await localRoot('escalation-finished');
+  const ended: string[] = [], closed: string[] = [];
+  // The registry's escalation-handler role at its default concurrency of 1: one live session holds the slot.
+  const slots = new Set<string>();
+  const launchHandler = async (work: string, trigger: string, at: number) => {
+    if (slots.size >= 1) throw new Error(`escalation-handler is at its concurrency limit of 1 (${[...slots].join(', ')})`);
+    const session = `registry-esc-${trigger}`, agentName = `gy-esc-${trigger}`;
+    slots.add(session);
+    herdr.agents.push({ name: agentName, pane_id: `pane-${agentName}`, agent_status: 'working' });
+    await saveEscalationSession(root, work, trigger, { agentName, pane: `pane-${agentName}`, work, trigger, kind: 'claude', account: 'env-a', runtime: 'claude', launchedAt: new Date(at).toISOString(), session, waiting: null }, at);
+  };
+  const { config, herdr, clock, work, cycle, now } = await approverLoop('escalation-finished', ['env-a', 'env-b'], now => ({
+    approver: undefined, decide: undefined,
+    roleHealth: async () => ({ 'escalation-handler': await escalationRoleHealth(config, loginsOnly(now)) }),
+    escalationSessions: () => readEscalationSessions(root),
+    markEscalation: session => saveEscalationSession(root, session.work, session.trigger, session, now()),
+    // As `master run` wires it: the registry session ends, the pane closes and the record goes.
+    endEscalation: async (session, _resolution, waiting) => {
+      if (session.session) { ended.push(session.session); slots.delete(session.session); }
+      if (session.pane) { closed.push(session.pane); herdr.agents = herdr.agents.filter(agent => agent.pane_id !== session.pane); }
+      await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, pane: null, session: null, waiting, idleSince: undefined } : null, now());
+    },
+    relaunchEscalation: async () => { throw new Error('a finished handler is never launched again'); },
+  }));
+  await launchHandler(work.key, 'lease-loss', now());
+  await assert.rejects(launchHandler(work.key, 'stalled', now()), /concurrency limit/, 'the running handler holds the slot');
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  assert.deepEqual([ended, closed], [[], []], 'a working handler is left alone');
+
+  // It records its decision and stops. Herdr reports a session idle while a command runs too, so one sighting ends nothing.
+  herdr.agents.find(agent => agent.name === 'gy-esc-lease-loss')!.agent_status = 'idle';
+  herdr.output['gy-esc-lease-loss'] = '  ⎿ Recorded the decision; stopping.\n';
+  await cycle(state);
+  assert.deepEqual(ended, []);
+  assert.ok((await readEscalationSessions(root))[0].idleSince, 'the first stopped sighting is noted on the record');
+  // Working again clears it; stopped again starts the grace afresh.
+  herdr.agents.find(agent => agent.name === 'gy-esc-lease-loss')!.agent_status = 'working';
+  clock.skewMs += 20_000; await cycle(state);
+  assert.equal((await readEscalationSessions(root))[0].idleSince, undefined);
+  herdr.agents.find(agent => agent.name === 'gy-esc-lease-loss')!.agent_status = 'done';
+  clock.skewMs += 20_000; await cycle(state);
+  clock.skewMs += handlerSettleMs - 1_000; await cycle(state);
+  assert.deepEqual(ended, [], 'not before the grace has passed');
+
+  clock.skewMs += 2_000;
+  const finished = await cycle(state);
+  const close = finished.actions.find(action => action.kind === 'close');
+  assert.equal(close?.state, 'done', JSON.stringify(finished.actions));
+  assert.match(close!.detail, /Ended escalation handler gy-esc-lease-loss .* stopped with no limit notice/);
+  assert.deepEqual([ended, closed], [['registry-esc-lease-loss'], ['pane-gy-esc-lease-loss']], 'its registry session and pane are ended');
+  assert.deepEqual(await readEscalationSessions(root), [], 'and its record dropped');
+  assert.ok(!finished.actions.some(action => action.kind === 'failover'), 'a finished handler is not failed over');
+  assert.deepEqual((await reload(work.id)).capacity?.exhaustions ?? [], [], 'nor recorded as spent');
+
+  // The second escalation takes the freed slot. When its pane is gone from Herdr, it is ended at once.
+  await launchHandler(work.key, 'stalled', now());
+  herdr.agents = herdr.agents.filter(agent => agent.name !== 'gy-esc-stalled');
+  await cycle(state);
+  assert.deepEqual(ended, ['registry-esc-lease-loss'], 'not while a just-launched session may not be listed yet');
+  clock.skewMs += launchAppearanceMs + 1_000;
+  await cycle(state);
+  assert.deepEqual(ended, ['registry-esc-lease-loss', 'registry-esc-stalled']);
+  assert.deepEqual(await readEscalationSessions(root), []);
+  assert.equal(slots.size, 0);
 });
 
 test('a re-keyed approval watch carries its session\'s account, runtime and registry session, so a retained session\'s exhaustion holds the account it spent', () => {
