@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ejectionReason, nextQueueSequence, predictQueue, queueOrder, queueRef, type QueueEntry } from '../src/merge-queue.js';
+import { ejectionReason, nextQueueSequence, predictQueue, queueOrder, queuePlacement, queueRef, type QueueEntry } from '../src/merge-queue.js';
+import { decideCarry } from '../src/model/carry.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 
 const ciAppIds = [15368];
@@ -234,4 +235,106 @@ test('unit:queue-tree-equivalent-base — a predicted base that changes to a tre
   // Tree equivalence never substitutes for publication: an unpublished head on a tree-identical base still publishes.
   head.queue!.speculation = null; head.observation = observation(head, { baseTip: commit('merged'), baseTree: commit('tree') });
   assert.equal(predictQueue([head], now.getTime())[0].publishable, true);
+});
+
+/** GY-196: an entry that fell back out of validation — here, its tip needs approval afresh — while it keeps its sequence. */
+function fellBack(item: Work) {
+  item.stage = 'review';
+  item.observation = observation(item, { reviews: [] });
+  item.gates = [{ name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }];
+  return item;
+}
+
+test('unit:unvalidated-predecessor-skipped — an entry sent back to review is no predecessor: the entry behind it is predicted on the base branch and its approval and proofs carry without it', () => {
+  const main = commit('main'), old = commit('old'), headB = commit('GYBhead'), tipB = commit('GYBtip'), rebuilt = commit('GYBrebuilt');
+  const a = published(enqueue(work('GY-A'), 1));
+  const b = enqueue(work('GY-B', { candidate: { sha: headB, baseSha: old, pr: 2, branch: 'graphyard/GY-B', author: 'agent' } }), 2);
+  b.evidence = [evidence(b, { scopeFiles: ['src/engine.ts'] })];
+  const reviewed = b.evidence[0];
+  // B's tip was built behind A while A was validated: a merge of B's reviewed head and A's tip.
+  b.candidate = { ...b.candidate!, sha: tipB, baseSha: a.candidate!.sha };
+  b.queue!.speculation = { ref: queueRef('GY-B'), tip: tipB, base: a.candidate!.sha, baseTree: commit('GYAtree'), predecessors: ['GY-A'], policyRevision: 1, publishedAt: now.toISOString(), reviewedHead: headB,
+    merge: { from: headB, parents: [headB, a.candidate!.sha], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/a.ts'] } };
+  b.observation = observation(b, { baseTip: main, reviews: [{ reviewer: 'reviewer', sha: headB, state: 'APPROVED' }] });
+  const [aheadOfB, behindA] = predictQueue([a, b], now.getTime());
+  assert.deepEqual([behindA.position, behindA.predecessors, behindA.predictedBase, behindA.current], [1, ['GY-A'], a.candidate!.sha, true], 'while A is validated, B is predicted on its tip');
+  assert.equal(aheadOfB.position, 0);
+
+  // A goes back to review: its tip needs a fresh approval. It keeps its sequence, but it is no predecessor.
+  fellBack(a);
+  assert.deepEqual(queueOrder([a, b]).map(item => item.key), ['GY-A', 'GY-B'], 'A keeps its entry and sequence');
+  const [skippedA, head] = predictQueue([a, b], now.getTime());
+  assert.equal(skippedA.position, 0, 'A itself is still predicted, on the base branch');
+  assert.deepEqual([head.position, head.predecessors, head.skipped, head.predictedBase], [0, [], ['GY-A'], main], "B's predicted base excludes A: it is the base branch");
+  assert.deepEqual(head.base, { sha: main, tree: null });
+  assert.deepEqual([head.current, head.publishable], [false, true], "B's tip behind A is stale and is rebuilt on the base branch alone");
+  assert.equal(head.reasons.some(reason => reason.includes('GY-A')), false, 'nothing in B\'s merge gate names A');
+
+  // Graphyard rebuilds B's tip from its own reviewed head onto main, and decides the carry from
+  // the prediction: no predecessor, so the base branch — validated by definition — and the files
+  // A's tip changed relative to it, which B's review and proof never read.
+  const merge = { from: headB, parents: [headB, main], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/a.ts'] };
+  const carry = decideCarry({ from: { sha: headB, baseSha: b.candidate!.baseSha }, to: { sha: rebuilt, baseSha: main }, policyRevision: 1, at: now.toISOString(), merge,
+    predecessor: { key: head.predecessors.at(-1) ?? null, validated: true }, reviewedFiles: ['src/engine.ts'],
+    approval: { provider: 'github', reviewer: 'reviewer', sha: headB }, proofs: [{ proof: 'integration:queue', evidence: reviewed }], app: 'control-plane' });
+  assert.equal(carry.predecessor, 'base branch');
+  assert.equal(carry.approval.carried, true, carry.approval.reason);
+  assert.deepEqual(carry.evidence.map(entry => [entry.proof, entry.carried, entry.evidenceId]), [['integration:queue', true, reviewed.id]]);
+  assert.doesNotMatch(carry.approval.reason, /GY-A|not fully validated/);
+  // What the incident refused, for contrast: the same tip decided behind the unvalidated entry.
+  const refused = decideCarry({ from: { sha: headB, baseSha: b.candidate!.baseSha }, to: { sha: rebuilt, baseSha: main }, policyRevision: 1, at: now.toISOString(), merge,
+    predecessor: { key: 'GY-A', validated: false }, reviewedFiles: ['src/engine.ts'], approval: { provider: 'github', reviewer: 'reviewer', sha: headB }, proofs: [{ proof: 'integration:queue', evidence: reviewed }], app: 'control-plane' });
+  assert.match(refused.approval.reason, /predecessor GY-A is not fully validated/);
+
+  // Bound, the rebuilt tip is the queue's head: review and acceptance pass on the carried bindings,
+  // and the merge gate waits on nothing A does.
+  b.candidate = { ...b.candidate!, sha: rebuilt, baseSha: main };
+  b.queue!.speculation = { ref: queueRef('GY-B'), tip: rebuilt, base: main, baseTree: commit('maintree'), predecessors: head.predecessors, policyRevision: 1, publishedAt: now.toISOString(), reviewedHead: headB, merge, carry };
+  b.observation = observation(b, { baseTip: main, baseTree: commit('maintree'), reviews: [{ reviewer: 'reviewer', sha: headB, state: 'APPROVED' }] });
+  const bound = predictQueue([a, b], now.getTime())[1];
+  assert.deepEqual([bound.position, bound.current, bound.tip, bound.predecessors], [0, true, rebuilt, []]);
+  const gates = evaluate(b, [a, b], now, ciAppIds);
+  for (const name of ['review', 'acceptance']) assert.equal(gates.gates.find(gate => gate.name === name)!.passed, true, `${name}: ${gates.gates.find(gate => gate.name === name)!.reasons.join('; ')}`);
+  assert.deepEqual(gates.gates.find(gate => gate.name === 'merge')!.reasons, [], 'B lands first; A is not ahead of it');
+  assert.equal(gates.stage, 'merge');
+
+  // Once A is validated again it is a predecessor again, in its sequence.
+  a.stage = 'merge'; a.observation = observation(a); a.gates = [];
+  assert.deepEqual(predictQueue([a, b], now.getTime())[1].predecessors, ['GY-A']);
+});
+
+test('unit:no-ejection-on-unvalidated-conflict — an entry that conflicts with an unvalidated predecessor\'s tip but not with the base branch stays queued and is re-predicted without it', () => {
+  const main = commit('main');
+  const a = published(enqueue(work('GY-A'), 1));
+  const b = enqueue(work('GY-B', { candidate: { sha: commit('GYBhead'), baseSha: commit('old'), pr: 2, branch: 'graphyard/GY-B', author: 'agent' } }), 2);
+  b.observation = observation(b, { baseTip: main }); b.evidence = [evidence(b)];
+  // B's change conflicts with A's tip and merges cleanly onto the base branch.
+  const merges: string[] = [];
+  const speculativeMerge = (head: string, base: string) => { merges.push(base); return base === a.candidate!.sha ? null : commit(`${head.slice(0, 4)}merged`); };
+  // What the queue does for B on each pass (see advanceQueue): publish onto the placement's predicted
+  // base, or eject on a conflict.
+  const advance = () => {
+    const placement = queuePlacement(b, [a, b], now.getTime())!;
+    if (placement.current || !placement.publishable) return { placement, ejected: null };
+    const tip = speculativeMerge(b.candidate!.sha, placement.predictedBase!);
+    return { placement, ejected: tip ? null : `Speculative merge of ${placement.predictedBase!.slice(0, 12)} into ${b.candidate!.branch} conflicts and cannot be resolved by Graphyard` };
+  };
+  // A validated A really is where B lands, so the conflict is B's to resolve.
+  const validatedA = advance();
+  assert.equal(validatedA.placement.predictedBase, a.candidate!.sha);
+  assert.match(validatedA.ejected!, /conflicts and cannot be resolved/);
+
+  // A falls back to review before B's merge is attempted: B is re-predicted on the base branch alone,
+  // the conflicting merge with A's tip is never made, and B stays in the queue.
+  fellBack(a); merges.length = 0;
+  const skipped = advance();
+  assert.deepEqual([skipped.placement.predictedBase, skipped.placement.predecessors, skipped.placement.skipped, skipped.placement.position], [main, [], ['GY-A'], 0]);
+  assert.equal(skipped.ejected, null);
+  assert.deepEqual(merges, [main], 'the only merge made is onto the base branch');
+  assert.equal(ejectionReason(b, ciAppIds, [a, b]), null);
+  const evaluated = evaluate(b, [a, b], now, ciAppIds);
+  assert.equal(evaluated.queue?.sequence, 2, 'B keeps its entry');
+  assert.equal(evaluated.queueEjection ?? null, null);
+  assert.deepEqual(evaluated.queueHistory ?? [], [], 'nothing was ejected');
+  assert.equal(evaluated.gates.find(gate => gate.name === 'merge')!.reasons.some(reason => reason.includes('GY-A')), false);
 });
