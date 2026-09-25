@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { defaultMergeBatchSize, maxMergeBatchSize } from '../merge-queue.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 
@@ -257,6 +258,9 @@ export const masterConfigSchema = z.object({
   // The agent environments profiles may launch on, discovered or created by master environments.
   environments: z.array(agentEnvironmentSchema).max(50).optional(),
   run: masterRunSchema.prefault({}),
+  // The merge queue (GY-330): how many consecutive entries one combined tip validates (default 4;
+  // 1 validates every entry on its own tip). The loop publishes it to the control plane every change.
+  mergeQueue: z.object({ batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional() }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's own operator-agent identity, and the separate approver identity whose session
@@ -265,6 +269,10 @@ export const masterConfigSchema = z.object({
   approver: agentIdentitySchema.optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
+/** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
+export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
+  return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
+}
 
 export function assertMasterBinding(config: MasterConfig, status: any) {
   if (status.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
