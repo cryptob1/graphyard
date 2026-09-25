@@ -96,6 +96,8 @@ export const reviewRecordSchema = z.object({
     releasedAt: z.string().min(1).max(40).optional() }).optional(),
   /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
   criteriaOnly: z.literal(true).optional(),
+  /** The review history the launch prompt was built from (GY-167, reviewHistory): the head last reviewed, and the changes-requested rounds before this one. */
+  reviewRound: z.object({ previousHead: sha40.optional(), changesRequested: z.number().int().nonnegative() }).strict().optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
@@ -442,10 +444,41 @@ export function assertReviewCandidate(work: Work, observedAt: string) {
 
 export type ReviewBinding = ReturnType<typeof assertReviewCandidate>;
 
+/** The changes-requested rounds after which only an unmet acceptance criterion may request changes (GY-167). */
+export const reviewRoundCap = 3;
+export type ReviewHistory = NonNullable<ReviewRecord['reviewRound']>;
+/**
+ * What earlier review rounds of this pull request mean for the next launch (GY-167): the head the
+ * configured reviewer last gave a verdict on, when that is an earlier head, and how many
+ * CHANGES_REQUESTED verdicts it posted on this pull request under this policy revision. Each
+ * record keeps the count its own launch started from, so the count survives the ledger reaping
+ * older records: it is the larger of the verdicts still on record and the newest carried count.
+ */
+export function reviewHistory(records: ReviewRecord[], binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'policyRevision'>, reviewer: string): ReviewHistory {
+  const own = (record: ReviewRecord) => record.key === binding.key && record.pr === binding.pr && !!record.verdict && record.verdict.reviewer.toLowerCase() === reviewer.toLowerCase();
+  const reviewed = records.filter(record => own(record) && record.sha !== binding.sha)
+    .sort((a, b) => (Date.parse(a.verdict!.submittedAt) || 0) - (Date.parse(b.verdict!.submittedAt) || 0));
+  const round = records.filter(record => record.key === binding.key && record.pr === binding.pr && record.policyRevision === binding.policyRevision);
+  const requested = (record: ReviewRecord) => own(record) && record.verdict!.state === 'CHANGES_REQUESTED';
+  const recorded = new Set(round.filter(requested).map(record => record.verdict!.reviewId)).size;
+  const carried = Math.max(0, ...round.filter(record => record.reviewRound).map(record => record.reviewRound!.changesRequested + (requested(record) ? 1 : 0)));
+  const previousHead = reviewed.at(-1)?.sha;
+  return { ...(previousHead ? { previousHead } : {}), changesRequested: Math.max(recorded, carried) };
+}
+
+/** The prompt's review-round section: the delta since the head last reviewed, and the cap once three rounds requested changes (GY-167). */
+export function reviewRoundSection(sha: string, history?: ReviewHistory) {
+  if (!history) return '';
+  return (history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
+      + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '')
+    + (history.changesRequested >= reviewRoundCap ? `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. ` : '');
+}
+
 /** `checkout` is the session directory a launch allocated under the managed worktree root, when it allocated one. */
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[]) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory) {
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
+    + reviewRoundSection(binding.sha, history)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + (threads?.failure ? threadReadFailureSection(threads.failure) : threads?.unresolved.length ? threadSection(binding.sha, threads.unresolved, threads.total) : '')
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
@@ -464,11 +497,11 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: 
  * it already judged — or, for a session that never took up its request (GY-93), the request
  * itself, from the launcher that sent it, so the message is complete whichever the case is.
  */
-export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout'>>, criteria?: { id: string; text: string }[]) {
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound'>>, criteria?: { id: string; text: string }[]) {
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now, bound to that exact commit: gh api --method POST repos/${repository}/pulls/${record.pr}/reviews -f commit_id=${record.sha} -f event=APPROVE -f body=YOUR_JUSTIFICATION (use event=REQUEST_CHANGES instead when the change is not acceptable). `
     + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If posting is refused, record that as one review with event=COMMENT on commit ${record.sha} (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
     // The request is repeated only with the item's criteria: the criteria-only rule without them would leave nothing to judge.
-    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria)}` : '');
+    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound)}` : '');
 }
 
 async function writeReviewerSession(directory: string, token: string) {
@@ -536,7 +569,9 @@ export async function launchReview(root: string, work: Work, profileName: string
     const sessions = profileSessions(profile, agents, ledger.reviews);
     if (!sessions.free) return { refusal: new Error(profileAtLimit('Reviewer', profile, sessions)) };
     const requestedAt = now().toISOString();
-    const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
+    // Read before this launch's own record joins the ledger: the rounds before this one.
+    const reviewRound = reviewHistory(ledger.reviews, binding, `${reviewerApp.slug}[bot]`);
+    const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound,
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
     ledger.reviews.push(record);
@@ -592,7 +627,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         pane = created.pane; tabId = created.tab;
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound), dependencies.run, { ...dependencies.prompt, ...dependencies.start, directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
