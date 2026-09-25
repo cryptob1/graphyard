@@ -38,16 +38,29 @@ export const actionIdleMs = 5 * 60_000;
  */
 export const actionStallThreshold = 3;
 /**
- * How long a stalled row waits between attempts, whatever its attempt count.
+ * How long a stalled row first waits between attempts, whatever its attempt count.
  *
- * A widening backoff is the right answer to a fault that may be load: each attempt costs something
- * and the next one may succeed. It is the wrong answer to a row that keeps failing for the same
- * reason — those attempts are not evidence that the next one should wait longer, they are evidence
- * that nothing will change until the condition does. Backoff earned while a blocking condition
- * stood must not outlive it, so a stalled row rechecks on this fixed interval instead of waiting
- * out a ceiling computed from attempts that could not have succeeded.
+ * A widening backoff on the attempt count is the right answer to a fault that may be load: each
+ * attempt costs something and the next one may succeed. Attempts made before a row stalled say
+ * nothing about the condition it now keeps meeting, so backoff earned against them must not
+ * outlive it: a row that stalls starts again from this recheck instead of waiting out a ceiling
+ * computed from attempts that could not have succeeded.
  */
 export const actionStallRecheckMs = 60_000;
+/**
+ * The longest a stalled row waits between attempts (GY-185).
+ *
+ * A fixed one-minute recheck assumed the condition would clear. One that never did — a delivered
+ * item's merge refused for want of an authorization, a dispatch refused because delivered work is
+ * immutable — was attempted about every two minutes for days: 2112 attempts on one row, each saving
+ * a whole document under the coordination lock. So the recheck grows with the unchanged run itself:
+ * each further failure for the same reason doubles it, up to this ceiling. A condition that clears
+ * soon is still answered soon, and one that does not costs a shrinking share of the lock.
+ */
+export const actionStallMaxMs = 30 * 60_000;
+/** The wait after `failures` consecutive failures for one unchanged reason: the recheck at the threshold, doubling per failure after it. */
+export const actionStallDelay = (failures: number) =>
+  Math.min(actionStallRecheckMs * 2 ** Math.max(0, failures - actionStallThreshold), actionStallMaxMs);
 
 export const actionRetryDelay = (attempts: number) => Math.min(actionRetryMinMs * 2 ** Math.max(0, attempts - 1), actionRetryMaxMs);
 
@@ -105,15 +118,17 @@ export function actionStall(row: ActionRow): ActionStall | null {
 /**
  * When a failed row is offered again.
  *
- * Two situations, two rules. A row whose failures keep changing is meeting faults that may pass,
- * and each attempt costs something, so it backs off on a widening interval. A row that keeps
- * failing for the same reason is stalled, and the attempts it made while that condition stood are
- * not a reason to wait longer — they were made while it could not have succeeded. It rechecks on
- * `actionStallRecheckMs` instead, so the moment its condition clears the row is claimed within a
- * minute rather than waiting out a ten-minute ceiling it earned against an impossibility.
+ * Two situations, two schedules. A row whose failures keep changing is meeting faults that may
+ * pass, and each attempt costs something, so it backs off on the attempt count. A row that keeps
+ * failing for the same reason is stalled: its wait restarts from `actionStallRecheckMs`, whatever
+ * attempts it made before, and doubles with each further identical failure up to
+ * `actionStallMaxMs` (`actionStallDelay`). A condition that clears soon is claimed within a minute
+ * or two; one that stands is attempted less and less often, never on a steady beat.
  */
-export const actionRetryAt = (row: ActionRow, now: Date) =>
-  new Date(now.getTime() + (actionStall(row) ? Math.min(actionRetryDelay(row.attempts), actionStallRecheckMs) : actionRetryDelay(row.attempts))).toISOString();
+export const actionRetryAt = (row: ActionRow, now: Date) => {
+  const stall = actionStall(row);
+  return new Date(now.getTime() + (stall ? actionStallDelay(stall.failures) : actionRetryDelay(row.attempts))).toISOString();
+};
 
 /**
  * The refusals `launchProducer` (src/producer.ts) gives a request it will never launch again,

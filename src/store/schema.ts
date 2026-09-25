@@ -1,5 +1,6 @@
 import type { TableDefinition } from './tables.js';
 import { workTables } from './tables/work.js';
+import { workIndexTables } from './tables/work-index.js';
 import { delegationTables } from './tables/delegation.js';
 import { operatorAgentTables } from './tables/operator-agents.js';
 import { proofGrantTables } from './tables/proof-grants.js';
@@ -17,7 +18,7 @@ import { githubCacheTables } from './tables/github-cache.js';
  * appears after every table it references. A feature adds its tables to one module here.
  */
 export const tables: readonly TableDefinition[] = [
-  ...workTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
+  ...workTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
   ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...attributionTables,
   ...schemaGenerationTables, ...githubCacheTables,
 ];
@@ -44,4 +45,4 @@ export const ledgerSequences = tables.flatMap(table => table.serial ? [{ table: 
  * database is never empty at them. A restore replaces the seed with the backup's row
  * instead of refusing the table as occupied; every other table must be empty.
  */
-export const ledgerSeeded = tables.filter(table => /\bINSERT INTO\b/i.test(table.ddl)).map(table => table.name);
+export const ledgerSeeded = tables.filter(table => !table.cache && /\bINSERT INTO\b/i.test(table.ddl)).map(table => table.name);
