@@ -3938,8 +3938,10 @@ export async function launchApprover(root: string, work: Work, decision: string,
     throw error;
   }
   const spentOn = selected?.account.name ?? chosen?.account?.name ?? null;
-  await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, launchedAt: new Date().toISOString() }).catch(() => {});
-  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, runtime: kind,
+  // The registry session is kept with the launch, so the loop can end it the moment the session is spent.
+  const session = selected?.account.fleet.session ?? null;
+  await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString() }).catch(() => {});
+  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, runtime: kind, session,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
       : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null };
 }
@@ -3949,7 +3951,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
  * started with `master approver` rather than launching its own, and an adopted session that stops
  * on a limit notice must hold the account it actually spent, not the runtime's own login.
  */
-export const approverLaunchSchema = z.object({ agentName: z.string().max(200), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(), launchedAt: z.string() }).strict();
+export const approverLaunchSchema = z.object({ agentName: z.string().max(200), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(),
+  /** The agent registry session the launch holds, when the registry chose its account. */
+  session: z.string().max(200).nullable().default(null), launchedAt: z.string() }).strict();
 export type ApproverLaunch = z.infer<typeof approverLaunchSchema>;
 const approverLaunchesPath = async (root: string) => resolve(await localDirectory(root), 'approvers', 'launches.json');
 export async function readApproverLaunch(root: string, agentName: string): Promise<ApproverLaunch | null> {
@@ -3987,6 +3991,8 @@ export async function escalationRoleHealth(config: MasterConfig, probe: Environm
 export const escalationSessionSchema = z.object({
   agentName: z.string().max(200), pane: z.string().max(200).nullable(), work: z.string().max(40), trigger: z.string().max(64),
   kind: z.string().max(40), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(), launchedAt: z.string(),
+  /** The agent registry session the handler holds, when the registry chose its account: ended with the handler. */
+  session: z.string().max(200).nullable().default(null),
   waiting: z.object({ since: z.string(), retryAt: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
 }).strict();
 export type EscalationSession = z.infer<typeof escalationSessionSchema>;
@@ -4051,7 +4057,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     await selected?.release(`escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
-  await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), waiting: null }).catch(() => {});
+  await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), session: selected?.account.fleet.session ?? null, waiting: null }).catch(() => {});
   return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
 }
 
