@@ -39,7 +39,7 @@ The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval o
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over until revalidated. Graphyard never merges: once requested, the App's check passes an authorized head and its merge group, and the App enqueues it in GitHub's queue (auto-merge without one); withdrawal fails the check and dequeues it.
+A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over until revalidated. Graphyard never merges: once requested, the App passes the check for an authorized head and its merge group and enqueues it (auto-merge without a queue); withdrawal fails and dequeues it.
 
 ### Bindings and carry
 
@@ -55,7 +55,7 @@ With `"deploySmoke": true`, the master dispatches the smoke workflow (`master in
 
 ## Enforcement boundary
 
-No transaction spans GitHub and Postgres: GitHub merges only heads whose required check passed. Graphyard issues no merge execution and holds no merge route: `merge-acquire` only records the request (merge protocol 3). Restrict other merge identities; a worker can still push its own branch after losing its lease.
+No transaction spans GitHub and Postgres: GitHub merges only heads whose required check passed; Graphyard has no merge route. Restrict other merge identities; a worker can still push its own branch after losing its lease.
 
 ## Identity-bound agent review
 
