@@ -5,6 +5,7 @@ import { prSteps } from '../pr-steps';
 import { releaseView, type ReleaseView } from '../release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
+import { shortShas } from '../candidate';
 
 /**
  * The Workers tab (GY-116, redrawn to the design in GY-161): every agent session across every item
@@ -29,8 +30,8 @@ export function ago(iso: string | null, now: number) {
   const at = Date.parse(iso ?? '');
   return Number.isFinite(at) ? `${spent(now - at)} ago` : 'at an unrecorded time';
 }
-/** Commit SHAs (and other long hex ids) in recorded text, shown as their first 8 characters. */
-export const shortShas = (text: string) => text.replace(/\b[0-9a-f]{9,64}\b/g, hex => hex.slice(0, 8));
+/** Commit SHAs in recorded text, shown as their first 8 characters (web/candidate.tsx). */
+export { shortShas };
 
 /**
  * One-click copy of exactly the text given: no prose, no trailing newline. The text is also the
@@ -71,6 +72,7 @@ export const roleWords: Record<SessionRoleKind, string> = {
  * — neither is ever shown as running.
  */
 export function health(row: WorkerRow, now: number): { tone: 'live' | 'stale' | 'ended'; text: string } {
+  if (row.leftOn && row.stale) return { tone: 'ended', text: `Not seen for ${spent(now - Date.parse(row.stale.since))} · its item is ${row.leftOn}` };
   if (row.stale) return { tone: 'stale', text: `Not seen for ${spent(now - Date.parse(row.stale.since))}` };
   if (row.state === 'running') return { tone: 'live', text: `Seen ${ago(row.updatedAt, now)}` };
   if (row.reconciled === 'vanished') return { tone: 'ended', text: 'Ended · stopped responding' };
@@ -86,7 +88,7 @@ function Health({ row, now }: { row: WorkerRow; now: number }) {
 }
 
 function Attach({ row }: { row: WorkerRow }) {
-  if (row.state === 'running') {
+  if (row.state === 'running' && !row.leftOn) {
     if (!row.local) return <span className="muted">no attach command recorded</span>;
     return <span className="attach">
       <CopyButton text={row.local} label="Copy local"/>
@@ -98,6 +100,7 @@ function Attach({ row }: { row: WorkerRow }) {
 
 /** What the session is doing now: a builder by its item's current step, anyone else by what it was launched for, an ended one by how it ended. */
 function doing(row: WorkerRow, item: Work | undefined, now: number, release: ReleaseView) {
+  if (row.leftOn) return shortShas(row.subject);
   if (row.state !== 'running') return shortShas(row.reconciled ? row.subject : row.outcome ?? row.subject);
   if (row.roleKind === 'worker' && item && !row.stale) return prSteps(item, now, release).label;
   return shortShas(row.subject);
@@ -105,12 +108,13 @@ function doing(row: WorkerRow, item: Work | undefined, now: number, release: Rel
 
 /** Since when, relative to now: a running session by when it started, an ended one by when it ended and how long it ran. */
 function since(row: WorkerRow, now: number) {
+  if (row.leftOn) return <>last seen {ago(row.updatedAt, now)} · ran <span className="spent">{spent(row.spentMs)}</span></>;
   if (row.state === 'running') return <>started <span className="spent">{spent(row.spentMs)}</span> ago</>;
   return <>ended {ago(row.endedAt ?? row.updatedAt, now)} · ran <span className="spent">{spent(row.spentMs)}</span></>;
 }
 
 function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
-  return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale ? 'stale' : undefined}>
+  return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined}>
     <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row}/></th>
     <td data-label="Role">{roleWords[row.roleKind]}</td>
     <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
@@ -150,8 +154,8 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
  */
 export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
-  const view = workersView(work, new Date(now));
   const release = releaseView(status);
+  const view = workersView(work, new Date(now), undefined, release);
   // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
   const stale = view.running.filter(row => row.stale).length;
   const open = view.running.length - stale;
