@@ -101,7 +101,10 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   const requirements = html.slice(html.indexOf('aria-label="Requirements"'), html.indexOf('aria-label="Pull request"'));
   assert.equal(requirements.match(/<details class="criterion-full"><summary><span class="criterion-mark" title="Pending">○<\/span> <span class="mono">AC-\d<\/span>/g)?.length, 2, 'each criterion once, marked pending');
   for (const ac of item.criteria) assert.ok(requirements.includes(`<p>${escape(ac.text)}</p></details>`), `${ac.id}: full text behind its line`);
-  const shown = visibleWords(html.replace('<details class="panel requirements"', '<details open class="panel requirements"')).join(' ');
+  // The lines themselves are never behind a closed disclosure: the panel is a plain section, and only each criterion's full text folds.
+  assert.match(requirements, /^aria-label="Requirements"><h2>Requirements <small>/);
+  assert.match(html, /<section class="panel requirements" aria-label="Requirements">/);
+  const shown = visibleWords(html).join(' ');
   assert.match(shown, /AC-1 Below the existing summary the item page shows What is left, Requirements, Pull request… unit:item-page-sections pending/, 'one line: the first sentence, capped');
   assert.doesNotMatch(shown, /A test renders a real-shaped item mid-review/, 'the rest waits for the expand');
   // A criterion whose every proof passed is marked met (GY-16 in the fixture: two of its three proofs passed).
@@ -218,6 +221,20 @@ test('What is left names who clears each step from the refusal itself: exhausted
   // A conflict with the base and unresolved review threads are the builder's to clear on a new head.
   const threads = { ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', ['Branch protection requires conversation resolution and 2 review threads are unresolved on 594f711015d0: a on b:1; c on d:2. GitHub blocks the merge until each is resolved'])] } as unknown as Work;
   assert.deepEqual(whatIsLeft(threads, NOW).map(group => [group.label, group.who]), [['Review', 'Reviewer agent'], ['Merge', 'Builder agent']]);
+  // Queued behind another item with branch protection unverified: the queue position is reported beside the protection
+  // refusal, and the master agent's refusal wins over the automatic wait, in the panel and in Who acts next.
+  const queuedProtection = { ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge' && entry.name !== 'review'), gate('review', []),
+    gate('merge', ['Required Graphyard check and merge-queue branch protection have not been verified', 'Merge queue position 2 of 2: GY-9 is ahead'])] } as unknown as Work;
+  assert.deepEqual(whatIsLeft(queuedProtection, NOW).map(group => [group.label, group.who]), [['Merge', 'Master agent']]);
+  assert.equal(prSteps(queuedProtection, NOW).who, 'Master agent');
+  const queuedOnly = { ...queuedProtection, gates: [...queuedProtection.gates.filter(entry => entry.name !== 'merge'), gate('merge', ['Merge queue position 2 of 2: GY-9 is ahead'])] } as unknown as Work;
+  assert.deepEqual([prSteps(queuedOnly, NOW).who, prSteps(queuedOnly, NOW).detail], ['Graphyard (automatic)', '2nd in line, after GY-9']);
+  // A review refusal no launched reviewer can answer (src/model/refusal-mapping.ts reviewStandstill): the action the control
+  // plane computed from it names who moves the item — proofs first, a fresh reading, or an escalation — never the reviewer.
+  const standstill = (kind: string) => ({ ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', [])],
+    nextAction: { kind, gate: 'review', refusal: 'Independent approval of the current commit is required', reason: 'standstill', llmRole: null } }) as unknown as Work;
+  assert.deepEqual(['dispatch', 'resync', 'escalate', 'request-review'].map(kind => prSteps(standstill(kind), NOW).who), ['Prover agent', 'Graphyard (automatic)', 'Master agent', 'Reviewer agent']);
+  assert.deepEqual(whatIsLeft(standstill('dispatch'), NOW).map(group => [group.label, group.who]), [['Review', 'Prover agent']]);
   // A blocker recorded before the hand-in fails the ready gate: the item is Blocked, and only the
   // master agent clears it — the What is left group and Who acts next both say so.
   const blocker = 'Needs the staging database credentials';

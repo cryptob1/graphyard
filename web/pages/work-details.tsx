@@ -130,11 +130,11 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
       {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
       {laterLeft.length > 0 && <details className="later-steps"><summary>Later steps ({laterLeft.length})</summary>{laterLeft.map(leftGroup)}</details>}</section>
-    <details className="panel requirements" aria-label="Requirements"><summary><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2></summary>
+    <section className="panel requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
       {item.criteria.map(ac => { const own = proofs.filter(p => p.criterion === ac.id); const met = own.length > 0 && own.every(p => p.status === 'passed');
         return <div className={`criterion ${met ? 'criterion-met' : 'criterion-pending'}`} key={ac.id}>
           <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
-          <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</details>
+          <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
     <section className="panel" aria-label="Pull request"><h2>Pull request</h2>
       {item.candidate ? <dl className="facts">
         {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`Pull request on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}

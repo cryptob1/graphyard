@@ -115,6 +115,15 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       // Every reviewer profile exhausted: no reviewer can act, and adding capacity or changing the
       // provider is the master agent's decision (src/model/refusal-mapping.ts escalates it).
       if (reasons.some(reason => reviewersExhausted.test(reason))) return { detail: 'no reviewer is available', who: 'Master agent' };
+      // The gate says "approval is required" even while no reviewer can be asked about this head
+      // (src/model/refusal-mapping.ts `reviewStandstill`); the action the control plane computed
+      // from that standstill names who actually moves it.
+      switch (work.nextAction?.gate === 'review' ? work.nextAction.kind : null) {
+        case 'dispatch': return { detail: 'the proofs run before the review', who: 'Prover agent' };
+        case 'resync': return { detail: 'waiting for a fresh reading of the pull request before the review', who: 'Graphyard (automatic)' };
+        case 'escalate': return { detail: 'no reviewer can be asked about this head', who: 'Master agent' };
+        case 'request-rework': return { detail: 'this head needs a new commit before the review', who: 'Builder agent' };
+      }
       return { detail: 'waiting for the reviewer', who: 'Reviewer agent' };
     case 'prove': {
       // Every proof the acceptance gate demands: the item's own and the obligations it inherits from
@@ -129,15 +138,17 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       return { detail: `${total - open.size} of ${total} proofs passed`, who: 'Prover agent' };
     }
     case 'merge': {
-      const queued = reasons.map(reason => reason.match(/^Merge queue position (\d+) of \d+: (\S+) is ahead$/)).find(Boolean);
-      if (queued) return { detail: `${ordinal(Number(queued[1]))} in line, after ${queued[2]}`, who: 'Graphyard (automatic)' };
       // Who clears a merge refusal is decided by the refusal itself, as the control plane's
       // classification decides it: administration and decisions are the master agent's, a new head
-      // is the builder's, and the queue's own work is automatic.
+      // is the builder's, and the queue's own work is automatic. A queue position is reported
+      // beside those refusals (src/model/gates.ts), so they are read first: waiting a turn in line
+      // is automatic only when nothing else holds the merge.
       const master = reasons.find(reason => mergeMasterClears.test(reason));
       if (master) return { detail: plainReason(master, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Master agent' };
       const builder = reasons.find(reason => mergeBuilderClears.test(reason));
       if (builder) return { detail: plainReason(builder, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
+      const queued = reasons.map(reason => reason.match(/^Merge queue position (\d+) of \d+: (\S+) is ahead$/)).find(Boolean);
+      if (queued) return { detail: `${ordinal(Number(queued[1]))} in line, after ${queued[2]}`, who: 'Graphyard (automatic)' };
       const stuck = reasons.map(reason => plainReason(reason, 'merge')).find(plain => plain.stuck);
       return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
     }

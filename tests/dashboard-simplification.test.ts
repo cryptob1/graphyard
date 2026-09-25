@@ -233,12 +233,13 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   assert.match(text(review), /Waiting for someone else to approve the latest code/);
   assert.doesNotMatch(text(review), /Proven to work:/, 'later steps are collapsed');
   for (const raw of ['needs trusted passing evidence', 'Policy v', 'Revision ', 'assignment 1', 'GitHub observation missing']) assert.ok(!text(review).includes(raw) && !visible.includes(raw), `no ${raw} by default`);
-  // Requirements are folded below the first screen (GY-161, AC-10); opened, each criterion appears once, with one marker per proof.
-  assert.match(view, /<details class="panel requirements" aria-label="Requirements">/);
-  const opened = text(view.replace('<details class="panel requirements"', '<details open class="panel requirements"'));
-  for (const ac of find('GY-16').criteria) assert.equal(opened.split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once`);
+  // Requirements sit below the summary and What is left (GY-161 AC-10, GY-171 AC-1): one line per criterion, its full text folded;
+  // each criterion appears once, with one marker per proof.
+  assert.match(view, /<section class="panel requirements" aria-label="Requirements">/);
+  const lines = text(view);
+  for (const ac of find('GY-16').criteria) assert.equal(lines.split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once`);
   assert.equal(view.match(/class="marker-pass"/g)?.length, 2); assert.equal(view.match(/class="marker-pending"/g)?.length, 1);
-  assert.match(opened, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
+  assert.match(lines, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
   assert.match(view, /<li class="marker-pass">✓ <abbr class="term"[^>]*>integration:login-rate-limit<\/abbr> passed<\/li>/);
   // Policy-changing actions sit in a closed, admin-only Edit menu.
   assert.match(view, /<details class="edit-menu"><summary>Edit<\/summary>[\s\S]*Use Codex cloud review[\s\S]*Revise requirements[\s\S]*<\/details>/);
