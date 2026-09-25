@@ -114,26 +114,26 @@ async function fixture(page: Page, role = 'admin', mutate: (report: any) => any 
   await page.goto('/');
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
-  // Flow analytics is a tab under Insights.
+  // Flow analytics is part of the one Insights page, behind its one Show details (GY-168).
   // On a phone the one navigation folds into the Menu button (GY-161).
   if (page.viewportSize()!.width <= 650) await page.getByRole('button', { name: 'Menu' }).click();
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Insights', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: 'Flow analytics', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Flow analytics', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Insights', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Flow analytics' })).toHaveCount(0);
+  await page.locator('.insight-details > summary').click();
+  await expect(page.getByRole('heading', { name: 'Flow analytics', level: 2 })).toBeVisible();
   return state;
 }
-// The page opens on where work waits and pull-request-to-merge time; everything else is behind Show details.
-const showDetails = (page: Page) => page.getByText('Show details', { exact: true }).click();
+/** The flow analytics report on the Insights page, apart from the shipping pulse beside it. */
+const analytics = (page: Page) => page.getByRole('region', { name: 'Flow analytics', exact: true });
 
 test('integration:flow-analytics-browser', async ({ page }) => {
   const state = await fixture(page);
   await expect(page.locator('.flow-state')).toHaveAttribute('data-state', /complete|sparse/);
 
-  // The default view: each wait category with items is a card with its count; nothing else.
+  // The report opens on each wait category with items, as a card with its count.
   const reviewCard = page.getByRole('button', { name: /Waiting for review/ });
   await expect(reviewCard).toContainText('1');
-  await expect(page.getByRole('img', { name: /Cumulative flow by stage/ })).toBeHidden();
-  await showDetails(page);
   await expect(page.getByText(/undelivered item\(s\) are/)).toBeVisible();
 
   // Each visualization is paired with an equivalent data table.
@@ -178,8 +178,8 @@ test('flow analytics distinguishes loading, unavailable, empty, sparse, partial,
   await expect(page.locator('.flow-state')).toHaveAttribute('data-state', /complete|sparse/);
 
   state.delay = true;
-  await page.getByRole('button', { name: 'Refresh' }).click();
-  await expect(page.getByRole('status')).toContainText('Loading flow analytics…');
+  await analytics(page).getByRole('button', { name: 'Refresh' }).click();
+  await expect(analytics(page).getByRole('status')).toContainText('Loading flow analytics…');
   await expect(page.locator('.flow-state')).toBeVisible();
   await expect(page.locator('.flow-state')).toHaveAttribute('data-state', 'loading');
   await expect(page.locator('.flow-state')).toContainText('earlier observation');
@@ -187,12 +187,12 @@ test('flow analytics distinguishes loading, unavailable, empty, sparse, partial,
   state.delay = false;
 
   state.status = 503;
-  await page.getByRole('button', { name: 'Refresh' }).click();
-  await expect(page.getByRole('alert')).toContainText('temporarily unavailable');
-  await expect(page.getByRole('alert')).toContainText('earlier observation');
+  await analytics(page).getByRole('button', { name: 'Refresh' }).click();
+  await expect(analytics(page).getByRole('alert')).toContainText('temporarily unavailable');
+  await expect(analytics(page).getByRole('alert')).toContainText('earlier observation');
   state.status = 200;
-  await page.getByRole('button', { name: 'Retry flow analytics' }).click();
-  await expect(page.getByRole('alert')).toHaveCount(0);
+  await analytics(page).getByRole('button', { name: 'Retry flow analytics' }).click();
+  await expect(analytics(page).getByRole('alert')).toHaveCount(0);
 
   const base = state.report;
   const variants: [string, (report: any) => any][] = [
@@ -203,7 +203,7 @@ test('flow analytics distinguishes loading, unavailable, empty, sparse, partial,
   ];
   for (const [expected, mutate] of variants) {
     state.report = mutate(base);
-    await page.getByRole('button', { name: 'Refresh' }).click();
+    await analytics(page).getByRole('button', { name: 'Refresh' }).click();
     await expect(page.locator('.flow-state')).toHaveAttribute('data-state', expected);
     if (state.report.coverage.sliceFilterTruncated) await expect(page.locator('.flow-state')).toContainText('this slice filter may have missed them');
   }
@@ -222,7 +222,7 @@ test('a phase drill-down cut off by the row bound is read per phase, and never a
   state.phase = key => key === null
     ? { metric: 'phase', key, columns: [], total: 900, truncated: true, rows: phaseRows(3, phases[0]) }
     : { metric: 'phase', key, columns: [], total: 3, truncated: false, rows: phaseRows(3, key) };
-  await page.getByRole('button', { name: 'Refresh' }).click();
+  await analytics(page).getByRole('button', { name: 'Refresh' }).click();
   // Asking one phase at a time stays inside the bound, so the figure is the whole window's.
   await expect.poll(() => phases.every(phase => state.queries.some(query => query.includes(`key=${phase}`)))).toBe(true);
   const headline = page.locator('.flow-headline');
@@ -231,7 +231,7 @@ test('a phase drill-down cut off by the row bound is read per phase, and never a
 
   // Past the bound even per phase, nothing is drawn from the part that came back.
   state.phase = key => ({ metric: 'phase', key, columns: [], total: 900, truncated: true, rows: phaseRows(3, key ?? phases[0]) });
-  await page.getByRole('button', { name: 'Refresh' }).click();
+  await analytics(page).getByRole('button', { name: 'Refresh' }).click();
   await expect(page.getByRole('heading', { name: 'Handed in → merged' })).toBeVisible();
   await expect(page.locator('.flow-unreadable')).toContainText('more merged changes than one read can return');
   await expect(page.locator('.flow-headline')).not.toContainText('typical');
@@ -241,7 +241,6 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   test(`flow analytics is keyboard reachable, labelled, and usable on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await fixture(page, 'reader');
-    await showDetails(page);
     for (const name of ['Window', 'Work type', 'Stage', 'Delivery slice']) await expect(page.getByLabel(name, { exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Cumulative flow data table' })).toBeVisible();
     await expect(page.getByRole('img', { name: /Cumulative flow by stage/ })).toBeVisible();

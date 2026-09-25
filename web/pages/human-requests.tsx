@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
 import { formatDuration } from '../duration';
+import { shortShas } from '../format';
 import type { Dashboard } from './dashboard';
 
 /**
@@ -38,7 +39,7 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
     {answered.length > 0 && <section className="work-list" aria-label="Recently answered"><h2>Recently answered</h2><ul className="shipped-list">{answered.map(({ item, request }) => <li key={request.id}>
       <button className="text-button" onClick={() => setSelected(item.id)}>{item.key} <span data-title>{item.title}</span></button>
       <span className="muted">{humanDecisionLabel[request.kind]} · {request.answer!.outcome} by {request.answer!.by} after {formatDuration(request.answer!.waitedMs / 60000)}</span>
-      <span>{request.answer!.text}</span>
+      <span>{shortShas(request.answer!.text)}</span>
     </li>)}</ul></section>}
   </>;
 }
@@ -53,9 +54,9 @@ export function RequestCard({ row, refusal, busy, open, answer }: { row: HumanRe
   const send = (body: Record<string, unknown>) => { if (text.trim()) void answer(text.trim(), body).then(() => setText('')); };
   return <div className="card human-request">
     <div className="card-top"><button className="text-button" onClick={open}>{row.work} <span data-title>{row.title}</span></button><span title={`Asked ${row.request.at}`}>Waiting {formatDuration(row.waitedMs / 60000)}</span></div>
-    <h3>{row.request.needed}</h3>
-    <p className="reason">{row.decision} · asked by {row.request.requestedBy}: {row.request.reason}</p>
-    {refusal ? <p className="muted">This session cannot answer it: {refusal}.</p> : <form onSubmit={event => { event.preventDefault(); send(post.body); }}>
+    <h3>{shortShas(row.request.needed)}</h3>
+    <p className="reason">{row.decision} · asked by {row.request.requestedBy}: {shortShas(row.request.reason)}</p>
+    {refusal ? <p className="muted">This session cannot answer it: {shortShas(refusal)}.</p> : <form onSubmit={event => { event.preventDefault(); send(post.body); }}>
       <textarea aria-label={`${post.field === 'reason' ? 'Reason' : 'Answer'} for ${row.work}`} placeholder="What you decided or provided, in words the next worker can act on…" value={text} onChange={event => setText(event.target.value)} rows={3}/>
       <div className="list-tools"><button type="submit" disabled={busy || !text.trim()}>{post.submit}</button>
         {post.decline && <button type="button" className="text-button" disabled={busy || !text.trim()} onClick={() => send(post.decline!.body)}>{post.decline.submit}</button>}</div>
