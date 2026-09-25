@@ -131,6 +131,9 @@ export const reclaimSummarySchema = z.object({
   // The managed worktree root's share of the pass: ephemeral checkouts no live session owned that
   // were removed, and the free space left on the root's own volume.
   checkouts: z.number().int().min(0).default(0), rootFreeBytes: z.number().int().min(0).nullable().default(null),
+  // Finished assignment worktrees removed outright (GY-360), and the reclaimable ones the per-pass
+  // bound left for the next cycle: while any are left, the loop reclaims every cycle.
+  trees: z.number().int().min(0).default(0), treeBacklog: z.number().int().min(0).default(0),
 }).strict();
 export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
 

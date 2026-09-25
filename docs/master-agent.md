@@ -28,9 +28,8 @@ The loop drives every item. Unless created `"systemDriven": false`, one refuses 
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10 seconds, 30 at most), storing each observation. A handle the runtime stops reporting closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
+**The control plane, not the master, closes finished sessions.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10 seconds, 30 at most), storing each observation. A handle the runtime stops reporting closes at the second consecutive sweep
+that misses it; an unobserved one is spared for 3 minutes; another host's handle is left to
 that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
@@ -51,7 +50,7 @@ another session's handle finished to free a slot.
 
 When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`) for the head. The review request follows once the head's unit and integration proofs pass (`proofs-pending` until then; a failed one returns the head to its worker). `*-postmerge` proofs are refused (use `policy.deploySmoke`). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch first awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables).
 
-**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) is how many sessions it runs at once, each with a name unique to its request above one. Changes apply without a restart; lowering it drains sessions first; status reports `longestWaitMs`; a role starved ten minutes counts in `counts.concurrencyStarved`.
+**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps its simultaneous sessions, each with a name unique to its request above one. Changes apply live; lowering it drains sessions first; status reports `longestWaitMs`; a role starved ten minutes counts in `counts.concurrencyStarved`.
 
 **Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles as `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`; close its pane. Unanswered sessions relaunch on another profile (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded, then relaunched.
 
