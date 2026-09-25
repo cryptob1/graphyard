@@ -1721,6 +1721,19 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       // A handler whose item has closed has nothing left to judge: it is ended once it finishes.
       if (!item) { if (!session.waiting) await handlerFinished(session, !!stopped(session.agentName)); continue; }
       const key = failoverKey('escalation-handler', item, `${session.trigger}:${session.waiting ? `${session.waiting.since}:relaunch` : session.launchedAt}`), previous = state.actions[key];
+      // A wait whose escalation was resolved another way while the item stays open has no handler
+      // left to launch: its record is dropped, so it is neither relaunched nor reported as a wait.
+      if (session.waiting && !standingEscalations(item).some(entry => entry.trigger === session.trigger)) {
+        const dropKey = `close:escalation:${session.work}:${session.trigger}:${session.waiting.since}`, dropped = state.actions[dropKey];
+        if (!effects.endEscalation || !readyToRetry(dropped, state.cycle)) continue;
+        try {
+          await effects.endEscalation(session, `the ${session.trigger} escalation on ${item.key} no longer stands, so no handler is launched for it`, null);
+          performed.push(await record(state, dropKey, { kind: 'close', work: item.key, principal: null, state: 'done', detail: `Dropped the waiting escalation handler record for ${item.key} (${session.trigger}): the escalation no longer stands, so nothing is left to launch`, attempts: (dropped?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        } catch (error) {
+          performed.push(await record(state, dropKey, { kind: 'close', work: item.key, principal: null, state: 'failed', detail: `Could not drop the waiting escalation handler record for ${item.key} (${session.trigger}), whose escalation no longer stands: ${message(error)}`, attempts: (dropped?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        }
+        continue;
+      }
       if (session.waiting) {
         if (Date.parse(session.waiting.retryAt) > clock || !effects.relaunchEscalation || !readyToRetry(previous, state.cycle)) continue;
         try {
@@ -2058,7 +2071,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   if (effects.reportCapacity) {
     const others = await effects.roleHealth?.().catch(() => null) ?? {};
     for (const role of ['reviewer', 'producer', 'approver', 'escalation-handler'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
-    const waitingEscalations = new Set((await effects.escalationSessions?.().catch(() => [] as EscalationSession[]) ?? []).filter(session => session.waiting).map(session => session.work));
+    // A waiting record whose escalation no longer stands waits on nothing: step 1 drops it.
+    const waitingEscalations = new Set((await effects.escalationSessions?.().catch(() => [] as EscalationSession[]) ?? [])
+      .filter(session => session.waiting && open.some(item => item.key === session.work && standingEscalations(item).some(entry => entry.trigger === session.trigger))).map(session => session.work));
     // An item waits on the approver role while it needs a decision no approver session is judging.
     const unjudged = new Set(open.filter(item => {
       const decision = effects.approver ? routineDecision(item, config, clock, assessments[item.id]) : null, watch = decision ? state.approvals[decisionKey(item, decision)] : undefined;
@@ -2500,10 +2515,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // An item no longer open has no pane to close, but its registry session still holds a slot.
     let closed = true;
     if (item) closed = await closeApprover(item, watch, `${watch.work} no longer needs ${watch.action} decision ${watch.decision}`);
-    else if (watch.session && effects.endRegistrySession) closed = await effects.endRegistrySession(watch.session, `${watch.work} is no longer open`).then(() => true, () => { watch.closeAttempts += 1; return false; });
+    else if (watch.session && effects.endRegistrySession) closed = await effects.endRegistrySession(watch.session, `${watch.work} is no longer open`).then(() => { watch.session = null; return true; }, () => { watch.closeAttempts += 1; return false; });
     // A tab that will not close, or a request that cannot be taken back, is left to the operator
     // after a few tries; the session name is this decision's alone, so it can refuse no other launch.
-    if ((closed && withdrawn) || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];
+    // A registry session is not: its id is the only way to end it, and while it lives it holds the
+    // role's slot, so the watch stays, past any bound, until the registry is told.
+    if ((closed && withdrawn) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
   }
 
   spent('decisions');

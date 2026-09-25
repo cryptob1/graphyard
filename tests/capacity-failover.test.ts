@@ -824,10 +824,19 @@ test('a waiting escalation handler is kept until its reset, even a weekly one mo
   assert.deepEqual(await readEscalationSessions(root), []);
 });
 
+/** The snapshot `loop` reads, with escalations standing on the items a test names, by trigger. */
+const standingSnapshot = (now: () => number, standing: () => Record<string, string[]>) => async () => {
+  const snapshot = await ok(coordinator, 'GET', 'work-snapshot'), at = new Date(now()).toISOString();
+  const work = (snapshot.work as Work[]).map(item => standing()[item.key] ? { ...item, escalations: standing()[item.key].map(trigger => ({ trigger, reason: `${trigger} stands`, at, actor: 'test' })) as Work['escalations'] } : item);
+  return { work, now: at };
+};
+
 test('an escalation handler waiting on spent quota records an escalation-handler capacity escalation on the item, shown in master status, and withdrawn at the reset', async () => {
   const at = Date.now(), resetsAt = new Date(at + 3 * 86_400_000).toISOString();
   let waitingFor = '';
   const { config, clock, work, cycle, now } = await approverLoop('escalation-capacity', ['env-a', 'env-b'], now => ({
+    approver: undefined, decide: undefined,
+    snapshot: standingSnapshot(now, () => ({ [waitingFor]: ['lease-loss'] })),
     roleHealth: async () => ({ 'escalation-handler': await escalationRoleHealth(config, loginsOnly(now)) }),
     escalationSessions: async () => [{ agentName: 'gy-esc', pane: null, work: waitingFor, trigger: 'lease-loss', kind: 'claude', account: null, runtime: 'claude', launchedAt: new Date(at).toISOString(), session: null, waiting: { since: new Date(at).toISOString(), retryAt: resetsAt, reason: 'no account left' } }],
   }));
@@ -952,6 +961,71 @@ test('a replaced approver whose registry session cannot be ended keeps that sess
   assert.deepEqual([watch.session, watch.launches], ['registry-slot-2', 2]);
 });
 
+test('an approval watch no longer needed keeps its registry session past the close bound until the registry ends it, so the slot is never orphaned', async () => {
+  const registry = approverSlot();
+  let refuse = true, hidden = '';
+  const endRegistrySession = registry.effects.endRegistrySession!;
+  const { config, herdr, clock, work, cycle } = await approverLoop('registry-cleanup-fails', ['env-a', 'env-b'], now => ({
+    ...registry.effects,
+    endRegistrySession: async (session, reason) => { if (refuse) throw new Error('the registry answered 503'); await endRegistrySession(session, reason); },
+    // The item leaves the open set, so its decision is no longer needed.
+    snapshot: async () => { const snapshot = await standingSnapshot(now, () => ({}))(); return { ...snapshot, work: snapshot.work.filter(item => item.key !== hidden) }; },
+  }));
+  registry.slot.herdr = herdr;
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  const [key] = Object.keys(state.approvals);
+  assert.equal(state.approvals[key].session, 'registry-slot-1');
+  hidden = work.key;
+  for (let index = 0; index <= maxApproverCloses + 1; index++) { clock.skewMs += 61_000; await cycle(state); }
+  const watch = state.approvals[key];
+  assert.ok(watch, 'the watch is kept past the close bound while its registry session is live');
+  assert.ok(watch.closeAttempts >= maxApproverCloses, JSON.stringify(watch));
+  assert.equal(watch.session, 'registry-slot-1', 'with the only id of that session');
+  assert.deepEqual([...registry.live], ['registry-slot-1']);
+
+  refuse = false;
+  clock.skewMs += 61_000;
+  await cycle(state);
+  assert.deepEqual(registry.ended, ['registry-slot-1'], 'the kept session is ended once the registry answers');
+  assert.deepEqual([...registry.live], []);
+  assert.equal(state.approvals[key], undefined, 'and only then is the watch dropped');
+});
+
+test('a waiting escalation handler record whose escalation was resolved another way is dropped, not relaunched or reported as a capacity wait', async () => {
+  const root = await localRoot('escalation-resolved');
+  const at = Date.now(), resetsAt = new Date(at + 3 * 86_400_000).toISOString(), relaunches: string[] = [];
+  let standing: string[] = ['lease-loss'];
+  const { config, clock, work, cycle } = await approverLoop('escalation-resolved', ['env-a', 'env-b'], now => ({
+    approver: undefined, decide: undefined,
+    snapshot: standingSnapshot(now, () => ({ [work.key]: standing })),
+    roleHealth: async () => ({ 'escalation-handler': await escalationRoleHealth(config, loginsOnly(now)) }),
+    escalationSessions: () => readEscalationSessions(root),
+    endEscalation: async (session, _resolution, waiting) => { await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, waiting } : null, now()); },
+    relaunchEscalation: async session => { relaunches.push(session.trigger); throw new Error('a resolved escalation is never launched again'); },
+  }));
+  await recordObservedExhaustion(config, profileAccount(escalationProfile), { at: new Date(at).toISOString(), resetsAt, reason: "You've hit your weekly limit", role: 'escalation-handler', profile: escalationProfile, work: work.key }, at);
+  await saveEscalationSession(root, work.key, 'lease-loss', { agentName: 'gy-esc', pane: null, work: work.key, trigger: 'lease-loss', kind: 'claude', account: null, runtime: 'claude', launchedAt: new Date(at).toISOString(), session: null, waiting: { since: new Date(at).toISOString(), retryAt: resetsAt, reason: 'no account left' } }, at);
+
+  const state = emptyDaemonState(config);
+  await cycle(state);
+  assert.equal((await readEscalationSessions(root)).length, 1, 'kept while its escalation stands');
+  assert.ok((await reload(work.id)).capacity!.escalations.some(entry => entry.role === 'escalation-handler'), 'and reported as a capacity wait');
+
+  // Another path resolves the escalation; the item stays open.
+  standing = [];
+  clock.skewMs += 20_000;
+  const dropped = await cycle(state);
+  const close = dropped.actions.find(action => action.kind === 'close');
+  assert.equal(close?.state, 'done', JSON.stringify(dropped.actions));
+  assert.match(close!.detail, /no longer stands/);
+  assert.deepEqual(await readEscalationSessions(root), [], 'the record is dropped');
+  clock.skewMs = Date.parse(resetsAt) - Date.now() + 60_000;
+  await cycle(state);
+  assert.deepEqual(relaunches, [], 'nothing is launched for it after the reset');
+  assert.deepEqual((await reload(work.id)).capacity!.escalations.filter(entry => entry.role === 'escalation-handler'), [], 'and the item no longer waits on the role');
+});
+
 test('an escalation handler launched with every account already spent is kept as a waiting record due at the first reset, so the loop launches it without a retry', async () => {
   await fresh();
   const root = await localRoot('escalation-spent-at-start'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-esc-start-'));
@@ -981,10 +1055,11 @@ test('an exhausted escalation handler\'s record survives a failed relaunch, whic
   const root = await localRoot('escalation-retry');
   const at = Date.now(), notice = "You've hit your weekly limit · resets Sep 26, 10pm";
   const ended: string[] = [], relaunches: string[] = [];
-  let failWith: 'fault' | 'capacity' | null = 'fault';
+  let failWith: 'fault' | 'capacity' | null = 'fault', escalated = '';
   const { config, herdr, clock, work, cycle } = await approverLoop('escalation-retry', ['env-a', 'env-b'], now => ({
     // No approver decision is involved: only the escalation handler's own records and effects.
     approver: undefined, decide: undefined,
+    snapshot: standingSnapshot(now, () => ({ [escalated]: ['lease-loss'] })),
     roleHealth: async () => ({ 'escalation-handler': await escalationRoleHealth(config, loginsOnly(now)) }),
     escalationSessions: () => readEscalationSessions(root),
     endEscalation: async (session, resolution, waiting) => {
@@ -1004,6 +1079,7 @@ test('an exhausted escalation handler\'s record survives a failed relaunch, whic
       return { agentName, account: null };
     },
   }));
+  escalated = work.key;
   // A handler a master launched on the registry, now stopped on its provider's notice.
   await saveEscalationSession(root, work.key, 'lease-loss', { agentName: 'gy-esc-0', pane: 'pane-gy-esc-0', work: work.key, trigger: 'lease-loss', kind: 'claude', account: null, runtime: 'claude', launchedAt: new Date(at).toISOString(), session: 'registry-esc-0', waiting: null }, at);
   herdr.agents.push({ name: 'gy-esc-0', pane_id: 'pane-gy-esc-0', agent_status: 'idle' });
