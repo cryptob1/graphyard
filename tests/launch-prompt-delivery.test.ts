@@ -14,6 +14,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewI
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
+import { autonomyContract } from '../src/autonomy.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 
 // GY-93: a launched session receives its instruction as its own first request, never as pasted
@@ -118,10 +119,10 @@ class FakeHerdr {
 }
 
 test('integration:launch-prompt-is-a-request — a producer, a reviewer, an approver and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
-  // The request contracts: a positional prompt after the flags, or --prompt for OpenCode; a runtime
-  // without a contract keeps the paste, and says so.
-  for (const kind of ['claude', 'codex', 'cursor', 'opencode']) assert.equal(launchDelivery(kind), 'request');
-  assert.equal(launchDelivery('muse'), 'paste'); assert.equal(launchDelivery(undefined), 'paste');
+  // The request contracts: a positional prompt after the flags, or the runtime's own interactive
+  // prompt flag; a runtime without one is refused at launch rather than pasted into (GY-184).
+  for (const kind of ['claude', 'codex', 'cursor', 'opencode', 'muse', 'pi', 'gemini', 'qwen', 'copilot']) assert.equal(launchDelivery(kind), 'request');
+  assert.equal(launchDelivery('aider'), 'paste'); assert.equal(launchDelivery(undefined), 'paste');
   const typedLaunches = (herdr: FakeHerdr) => herdr.calls.filter(call => call[0] === 'pane' && call[1] === 'run').map(call => expandTypedCommand(call[3]));
 
   const { root, token, cleanup } = await installed();
@@ -151,7 +152,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     assert.equal(produced.delivery, 'request');
     const producer = herdr.named('produce-codex');
     // GY-88: the request names the session directory the launch allocated under the managed worktree root.
-    assert.equal(producer.request, producerPrompt(config, { key: 'GY-93', pr: 93, sha: H, baseSha: B, policyRevision: 1, group: request.group!, proofs: request.proofs!, checkout: produced.checkout }, { principal: 'proof-runner' }));
+    assert.equal(producer.request, `${autonomyContract} ` + producerPrompt(config, { key: 'GY-93', pr: 93, sha: H, baseSha: B, policyRevision: 1, group: request.group!, proofs: request.proofs!, checkout: produced.checkout }, { principal: 'proof-runner' }), 'Codex loads no role file, so the autonomy contract leads the request (GY-184)');
     assert.equal(producer.toolCalls.length, 1); assert.deepEqual(producer.pasted, []);
     const produceStart = typedLaunches(herdr).at(-1)!;
     assert.ok(produceStart.args.includes('--ask-for-approval') && produceStart.args.includes('--add-dir'), 'the Codex sandbox flags are kept');
@@ -173,14 +174,14 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     const dispatched = await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000);
     assert.equal(dispatched.delivery, 'request');
     const worker = herdr.named('eng-oc');
-    assert.match(worker.request!, /^Implement GY-93:/);
+    assert.ok(worker.request!.startsWith(`${autonomyContract} Implement GY-93:`), 'OpenCode loads no role file, so the autonomy contract leads the request (GY-184)');
     assert.equal(worker.toolCalls.length, 1); assert.deepEqual(worker.pasted, []);
     assert.equal(herdr.calls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0, 'no launch typed anything into a session');
 
-    // A runtime without a request contract keeps the confirmed paste delivery, and the record says so.
+    // Muse, which GY-93 once prompted after start, now takes its request positionally too (GY-184).
     const approvedMuse = await launchApprover(root, work({ key: 'GY-94', id: 'work-94' }), 'decision-2', 'muse', [], herdr.run);
-    assert.equal(approvedMuse.delivery, 'paste');
-    assert.equal(herdr.named(approvedMuse.agentName).pasted.length, 1);
+    assert.equal(approvedMuse.delivery, 'request');
+    assert.deepEqual(herdr.named(approvedMuse.agentName).pasted, []);
 
     // A runtime already busy on its request is a session that started: it is seen `working`,
     // named at once, never closed (GY-121: the start bound reads the pane).
