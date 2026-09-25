@@ -16,7 +16,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, missingProofs, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { dispatchSummary, emptyDispatchCursor, runAutoDispatch, tickRetryDelay, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { proofOutcome } from '../src/producer.js';
-import { coordinationHistoryLimit, coordinationViewHeader } from '../src/server/work-view.js';
+import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork } from '../src/server/work-view.js';
 import { cycleBudget } from '../src/cli/master.js';
 import { assertTiming, minimumSamples, steadyState } from './helpers/timing.js';
 
@@ -199,7 +199,11 @@ test('integration:store-bounded-waits — the store pool bounds the wait for a c
   // A long-lived item's action queue: far more resolved rows than the view keeps.
   const [first] = (await store.list());
   const history = Array.from({ length: 60 }, (_, n) => ({ id: `resolved-${n}`, kind: 'dispatch', work: first.id, key: first.key, state: 'done', history: Array.from({ length: 20 }, () => ({ at: new Date().toISOString(), event: 'failed', requester: 'graphyard', executor: 'executor-a', result: 'failed', reason: 'x'.repeat(400) })) }));
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{actionQueue}',$2::jsonb) WHERE id=$1", [first.id, JSON.stringify({ actions: [], history })]);
+  // And evidence for heads it no longer has, which no open or recent request names: a coordinator
+  // decision can never consult it, so it must not leave the database either.
+  const superseded = 'dead'.padEnd(40, '0');
+  const stale = Array.from({ length: 40 }, (_, n) => ({ ...first.evidence[0], id: randomUUID(), sha: superseded, url: `https://ci.example/superseded/${n}` }));
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(jsonb_set(document,'{actionQueue}',$2::jsonb),'{evidence}',(document->'evidence')||$3::jsonb) WHERE id=$1", [first.id, JSON.stringify({ actions: [], history }), JSON.stringify(stale)]);
   try {
     const { result, seen } = await spyQueries(store, () => read('work-snapshot', { [coordinationViewHeader]: 'coordination' }));
     const view = result.body;
@@ -213,15 +217,23 @@ test('integration:store-bounded-waits — the store pool bounds the wait for a c
         assert.ok((document.actionQueue?.history?.length ?? 0) <= coordinationHistoryLimit, 'the SQL trimmed the action-queue history before it left the database');
         assert.equal(document.pipeline, undefined);
         assert.equal(document.observation?.scopeFiles, undefined);
+        assert.ok(!(document.evidence ?? []).some((entry: Evidence) => entry.sha === superseded), 'the SQL filtered superseded-head evidence before it left the database');
       }
     }
     const trimmed = (view.work as Work[]).find(item => item.id === first.id)!;
     assert.deepEqual(trimmed.actionQueue!.history.map(row => row.id), history.slice(-coordinationHistoryLimit).map(row => row.id), 'the most recent rows are the ones kept, in order');
     assert.ok(view.omitted.actionHistory >= history.length - coordinationHistoryLimit, 'and the view still says how many it left out');
+    // The evidence kept is exactly what the view's own rule keeps from the whole document, and the
+    // records the SQL dropped are still counted as left out.
+    const full = (await read('work-snapshot')).body as { work: Work[] };
+    const whole = full.work.find(item => item.id === first.id)!;
+    assert.deepEqual(trimmed.evidence.map(entry => entry.id), coordinationWork(whole, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0 }).evidence.map(entry => entry.id));
+    assert.ok(trimmed.evidence.length > 0, 'the candidate\'s own evidence is kept');
+    assert.equal(view.omitted.evidence, trimInProcess(full).omitted.evidence, 'the records the SQL dropped are counted as the in-process trim would count them');
     // The full view is untouched: it still carries every row.
     assert.equal(((await read('work-snapshot')).body.work as Work[]).find(item => item.id === first.id)!.actionQueue!.history.length, history.length);
   } finally {
-    await store.pool.query("UPDATE work_items SET document=document-'actionQueue' WHERE id=$1", [first.id]);
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document-'actionQueue','{evidence}',$2::jsonb) WHERE id=$1", [first.id, JSON.stringify(first.evidence)]);
   }
 });
 
