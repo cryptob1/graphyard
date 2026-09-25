@@ -83,3 +83,51 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
   await page.getByRole('button', { name: 'Help' }).click();
   await shot('guide');
 });
+
+// GY-198: the sign-in page in its token-form, verifying and unreachable states, at 1280 px and 375 px wide.
+// The images land in browser-tests/screenshots/login/; tests/ui-login.test.ts checks they are committed.
+export const loginWidths = [1280, 375] as const;
+export const loginStates = ['token-form', 'verifying', 'unreachable'] as const;
+const loginOut = 'browser-tests/screenshots/login';
+
+for (const width of loginWidths) test(`the sign-in page is captured in every state at ${width} px`, async ({ page }) => {
+  mkdirSync(loginOut, { recursive: true });
+  await page.setViewportSize({ width, height: 800 });
+  await page.clock.install({ time: new Date(NOW) });
+  // The status read never answers, so the page stays verifying until the clock passes the 10 second bound.
+  await page.route('**/api/**', () => {});
+  const shot = async (state: typeof loginStates[number]) => {
+    // Nothing overflows sideways, every block of the column shares one left edge, and no text sits beside a button:
+    // the helper text starts below the last button.
+    const layout = await page.evaluate(() => {
+      const column = document.querySelector('.login')!;
+      const lefts = [...column.children].map(child => Math.round(child.getBoundingClientRect().left));
+      const help = column.querySelector('.login-help')!.getBoundingClientRect();
+      const buttons = [...column.querySelectorAll('button')].map(button => button.getBoundingClientRect());
+      return { content: document.documentElement.scrollWidth, width: document.documentElement.clientWidth, lefts, helpTop: help.top, buttonBottom: Math.max(...buttons.map(box => box.bottom)) };
+    });
+    expect(layout.content, `${state} fits ${width} px`).toBeLessThanOrEqual(layout.width);
+    expect(new Set(layout.lefts).size, `${state}: one left edge at ${width} px`).toBe(1);
+    expect(layout.helpTop, `${state}: the helper text is below the action at ${width} px`).toBeGreaterThanOrEqual(layout.buttonBottom);
+    await page.screenshot({ path: `${loginOut}/${state}-${width}.png`, fullPage: true });
+  };
+  await page.goto('/');
+  await expect(page.getByLabel('Access token')).toBeFocused();
+  await shot('token-form');
+  await page.getByLabel('Access token').fill('fixture');
+  await page.getByRole('button', { name: 'Open control plane' }).click();
+  await expect(page.getByRole('status')).toHaveAttribute('aria-busy', 'true');
+  await expect(page.getByRole('status')).toHaveText('Verifying connection…');
+  await expect(page.getByRole('button', { name: 'Use another token' })).toHaveClass(/text-button/);
+  await shot('verifying');
+  await page.clock.fastForward(10_000);
+  await expect(page.getByRole('alert')).toHaveText(/^Can't reach the control plane at 127\.0\.0\.1:4319$/);
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  await shot('unreachable');
+  // A rejected token returns to the form with the notice and the input focused.
+  await page.unroute('**/api/**');
+  await page.route('**/api/**', route => route.fulfill({ status: 401, json: { error: 'Unauthorized' } }));
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await expect(page.getByRole('alert')).toHaveText('That token was not accepted');
+  await expect(page.getByLabel('Access token')).toBeFocused();
+});
