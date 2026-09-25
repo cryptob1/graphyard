@@ -3286,16 +3286,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);
-    // the faults it counts are read with the coordinator's visibility.
+    // the faults it counts are read with the coordinator's visibility, with or without that identity,
+    // so an installation that has not provisioned it yet still counts every recurrence.
     controlPlane: coordinatorStatus,
-    get reportedAttention() {
-      return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
-        // Imported when first read: the status report imports this module, so a static import would be a cycle.
-        const reported = await (await import('./cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
-          runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true });
-        // A required check red on the clock is named as master status names it, after buildMasterStatus.
-        return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
-      } : undefined;
+    reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
+      // Imported when first read: the status report imports this module, so a static import would be a cycle.
+      const reported = await (await import('./cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
+        runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true });
+      // A required check red on the clock is named as master status names it, after buildMasterStatus.
+      return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),

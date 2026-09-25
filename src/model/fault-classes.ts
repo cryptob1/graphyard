@@ -228,8 +228,8 @@ export function recurringClasses(instances: readonly FaultInstance[], work: read
   });
 }
 
-/** Problems the control plane's status reports beside any item (App permissions, integration jobs, a GitHub
- *  pause, unserved executors): the dashboard groups them with the items' faults, as its notices show them. */
+/** Problems the control plane's status reports beside any item (App permissions, integration jobs, production lag and
+ *  incidents, a GitHub pause, unserved executors): the dashboard groups them with the items' faults, as master status does. */
 export function statusFaults(status: any): FaultObservation[] {
   if (!status) return [];
   const lines = (value: unknown): string[] => Array.isArray(value) ? value.filter((line): line is string => typeof line === 'string') : [];
@@ -237,7 +237,7 @@ export function statusFaults(status: any): FaultObservation[] {
   if (!status.github) found.push(observe('setup', 'github', 'GitHub is not connected, so nothing can merge'));
   for (const line of lines(status.appPermissions?.attention)) found.push(observe('app-permissions', 'installation', line));
   if (status.heldJobs > 0) found.push(observe('held-jobs', 'installation', `${status.heldJobs} integration job(s) held on a permission shortfall`));
-  for (const line of lines(status.delegationLimits?.attention)) found.push(observe('delegation-limits', 'installation', line));
+  for (const line of lines(status.delegationLimits?.attention)) found.push(observe('delegation-limits', 'installation', line)); for (const line of lines(status.production?.attention)) found.push(observe('production', 'installation', line));
   if (status.githubBudget?.paused) found.push(observe('github-budget', 'github', `GitHub requests are paused until ${status.githubBudget.paused.until}`));
   else for (const job of Array.isArray(status.jobs) ? status.jobs.filter((job: any) => job?.error) : []) found.push(observe('integration-job', job?.work_id ?? 'github', `A GitHub update failed: ${job?.error ?? 'no reason recorded'}`));
   for (const entry of Array.isArray(status.executors?.attention) ? status.executors.attention : []) found.push(observe('executor', 'executors', String(entry?.text ?? entry?.kind ?? 'an action no executor serves')));

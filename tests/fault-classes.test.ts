@@ -170,6 +170,10 @@ test('unit:fault-classes — master status and the dashboard group open problems
   const quiet = fixture.filter(entry => !workFaults(entry, NOW).length);
   const troubled = { ...boardStatus('admin'), appPermissions: { attention: ['The App lacks Checks: write', 'The App lacks Contents: write'] }, executors: { live: 1, attention: [{ kind: 'merge', text: 'No executor serves merge' }] } };
   assert.deepEqual(groupFaults(statusFaults(troubled)).map(group => [group.faultClass, group.count]), [['configuration', 3]]);
+  // Production lag and deployment incidents master status raises are grouped under deployment, as master status groups them.
+  const lagging = { ...troubled, production: { attention: ['main is 3 commits ahead of production (serving abc123): build failed', '1 delivered item has an open deployment incident: GY-7 (failed)'] } };
+  assert.deepEqual(groupFaults(statusFaults(lagging)).map(group => [group.faultClass, group.count]).sort(), [['configuration', 3], ['deployment', 2]]);
+  assert.deepEqual(statusFaults(lagging).filter(fault => fault.kind === 'production').map(fault => fault.text), lagging.production.attention);
   assert.match(render(quiet, troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'the status-level problems are counted under their class');
   assert.match(render([], troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'with no work at all the status-level problems are still grouped');
 });
@@ -422,10 +426,19 @@ test('unit:recurring-class-item — attention master status adds after buildMast
   (effects as any).reportedAttention = async () => { throw new Error('status read refused'); };
   now = clock + 10 * 60_000; await runCycle(config(), state, effects, () => now);
   assert.ok(state.faults.instances.some(entry => entry.kind === 'loop-failures' && /status read refused/.test(entry.text)));
-  // The loop's wiring reads it only with the operator-agent identity, as it files.
+  // The loop's wiring reads it with the coordinator's credential whether or not the operator-agent identity is
+  // provisioned: only filing needs that identity, so an installation without it still counts every recurrence.
   const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' } };
-  assert.equal(daemonEffects('/nonexistent', config(), deps).reportedAttention, undefined);
+  const unprovisioned = daemonEffects('/nonexistent', config(), deps);
+  assert.equal(typeof unprovisioned.reportedAttention, 'function', 'report-only faults are read without an operator-agent identity');
+  assert.equal(unprovisioned.fileFaultClass, undefined, 'filing still needs the operator-agent identity');
   assert.equal(typeof daemonEffects('/nonexistent', { ...config(), operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/operator.token' } } as MasterConfig, deps).reportedAttention, 'function');
+  // Without the identity the report-only faults keep standing as the same instances, and a later recurrence still counts.
+  reported = ['GY-1', 'GY-2', 'GY-3'].map(overflow);
+  const tracked = emptyDaemonState(config()), bare = { ...effects, reportedAttention: async () => ({ items: reported }), fileFaultClass: undefined } as unknown as DaemonEffects;
+  for (let round = 0; round < 2; round++) { now = clock + (20 + round) * 60_000; await runCycle(config(), tracked, bare, () => now); }
+  assert.equal(tracked.faults.instances.filter(entry => entry.faultClass === 'decision').length, 3, 'the standing report-only faults are tracked, once each');
+  assert.equal(Object.keys(tracked.faults.open).length >= 3, true, 'they still stand, so provisioning the identity later opens no spurious recurrence');
 });
 
 test('unit:recurring-class-item — a required check red on the clock reaches recurrence tracking as the timing-failure class, whatever its name', async () => {
