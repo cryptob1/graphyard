@@ -3951,7 +3951,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // The approver's runtime and account come from the registry's approver role. An explicit
   // AGENT_KIND is the operator's override; an installation whose registry has no approver role
   // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
-  const selected = explicitKind ? null : await selectFleetSession(config, 'approver', { name, principal: config.approver!.id }, { ...probe, work: work.key });
+  // The sessions Herdr lists are what the role's count is judged against (GY-190): an approver that
+  // judged its decision and exited no longer holds a slot the next one needs.
+  const selected = explicitKind ? null : await selectFleetSession(config, 'approver', { name, principal: config.approver!.id }, { runtime: { agents, available: true }, ...probe, work: work.key });
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
   const kind = selected?.account.kind ?? explicitKind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
@@ -3980,7 +3982,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
-  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false,
+  // The registry session is returned with the launch: the loop ends it once the decision is judged.
+  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane!, delivery, focusChanged: false, session: selected?.account.fleet.session ?? null,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped } : null };
 }
 
