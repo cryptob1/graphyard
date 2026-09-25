@@ -4,6 +4,7 @@ import { parseArgs } from 'node:util';
 import { availableRuntimes, discover } from '../onboarding.js';
 import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
+import { protectionRun } from '../protection.js';
 import { applyInstall, buildPlan, prepareInstall, providers, type InstallInputs } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
@@ -126,7 +127,7 @@ export const installCommands = defineCommands([
           // Apply rewrites the registry from the reviewed proposal; the CI producer's token is read
           // first so a re-run keeps the repository secret valid, then the entry is merged back in.
           const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
-          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root) });
+          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun });
           const ciProofs = await registerCiProducer(result.principalsFile, roster);
           return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },
             capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
