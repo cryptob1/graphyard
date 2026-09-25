@@ -25,7 +25,7 @@ import { independentProducerProfiles, launchProducer, readProducerLedger, reclai
 import { launchReview, readReviewLedger, updateReviewLedger } from './reviewer.js';
 import { basePaths, findingScope, readReviewFindings, type ReviewFinding } from './review-scope.js';
 import { capacityRecheckMs, defaultAwaitReviewers } from './auto-dispatch.js';
-import { approverProfile, approverRoleHealth, escalationProfile, escalationRoleHealth, readApproverLaunch, inspectProducerCredentials, inspectProfileAccounts, launchEscalationHandler, preservePartialWork, profileAccount, readEnvironmentLog, readEscalationSessions, recordObservedExhaustion, roleCapacity, saveEscalationSession, selectionKey, verifiedContext, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
+import { approverProfile, approverRoleHealth, escalationProfile, escalationRoleHealth, readApproverLaunch, inspectProducerCredentials, inspectProfileAccounts, launchEscalationHandler, preservePartialWork, ownLoginAccounts, readEnvironmentLog, readEscalationSessions, recordObservedExhaustion, roleCapacity, saveEscalationSession, selectionKey, verifiedContext, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type RoleCapacity } from './master.js';
 import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispatchable, guardBroadScope, assertOutsideWorktrees, assessContainment, closeHerdrPane, containmentPhase, decisionInput, diskExhaustionMessage, diskThresholdBytes, dispatchWork, inspectWorkerCredentials, launchApprover, listHerdrAgents, mergeExecutor, mergedWithoutAuthorization, observeHerdrAgents, reclaimAdvice, reclaimIdleMs, reclaimWorktrees, unauthorizedMergeViolation, writeFailure, type AttentionItem, type ConfigReload, type ContainmentAssessment, type HerdrAgent, type MasterConfig, type MergeExecutor, type WorkerProfile, type WorktreeReclaimReport } from './master.js';
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { httpFleetClient } from './fleet.js';
@@ -1404,6 +1404,8 @@ export const cycleDelay = (intervalMs: number, report: Pick<SilenceReport, 'acti
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
 /** A session only says its account is spent once it has stopped; while it works, its output is its own prose. */
 export const stoppedStates = ['idle', 'done', 'blocked'];
+/** The wait an escalation launch refused for spent capacity already computed: the earliest reset among every account it skipped. */
+const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 
@@ -1713,7 +1715,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     const held = async (role: CapacityRole, profile: string, item: Work, signal: { reason: string; resetsAt: string | null }) => {
       const selected = await effects.selectedAccount?.(role, profile) ?? null;
       const account = selected?.environment ?? null;
-      await effects.holdAccount?.(account ?? profileAccount(profile), { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role, profile, work: item.key });
+      // A session on no named account spent its runtime's own login, which other roles launch on too.
+      const own = (role === 'worker' ? config.workers : role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile) ?? { name: profile };
+      for (const name of account ? [account] : ownLoginAccounts(own)) await effects.holdAccount?.(name, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role, profile, work: item.key });
       return { account, runtime: selected?.kind ?? null };
     };
     for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('failover', heldBy(profile), profile.name, async () => {
@@ -1829,7 +1833,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
           const launched = await effects.relaunchEscalation(session);
           performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `escalation handler for ${item.key} (${session.trigger}) waited since ${session.waiting.since} (${session.waiting.reason}); relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         } catch (error) {
-          if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { await effects.endEscalation?.(session, session.waiting.reason, { ...session.waiting, retryAt: new Date(clock + capacityRecheckMs).toISOString() }).catch(() => {}); return; }
+          if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { await effects.endEscalation?.(session, session.waiting.reason, { ...session.waiting, retryAt: launcherRetry(error) ?? new Date(clock + capacityRecheckMs).toISOString() }).catch(() => {}); return; }
           performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler for ${item.key} (${session.trigger}) could not be launched again: ${message(error)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         }
         return;
@@ -1840,8 +1844,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       if (!signal) { await handlerFinished(session, !!agent); return; }
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
       try {
-        const account = session.account ?? profileAccount(escalationProfile);
-        const hold = await effects.holdAccount?.(account, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'escalation-handler', profile: escalationProfile, work: item.key }) as { until?: string } | undefined;
+        // A handler on no named account spent its runtime's own login, which an approver launches on too.
+        let hold: { until?: string } | undefined;
+        for (const account of session.account ? [session.account] : ownLoginAccounts({ name: escalationProfile, kind: session.runtime ?? session.kind })) {
+          const recorded = await effects.holdAccount?.(account, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'escalation-handler', profile: escalationProfile, work: item.key }) as { until?: string } | undefined;
+          hold ??= recorded;
+        }
         await effects.reportCapacity!(item, { event: 'exhausted', role: 'escalation-handler', requestId: session.trigger.slice(0, 64), profile: escalationProfile, account: session.account, runtime: session.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
           partialWork: { state: 'not-applicable', detail: 'an escalation handler edits nothing: it requests a decision and leaves no work to keep' } });
         const ended = `provider quota exhausted on ${session.account ?? 'its runtime\'s own account'} mid-session (${signal.reason}; ${resets})`;
@@ -1855,7 +1863,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
           next = `relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
         } catch (error) {
           if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) throw error;
-          const retryAt = signal.resetsAt ?? hold?.until ?? new Date(clock + capacityRecheckMs).toISOString();
+          // The launcher already chose the wait: the earliest reset among every account it skipped.
+          const retryAt = launcherRetry(error) ?? signal.resetsAt ?? hold?.until ?? new Date(clock + capacityRecheckMs).toISOString();
           await effects.endEscalation?.({ ...session, pane: null, session: null }, ended, { since: new Date(clock).toISOString(), retryAt, reason: message(error).slice(0, 500) });
           next = `no other account is left for the role (${message(error)}), so it is launched again at ${retryAt}`;
         }
@@ -2398,7 +2407,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
     const account = watch.account, spentOn = account ?? 'its runtime\'s own account';
     try {
-      await effects.holdAccount?.(account ?? profileAccount(approverProfile), { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
+      // An approver on no named account spent its runtime's own login, which an escalation handler launches on too.
+      for (const name of account ? [account] : ownLoginAccounts({ name: approverProfile, kind: watch.runtime ?? undefined })) await effects.holdAccount?.(name, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
       await effects.reportCapacity(item, { event: 'exhausted', role: 'approver', requestId: watch.decision.slice(0, 64), profile: approverProfile, account, runtime: watch.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
         partialWork: { state: 'not-applicable', detail: 'an approver session edits nothing: it judges a decision and leaves no work to keep' } });
       const ended = `approver session ${watch.agentName} exhausted ${spentOn} mid-session (${signal.reason}; ${resets})`;

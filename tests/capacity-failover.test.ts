@@ -19,7 +19,7 @@ import type { CliContext } from '../src/cli/context.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, handlerSettleMs, launchAppearanceMs, maxApproverCloses, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { approverProfile, approverRoleHealth, heldRuntimeLogin, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
+import { approverProfile, approverRoleHealth, heldRuntimeLogin, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, NoHealthyAccountError, observedExhaustions, ownLoginAccounts, preservePartialWork, profileAccount, recordObservedExhaustion, runtimeLogin, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
 import { describeCapacity, detectExhaustion, parseResetTime } from '../src/model/capacity.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
@@ -1104,6 +1104,88 @@ test('an approver launched on an explicit runtime is refused while that runtime\
   assert.deepEqual([after.account, after.fleet], [null, null], 'after the reset the runtime\'s own login is used again');
 });
 
+test('an approver and an escalation handler on the same runtime\'s own login share its hold, whichever of them spent it', async () => {
+  const root = await localRoot('runtime-login-shared'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-runtime-login-'));
+  const operatorToken = join(home, 'master-operator.token');
+  await writeFile(operatorToken, `master-operator-${'m'.repeat(32)}\n`, { mode: 0o600 });
+  const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(home, 'coordinator.token') }), operatorAgent: { id: 'master-operator', credentialFile: operatorToken } } as MasterConfig;
+  const at = Date.now(), resetsAt = new Date(at + 2 * 86_400_000).toISOString();
+  const observed = { at: new Date(at).toISOString(), resetsAt, reason: "You've hit your weekly limit", work: 'GY-7' };
+  // An approver on claude's own login stopped on its notice: the loop holds what it holds (approverExhausted).
+  for (const name of ownLoginAccounts({ name: approverProfile, kind: 'claude' })) await recordObservedExhaustion(config, name, { ...observed, role: 'approver', profile: approverProfile }, at);
+  const context = { key: 'GY-7', escalation: { trigger: 'lease-loss' }, fingerprint: 'f'.repeat(64) } as unknown as EscalationContext;
+  const herdrCalls: string[][] = [];
+  const run = (async (_command: string, args: string[]) => { herdrCalls.push(args); return '{}'; }) as unknown as ChildRun;
+  await assert.rejects(launchEscalationHandler(root, config, context, 'claude', [], run), (error: Error & { capacityExhausted?: boolean; retryAt?: string }) => {
+    assert.equal(error.capacityExhausted, true, 'a handler on the login the approver spent waits for its reset');
+    assert.equal(error.retryAt, resetsAt, 'and the wait it computed rides on the error');
+    return true;
+  });
+  assert.deepEqual(herdrCalls, [], 'no tab is opened on the spent login');
+  const other = await selectAccount(config, 'escalation-handler', { name: escalationProfile, kind: 'codex' }, { now: () => at });
+  assert.equal(other.account, null, 'another runtime\'s own login is not held');
+
+  // The other way round: a handler spent claude's own login, and the approver is refused it.
+  const second = { ...config, credentialFile: join(await mkdtemp(join(tmpdir(), 'graphyard-capacity-runtime-login-b-')), 'coordinator.token') } as MasterConfig;
+  for (const name of ownLoginAccounts({ name: escalationProfile, kind: 'claude' })) await recordObservedExhaustion(second, name, { ...observed, role: 'escalation-handler', profile: escalationProfile }, at);
+  await assert.rejects(heldRuntimeLogin(second, 'approver', approverProfile, 'GY-7', { now: () => at }, 'claude'), (error: Error & { capacityExhausted?: boolean; skipped: { environment: string }[] }) => {
+    assert.equal(error.capacityExhausted, true);
+    assert.deepEqual(error.skipped.map(skip => skip.environment), [runtimeLogin('claude')], 'the hold is found under the runtime login, not a role\'s profile');
+    return true;
+  });
+  await assert.rejects(selectAccount(second, 'approver', { name: approverProfile, kind: 'claude' }, { now: () => at }), /exhausted its quota mid-session/);
+  assert.equal((await heldRuntimeLogin(second, 'approver', approverProfile, 'GY-7', { now: () => at }, 'codex')).account, null);
+  // A profile whose environment selects a home of its own is on another login, so the runtime hold does not bar it.
+  assert.equal((await selectAccount(second, 'reviewer', { name: 'own-home', kind: 'claude', environment: { CLAUDE_CONFIG_DIR: '/tmp/elsewhere' } }, { now: () => at })).account, null);
+  const health = await inspectProfileAccounts(second, 'approver', [{ name: approverProfile, kind: 'claude' }], { [approverProfile]: { available: true, reason: null } }, { now: () => at });
+  assert.equal(health[approverProfile].available, false, 'the approver role reads as spent, so its capacity line names the held login');
+  assert.deepEqual(health[approverProfile].accounts?.map(entry => [entry.environment, entry.resetsAt]), [[runtimeLogin('claude'), resetsAt]]);
+  assert.equal((await heldRuntimeLogin(second, 'approver', approverProfile, 'GY-7', { now: () => Date.parse(resetsAt) + 1 }, 'claude')).account, null, 'eligible again after the reset');
+});
+
+test('a spent escalation handler waits for the earliest reset its relaunch computed, not only its own account\'s', async () => {
+  const root = await localRoot('escalation-earliest');
+  const at = Date.now();
+  const soon = () => new Date(Date.now() + clock.skewMs + 10 * 60_000).toISOString();
+  const computed: string[] = [], relaunches: string[] = [];
+  let escalated = '';
+  const { config, herdr, clock, work, cycle } = await approverLoop('escalation-earliest', ['env-a', 'env-b'], now => ({
+    approver: undefined, decide: undefined,
+    snapshot: standingSnapshot(now, () => ({ [escalated]: ['lease-loss'] })),
+    roleHealth: async () => ({ 'escalation-handler': await escalationRoleHealth(config, loginsOnly(now)) }),
+    escalationSessions: () => readEscalationSessions(root),
+    endEscalation: async (session, _resolution, waiting) => { await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, pane: null, session: null, waiting } : null, now()); herdr.agents = herdr.agents.filter(agent => agent.pane_id !== session.pane); },
+    // The launch as `launchEscalationHandler` refuses it: every account spent, and the wait until the
+    // earliest held reset — here env-b's, ten minutes away — carried on the error.
+    relaunchEscalation: async session => {
+      relaunches.push(session.trigger);
+      const retryAt = soon(); computed.push(retryAt);
+      throw Object.assign(new NoHealthyAccountError(`No healthy agent account for escalation-handler; the escalation waits and the loop launches it again at ${retryAt}`, [
+        { at: new Date(now()).toISOString(), role: 'escalation-handler', profile: escalationProfile, environment: 'env-a', reason: 'env-a exhausted', work: session.work, cause: 'exhausted' },
+        { at: new Date(now()).toISOString(), role: 'escalation-handler', profile: escalationProfile, environment: 'env-b', reason: 'env-b exhausted', work: session.work, cause: 'exhausted' }]), { retryAt });
+    },
+  }));
+  escalated = work.key;
+  // A handler on env-a stopped on a notice naming no reset: env-a alone would be held for an hour.
+  await saveEscalationSession(root, work.key, 'lease-loss', { agentName: 'gy-esc-0', pane: 'pane-gy-esc-0', work: work.key, trigger: 'lease-loss', kind: 'claude', account: 'env-a', runtime: 'claude', launchedAt: new Date(at).toISOString(), session: null, waiting: null }, at);
+  herdr.agents.push({ name: 'gy-esc-0', pane_id: 'pane-gy-esc-0', agent_status: 'idle' });
+  herdr.output['gy-esc-0'] = "  ⎿ You've hit your usage limit\n";
+
+  const state = emptyDaemonState(config);
+  const first = await cycle(state);
+  assert.equal(first.actions.find(action => action.kind === 'failover')?.state, 'done', JSON.stringify(first.actions));
+  assert.ok(Date.parse((await observedExhaustions(config))['env-a'].until) - (Date.now() + clock.skewMs) > 30 * 60_000, 'env-a itself is held for the unknown-reset hour');
+  let [waiting] = await readEscalationSessions(root);
+  assert.equal(waiting.waiting?.retryAt, computed[0], 'the wait is the launcher\'s earliest reset, not env-a\'s hour');
+
+  // Due again: the relaunch still finds nothing, and the record takes the wait it computed, not a one-minute guess.
+  clock.skewMs = Date.parse(computed[0]) - Date.now() + 1_000;
+  await cycle(state);
+  assert.deepEqual(relaunches, ['lease-loss', 'lease-loss']);
+  [waiting] = await readEscalationSessions(root);
+  assert.equal(waiting.waiting?.retryAt, computed[1]);
+});
+
 test('an escalation handler whose launch record cannot be written is closed and fails, rather than running untracked', async () => {
   await fresh();
   const root = await localRoot('escalation-unrecorded'), home = await mkdtemp(join(tmpdir(), 'graphyard-capacity-esc-unrecorded-'));
@@ -1164,6 +1246,7 @@ test('an exhausted escalation handler\'s record survives a failed relaunch, whic
   assert.equal(failed?.state, 'failed', JSON.stringify(first.actions));
   assert.match(failed!.detail, /context route answered 503/);
   assert.deepEqual(ended, ['registry-esc-0'], 'the spent handler\'s registry session is ended with it');
+  assert.ok((await observedExhaustions(config))[runtimeLogin('claude')], 'the runtime\'s own login it spent is held for every role, not only under the handler\'s profile');
   const kept = await readEscalationSessions(root);
   assert.equal(kept.length, 1, 'the only durable record of the escalation is not deleted by a failed relaunch');
   assert.ok(kept[0].waiting && Date.parse(kept[0].waiting.retryAt) <= clock.skewMs + Date.now(), 'it is due at once');
