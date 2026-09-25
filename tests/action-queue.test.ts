@@ -180,9 +180,9 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(item.autoDispatch!.review, null, 'and the control plane asks nobody to review a head nobody may review');
   assert.equal(refusalAction(item, 'review', item.nextAction!.refusal!), 'request-rework', 'the refusal maps there too, so the queue and the gate agree');
 
-  // A head behind the base tip that GitHub does not report mergeable is not reviewed (GY-191):
-  // that is answered by a fresh reading and a base refresh, not a review.
-  item = await engine.observe(item.id, item.revision, observation(item, { reviews: [], baseTipContained: false, baseTip: sha40('ef'), mergeable: false }));
+  // A head that does not contain the base tip and conflicts with it (GY-191: behind alone is
+  // reviewed as it stands) is answered by a fresh reading and a sync, not a review.
+  item = await engine.observe(item.id, item.revision, observation(item, { reviews: [], baseTipContained: false, baseTip: sha40('ef'), mergeable: false, conflicting: true }));
   assert.equal(item.nextAction!.kind, 'resync');
   assert.equal(item.nextAction!.gate, 'review');
   assert.match(item.nextAction!.reason, /does not contain the base tip [0-9a-f]{12}/);
@@ -866,7 +866,9 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   assert.equal(new Set(assigned.map(item => item.id)).size, assigned.length, 'no item was handed to two workers');
   // The offer order is the dispatch order the control plane already uses: priority, then the
   // narrowest planned scope, then age. Nothing about worker liveness enters into it.
-  assert.equal(assigned[0].priority, 0, 'the highest priority item is offered first');
+  // Earlier tests leave dispatchable items of their own (planned-file overlap no longer holds them);
+  // among this test's items, the highest priority is offered first.
+  assert.equal(assigned.filter(item => offered.some(entry => entry.id === item.id))[0].priority, 0, 'the highest priority item is offered first');
   for (const item of assigned) await engine.execute(item.lease!.owner === worker.id ? worker : otherWorker, 'release', item.id, { epoch: item.lease!.epoch }, randomUUID());
 
   // An item another worker already holds is never offered twice: a racing pull skips it.

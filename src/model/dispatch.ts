@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { Observation, Work } from './work.js';
+import type { Work } from './work.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
+import { behindBaseHold } from './behind-base.js';
 import { automatableOutcomes, dispatchIneligibility, mechanicalHold, producerGroupDecisions, type ProducerGroup } from './mechanical-proofs.js';
 
 /**
@@ -46,25 +47,13 @@ export const dispatchHistoryLimit = 50;
 
 // Which proofs a machine settles and what the head's evidence says of them live in a module the
 // browser bundle can load (the gates read them); re-exported here for every existing reader.
+export { behindBaseHold } from './behind-base.js';
 export { automatableOutcomes, automatableProof, dispatchIneligibility, mechanicalFailure, mechanicalHold, mechanicalProof, mechanicalVerdicts, openProducerRequest, producerGroupDecisions, producerGroupOf, producerGroups, type MechanicalVerdict, type ProducerGroup, type ProducerGroupDecision, type ProducerGroupState, type ProofOutcome } from './mechanical-proofs.js';
 
 
 const short = (sha: string) => sha.slice(0, 12);
 const binds = (request: Pick<DispatchRequest, 'sha' | 'baseSha' | 'policyRevision'>, work: Work) =>
   !!work.candidate && request.sha === work.candidate.sha && request.baseSha === work.candidate.baseSha && request.policyRevision === work.policyRevision;
-
-declare module './work.js' {
-  interface Observation {
-    /** GitHub reported `mergeable: false` for the open head: its merge with the base conflicts (GY-191). Unset while GitHub computes it. */
-    mergeConflict?: boolean;
-  }
-}
-/**
- * Being behind the base never withholds review of a head that merges cleanly (GY-191): the merge
- * queue integrates and re-tests the combined tip. Only a behind head GitHub does not report
- * mergeable waits — a conflicting one is sent back to a worker, an uncomputed one is read again.
- */
-export const reviewWithheldBehindBase = (observation: Pick<Observation, 'baseTipContained' | 'mergeable'>) => observation.baseTipContained === false && observation.mergeable !== true;
 
 /**
  * Why the current head does or does not need a launched reviewer.
@@ -102,7 +91,8 @@ export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): 
   const verdict = observation.agentReview;
   if (verdict?.verdict === 'changes-requested' && verdict.provider === provider && verdict.sha === candidate.sha)
     return { needed: false, state: 'changes-requested', reason: `${verdict.profile ?? provider} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
-  if (reviewWithheldBehindBase(observation)) return { needed: false, state: 'base-not-contained', reason: `head ${short(candidate.sha)} does not contain the base tip ${short(observation.baseTip ?? '')} and GitHub does not report it mergeable; ${observation.mergeConflict ? 'it conflicts, so it returns to a worker to sync' : 'the next observation reads whether it conflicts'}` };
+  const behind = behindBaseHold(work);
+  if (behind) return { needed: false, state: 'base-not-contained', reason: behind };
   // Mechanical verification precedes judgment, for every provider: no reviewer is asked about a
   // head whose unit and integration proofs have not run, and a head that fails one goes back to
   // its worker (the build gate names the criterion) instead of consuming a reviewer session.

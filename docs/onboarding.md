@@ -19,7 +19,7 @@ Commit the updated `AGENTS.md` and `.gitignore`, never `.graphyard/`. A worker w
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder to post its verdict) comes from the same launcher and is acted on without confirmation.
 
-Agents rightly treat Herdr's bracketed paste as untrusted data (a prompt injection defence), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. Nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. Nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
