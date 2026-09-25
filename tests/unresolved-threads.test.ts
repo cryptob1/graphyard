@@ -166,7 +166,7 @@ test('unit:unresolved-threads-surfaced — master status lists the unresolved th
   assert.ok(argv[2].includes(`${hostile.author} on ${hostile.path}:1`), 'the reason carries the thread verbatim, unexpanded');
 
   const guide = (await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
-  assert.match(guide, /An unresolved review thread is a finding to fix/);
+  assert.match(guide, /Any other thread is a finding to fix/);
   assert.match(guide, /Resolving a thread the master did not write is not the master's call/);
 });
 
