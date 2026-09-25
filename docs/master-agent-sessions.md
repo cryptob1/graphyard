@@ -7,7 +7,7 @@ Add a worker with `master worker add FILE` from a template ([Codex](../examples/
 
 Reviewers are added with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json) templates); the loop launches each review; `master review GY-N [PROFILE]` recovers a refused launch or an unsatisfied attempt.
 
-`master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply next tick; `setup.attention` reports setup that stops every launch.
+`master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply next tick; `setup.attention` reports launch-stopping setup.
 
 ### Session handles
 

@@ -279,6 +279,21 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
         for (const folder of folders) assert.deepEqual(projects[realpathSync(folder)], { hasTrustDialogAccepted: true }, folder);
         assert.ok(projects[realpathSync(worktree)].hasTrustDialogAccepted, 'the earlier record survives');
       } finally { await Promise.all(folders.map(folder => rm(folder, { recursive: true, force: true }))); }
+      // A settings.local.json is the repository's own configuration unless git ignores it there
+      // (Graphyard writes a worker's only into a worktree that ignores it), so a tracked one refuses
+      // the launch and an ignored one does not.
+      const local = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-local-'));
+      try {
+        execFileSync('git', ['init', '--quiet'], { cwd: local });
+        mkdirSync(join(local, '.claude')); await writeFile(join(local, '.claude/settings.local.json'), JSON.stringify({ hooks: {} }));
+        execFileSync('git', ['add', '--force', '.claude/settings.local.json'], { cwd: local });
+        await assert.rejects(trustClaudeFolder(local, { CLAUDE_CONFIG_DIR: home }, ['--permission-mode', 'bypassPermissions']),
+          (error: unknown) => error instanceof LaunchRefusedError && error.message.includes(`carries the repository's own Claude configuration ${join(realpathSync(local), '.claude/settings.local.json')}`));
+        assert.equal(JSON.parse(await readFile(config, 'utf8')).projects[realpathSync(local)], undefined, 'a tracked settings.local.json is never trusted into');
+        execFileSync('git', ['rm', '--cached', '--quiet', '.claude/settings.local.json'], { cwd: local });
+        await writeFile(join(local, '.gitignore'), '.claude/settings.local.json\n');
+        assert.equal((await trustClaudeFolder(local, { CLAUDE_CONFIG_DIR: home }, ['--permission-mode', 'bypassPermissions'])).written, true, 'an ignored one is the operator\'s or Graphyard\'s own');
+      } finally { await rm(local, { recursive: true, force: true }); }
       // A config that cannot be read refuses the launch, naming the runtime, before anything reaches Herdr.
       await writeFile(config, '{ not json');
       const untrusted: string[][] = [];

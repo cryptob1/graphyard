@@ -64,9 +64,10 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
  *
  * That record also lets Claude Code load the folder's own configuration — the repository's
  * checked-in `.claude/settings.json` with its hooks, its `.mcp.json` — under the session's
- * credentials, which the launcher never grants on its own (consent-prompt.ts); a
- * `settings.local.json` is the operator's or Graphyard's own (a worker's is written by
- * installWorkerHarness). So Graphyard records it only where it enables none of that: for a launch
+ * credentials, which the launcher never grants on its own (consent-prompt.ts). A
+ * `settings.local.json` that git ignores there is the operator's or Graphyard's own (a worker's is
+ * written by installWorkerHarness only into a worktree that ignores it); one git tracks or would
+ * track is the repository's, and counts. So Graphyard records it only where it enables none of that: for a launch
  * whose `--setting-sources` leaves out `project`, as every session under
  * a repository that carries Claude settings is launched with its role file (master.ts
  * prepareSessionHarness), or for a folder that, with its ancestors, carries no such configuration.
@@ -97,12 +98,14 @@ export function loadsRepositorySettings(args: string[]) {
   }
   return !named.length || named.some(sources => sources.some(source => (repositorySettingSources as readonly string[]).includes(source)));
 }
+/** Whether git ignores `name` in `folder`: false for a tracked or unignored file, and outside a repository, so an unknown file counts as the repository's. */
+const gitIgnores = (folder: string, name: string) => Promise.resolve(defaultChildRun('git', ['check-ignore', '--quiet', '--', name], { cwd: folder })).then(() => true, () => false);
 /** The first repository-controlled Claude configuration the folder or an ancestor carries (never the account's own config home), or null. */
-export function repositoryClaudeConfig(folder: string, environment: Record<string, string> = {}) {
+export async function repositoryClaudeConfig(folder: string, environment: Record<string, string> = {}) {
   const homes = new Set([resolve(homedir(), '.claude'), environment.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR].filter((home): home is string => !!home).map(canonicalPath));
   for (const path of ancestors(folder)) {
-    const candidates = [...(homes.has(canonicalPath(resolve(path, '.claude'))) ? [] : ['.claude/settings.json']), '.mcp.json'];
-    for (const name of candidates) if (existsSync(resolve(path, name))) return resolve(path, name);
+    const candidates = [...(homes.has(canonicalPath(resolve(path, '.claude'))) ? [] : ['.claude/settings.json', '.claude/settings.local.json']), '.mcp.json'];
+    for (const name of candidates) if (existsSync(resolve(path, name)) && !(name === '.claude/settings.local.json' && await gitIgnores(path, name))) return resolve(path, name);
   }
   return null;
 }
@@ -138,7 +141,7 @@ export async function trustClaudeFolder(directory: string, environment: Record<s
     return { document, projects, trusted: ancestors(folder).some(path => projects[path]?.hasTrustDialogAccepted === true) };
   };
   if ((await read()).trusted) return { file, directory: folder, written: false };
-  const carried = loadsRepositorySettings(args) ? repositoryClaudeConfig(folder, environment) : null;
+  const carried = loadsRepositorySettings(args) ? await repositoryClaudeConfig(folder, environment) : null;
   if (carried) throw refuse(`the folder is not trusted in ${file}, and it carries the repository's own Claude configuration ${carried}, which this launch loads (no --setting-sources that leaves out ${repositorySettingSources.join(', ')}) and recording the folder as trusted would let run under the session's credentials. Launch it with --setting-sources user, or trust the folder once as the operator by starting Claude Code there`);
   for (let attempt = 1; ; attempt++) {
     try {
