@@ -6,7 +6,8 @@ import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, latency
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
-import { record } from './effects.js';
+import { type DaemonEffects, record } from './effects.js';
+import { capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
 
 /** Step 4c: request and supervise the routine decisions. */
@@ -47,8 +48,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     await effects.persist(state);
     if (listed) return `adopted approver session ${name}, already judging it`;
     inventory = null;
-    const launched = await effects.approver!(item, watch.decision);
-    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null });
+    let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>;
+    try { launched = await effects.approver!(item, watch.decision); }
+    catch (error) {
+      // A role at its concurrency limit is a wait for a slot, not a failed session (GY-190): the
+      // launch is not counted against the decision's bound, and the next cycle makes it again, so
+      // the approver starts on the first cycle after a slot frees without anybody asking.
+      const full = capacityRefusal(error);
+      if (!full) throw error;
+      Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, session: null, capacity: full.slice(0, 500) });
+      await effects.persist(state);
+      return `left it pending for an approver slot, launched on the first cycle one frees: ${full}`;
+    }
+    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, session: launched?.session ?? null, capacity: null });
     return `launched independent approver session ${watch.agentName} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   const escalateUnjudged = async (item: Work, watch: ApprovalWatch, detail: string) => {
@@ -228,6 +240,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // Every other step replaces the session, so the one that ended goes first. While it cannot be
     // closed its name is still taken, and the step is taken again next cycle.
     if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
+    // A launch waiting for a slot never ran a session, so there is no ending to record: it is only made again.
+    if (step.step === 'relaunch' && watch.capacity && !watch.agentName) {
+      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} waits for an approver slot; ${await launch(item, watch, false)}`); }
+      catch (error) { await note(`${base}:launch:${watch.launches}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} waited for an approver slot; its approver session could not be launched: ${message(error)}`); }
+      return;
+    }
     if (watch.ended.at(-1) !== step.detail.slice(0, 300)) watch.ended = [...watch.ended, step.detail.slice(0, 300)].slice(-10);
     if (step.step === 'rerequest') {
       // The server settled it some other way — failed on a precondition, stale, withdrawn — and
@@ -337,5 +355,20 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A tab that will not close, or a request that cannot be taken back, is left to the operator
     // after a few tries; the session name is this decision's alone, so it can refuse no other launch.
     if ((closed && withdrawn) || watch.closeAttempts >= maxApproverCloses) delete state.approvals[key];
+  });
+
+  // 4d. Registry sessions end with the sessions they record (GY-190). A registry session is a
+  //     launch, not a process, and nothing reports its end: an approver that judged its decision and
+  //     exited kept its role's slot, and after `concurrency` launches the role stopped launching.
+  //     Each cycle therefore ends every live registry session whose runtime session is gone from
+  //     Herdr, and every session of an approver whose decision is judged, naming why; a launch
+  //     step 4c left waiting for a slot is made on the next cycle, into the room this frees.
+  if (effects.reconcileSessions) await isolate('decision', null, 'agent-registry', async () => {
+    const finished = new Map<string, string>();
+    for (const watch of Object.values(state.approvals)) if (watch.session && watch.settledAt) finished.set(watch.session, `approver decision ${watch.decision} on ${watch.work} is judged`);
+    const ended = await effects.reconcileSessions!(await sessions(), finished);
+    for (const watch of Object.values(state.approvals)) if (watch.session && ended.some(entry => entry.session === watch.session)) watch.session = null;
+    for (const entry of ended) performed.push(await record(state, `registry:end:${entry.session}`, { kind: 'close', work: entry.work, principal: null, state: 'done',
+      detail: `Ended the ${entry.role} registry session ${entry.session} on ${entry.account}${entry.work ? ` for ${entry.work}` : ''}: ${entry.reason}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
 }

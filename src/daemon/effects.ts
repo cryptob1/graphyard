@@ -15,6 +15,7 @@ import { type ReviewFinding, readReviewFindings, basePaths } from '../review-sco
 import { defaultAwaitReviewers } from '../auto-dispatch.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, decisionInput, launchApprover, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment } from '../master.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
+import { reconcileFleetSessions } from '../fleet.js';
 import { clampCount, type ContainmentRetention, type DaemonAction, daemonActionSchema, type DaemonState, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
@@ -92,7 +93,13 @@ export interface DaemonEffects {
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
    * Never the requester.
    */
-  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null }>;
+  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; session?: string | null }>;
+  /**
+   * Ends the agent-registry sessions that no longer run (GY-190): every live one whose runtime
+   * session is gone from this host's Herdr, and every one `finished` names, with its reason.
+   * Returns what it ended. A loop wired without it leaves the registry to its own time windows.
+   */
+  reconcileSessions?: (runtime: { agents: HerdrAgent[]; available: boolean }, finished: ReadonlyMap<string, string>) => Promise<{ session: string; role: string; work: string | null; account: string; reason: string }[]>;
   /**
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
@@ -291,13 +298,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The approver's runtime and account come from the registry's approver role; naming a kind here
   // would be a runtime read out of code, and the role would decide nothing.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane }; };
+  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await listHerdrAgents(run), run); return { agentName: launched.agentName, pane: launched.pane, session: launched.session }; };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   let publishedEnvironment: string | null = null;
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
+    reconcileSessions: (runtime, finished) => reconcileFleetSessions(current(), runtime, finished),
     childWaits: () => ledger.drain(),
     // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
     sessionOutput: async agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },

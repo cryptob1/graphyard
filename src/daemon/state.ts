@@ -216,6 +216,10 @@ export const approvalWatchSchema = z.object({
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
   /** The worker scope request a `requirements` decision answers (GY-176): whose, and for what. */
   scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
+  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged. */
+  session: z.string().max(200).nullable().default(null),
+  /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
+  capacity: z.string().max(500).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 
