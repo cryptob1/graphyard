@@ -130,7 +130,7 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 // provider merge the first one already committed. The instance is minted by the executor and
 // bound here to the principal that authenticates it, so no instance can name another principal's.
 const executorInstance = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
-const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), executor: executorInstance.optional() }).strict();
+const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000), executor: executorInstance.optional() }).strict();
 const mergeVerifySchema = z.object({ executionId: z.string().uuid(), executor: executorInstance.optional() }).strict();
 /**
@@ -1139,7 +1139,13 @@ export class Engine {
           && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, fenced, or superseded');
         return receipt.result;
       }
-      demand(work.revision === data.expectedRevision, 'Task changed before merge execution; retry');
+      // The grant is bound to what it merges, not to the document revision the caller read (GY-192):
+      // observations and bookkeeping bump the revision constantly without changing the candidate.
+      // A revision from the future was never read; any other change is re-validated below, in this
+      // transaction, against the binding — head, base, policy revision, the queue tip the caller
+      // verified, and the all-gates authorization for exactly those.
+      demand(data.expectedRevision <= work.revision, 'Task changed before merge execution; retry');
+      demand(data.queueTip === undefined || work.queue?.speculation?.tip === data.queueTip && work.queue.speculation.base === data.baseSha, 'Task changed before merge execution; retry');
       if (work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
       demand(!work.mergeExecution, work.mergeExecution?.committingAt ? 'A committed merge execution awaits GitHub reconciliation; no new execution can be granted until it is observed' : 'A merge execution is already active');
       this.evaluate(work, all, now);
