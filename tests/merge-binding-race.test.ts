@@ -112,13 +112,14 @@ test('integration:merge-binding-not-revision — observation refreshes before th
   const calls: string[][] = [];
   const result = await mergeExecutor(config, racingSnapshot, mutate, executor(), randomUUID(), github(calls))(stale);
   assert.match(result.result, /merge requested/, 'three unrelated revision bumps did not refuse the merge');
-  const merged = await reload(work.id);
-  assert.ok(merged.revision > stale.revision + 3, `the record moved on from ${stale.revision} to ${merged.revision} during the attempt`);
-  assert.ok(merged.mergeExecution?.committingAt, 'the execution was granted and committed');
-  assert.ok(merged.mergeExecution!.authorizationRevision > stale.revision, 'the grant records the revision the engine re-validated in its transaction');
-  assert.equal(calls.filter(args => args[1] === '--method').length, 1, 'the provider merge was called once');
+  const requested = await reload(work.id);
+  assert.ok(requested.revision > stale.revision + 2, `the record moved on from ${stale.revision} to ${requested.revision} during the attempt`);
+  // GitHub executes the merge (GY-258): the step records the request, and nothing else.
+  assert.equal((await engine.enqueueRequest(work.id))?.sha, head, 'the merge request was recorded for the head');
+  assert.equal(requested.mergeExecution ?? null, null, 'no merge execution is acquired');
+  assert.equal(calls.filter(args => args[1] === '--method').length, 0, 'no provider merge call is made');
 
-  // What is merged changing still refuses, at the broker and at the engine.
+  // What is merged changing still refuses, at the merge step and at the engine.
   const second = await candidate();
   const current = await reload(second.id);
   const guarded = mergeExecutor(config, snapshot, transport(coordinator), executor(), randomUUID(), github());
@@ -128,18 +129,18 @@ test('integration:merge-binding-not-revision — observation refreshes before th
     ['policy revision', { ...current, policyRevision: current.policyRevision + 1 }],
     ['queue tip', { ...current, queue: { ...current.queue!, speculation: { ...current.queue!.speculation!, tip: 'f'.repeat(40) } } }],
   ] as [string, Work][]) await assert.rejects(guarded(read), /changed before GitHub verification; retry/, `a read whose ${what} differs from the record is refused even at the same revision`);
-  assert.equal((await reload(second.id)).mergeExecution ?? null, null, 'no execution was granted on a changed binding');
+  assert.equal(await engine.enqueueRequest(second.id), null, 'no merge was requested on a changed binding');
   await refreshObservation(second.id);
-  const bound = { expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision, queueTip: head };
+  const bound = { enqueue: true as const, expectedRevision: current.revision, sha: head, baseSha: base, policyRevision: current.policyRevision, queueTip: head };
   await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, sha: 'd'.repeat(40) }, id()), /Merge authorization is no longer current/);
   await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, baseSha: 'e'.repeat(40), queueTip: undefined }, id()), /Merge authorization is no longer current/);
   await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, policyRevision: current.policyRevision + 1 }, id()), /Merge authorization is no longer current/);
-  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, queueTip: 'f'.repeat(40) }, id()), /Task changed before merge execution; retry/);
-  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, expectedRevision: current.revision + 50 }, id()), /Task changed before merge execution; retry/, 'a revision the caller cannot have read is refused');
-  // The same binding at a stale revision is granted: the engine re-validated it in the transaction.
+  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, queueTip: 'f'.repeat(40) }, id()), /Task changed before the merge was requested; retry/);
+  await assert.rejects(engine.acquireMerge(coordinator, second.id, { ...bound, expectedRevision: current.revision + 50 }, id()), /Task changed before the merge was requested; retry/, 'a revision the caller cannot have read is refused');
+  // The same binding at a stale revision is recorded: the engine re-validated it in the transaction.
   const granted = await engine.acquireMerge(coordinator, second.id, bound, id());
-  assert.equal(granted.execution.sha, head);
-  assert.ok(granted.execution.authorizationRevision > current.revision);
+  assert.equal(granted.enqueue.sha, head);
+  assert.equal((await reload(second.id)).mergeExecution ?? null, null);
 });
 
 // ---- The loop, with fakes --------------------------------------------------------------------

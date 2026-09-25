@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { assertMergeCandidate, buildMasterStatus, masterConfigSchema, mergeExecutionOwner, mergeExecutor, mergedWithoutAuthorization, stepAlreadyPerformed, type MasterConfig, type MergeExecutor } from '../src/master.js';
+import { assertMergeCandidate, buildMasterStatus, masterConfigSchema, mergeExecutionOwner, mergeExecutor, mergedWithoutAuthorization, type MasterConfig, type MergeExecutor } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
@@ -125,89 +125,26 @@ function daemon(executor: MergeExecutor, calls: string[][] = [], mutate = transp
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
 }
 
-test('integration:merge-executor-instance-owner — the daemon loop and an interactive merge race one candidate under one coordinator credential: exactly one acquires, the other stands down without cancelling, and the execution reaches its own terminal state', async () => {
+test('GitHub executes the merge (GY-258): the daemon loop and an interactive merge under one coordinator credential each request it, no execution is acquired, and the ledger holds exactly one request', async () => {
   const work = await candidate();
   const loop: MergeExecutor = { principal: coordinator.id, instance: `daemon-${randomUUID()}` };
   const interactive: MergeExecutor = { principal: coordinator.id, instance: randomUUID() };
-  assert.notEqual(mergeExecutionOwner(loop), mergeExecutionOwner(interactive));
-  assert.ok(mergeExecutionOwner(loop).startsWith(`${coordinator.id}#`), 'the owner names the principal and the instance');
-  // The interleaving that cost GY-81 its delivery: the loop acquires the execution, and while it
-  // holds it — before its verification — the interactive merge reads the record and judges it.
-  let release!: () => void; const acquired = new Promise<void>(resolve => { release = resolve; });
-  let proceed!: () => void; const judged = new Promise<void>(resolve => { proceed = resolve; });
-  const loopCalls: string[][] = [];
-  const effects = daemon(loop, loopCalls, async (path, data, key) => {
-    if (path.endsWith('/merge-verify')) await judged;
-    const result = await transport(coordinator)(path, data, key);
-    if (path.endsWith('/merge-acquire')) release();
-    return result;
-  });
-  const cycle = runCycle(config, emptyDaemonState(config), effects);
-  await acquired;
-  const interactiveMerge = mergeExecutor(config, snapshot, transport(coordinator), interactive, randomUUID(), github());
-  await assert.rejects(interactiveMerge(await reload(work.id)), /merge execution .* is held by graphyard-master#daemon-.* this executor stands down without cancelling it/, 'the interactive executor does not resume or cancel an execution another instance holds');
-  proceed();
-  const performed = await cycle;
-  assert.deepEqual(effects.merges, [work.key], 'the loop invoked the guarded merge for the candidate');
-  const loopMerge = performed.actions.find(action => action.kind === 'merge')!;
-  assert.equal(loopMerge.state, 'done', loopMerge.detail); assert.match(loopMerge.detail, /merge requested/);
-  const acquiredEvents = await events(work.id, 'merge.execution.acquired');
-  assert.equal(acquiredEvents.length, 1, 'exactly one executor acquired');
-  assert.equal(acquiredEvents[0].payload.details.owner, mergeExecutionOwner(loop), 'the execution is owned by the loop instance, not by the principal');
-  assert.equal((await events(work.id, 'merge.execution.cancelled')).length, 0, 'the losing executor cancelled nothing');
-  assert.equal((await events(work.id, 'merge.execution.committed')).length, 1);
-  assert.equal(loopCalls.filter(args => args[1] === '--method').length, 1, 'the provider merge was called exactly once');
-  // The execution is the loop instance's alone: neither the bare principal nor another instance can cancel it.
-  const held = await reload(work.id); const execution = held.mergeExecution!;
-  assert.equal(execution.owner, mergeExecutionOwner(loop)); assert.ok(execution.committingAt);
-  await assert.rejects(engine.cancelMerge(coordinator, work.id, { executionId: execution.id, reason: 'Interactive executor gives up' , executor: interactive.instance }, id()), /owned by another coordinator executor instance/);
-  await assert.rejects(engine.cancelMerge(coordinator, work.id, { executionId: execution.id, reason: 'A principal-only caller' }, id()), /owned by another coordinator executor instance/);
-  await assert.rejects(engine.commitMerge(coordinator, work.id, { executionId: execution.id, executor: interactive.instance }, id()), /owned by another coordinator executor instance/);
-  assert.throws(() => assertMergeCandidate(held, new Date().toISOString(), mergeExecutionOwner(interactive)), /stands down without cancelling/);
-  assert.throws(() => assertMergeCandidate(held, new Date().toISOString(), coordinator.id), /stands down without cancelling/, 'the principal alone never resumes an instance-owned execution');
-  // The execution reaches its terminal state: GitHub's merge, observed, delivers the item on that execution.
-  await delay(5);
-  const delivered = await engine.observe(work.id, held.revision, await merged(work));
-  assert.equal(delivered.stage, 'done'); assert.equal(delivered.mergeExecution, null);
-  assert.equal(delivered.delivery?.authorizationRevision, execution.authorizationRevision);
-  assert.equal(delivered.violations.length, 0);
-});
-
-test('integration:losing-executor-stands-down — a confirmed already-verified or already-committed refusal makes the executor stand down and leave the execution intact; no merge.execution.cancelled follows', async () => {
-  assert.equal(stepAlreadyPerformed(Object.assign(new Error('{"error":"Merge execution was already verified; retry with the original idempotency key"}'), { confirmedRefusal: true })), true);
-  assert.equal(stepAlreadyPerformed(Object.assign(new Error('{"error":"Merge execution was already committed; retry with the original idempotency key"}'), { confirmedRefusal: true })), true);
-  assert.equal(stepAlreadyPerformed(new Error('Merge execution was already verified')), false, 'an unconfirmed failure is not a performed step');
-  assert.equal(stepAlreadyPerformed(Object.assign(new Error('{"error":"GitHub gates changed during merge execution"}'), { confirmedRefusal: true })), false);
-  // Already verified: the first executor verified; a second attempt reads a record that predates
-  // the verification and asks to verify again with its own key. The refusal is the engine's, the
-  // execution stays exactly as the first executor left it, and nothing is cancelled.
-  const first = await candidate();
-  const executor: MergeExecutor = { principal: coordinator.id, instance: `daemon-${randomUUID()}` };
-  const granted = await engine.acquireMerge(coordinator, first.id, { expectedRevision: first.revision, sha: head, baseSha: base, policyRevision: first.policyRevision, executor: executor.instance }, id());
-  const verified = await engine.verifyMerge(coordinator, first.id, { executionId: granted.execution.id, executor: executor.instance }, { ...observation(first), prState: 'open', draft: false }, id());
-  const stale = { ...(await reload(first.id)), mergeExecution: granted.execution };
-  const staleSnapshot = async () => ({ work: [stale], now: await dbNow() });
-  const attempt = mergeExecutor(config, staleSnapshot, transport(coordinator), executor, randomUUID(), github());
-  await assert.rejects(attempt(stale), /already verified.*stands down and leaves the execution intact/s);
-  const afterVerify = await reload(first.id);
-  assert.equal(afterVerify.mergeExecution?.id, granted.execution.id, 'the execution is intact');
-  assert.equal(afterVerify.mergeExecution?.verifiedAt, verified.verifiedAt);
-  assert.equal((await events(first.id, 'merge.execution.cancelled')).length, 0, 'no merge.execution.cancelled follows an already-verified refusal');
-  // Already committed: the first executor committed to the provider; a stale attempt resumes the
-  // recorded verification and asks to commit. It stands down before any provider call.
-  const committed = await engine.commitMerge(coordinator, first.id, { executionId: granted.execution.id, executor: executor.instance }, id());
-  const staleVerified = { ...(await reload(first.id)), mergeExecution: { ...afterVerify.mergeExecution!, committingAt: undefined } };
   const calls: string[][] = [];
-  const later = mergeExecutor(config, async () => ({ work: [staleVerified], now: await dbNow() }), transport(coordinator), executor, randomUUID(), github(calls));
-  await assert.rejects(later(staleVerified), /already committed.*stands down and leaves the execution intact/s);
-  assert.equal(calls.filter(args => args[1] === '--method').length, 0, 'no provider merge from the executor that stood down');
-  const afterCommit = await reload(first.id);
-  assert.equal(afterCommit.mergeExecution?.committingAt, committed.committingAt, 'the committed execution is intact');
-  assert.equal((await events(first.id, 'merge.execution.cancelled')).length, 0, 'no merge.execution.cancelled follows an already-committed refusal');
-  // The owner finishes: the observed merge delivers on the execution the loser left alone.
+  const [first, second] = await Promise.all([
+    mergeExecutor(config, snapshot, transport(coordinator), loop, randomUUID(), github(calls))(work),
+    mergeExecutor(config, snapshot, transport(coordinator), interactive, randomUUID(), github(calls))(work),
+  ]);
+  for (const outcome of [first, second]) { assert.equal(outcome.pending, true); assert.equal(outcome.enqueued, true); }
+  assert.equal(calls.some(args => args[1] === '--method'), false, 'no executor calls the provider merge');
+  assert.equal((await reload(work.id)).mergeExecution ?? null, null, 'no merge execution is acquired');
+  assert.equal((await events(work.id, 'merge.enqueue.requested')).length, 1, 'one request stands for the candidate');
+  assert.equal((await events(work.id, 'merge.execution.acquired')).length, 0);
+  assert.equal((await engine.enqueueRequest(work.id))?.sha, head);
+  // GitHub merges; the delivery is recorded from the merged observation.
   await delay(5);
-  const delivered = await engine.observe(first.id, afterCommit.revision, await merged(first));
-  assert.equal(delivered.stage, 'done'); assert.equal(delivered.delivery?.authorizationRevision, granted.execution.authorizationRevision);
+  const delivered = await engine.observe(work.id, (await reload(work.id)).revision, await merged(work));
+  assert.equal(delivered.stage, 'done', delivered.violations.join('; '));
+  assert.equal(delivered.delivery?.mergeSha, mergeSha);
 });
 
 test('integration:merged-without-authorization-recovery — an observed merge whose execution was cancelled records the violation, stays out of done, and reaches done only through a two-party merge decision re-checked at the merge cutoff, with authorizationRevision and evidenceAsOf from the historical snapshot', async () => {

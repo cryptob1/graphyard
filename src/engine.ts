@@ -9,7 +9,7 @@ import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, currentRestore, decideIdentityCarry, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, tipReplacesHead, type BaseRefresh, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
@@ -133,6 +133,8 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 // bound here to the principal that authenticates it, so no instance can name another principal's.
 const executorInstance = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
+/** The coordinator's request that GitHub merge exactly this candidate (GY-258): the merge step's whole authority now. */
+const mergeEnqueueSchema = z.object({ enqueue: z.literal(true), expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
 const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000), executor: executorInstance.optional() }).strict();
 const mergeVerifySchema = z.object({ executionId: z.string().uuid(), executor: executorInstance.optional() }).strict();
 /**
@@ -1143,7 +1145,69 @@ export class Engine {
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
     return { work, observationScheduled: !!before!.submission, revision: work.revision, changed: work.revision !== before!.revision };
   }
+  /**
+   * GitHub executes merges; Graphyard only gates them (GY-258). The coordinator's merge step records
+   * a request that GitHub merge exactly this candidate — refused unless every gate passes for it
+   * now — and wakes the item's observation job, whose control-plane App publishes the check and
+   * enqueues the pull request. No execution, window or clock wait is issued: GitHub merges only a
+   * head whose required check the control plane published as passed, and dequeues on withdrawal.
+   */
+  async requestEnqueue(actor: Principal, id: string, input: unknown, key: string) {
+    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    const data = mergeEnqueueSchema.parse(input);
+    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.enqueue', id, data })).digest('hex');
+    return this.store.transaction(async (db, now) => {
+      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result; }
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(item => item.id === id || item.key === id);
+      demand(work, 'Work item not found', 404);
+      demand(data.expectedRevision <= work.revision, 'Task changed before the merge was requested; retry');
+      demand(data.queueTip === undefined || work.queue?.speculation?.tip === data.queueTip && work.queue.speculation.base === data.baseSha, 'Task changed before the merge was requested; retry');
+      this.evaluate(work, all, now);
+      const authorization = work.mergeAuthorization;
+      const age = work.observation ? now.getTime() - Date.parse(work.observation.at) : NaN;
+      demand(work.stage === 'merge' && work.gates.every(gate => gate.passed) && !work.violations.length && authorization
+        && authorization.sha === data.sha && authorization.baseSha === data.baseSha && authorization.policyRevision === data.policyRevision
+        && work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && Number.isFinite(age) && age >= 0 && age < 120_000,
+      'Merge authorization is no longer current');
+      const request: MergeEnqueueRequest = { sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, requestedBy: mergeExecutionOwner(actor, data.executor), at: now.toISOString() };
+      const standing = await this.enqueueRequest(work.id, db);
+      if (!standing || standing.sha !== request.sha || standing.baseSha !== request.baseSha || standing.policyRevision !== request.policyRevision)
+        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'merge.enqueue.requested', JSON.stringify({ details: request })]);
+      await wakeJob(db, work.id);
+      const result = { key: work.key, revision: work.revision, enqueue: standing && standing.sha === request.sha && standing.baseSha === request.baseSha && standing.policyRevision === request.policyRevision ? standing : request };
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      return result;
+    });
+  }
+  /** The latest merge request the coordinator recorded for the item, or null (GY-258). */
+  async enqueueRequest(id: string, db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> } = this.store.pool): Promise<MergeEnqueueRequest | null> {
+    return (await db.query("SELECT payload->'details' AS request FROM events WHERE work_id=$1 AND kind='merge.enqueue.requested' ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.request ?? null;
+  }
+  /**
+   * What GitHub's queue holds for the item, written onto its observation when it changed, and every
+   * enqueue and dequeue the control plane performed appended to the ledger with its reason.
+   */
+  async recordGitHubQueue(id: string, state: GitHubMergeQueueState, action: MergeQueueAction): Promise<Work> {
+    return this.store.transaction(async (db, now) => {
+      const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
+      demand(work, 'Work item not found', 404);
+      if (action.kind !== 'hold') await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'github', action.kind === 'enqueue' ? 'merge.enqueued' : 'merge.dequeued',
+        JSON.stringify({ details: { reason: action.reason, pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, head: state.head, queue: state.queue, mode: state.mode, at: now.toISOString() } })]);
+      // What the queue holds once the action took effect: GitHub answered the mutation, not a re-read.
+      const recorded: GitHubMergeQueueState = { ...state, mode: action.kind === 'enqueue' ? state.queue ? 'queued' : 'auto-merge' : action.kind === 'dequeue' ? 'none' : state.mode };
+      const comparable = (value: GitHubMergeQueueState | null | undefined) => value ? JSON.stringify({ ...value, at: null }) : null;
+      if (!work.observation || work.observation.merged || comparable(work.observation.githubQueue) === comparable(recorded)) return work;
+      work.observation.githubQueue = recorded;
+      await save(db, work, 'github', 'github.queue', now, { mode: recorded.mode, entryState: recorded.entryState, position: recorded.position });
+      return work;
+    });
+  }
   async acquireMerge(actor: Principal, id: string, input: unknown, key: string) {
+    // The merge step's request that GitHub merge the candidate travels on the same route (GY-258).
+    if ((input as { enqueue?: unknown } | null)?.enqueue !== undefined) return this.requestEnqueue(actor, id, input, key);
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data = mergeAcquireSchema.parse(input);
@@ -1786,7 +1850,12 @@ export class Engine {
         const past = authorizedSnapshot ? undefined : await documentBefore(db, id, new Date(cutoff),
           record => !(record.observation?.merged && record.observation.candidate?.pr === observation.candidate.pr));
         const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
-        if (!authorizedSnapshot && past && executionValid && !historical.length) {
+        // GitHub executes the merge (GY-258): the coordinator's request that GitHub merge exactly
+        // this head, recorded before the merge, stands where an execution stood. The record before
+        // the cutoff must still show every gate passed and the authorization binding this head.
+        const requested = !executionValid && past ? (await db.query(`SELECT 1 FROM events WHERE work_id=$1 AND kind='merge.enqueue.requested' AND payload->'details'->>'sha'=$2 AND payload->'details'->>'baseSha'=$3
+          AND (payload->'details'->>'policyRevision')::int=$4 AND created_at<$5 LIMIT 1`, [id, observation.candidate.sha, observation.candidate.baseSha, past.policyRevision, new Date(cutoff)])).rowCount! > 0 : false;
+        if (!authorizedSnapshot && past && (executionValid || requested) && !historical.length) {
           authorizedSnapshot = past; authorizationRevision = boundedExecution?.authorizationRevision ?? past.revision;
         }
         // An observed merge whose execution was cancelled or never valid is a recorded violation
@@ -1837,6 +1906,9 @@ export class Engine {
         }
       }
       const previousObservation = work.observation;
+      // GitHub's queue state is read after the observation, by the check publication; it is kept
+      // across observations of the same pull request until that read replaces it.
+      if (observation.githubQueue === undefined && previousObservation?.githubQueue && previousObservation.candidate?.pr === observation.candidate.pr) observation.githubQueue = previousObservation.githubQueue;
       work.candidate = observation.candidate;
       work.observation = observation;
       // Snapshot all provider review identities after the revision. Approvals in this

@@ -35,6 +35,10 @@ The gate is the reviewer's approval of the exact head plus required CI. Threads 
 
 `docs/README.md` and `docs/protocol.md` are generated in full ([development](development.md)), and the managed `AGENTS.md` blocks are rendered by `init`; `sync` regenerates them after merging. The regression guard classifies paths in `GRAPHYARD_GENERATED_FILES` (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.
 
+## GitHub merges, Graphyard gates
+
+Graphyard never merges a pull request itself. Once every gate passes for a head and the master's merge step asks, the control-plane App publishes `Graphyard / merge` success on that exact head and enqueues it in GitHub's merge queue; a new head, a failing gate or a policy change fails the check and dequeues it. GitHub performs the merge, and the item is Done from the merged observation ([details](github.md#github-executes-the-merge)).
+
 ## Ship in under thirty minutes
 
 The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never by weakening a gate.

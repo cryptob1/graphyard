@@ -173,9 +173,8 @@ test('integration:blocked-merge-refused-before-execution — master merge refuse
     const acquired: unknown[] = [], provider: string[][] = [];
     const record = { ...work, mergeExecution: null } as Work;
     await assert.rejects(mergeWork(config, record, async () => ({ work: [record], now: new Date().toISOString() }),
-      async (...args) => { acquired.push(args); throw new Error('acquire must not be called'); },
-      async () => { throw new Error('cancel must not be called'); }, async () => { throw new Error('verify must not be called'); },
-      (command, args) => { provider.push([command, ...args]); throw new Error('GitHub must not be called'); }, 'graphyard-master#interactive'),
+      async (...args) => { acquired.push(args); throw new Error('the merge must not be requested'); },
+      async (command, args) => { provider.push([command, ...args]); throw new Error('GitHub must not be called'); }),
     (error: Error) => error.message.includes('before any merge execution') && error.message.includes(`${reviewer} on src/claims.ts:42`));
     assert.equal(acquired.length, 0, 'no merge execution is requested');
     assert.equal(provider.length, 0, 'nothing is sent to GitHub');

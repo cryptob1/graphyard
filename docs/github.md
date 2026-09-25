@@ -33,13 +33,17 @@ Review uses a separate reviewer App, created by `graphyard master reviewer setup
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` bound to this App, leave "require up to date" (`strict`) **off**, enforce for administrators, forbid force pushes and deletion, and remove bypass rights from worker identities. `master browser protection` reconciles it.
+On the base branch require `Graphyard / merge` bound to this App, leave "require up to date" (`strict`) **off**, enforce for administrators, forbid force pushes and deletion, and remove bypass rights from worker identities. `master browser protection` reconciles it. `graphyard master protection --apply` (and install) also writes the ruleset `Graphyard merge queue`: a GitHub merge queue on the base branch, one entry at a time, whose merge groups must pass `Graphyard / merge` from this App. Required CI workflows must also run on `merge_group`.
 
 The gate also requires CI checks from Apps in `GITHUB_CI_APP_IDS`, an approval of the current head, trusted evidence with executed > 0 and skipped 0, a mergeable non-draft PR, and the queue head.
 
 ## Merge queue
 
 A candidate enters once its gates pass. Its speculative tip (the predicted base merged into the candidate) is pushed onto the candidate branch and published under `refs/graphyard/queue/KEY`, and every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; once repaired it re-enters at the back. An entry leaving validation keeps its sequence but is passed over until revalidated.
+
+### GitHub executes the merge
+
+Graphyard gates; GitHub merges. When every gate passes and the master's merge step asks (`master run`, or `master merge`), the App publishes `Graphyard / merge` success on that exact head and enqueues the pull request in GitHub's merge queue, bound to the head by `expectedHeadOid` (auto-merge where the branch has no queue). While the entry waits, the App publishes the same verdict on the merge group commit. When authorization is withdrawn — a new head, a failing gate, a policy change — the App publishes failure on the head and dequeues it. GitHub performs the merge; the delivery is recorded from the merged observation's `merge_commit_sha`, attributed to the pre-merge record that shows every gate passed and the merge request for that head. No Graphyard code calls GitHub's merge endpoint. `master status` shows each queued item's GitHub queue state under `queue[].github`.
 
 ### Bindings and carry
 
@@ -55,7 +59,7 @@ With `"deploySmoke": true` in the policy, the master dispatches the smoke workfl
 
 ## Enforcement boundary
 
-No transaction spans GitHub and Postgres: a single-use merge execution and final re-observation narrow the gap, and [revocation](protocol/evidence.md#revocation) cancels an execution until its commit point. An unknown merge outcome is settled next tick from the pull request. Restrict other merge identities; a worker can still push its own branch after losing its lease.
+No transaction spans GitHub and Postgres: GitHub merges only a head whose required check the App published as passed, and the App fails the check and dequeues on withdrawal, observing an enqueued head every 20 seconds. A merge GitHub performs without a standing authorization and merge request is recorded as unauthorized. Restrict other merge identities; a worker can still push its own branch after losing its lease.
 
 ## Identity-bound agent review
 

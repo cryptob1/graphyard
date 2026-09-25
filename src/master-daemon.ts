@@ -2998,8 +2998,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     for (let retries = 0; ; retries++) {
       try {
         const result = await effects.merge(target) as { result?: string; pending?: boolean } | undefined;
-        // A retained execution with an unknown provider outcome is pending, not merged (GY-195).
-        if (result?.pending) performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail: `Guarded merge pending for ${item.key}: ${result.result ?? 'the provider outcome is unknown'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        // GitHub executes the merge (GY-258): the step only requests it, so the outcome stays
+        // pending until the merged observation, from which the delivery is recorded.
+        if (result?.pending) performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail: `Guarded merge pending for ${item.key}: ${result.result ?? 'GitHub has not merged it yet'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         else performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${result?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       } catch (error) {
