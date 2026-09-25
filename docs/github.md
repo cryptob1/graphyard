@@ -39,17 +39,17 @@ The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head app
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof binds it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
+A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; repaired, it re-enters at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals (`merge.enqueue.refused`) show in `master status`.
 
 ### Bindings and carry
 
 Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
-Carry ignores reviewed files when that conflict-free Graphyard merge left the change's own patch-id unchanged; carried steps name their ground.
+Carry ignores reviewed files if that conflict-free Graphyard merge kept the change's patch-id; carried steps name their ground.
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4, 1 disables; `POST /api/merge-queue` publishes it) batches entries onto one CI-tested tip; members merge in order once a tip holding them passes; a failing batch is halved until its failing entry is ejected, naming the check (`mergeStep`).
+`mergeQueue.batchSize` (master config, default 4, 1 disables; `POST /api/merge-queue` publishes it) batches entries onto one CI-tested tip; members merge in order once a containing tip passes; a failing batch is halved until the culprit is ejected, naming the check (`mergeStep`).
 
 ### Proofs in CI
 
