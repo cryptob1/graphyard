@@ -18,6 +18,7 @@ import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition }
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, type ActionRow } from './model/actions.js';
+import { livenessFallback, livenessOf, livenessRepairEntry, repairLiveness } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -1574,7 +1575,8 @@ export class Engine {
     // One computation answers both: the queue reconciles against it and the item carries it, so
     // two readers of the same evaluation cannot disagree about what this item needs.
     const computed = nextAction(work, all, now);
-    reconcileActions(work, all, now, { next: computed });
+    // An open item the derivation names nothing for and nothing moves is owned by an escalation (GY-201).
+    reconcileActions(work, all, now, { next: computed ?? livenessFallback(work, all, now) });
     // Only a different decision is written: an identical action rebuilt in source order would
     // differ from the stored one by key order alone, and the reconciliation tick would rewrite
     // every item on every pass.
@@ -1597,6 +1599,9 @@ export class Engine {
       for (const work of all) {
         if (work.stage === 'done') continue;
         const before = JSON.stringify(work);
+        // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
+        // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
+        const stranded = livenessOf(work, all, now).violation;
         preserveAssignment(work); retainQuarantineFence(work);
         const executing = holdsMergeExecution(work, now.getTime());
         const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
@@ -1604,8 +1609,16 @@ export class Engine {
         // loss: that escalation must reach the record and fence the execution
         // rather than wait for it, so delivery cannot outrun the concern. A
         // committed execution is retired only by the GitHub observation that
-        // settles its provider outcome, never by reconciliation.
-        if (executing && !leaseLost) continue;
+        // settles its provider outcome, never by reconciliation — but one that outlived its
+        // authority with the pull request open is owed a fresh reading, queued here.
+        if (executing && !leaseLost) {
+          if (repairLiveness(work, all, now).length && JSON.stringify(work) !== before) {
+            const entry = stranded ? livenessRepairEntry(stranded, work, all, now) : null;
+            if (entry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+            await save(db, work, 'graphyard', 'reconciled', now, entry ? { ledger: [entry.kind] } : undefined);
+          }
+          continue;
+        }
         if (!executing && work.mergeExecution) work.mergeExecution = null;
         const ledger: { kind: string; details: Record<string, unknown> }[] = [];
         // The ledger explains a lapse: the epoch's own blocked report or the admin's stopped-worker
@@ -1640,6 +1653,9 @@ export class Engine {
         // behind it are woken to predict against the real base.
         const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
         if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason } });
+        // Every violation found at the start of the tick is repaired by the evaluation above — the
+        // derivation names its successor and the queue opens its row — and the ledger says so.
+        if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
         if (JSON.stringify(work) !== before) {
           for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
           await this.recordDispatch(db, work, now);
