@@ -4,9 +4,10 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type SetupProposal } from './onboarding.js';
+import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { autonomyContract } from './autonomy.js';
+import { documentationAssignment, documentationPolicySchema, parseRepositoryConfig, repositoryConfigFile, type DocumentationPolicy } from './model/documentation.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 
@@ -321,6 +322,11 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     applied.push('AGENTS.md coordination section');
   }
 
+  // The repository's documentation policy (GY-215): proposed from what the checkout holds and
+  // written to its committed Graphyard configuration once; an operator's edit is drift, never overwritten.
+  const documentation = await writeDocumentationConfig(root, proposeDocumentation(await collectScanInput(root)));
+  (documentation.state === 'written' ? applied : documentation.state === 'unchanged' ? unchanged : drift).push(documentation.state === 'drift' ? `${repositoryConfigFile} documentation differs from the scan; the committed file was kept` : `${repositoryConfigFile} documentation policy`);
+
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
   const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
   // Only principals the operator reviewed in the proposal are registered; apply
@@ -385,13 +391,67 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const workerStep = workerPrincipals.length
     ? 'place each worker credential at its profile credentialFile path, then claim work'
     : 'no agent runtime was detected on this machine, so the proposal declared no worker profile and no worker principal was registered; install an agent CLI and rerun init --scan --apply to add one';
-  return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null,
+  const documentationLine = documentationAssignment(documentation.policy).line;
+  return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null, documentation: { file: repositoryConfigFile, policy: documentation.policy, line: documentationLine },
     githubPending: !githubApp,
     workerPrincipals,
     principalsFile: resolve(directory, 'principals.json'),
     next: githubApp
       ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`
-      : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently' };
+      : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently',
+    documentationNext: `Commit ${repositoryConfigFile} with AGENTS.md, and set ${documentationLine} on the Graphyard deployment so every item names these documentation paths` };
+}
+
+// --- Documentation policy: what the repository documents, proposed from the checkout (GY-215) ----
+
+const documentationTrees = ['docs', 'doc', 'site', 'website', 'wiki'];
+const readmeFile = /^README(?:\.[A-Za-z0-9]+)?$/i, changelogFile = /^(?:CHANGELOG|CHANGES|HISTORY)(?:\.[A-Za-z0-9]+)?$/i;
+/**
+ * The documentation paths a repository actually holds: its documentation trees (docs/, site/, a
+ * wiki), its root README and agent contract, per-package READMEs as one glob per package root, and
+ * the root changelog. A repository with none of them is proposed its README, the one page every
+ * repository is expected to keep.
+ */
+export function proposeDocumentation(input: Pick<ScanInput, 'files'>): DocumentationPolicy {
+  const paths: string[] = [];
+  const add = (path: string) => { if (!paths.includes(path)) paths.push(path); };
+  for (const tree of documentationTrees) if (input.files.some(file => file.startsWith(`${tree}/`))) add(`${tree}/`);
+  const root = input.files.filter(file => !file.includes('/'));
+  for (const file of root.filter(file => readmeFile.test(file)).sort()) add(file);
+  if (root.includes('AGENTS.md')) add('AGENTS.md');
+  for (const file of input.files.filter(file => file.includes('/') && readmeFile.test(file.split('/').at(-1)!)).sort()) {
+    const segments = file.split('/');
+    // A README inside a documentation tree is already covered; one under a hidden tooling directory is not published documentation.
+    if (documentationTrees.includes(segments[0]) || segments.some(segment => segment.startsWith('.'))) continue;
+    // packages/api/README.md → packages/*/README.md: every package of that root, present and future.
+    add(segments.length === 3 ? `${segments[0]}/*/${segments[2]}` : file);
+  }
+  const changelog = root.filter(file => changelogFile.test(file)).sort((a, b) => Number(b === 'CHANGELOG.md') - Number(a === 'CHANGELOG.md') || a.localeCompare(b))[0] ?? null;
+  return documentationPolicySchema.parse({ paths: paths.length ? paths : ['README.md'], changelog });
+}
+
+/**
+ * Write the policy into the repository's committed Graphyard configuration. A configuration that
+ * already declares one is the repository's own choice: it is kept, and a difference from the scan
+ * is reported as drift, exactly as an operator-tuned profile is.
+ */
+export async function writeDocumentationConfig(root: string, proposed: DocumentationPolicy): Promise<{ state: 'written' | 'unchanged' | 'drift'; policy: DocumentationPolicy }> {
+  const file = resolve(root, repositoryConfigFile);
+  await regularOrMissing(file);
+  let existing: string | null = null;
+  try { existing = await readFile(file, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  if (existing !== null) {
+    const policy = parseRepositoryConfig(existing).documentation;
+    return { state: canonicalJson(policy) === canonicalJson(proposed) ? 'unchanged' : 'drift', policy };
+  }
+  await atomicWrite(file, `${JSON.stringify({ documentation: proposed }, null, 2)}\n`, 0o644);
+  return { state: 'written', policy: proposed };
+}
+
+/** The policy a checkout's committed configuration declares, or null when it has none. */
+export async function readDocumentationConfig(root: string): Promise<DocumentationPolicy | null> {
+  try { return parseRepositoryConfig(await readFile(resolve(root, repositoryConfigFile), 'utf8')).documentation; }
+  catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
 // --- Executor supervision: what a host runs, and the unit that keeps it running (GY-105) -----------
