@@ -1,5 +1,5 @@
 import { deliveryState, isClosed, type Work } from '../src/model';
-import { dispatchHold } from '../src/coordination';
+import { resourceConflicts } from '../src/coordination';
 import { parkedOnHuman, type HumanRequestRow } from '../src/model/human-request';
 import { shortShas } from './format';
 import { phaseOf, plainReason, plainStatus } from './plain-status';
@@ -153,17 +153,18 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
 
 /**
  * Why an item in Up next is not waiting for a worker at all (GY-172): it is held by a dependency
- * that has not shipped — "Waiting for GY-N to ship first" — or by a planned-file overlap with work
- * already in flight, which names that work and the files. Null for an item a free builder takes
- * next. The overlap is the dispatcher's own hold (`dispatchHold`), so the page says what the loop
- * does; a hold past its bound no longer holds, and the item is not described as held.
+ * that has not shipped — "Waiting for GY-N to ship first" — or by an exclusive resource another
+ * claimed item holds, which names that item and the resource. Null for an item a free builder takes
+ * next. The resource hold is the dispatcher's own (`resourceConflicts`, as `dispatchHold` applies
+ * it), so the page says what the loop does; planned-file overlap holds nothing (dispatch is
+ * optimistic), so an overlapping item is described as waiting for a worker, which it is.
  */
-export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'overlap'; text: string } | null {
+export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'resource'; text: string } | null {
   const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
   if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready').text };
-  const hold = all.length ? dispatchHold(work, all, now) : null;
-  if (!hold || hold.overdue) return null;
-  return { kind: 'overlap', text: `Waiting for ${hold.ahead.map(entry => entry.key).join(', ')} to land first: its planned files overlap (${[...new Set(hold.ahead.flatMap(entry => entry.paths))].join(', ')})` };
+  const held = resourceConflicts(work, all, now);
+  if (!held.length) return null;
+  return { kind: 'resource', text: `Waiting for ${[...new Set(held.map(entry => entry.key))].join(', ')} to release ${[...new Set(held.map(entry => entry.resource))].join(', ')}: an exclusive resource it needs` };
 }
 /** What the Up next tile says under its count: waiting for a worker only when that is true of what it counts. */
 export function upNextMeaning(items: Work[], all: Work[], now: number): string {

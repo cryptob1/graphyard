@@ -118,21 +118,21 @@ test('unit:ui-reads-session-state — the Work page lists as running only the se
   assert.match(page('GY-12'), /Not seen for 20m/);
 });
 
-test('unit:ui-reads-session-state — Up next says what an item waits on: the dependency that must ship first, or the overlap that holds it, never "Waiting for a worker" for either', () => {
+test('unit:ui-reads-session-state — Up next says what an item waits on: the dependency that must ship first, or the exclusive resource that holds it, never "Waiting for a worker" for either', () => {
   const work = base();
   const item = (key: string) => work.find(w => w.key === key)!;
-  // GY-13 waits on GY-17 to ship; GY-17 itself is ready but its planned files overlap GY-14, claimed and in flight.
+  // GY-13 waits on GY-17 to ship; GY-17 itself is ready but needs staging-db, which GY-14 holds under its claim.
   Object.assign(item('GY-13'), { dependencies: [item('GY-17').id], gates: item('GY-13').gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons: ['Dependency GY-17 is unfinished'] } : gate) });
-  Object.assign(item('GY-17'), { plannedFiles: ['web/groups.ts'], blocker: null, gates: item('GY-17').gates.map(gate => gate.name === 'ready' ? { ...gate, passed: true, reasons: [] } : gate) });
-  // Claimed ten minutes ago: a hold inside its two-hour bound (a hold past it no longer holds).
-  Object.assign(item('GY-14'), { plannedFiles: ['web/groups.ts', 'web/pages/'], priority: item('GY-17').priority, lease: { ...item('GY-14').lease!, expiresAt: at(30 * minute) },
+  Object.assign(item('GY-17'), { plannedFiles: ['web/groups.ts'], exclusiveResources: ['staging-db'], blocker: null, gates: item('GY-17').gates.map(gate => gate.name === 'ready' ? { ...gate, passed: true, reasons: [] } : gate) });
+  // Claimed ten minutes ago with a live lease: its resource is held.
+  Object.assign(item('GY-14'), { plannedFiles: ['web/groups.ts', 'web/pages/'], exclusiveResources: ['staging-db'], priority: item('GY-17').priority, lease: { ...item('GY-14').lease!, expiresAt: at(30 * minute) },
     lastAssignment: { ...item('GY-14').lastAssignment!, claimedAt: at(-10 * minute) }, pipeline: undefined });
 
   const { byGroup } = classify(work, NOW);
   const upNext = byGroup['up-next'].map(entry => entry.key).sort();
   assert.deepEqual(upNext, ['GY-12', 'GY-13', 'GY-17'], 'both are released and unclaimed, beside GY-12, whose worker\'s lease lapsed');
   assert.deepEqual(nextActor(item('GY-13'), 'up-next', NOW, undefined, work), { who: 'Nobody yet', does: 'Waiting for GY-17 to ship first' });
-  assert.deepEqual(nextActor(item('GY-17'), 'up-next', NOW, undefined, work), { who: 'Nobody yet', does: 'Waiting for GY-14 to land first: its planned files overlap (web/groups.ts)' });
+  assert.deepEqual(nextActor(item('GY-17'), 'up-next', NOW, undefined, work), { who: 'Nobody yet', does: 'Waiting for GY-14 to release staging-db: an exclusive resource it needs' });
   assert.equal(nextActor(item('GY-12'), 'up-next', NOW, undefined, work).does, 'Hands it to the next free builder agent', 'GY-12 really is waiting for a worker');
   assert.equal(upNextMeaning(byGroup['up-next'], work, NOW), '1 waiting for a worker · 2 held', 'the tile counts what waits for a worker apart from what is held');
   assert.equal(upNextMeaning(byGroup['up-next'].filter(entry => entry.key !== 'GY-12'), work, NOW), 'Held behind other work', 'and never says a worker is what held items wait for');
@@ -141,7 +141,7 @@ test('unit:ui-reads-session-state — Up next says what an item waits on: the de
   const section = html.slice(html.indexOf('data-group-section="up-next"'));
   const row = (key: string) => { const start = section.indexOf(`data-row="${key}"`); assert.ok(start >= 0, key); return visibleWords(section.slice(start, section.indexOf('</div>', section.indexOf('row-who', start)))).join(' '); };
   assert.match(row('GY-13'), /Waiting for GY-17 to ship first/);
-  assert.match(row('GY-17'), /Waiting for GY-14 to land first: its planned files overlap \(web\/groups\.ts\)/);
+  assert.match(row('GY-17'), /Waiting for GY-14 to release staging-db: an exclusive resource it needs/);
   for (const key of ['GY-13', 'GY-17']) assert.doesNotMatch(row(key), /Waiting for a worker|next free builder/);
   const tile = html.slice(html.indexOf('data-tile="up-next"'), html.indexOf('</button>', html.indexOf('data-tile="up-next"')));
   assert.match(tile, /<small>1 waiting for a worker · 2 held<\/small>/);
@@ -150,4 +150,7 @@ test('unit:ui-reads-session-state — Up next says what an item waits on: the de
   assert.equal(upNextMeaning([item('GY-12')], work, NOW), groupMeaning['up-next']);
   assert.equal(groupMeaning['up-next'], 'Waiting for a worker');
   assert.equal(upNextMeaning([item('GY-13')], work, NOW), 'Waiting for GY-17 to ship first', 'one held item: the tile names what it waits for');
+  // Planned-file overlap alone holds nothing (dispatch is optimistic): GY-17 still shares web/groups.ts with GY-14, and without the resource it waits for a worker.
+  Object.assign(item('GY-17'), { exclusiveResources: [] });
+  assert.equal(nextActor(item('GY-17'), 'up-next', NOW, undefined, work).does, 'Hands it to the next free builder agent');
 });
