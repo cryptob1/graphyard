@@ -479,3 +479,25 @@ test('manual:agent-env-docs-review — the onboarding and master guides describe
   for (const fragment of ['master environments', 'quotaCeilingPercent', 'fails over', 'accounts', 'prompt', 'bypassPermissions', 'OPENCODE_PERMISSION', 'master harness', 'systemctl --user restart graphyard-master']) assert.ok(masterGuide.includes(fragment), `the master guide describes ${fragment}`);
   assert.match(help, /master environments \[--create KIND/);
 });
+
+// A registry runtime that names no home variable (GY-180): the kind's known variable carries the
+// chosen account's home, and a home nothing can carry is refused before any session starts.
+const registryAccount = (kind: string, home: string | null) => ({ name: `${kind}-b`, kind, home, fleet: { runtime: kind, model: 'm', modelId: null, session: 's-1', reason: 'chosen',
+  contract: { kind, args: [], environment: {}, homeVariable: null, modelFlag: null, login: null, loginFile: null } } });
+
+test('unit:registry-account-home-applied — a registry account of a runtime with no homeVariable launches on its own home through its kind\'s known variable', () => {
+  const claude = accountLaunch({ approvals: 'auto', agentArgs: [], environment: {} }, registryAccount('claude', '/accounts/claude-b'));
+  assert.equal(claude.environment.CLAUDE_CONFIG_DIR, '/accounts/claude-b', 'the session runs on the account it was chosen for');
+  assert.equal(accountLaunch({ approvals: 'auto', agentArgs: [], environment: {} }, registryAccount('codex', '/accounts/codex-b')).environment.CODEX_HOME, '/accounts/codex-b');
+  // A runtime's own variable still wins over the kind's.
+  const named = registryAccount('claude', '/accounts/claude-b'); named.fleet.contract = { ...named.fleet.contract, homeVariable: 'OTHER_HOME' as never };
+  const own = accountLaunch({ approvals: 'auto', agentArgs: [], environment: {} }, named).environment;
+  assert.equal(own.OTHER_HOME, '/accounts/claude-b'); assert.equal(own.CLAUDE_CONFIG_DIR, undefined);
+});
+
+test('unit:unappliable-home-refused — an account whose home no variable can carry is refused before launch, naming the account and the missing variable', () => {
+  assert.throws(() => accountLaunch({ approvals: 'auto', agentArgs: [], environment: {} }, registryAccount('muse', '/accounts/muse-b')),
+    { name: 'Error', message: /^Graphyard refuses to launch account muse-b: its home \/accounts\/muse-b cannot be applied because runtime muse names no login-home variable and the muse kind has none known, so the session would run on the default login instead of muse-b\. Set the runtime's home variable with master registry runtime set NAME --home-variable VAR\.$/ });
+  // An account with no home runs on the runtime's own login, as before.
+  assert.equal(accountLaunch({ approvals: 'auto', agentArgs: [], environment: {} }, registryAccount('muse', null)).account, 'muse-b');
+});
