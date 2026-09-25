@@ -65,7 +65,7 @@ A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle wai
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s (never forced) worktrees done or idle past `run.reclaimIdleHours`, keeping dirty or unpushed ones, `run.worktreeRemovalLimit` (default 50) per cycle, logged in `.graphyard/worktree-reclaim.jsonl`; status reads its cached inventory. Under `run.diskThresholdGb` it raises `disk` attention.
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, audited in `.graphyard/worktree-reclaim.jsonl`; below `run.diskThresholdGb` it raises `disk` attention.
 
 ### The managed worktree root
 
