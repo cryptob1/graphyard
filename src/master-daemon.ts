@@ -8,7 +8,7 @@ import { ciReportingEnvironment } from './install/ci-proofs.js';
 import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, faultInstanceSchema, noteActionOutcome, noteFault, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from './model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, openFaultClassItem, type FaultClass, faultClassPolicyFromEnv, faultInstanceSchema, noteActionOutcome, noteFault, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from './model/fault-classes.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
 import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
@@ -461,6 +461,13 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = state.approvals[key] ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: the decision was requested before the restart; its approver session is supervised from here'
         : 'Resumed: no request was recorded before the restart; a standing one is adopted, otherwise it is requested again';
+    } else if (action.kind === 'fault') {
+      // Filing a recurring class's item is idempotent under its key: the item the filing made stands open naming the
+      // class, and later instances link to it; without one, the class files again under the same key.
+      const filed = openFaultClassItem(work, key.slice(faultActionKey('').length) as FaultClass);
+      next.state = filed ? 'done' : 'failed';
+      next.work = filed?.key ?? null;
+      next.detail = filed ? `Resumed: ${filed.key} stands open for the class; later instances link to it` : 'Resumed: no item stands for the class, so it is filed again under the same idempotency key';
     } else {
       next.state = 'indeterminate';
       next.detail = `Resumed: the ${action.kind} request was interrupted and its effect is unknown`;
@@ -1515,8 +1522,10 @@ export interface DaemonEffects {
    * overflows, intervention patterns, executors, terminal decisions, throughput, resources, and the
    * requests, review conflicts, stalls, overlong sessions, owed judgments, setup and dispatcher lines
    * of derivedAttention), read with the control plane's status so the loop tracks every class the report shows.
+   * `attribute` is the report's last step over the whole list — a ledger refusal in place of the launch symptoms
+   * it causes, a resource at its bound named in place of its symptom — so one cause is tracked as the report shows it, once.
    */
-  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<AttentionItem[]>;
+  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
 }
 
 /**
@@ -1544,6 +1553,8 @@ async function record(state: DaemonState, key: string, action: Omit<DaemonAction
   return entry;
 }
 
+/** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
+export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[] }
 /** What the cycle already read that faults are derived from, beside the items' own records. */
 export interface FaultSources {
   config?: MasterConfig; agents?: HerdrAgent[]; credentials?: Record<string, { available: boolean; reason: string | null }>;
@@ -1552,6 +1563,8 @@ export interface FaultSources {
   status?: (ControlPlaneStatus & Record<string, unknown>) | null; jobs?: { work_id?: string; error?: string | null }[];
   /** What `master status` adds after `buildMasterStatus`, as the loop read it this cycle (see DaemonEffects.reportedAttention). */
   reported?: AttentionItem[];
+  /** The report's final attribution (ReportedAttention.attribute), run over the derived and reported lines together. */
+  attribute?: ReportedAttention['attribute'];
 }
 /**
  * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
@@ -1561,8 +1574,11 @@ export interface FaultSources {
  * sources); the status-level problems (App permissions, held or failed integration jobs, a GitHub
  * pause, unserved executors, no GitHub connection); and disk below its bound. Each has a stable
  * subject, so a fault that keeps standing is one instance; one that clears and returns is another.
- * A derived line in a class the item's own record already shows is the same fault, so it is not
- * counted twice; nor is the one-hour dwell line (`gate`), which is the ordinary pace of work — a
+ * The lines go through the report's own attribution first, so a symptom the report names as its
+ * cause (a full ledger, a resource at its bound) is tracked as that cause alone. A derived line that
+ * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
+ * fault, so it is not counted twice; a different fault of the same class on the item is its own
+ * instance. Nor is the one-hour dwell line (`gate`) counted, which is the ordinary pace of work — a
  * gate nothing moves is `stalled-item`. Failed actions are not read here: the action history
  * retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
@@ -1571,13 +1587,14 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   const derived: FaultObservation[] = [];
   const { config } = sources;
   if (config) {
+    let status: { work: any[]; attentionItems: AttentionItem[] } = { work: [], attentionItems: [] };
     try {
-      const status = buildMasterStatus({ work, now: new Date(now).toISOString() }, config.workers, sources.agents ?? [], sources.credentials ?? {}, sources.containment ?? {}, undefined, config.baseBranch, sources.status ?? undefined);
-      for (const item of classifyAttention(status.attentionItems)) if (item.kind !== 'gate') derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+      status = buildMasterStatus({ work, now: new Date(now).toISOString() }, config.workers, sources.agents ?? [], sources.credentials ?? {}, sources.containment ?? {}, undefined, config.baseBranch, sources.status ?? undefined);
     } catch (error) {
       derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
     }
-    for (const item of classifyAttention(sources.reported ?? [])) if (item.kind !== 'gate') derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+    const listed = { work: status.work, attentionItems: [...status.attentionItems, ...(sources.reported ?? [])] };
+    for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems)) if (item.kind !== 'gate') derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
@@ -1586,9 +1603,17 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
   const derivedKinds = new Set(derived.map(fault => `${fault.kind}|${fault.subject}`));
   if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }).filter(fault => !(sources.reported && fault.kind === 'executor') && !derivedKinds.has(`${fault.kind}|${fault.subject}`)));
-  const shown = new Set(own.map(fault => `${fault.subject}|${fault.faultClass}`));
-  return [...own, ...derived.filter(fault => !shown.has(`${fault.subject}|${fault.faultClass}`))];
+  const shown = new Set(own.map(fault => `${fault.subject}|${fault.kind}`));
+  return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
 }
+/**
+ * The derived lines that restate a fault the item's own record holds under another kind: a fence's settle or grace line
+ * is the fence, an exhausted reviewer is the item's spent account, a missing session is its lost lease, and a gate with
+ * no action named is the blocker holding it. A derived line of the item's own kind always restates it.
+ */
+export const restatements: Partial<Record<FaultKind, FaultKind[]>> = {
+  'containment-settleable': ['containment'], 'containment-grace': ['containment'], 'reviewer-exhausted': ['role-capacity'], 'session': ['escalation:lease-loss'], 'stalled-item': ['blocker', 'sandbox-blocker'],
+};
 export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
 /**
  * A failing run ends when its action succeeds (noteActionOutcome), and also when the loop no longer
@@ -2633,13 +2658,13 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   //     A read that fails makes the cycle partial: faults its source would have shown were not
   //     observed, so none standing ends this cycle (and none reopens as a new instance next cycle).
-  let partial = false, reported: AttentionItem[] | undefined;
+  let partial = false, reported: ReportedAttention | undefined;
   const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => { partial = true; return null; }) : null;
   const summary = controlPlane && effects.reportedAttention ? daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId) : null;
   if (summary) reported = await effects.reportedAttention!(snapshot.work, controlPlane!, { agents, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
-    .catch(error => { partial = true; return [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem]; });
+    .catch(error => { partial = true; return { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] }; });
   endFailingRuns(state, effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), clock);
-  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported }), new Date(clock).toISOString(), partial);
+  trackFaults(state.faults, cycleFaults(state, snapshot.work, clock, { config, agents, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute }), new Date(clock).toISOString(), partial);
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
 
   spent('deployment');
@@ -3238,7 +3263,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) =>
         // Imported when first read: the status report imports this module, so a static import would be a cycle.
         (await (await import('./cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
-          runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true })).items : undefined;
+          runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true })) : undefined;
     },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: target => probeSupervisorAbsence(target, { run }) }),
