@@ -7,13 +7,13 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 
 ## 2. Add machines
 
-Each concurrent session needs a worker identity and host ID: rerun the installer with a higher `--workers`, or connect a machine:
+Each concurrent session needs a worker identity and host ID: raise the installer's `--workers`, or connect a machine:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit the updated `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graphyard/`. Without the master, run a worker under `graphyard watch GY-1 EPOCH -- COMMAND`, which stops it on lease loss.
+Commit `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker and stops it on lease loss.
 
 ### Documentation policy
 
@@ -21,13 +21,13 @@ Commit the updated `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graph
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder to post its verdict) comes from the same launcher and is acted on without confirmation.
+The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
 
-Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. Nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat Herdr's bracketed paste as untrusted data (prompt injection), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
-Each agent account has its own login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each agent account has a login home under `~/.coding_agents`, selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
@@ -39,7 +39,7 @@ Profiles default to `"approvals": "auto"` so sessions never block on a permissio
 
 ### Configure the fleet
 
-The **agent registry** (CLI, `/api/agent-registry` or the **Agent fleet** page) records runtimes, accounts and roles; propose it from local logins:
+The **agent registry** records runtimes, accounts and roles, proposed from local logins:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -85,7 +85,7 @@ Each candidate needs one review and one producer session per proof group; a prof
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
 ```
 
-When adding workers, for worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals, one account per two or three slots. Watch `longestWaitMs`.
+When adding workers, for worker count `W` and `G` proof groups: at least `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over two or more producer principals. Watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -95,8 +95,6 @@ node "$GRAPHYARD_CLI" master init --url https://YOUR-GRAPHYARD-HOST --herdr-work
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs the executors
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
-
-The second `init` installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances that run each item's next action.
 
 Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
@@ -108,7 +106,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 `graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-CI workflows should cancel superseded pull-request runs. Give each workflow a pull request triggers a `concurrency` group per pull request, `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`: a rework or base-refresh push then cancels the run for the older head, and runs on main are never cancelled. Without it every refresh queues a full run behind the stale ones, and items wait in Test. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
+CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
 
 ## What stays manual
 
