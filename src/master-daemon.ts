@@ -47,7 +47,9 @@ export const daemonActionSchema = z.object({
   kind: z.enum(daemonActionKinds),
   work: z.string().nullable().default(null),
   principal: z.string().nullable().default(null),
-  state: z.enum(['started', 'done', 'failed', 'indeterminate']),
+  // `waiting`: the action's effect is not yet known and the loop re-evaluates it every cycle — a
+  // merge whose provider outcome is unknown until GitHub reconciles the retained execution (GY-195).
+  state: z.enum(['started', 'done', 'failed', 'indeterminate', 'waiting']),
   detail: z.string().max(actionDetailMax),
   attempts: z.number().int().min(0).max(1000).default(1),
   // The item's attempt epoch when the action started. A dispatch that lands always advances it,
@@ -358,7 +360,7 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
 /** Keep the cursor bounded without ever discarding an unresolved action. */
 export function pruneDaemonState(state: DaemonState) {
   const entries = Object.entries(state.actions);
-  const resolved = entries.filter(([, action]) => action.state === 'done' || action.state === 'failed');
+  const resolved = entries.filter(([, action]) => action.state === 'done' || action.state === 'failed' || action.state === 'waiting');
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
@@ -690,7 +692,7 @@ export function profileHealth(profiles: WorkerProfile[], credentials: Record<str
 
 /** Retry a refused action on a widening cycle interval rather than on every pass. */
 export function readyToRetry(previous: DaemonAction | undefined, cycle: number, maxBackoffCycles = 30) {
-  if (!previous) return true;
+  if (!previous || previous.state === 'waiting') return true;
   if (previous.state !== 'failed') return false;
   return cycle - previous.cycle >= Math.min(2 ** Math.max(0, previous.attempts - 1), maxBackoffCycles);
 }
@@ -2849,9 +2851,27 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     }
     await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'started', detail: `Invoking the guarded merge for ${item.key}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
     try {
-      const result = await effects.merge(item);
-      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${(result as { result?: string })?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      const result = await effects.merge(item) as { result?: string; pending?: boolean } | undefined;
+      // A retained execution with an unknown provider outcome is not a merge: it waits and is
+      // re-evaluated next cycle, so the item is delivered from the observation or merged again
+      // once the execution clears, never stranded behind a `done` that is never retried (GY-195).
+      if (result?.pending === true) {
+        const detail = `Guarded merge pending for ${item.key}: ${result.result ?? 'the provider outcome is unknown'}`;
+        // One wait is one attempt however many cycles it spans, so a later refusal backs off from
+        // the attempts actually made rather than from the cycles spent waiting.
+        const waited = previous?.state === 'waiting';
+        const entry = await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail, attempts: waited ? previous.attempts : state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist);
+        if (!waited || detailChanged(previous, detail)) performed.push(entry);
+        return;
+      }
+      performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `Guarded merge accepted for ${item.key}: ${result?.result ?? 'merge requested'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
+      // A provider call that ended with an unknown outcome retains its execution: it waits on
+      // GitHub's reconciliation like the pending answer above rather than backing off.
+      if ((error as { pendingOutcome?: boolean } | null)?.pendingOutcome) {
+        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'waiting', detail: `Guarded merge pending for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       // A refusal is the gate working, not a daemon fault: record it and keep cycling.
       performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail: `Guarded merge refused for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
