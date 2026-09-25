@@ -64,14 +64,18 @@ export async function withdrawDecision(services: Services, caller: Principal, id
  * kept on the item, in the same transaction, where the asking worker's own `status` and
  * `scope-request --wait` read it — the approver, its reason, and that the attempt stays inside
  * plannedFiles — rather than sent to its session. Only the open request of the live attempt it
- * names is answered; one withdrawn, re-asked or outlived by its lease is left as it stands.
+ * names is answered; one withdrawn, re-asked or outlived by its lease is left as it stands, and so
+ * is one whose requirements moved on since the decision was requested: a decline judged against a
+ * superseded policy revision is no answer to the request as it now stands, exactly as the approval
+ * path refuses that stale input (`decisionPrecondition`), so the request stays undecided.
  */
 async function answerScopeRequest(db: Parameters<typeof save>[0], work: Work, decision: { id: string; action: string; input: any }, actor: Principal, reason: string, now: Date) {
   const answers = decision.action === 'requirements' ? decision.input?.answers : undefined, request = work.scopeRequest;
   // The same liveness the approval path demands: a lease that has expired, reconciled or not, is
   // no attempt to answer, and its item is not written to on that attempt's behalf.
   const live = !!work.lease && work.lease.epoch === answers?.epoch && Date.parse(work.lease.expiresAt) > now.getTime();
-  if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || !live) return;
+  const current = decision.input?.expectedPolicyRevision === work.policyRevision;
+  if (!answers || !request || request.epoch !== answers.epoch || request.at !== answers.at || !live || !current) return;
   work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
   work.scopeRequest = { ...request, decision: work.scopeDecision };
   work.blocker = `${scopeRefusalBlocker} by the independent approver ${actor.id} (decision ${decision.id}): ${reason}`.slice(0, 2000);

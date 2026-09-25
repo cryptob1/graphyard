@@ -413,3 +413,38 @@ test('unit:scope-outcome-delivered — a request a master widens by hand with ma
   assert.equal(heard.state, 'approved', 'the wait reads the approval instead of finding no request');
   assert.match(heard.text, /master-operator/);
 });
+
+test('unit:scope-approver-routine — a refusal judged against a superseded policy revision leaves the request undecided', async () => {
+  let work = await claimed('stale refusal');
+  await ask(work, ['src/server/routes/work.ts'], 'The route would be easier to change here too');
+  const loop = harness(), state = emptyDaemonState(loopConfig());
+  await loop.cycle(state);
+  const [requested] = await standing(work);
+  const before = await reload(work.id);
+  // The requirements move on while the worker keeps its lease and the request stays open.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{policyRevision}',to_jsonb($2::int)) WHERE id=$1", [work.id, before.policyRevision + 1]);
+  await ok(approver.token, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision: requested.id, reason: 'Judged against the old requirements' });
+  work = await reload(work.id);
+  assert.equal(work.scopeDecision!.decidedBy, 'graphyard', "the rule's refusal stands; the stale decline is not the request's answer");
+  assert.equal(work.scopeRequest!.decision!.decidedBy, 'graphyard');
+  assert.equal(work.blocker, before.blocker, 'no approver blocker is written');
+  assert.equal((await events(work)).filter(entry => entry.kind === 'scope.refused').length, 0);
+  assert.equal(scopeRequestOutcome(work, { epoch: work.epoch, at: work.scopeRequest!.at, paths: ['src/server/routes/work.ts'] }).state, 'pending', 'the worker is not told to withdraw');
+});
+
+test('unit:scope-outcome-delivered — an outcome recorded before decisions carried their epoch is read by the attempt that asked it, and by no other', async () => {
+  const work = await claimed('legacy outcome');
+  await ask(work, [helper], 'The layout needs its measuring helper');
+  const config = { ...loopConfig(), url };
+  await approveScopeRequest(process.cwd(), config, [work.key, 'The helper is part of the layout criterion'], { coordinator: path => ok(token(coordinator), 'GET', path), operatorToken: async () => master.token });
+  // As persisted before the upgrade: the request is cleared and its decision names no epoch.
+  await store.pool.query("UPDATE work_items SET document=document #- '{scopeDecision,epoch}' WHERE id=$1", [work.id]);
+  const legacy = await reload(work.id);
+  assert.equal(legacy.scopeRequest, null);
+  assert.equal(legacy.scopeDecision?.epoch, undefined);
+  const heard = await awaitScopeOutcome({ api: path => ok(token(implementer), 'GET', path) }, legacy, work.epoch, { waitMs: 1_000, everyMs: 20, cli: 'graphyard' });
+  assert.equal(heard.state, 'approved', 'the same live lease reads its legacy outcome');
+  // A legacy outcome asked before this epoch's claim belongs to an earlier attempt.
+  const earlier = { ...legacy, scopeDecision: { ...legacy.scopeDecision!, requestedAt: new Date(Date.parse(legacy.lastAssignment!.claimedAt!) - 1_000).toISOString() } };
+  await assert.rejects(awaitScopeOutcome({ api: path => ok(token(implementer), 'GET', path) }, earlier, work.epoch, { waitMs: 0 }), /no scope request for epoch/);
+});

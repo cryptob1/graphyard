@@ -46,7 +46,7 @@ export const scopeRequestCommand: CliCommand = {
  * decided before the worker waits is read from the decision this attempt's request received.
  */
 export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: Work, epoch: number, options: { waitMs?: number; everyMs?: number; cli?: string } = {}) {
-  const decided = work.scopeDecision?.epoch === epoch ? work.scopeDecision : null;
+  const decided = decisionOfAttempt(work, epoch);
   const request = work.scopeRequest?.epoch === epoch ? work.scopeRequest : decided && { at: decided.requestedAt, paths: decided.paths };
   if (!request) throw new Error(`${work.key} has no scope request for epoch ${epoch}; ask with scope-request ${work.key} ${epoch} PATH... -- REASON`);
   const ask = { epoch, at: request.at, paths: request.paths }, cli = options.cli ?? 'graphyard';
@@ -57,6 +57,19 @@ export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: 
     await new Promise(resolve => setTimeout(resolve, Math.min(options.everyMs ?? 10_000, Math.max(0, deadline - Date.now()))));
     item = ((await context.api('work')) as Work[]).find(entry => entry.id === work.id) ?? item;
   }
+}
+
+/**
+ * The decision this attempt's request received. One recorded before decisions carried their epoch
+ * has none, so it is this attempt's only when the live lease is this epoch's, its holder asked,
+ * and it was asked after this epoch's claim: a legacy outcome of an earlier attempt never is.
+ */
+function decisionOfAttempt(work: Work, epoch: number) {
+  const decision = work.scopeDecision;
+  if (!decision) return null;
+  if (decision.epoch !== undefined) return decision.epoch === epoch ? decision : null;
+  const claim = work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : undefined;
+  return work.lease?.epoch === epoch && decision.requestedBy === work.lease.owner && !!claim && Date.parse(decision.requestedAt) >= Date.parse(claim) ? decision : null;
 }
 
 /**
