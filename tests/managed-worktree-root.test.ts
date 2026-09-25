@@ -158,7 +158,9 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
       reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(text.includes('/tmp'), false, 'a generated prompt never names /tmp');
     assert.ok(producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }).includes(resolve(homedir(), '.local/share/graphyard/worktrees')), 'a previewed prompt names the default root');
     const sources = fileURLToPath(new URL('../src/', import.meta.url));
-    for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', 'master-daemon.ts', 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {
+    // master.ts and master-daemon.ts re-export their modules under master/ and daemon/ (GY-177).
+    const split = async (directory: string) => (await readdir(join(sources, directory))).filter(name => name.endsWith('.ts')).map(name => `${directory}/${name}`);
+    for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', ...await split('master'), 'master-daemon.ts', ...await split('daemon'), 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {
       const code = (await readFile(join(sources, file), 'utf8')).split('\n').filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
       assert.doesNotMatch(code, /['"`]\/tmp\b|tmpdir\(\)/, `${file} places nothing under the temporary directory`);
     }
