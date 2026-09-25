@@ -228,17 +228,18 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   const at = (needle: string) => { const index = visible.indexOf(words(needle).join(' ')); assert.ok(index >= 0, `shows ${needle}: ${visible}`); return index; };
   const order = [at('Moving'), at('PR #43'), at('Proving 2 of 3 proofs passed'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, pull request, why, who acts next, then what is left');
-  // Only the current step's reasons are listed as what is left; the gates' raw reasons stay under More details.
+  // Only the current step's reasons are listed as what is left; the gates' raw reasons stay under Technical details.
   const review = itemView('GY-15');
   assert.match(text(review), /Waiting for someone else to approve the latest code/);
   assert.doesNotMatch(text(review), /Proven to work:/, 'later steps are collapsed');
   for (const raw of ['needs trusted passing evidence', 'Policy v', 'Revision ', 'assignment 1', 'GitHub observation missing']) assert.ok(!text(review).includes(raw) && !visible.includes(raw), `no ${raw} by default`);
-  // Requirements are folded below the first screen (GY-161, AC-10); opened, each criterion appears once, with one marker per proof.
-  assert.match(view, /<details class="panel requirements" aria-label="Requirements">/);
-  const opened = text(view.replace('<details class="panel requirements"', '<details open class="panel requirements"'));
-  for (const ac of find('GY-16').criteria) assert.equal(opened.split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once`);
+  // Requirements sit below the summary and What is left (GY-161 AC-10, GY-171 AC-1): one line per criterion, its full text folded;
+  // each criterion appears once, with one marker per proof.
+  assert.match(view, /<section class="panel requirements" aria-label="Requirements">/);
+  const lines = text(view);
+  for (const ac of find('GY-16').criteria) assert.equal(lines.split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once`);
   assert.equal(view.match(/class="marker-pass"/g)?.length, 2); assert.equal(view.match(/class="marker-pending"/g)?.length, 1);
-  assert.match(opened, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
+  assert.match(lines, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
   assert.match(view, /<li class="marker-pass">✓ <abbr class="term"[^>]*>integration:login-rate-limit<\/abbr> passed<\/li>/);
   // Policy-changing actions sit in a closed, admin-only Edit menu.
   assert.match(view, /<details class="edit-menu"><summary>Edit<\/summary>[\s\S]*Use Codex cloud review[\s\S]*Revise requirements[\s\S]*<\/details>/);
@@ -330,7 +331,7 @@ test('plain-language support for manual:plain-language-review — every visible 
 });
 
 test('integration:dashboard-capability-parity — nothing removed from a default view is lost; the API is unchanged; the fixture reproduces the audit views; the sidebar spans the page', async () => {
-  // The item view keeps every datum and action, under More details or the Edit menu.
+  // The item view keeps every datum and action, under Technical details or the Edit menu.
   const item = find('GY-16');
   const view = itemView('GY-16');
   for (const needle of ['Policy v1', 'Revision 1', 'P2', 'Worker ID: worker-2', 'Owner', 'Blocking now:', 'Coordination', 'Code review', 'Gate decisions', 'Evidence (2)', 'Work history', 'Use Codex cloud review', 'Revise requirements', 'build-1:/work/gy-16-1', 'In this step for'])

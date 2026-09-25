@@ -413,7 +413,7 @@ export class Engine {
         work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
         // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
-        work!.proofGaps = await unauthorizedProofs(db, this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])]);
+        work!.proofGaps = await unauthorizedProofs(db, this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])], data.producerProofs);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
@@ -556,7 +556,7 @@ export class Engine {
         work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
         work.scenarioRequirements = pins; work.policyRevision++;
         this.refuseRenewedDeferral(work, all);
-        work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])]);
+        work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
         work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
         // A request the widened scope fully covers is answered; a partial one stays open for the
         // master. Answering it also lifts the refusal that was blocking the item on scope.
