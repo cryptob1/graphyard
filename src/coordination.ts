@@ -1,5 +1,6 @@
 import { bootstrapObligations, currentEvidence, describeQueueBinding, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
 import { namedPaths } from './model/scope.js';
+import { behindBaseHold } from './model/dispatch.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh, predictQueue } from './merge-queue.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }
@@ -258,8 +259,11 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   if (baseConflict) add('base-conflict', baseConflict, `Graphyard cannot bring this head onto the base branch itself. Resolve the conflict on the pull-request branch and push; nothing carries across the resolution, so the item takes a fresh review and fresh proofs.`);
   else if (refreshing) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${refreshing.baseTip.slice(0, 12)}; it stays bound to ${refreshing.boundBase.slice(0, 12)} while the control plane brings it onto the new tip`,
     'Nothing to run: the reconciliation job merges the base into this branch and decides what the review and each proof carry. No sync, no rework round, and no review or proof round is requested for the move.');
-  else if (work.submission && work.observation?.baseTipContained === false) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation.baseTip?.slice(0, 12) ?? ''}`,
-    `No review is requested for it: run graphyard sync ${work.key} and push, or let the merge queue publish a tip that contains the base once the candidate is proven.`);
+  // Behind but mergeable is not a wait: review and proofs are requested for the head as it stands
+  // and the merge queue integrates it with the base before merging (GY-191). Only a head that does
+  // not merge cleanly is withheld, and that one needs a sync.
+  else if (work.submission && behindBaseHold(work)) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation?.baseTip?.slice(0, 12) ?? ''} and GitHub does not report it mergeable`,
+    `No review is requested for it until it merges cleanly: the loop requests a sync rework for ${work.key}, or run graphyard sync ${work.key} and push.`);
   // What the control plane's last base refresh kept and what it re-required, each with its reason.
   const refreshCarry = currentBaseRefreshCarry(work);
   if (refreshCarry) {

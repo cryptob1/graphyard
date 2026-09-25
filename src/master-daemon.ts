@@ -798,6 +798,11 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
   // requested changes, and the loop never asked again because both keyed on the head alone.
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
+  // A head GitHub reports conflicting with the base, or one the merge queue ejected because its
+  // speculative merge conflicts, is not waited on either (GY-191): nothing but a sync can move it,
+  // so the loop asks for that round at once, naming the base tip it conflicts with.
+  const sync = work.reworkRequested ? null : syncConflict(work);
+  if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
   const verdict = standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   // Unresolved review threads block the provider's merge (GY-139) whatever the review state that
@@ -816,6 +821,29 @@ function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): Ro
   if (lost) return { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
     reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` };
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
+  return null;
+}
+/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
+const speculativeConflictReason = /^Speculative merge of [0-9a-f]+ into .+ conflicts/;
+/**
+ * The conflict with the base that only a sync round can resolve, for exactly the current head, or
+ * null. Two observations say so. GitHub computed a merge conflict for the open pull request (its
+ * `mergeable` is false, not merely uncomputed); and the merge queue ejected this head because its
+ * speculative merge conflicts. An ejection whose base the control plane has not yet tried to
+ * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
+ * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
+ * The binding names the head and the base tip, so a base that moves on is a fresh ground.
+ */
+export function syncConflict(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
+  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  const tip = observation.baseTip ?? candidate.baseSha;
+  if (observation.conflicting && !work.queue)
+    return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
+  const ejection = work.queueEjection;
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !pendingBaseRefresh(work))
+    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
   return null;
 }
 /**

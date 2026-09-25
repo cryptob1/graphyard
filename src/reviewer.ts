@@ -10,7 +10,7 @@ import { listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadRe
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
-import { liveReviewRequest } from './model/dispatch.js';
+import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
@@ -401,10 +401,11 @@ export function assertReviewCandidate(work: Work, observedAt: string) {
   if (!(age >= 0 && age < 120_000)) throw new Error(`${work.key} GitHub observation is missing or older than two minutes`);
   if (observation.prState === 'closed') throw new Error(`${work.key} pull request is closed`);
   if (observation.draft) throw new Error(`${work.key} pull request is still a draft`);
-  // A head behind the base branch would be reviewed against a diff GitHub will later recompute,
-  // and the approval dismissed with it. The worker syncs, or the queue publishes a tip that
-  // contains the base; the review waits for a head that does.
-  if (observation.baseTipContained === false) throw new Error(`${work.key} candidate ${candidate.sha.slice(0, 12)} does not contain the base branch tip ${observation.baseTip?.slice(0, 12) ?? ''}; a review of it would be dismissed when the merge base changes. Run graphyard sync ${work.key} and push, or wait for the merge queue to publish a tip that contains it`);
+  // A head behind the base branch is reviewed as it stands when it merges cleanly: the merge queue
+  // integrates it with the current base and re-tests the combined tip before merging (GY-191).
+  // Only a head that conflicts with the base, or whose mergeability GitHub has not computed, waits
+  // for a sync.
+  if (behindBaseHold(work)) throw new Error(`${work.key} candidate ${candidate.sha.slice(0, 12)} does not contain the base branch tip ${observation.baseTip?.slice(0, 12) ?? ''}; ${observation.conflicting ? 'GitHub reports a merge conflict with it' : 'GitHub does not report it mergeable'}, so a review would judge a diff the sync will change. Run graphyard sync ${work.key} and push`);
   return { key: work.key, pr: candidate.pr, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, author: candidate.author, branch: candidate.branch };
 }
 
