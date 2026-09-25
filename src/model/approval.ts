@@ -77,7 +77,29 @@ export interface Decision {
   noPrecedent: string | null;
   /** Later requesters that followed the same precedent while this decision stood. */
   concurrences: { requester: string; reason: string; precedent: string[]; context: string | null; at: string }[];
+  /** For a rework or recover request, the candidate it was requested against (GY-229); null otherwise and for requests recorded before it was kept. */
+  situation?: DecisionSituation | null;
 }
+/**
+ * What a rework or recover request judged: the item's candidate head and the base it was built
+ * on when the request was made. The server records it with the request, and a refusal stands only
+ * against a request made for the same pair (GY-229): their input is otherwise the bare attestation
+ * `{ previousWorkerStopped: true }`, identical for every request on the item.
+ */
+export interface DecisionSituation { sha: string | null; baseSha: string | null }
+export const situatedDecisionActions: readonly DecisionAction[] = ['rework', 'recover'];
+export const decisionSituation = (action: string, work: Pick<Work, 'candidate'>): DecisionSituation | null =>
+  situatedDecisionActions.includes(action as DecisionAction) ? { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null } : null;
+const sameSituation = (recorded: DecisionSituation | null | undefined, current: DecisionSituation | null | undefined) =>
+  !recorded || ((recorded.sha ?? null) === (current?.sha ?? null) && (recorded.baseSha ?? null) === (current?.baseSha ?? null));
+/**
+ * Whether a refused decision judged the same situation as a new request. Only rework and recover
+ * are situated; any other action's input already names what it binds. A refusal recorded before
+ * situations were kept judged a candidate nobody can name any more, so it still stands against
+ * every request until one cites it, as it always did; the loop cites it with its new grounds.
+ */
+const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
+  !situatedDecisionActions.includes(action) || sameSituation(decision.situation, situation);
 export interface DecisionEvent { kind: string; actor: string; at: string; payload: any }
 
 /** Rebuild every decision on an item from its append-only ledger entries, oldest first. */
@@ -88,7 +110,8 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     if (event.kind === 'decision.requested') {
       decisions.set(details.id, { id: details.id, workId, action: details.action, input: details.input, reason: details.reason, requestedBy: event.actor, requestedAt: event.at, state: 'requested',
         approvedBy: null, approvedAt: null, approvalReason: null, outcome: null, refusals: [], refusal: null,
-        precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, noPrecedent: typeof details.noPrecedent === 'string' ? details.noPrecedent : null, concurrences: [] });
+        precedent: Array.isArray(details.precedent) ? [...details.precedent] : [], context: typeof details.context === 'string' ? details.context : null, noPrecedent: typeof details.noPrecedent === 'string' ? details.noPrecedent : null, concurrences: [],
+        situation: details.situation && typeof details.situation === 'object' ? { sha: details.situation.sha ?? null, baseSha: details.situation.baseSha ?? null } : null });
       continue;
     }
     const decision = decisions.get(details.id);
@@ -141,9 +164,11 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
  * cited: it was accepted only by answering them, so a request cites the newest refusals and the
  * chain carries the rest — a history of refusals never outgrows the reason bound (GY-163). Anything
  * else is the same unjustified request retried, and it is refused naming the prior refusal.
+ * A rework or recover refusal judged one candidate and base (`situation`, GY-229): a request made
+ * for another candidate or base is a new request, not a retry, whatever its input.
  */
-export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | 'input' | 'reason' | 'refusal'> & { state: string; precedent?: string[] })[], action: DecisionAction, input: unknown, reason: string, same: (a: unknown, b: unknown) => boolean, precedent: string[] = []): string | null {
-  const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input));
+export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | 'input' | 'reason' | 'refusal'> & { state: string; precedent?: string[]; situation?: DecisionSituation | null })[], action: DecisionAction, input: unknown, reason: string, same: (a: unknown, b: unknown) => boolean, precedent: string[] = [], situation?: DecisionSituation | null): string | null {
+  const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input) && judgedSame(action, decision, situation));
   const bare = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const names = (text: string, cited: string[], id: string) => text.includes(id) || cited.includes(id);
   // Whatever else it cites, a request whose reason is a refused request's own reason repeats it.
@@ -157,16 +182,17 @@ export function unansweredRefusal(decisions: (Pick<Decision, 'id' | 'action' | '
     }
   }
   const standing = refused.find(decision => !answered.has(decision.id));
-  return standing ? `Decision ${standing.id} (${action}) with this input was refused by ${standing.refusal?.approver ?? 'its approver'}: ${standing.refusal?.reason ?? standing.reason}. An identical request is refused; answer the refusal with a new request whose reason cites ${standing.id} and gives what the refused request lacked` : null;
+  return standing ? `Decision ${standing.id} (${action}) with this input${situation?.sha ? ` for candidate ${situation.sha.slice(0, 12)} on base ${String(situation.baseSha).slice(0, 12)}` : ''} was refused by ${standing.refusal?.approver ?? 'its approver'}: ${standing.refusal?.reason ?? standing.reason}. An identical request is refused; answer the refusal with a new request whose reason cites ${standing.id} and gives what the refused request lacked` : null;
 }
 
 /**
  * The refusals a new request must cite itself: those no other refused request of the same action
  * and input already cited. Citing these answers the rest through the chain `unansweredRefusal`
- * follows. Newest first, as the history lists them.
+ * follows. Newest first, as the history lists them. Only refusals of the same situation count: one
+ * judged for another candidate or base does not stand against the request.
  */
-export function uncitedRefusals(decisions: { id: string; action: string; input: unknown; reason: string; state: string; precedent?: string[] }[], action: DecisionAction, input: unknown, same: (a: unknown, b: unknown) => boolean): string[] {
-  const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input));
+export function uncitedRefusals(decisions: { id: string; action: string; input: unknown; reason: string; state: string; precedent?: string[]; situation?: DecisionSituation | null }[], action: DecisionAction, input: unknown, same: (a: unknown, b: unknown) => boolean, situation?: DecisionSituation | null): string[] {
+  const refused = decisions.filter(decision => decision.state === 'refused' && decision.action === action && same(decision.input, input) && judgedSame(action, decision, situation));
   return refused.filter(decision => !refused.some(other => other.id !== decision.id && (other.reason.includes(decision.id) || (other.precedent ?? []).includes(decision.id)))).map(decision => decision.id);
 }
 
