@@ -16,7 +16,7 @@ import { type ReviewFinding, readReviewFindings, basePaths, baseText } from '../
 import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions } from '../fleet.js';
@@ -544,10 +544,21 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The idle bound comes from the live configuration, so a host under pressure can shorten it
     // (or a slow repository lengthen it) without restarting the loop.
     // The same pass takes back every ephemeral checkout no live session owns, under the managed root.
+    // Finished worktrees are removed outright first, a bounded number per pass (GY-360); the
+    // inventory that remains is the one the dependency reclaim judges and `master status` reads.
     reclaim: async work => {
-      const report = await reclaimWorktrees(root, work, { idleMs: reclaimIdleMs(current()) });
-      try { return { ...report, checkouts: await reclaimCheckouts(root, current()) }; }
-      catch (error) { return { ...report, errors: [...report.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
+      const config = current(), idleMs = reclaimIdleMs(config);
+      const livePaths = [...(await readReviewLedger(root)).reviews, ...(await readProducerLedger(root)).producers]
+        .filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+      const trees = await removeReclaimableWorktrees(root, work, { idleMs, run, baseBranch: config.baseBranch, limit: config.run.worktreeRemovalLimit, livePaths });
+      const report = await reclaimWorktrees(root, work, { idleMs, entries: trees.entries });
+      const taken = new Set(report.applied ? report.removed : []);
+      await writeWorktreeInventoryCache(root, { at: trees.at, entries: trees.entries.map(entry => ({ ...entry, dependencies: entry.dependencies.filter(dependency => !taken.has(dependency.path)) })),
+        held: trees.kept.filter(entry => !entry.reason.startsWith('Git refused')).map(entry => ({ path: entry.path, activityAt: trees.entries.find(tree => tree.path === entry.path)?.activityAt ?? 0, reason: entry.reason })) })
+        .catch(error => report.errors.push(`Worktree inventory cache: ${writeFailure(error, 'Writing the worktree inventory cache').message}`));
+      const withTrees = { ...report, trees };
+      try { return { ...withTrees, checkouts: await reclaimCheckouts(root, config) }; }
+      catch (error) { return { ...withTrees, errors: [...withTrees.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
     },
     // The decision effects exist only while the live configuration names the master's
     // operator-agent identity. Without one the loop has no way to request anything, so the cycle
