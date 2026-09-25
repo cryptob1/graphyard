@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Work } from './work.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
-import { automatableOutcomes, mechanicalHold } from './mechanical-proofs.js';
+import { automatableOutcomes, dispatchIneligibility, mechanicalHold, producerGroupDecisions, type ProducerGroup } from './mechanical-proofs.js';
 
 /**
  * Automatic dispatch at submit.
@@ -23,9 +23,6 @@ export const dispatchKinds = ['review', 'producer'] as const;
 export type DispatchKind = typeof dispatchKinds[number];
 export const dispatchStates = ['requested', 'satisfied', 'cancelled'] as const;
 export type DispatchState = typeof dispatchStates[number];
-/** One producer session runs one group: every automatable proof of one kind, on one head. */
-export const producerGroups = ['unit', 'integration', 'manual'] as const;
-export type ProducerGroup = typeof producerGroups[number];
 
 export interface DispatchRequest {
   id: string; kind: DispatchKind;
@@ -49,27 +46,12 @@ export const dispatchHistoryLimit = 50;
 
 // Which proofs a machine settles and what the head's evidence says of them live in a module the
 // browser bundle can load (the gates read them); re-exported here for every existing reader.
-export { automatableOutcomes, automatableProof, mechanicalFailure, mechanicalHold, mechanicalProof, mechanicalVerdicts, producerGroupOf, type MechanicalVerdict, type ProofOutcome } from './mechanical-proofs.js';
+export { automatableOutcomes, automatableProof, dispatchIneligibility, mechanicalFailure, mechanicalHold, mechanicalProof, mechanicalVerdicts, openProducerRequest, producerGroupDecisions, producerGroupOf, producerGroups, type MechanicalVerdict, type ProducerGroup, type ProducerGroupDecision, type ProducerGroupState, type ProofOutcome } from './mechanical-proofs.js';
 
 
 const short = (sha: string) => sha.slice(0, 12);
 const binds = (request: Pick<DispatchRequest, 'sha' | 'baseSha' | 'policyRevision'>, work: Work) =>
   !!work.candidate && request.sha === work.candidate.sha && request.baseSha === work.candidate.baseSha && request.policyRevision === work.policyRevision;
-
-/** Why no request may stand for the candidate right now, or null when the head is a live, observed, buildable candidate. */
-export function dispatchIneligibility(work: Work): string | null {
-  if (work.stage === 'done') return 'the work is delivered';
-  if (work.observation?.merged) return 'the pull request is merged';
-  if (!work.submission) return 'no candidate is submitted';
-  if (work.reworkRequested) return 'rework was requested; the next submitted candidate is requested afresh';
-  const candidate = work.candidate, observation = work.observation;
-  if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return 'the candidate has not been independently observed';
-  if (observation.prState === 'closed') return 'the pull request is closed';
-  if (observation.draft) return 'the pull request is a draft';
-  const build = work.gates.find(gate => gate.name === 'build');
-  if (build && !build.passed) return `the build gate refuses: ${build.reasons[0]}`;
-  return null;
-}
 
 /**
  * Why the current head does or does not need a launched reviewer.
@@ -178,22 +160,24 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     // Producers: one live request per proof group with something left to prove. A head whose
     // trusted evidence already failed is not asked for again; the master routes that finding.
     const outcomes = automatableOutcomes(work, all, now);
+    const decisions = producerGroupDecisions(work, all, now, outcomes);
     const kept: DispatchRequest[] = [];
+    // A retained request answers to its whole group's decision, not only the proofs it named: a
+    // sibling proof that failed since makes the group `failed`, and the planner returns the head.
     for (const request of state.producers) {
       if (!binds(request, work)) { resolve(request, 'cancelled', staleReason(request)); continue; }
+      const decision = decisions.find(entry => entry.group === request.group);
       const mine = outcomes.filter(entry => request.proofs!.includes(entry.proof));
-      const failed = mine.filter(entry => entry.outcome === 'failed'), unproven = mine.filter(entry => entry.outcome === 'unproven');
-      if (failed.length) resolve(request, 'satisfied', `trusted evidence failed for ${failed.map(entry => `${entry.proof} (${entry.producer})`).join(', ')}; the next head is requested afresh`);
-      else if (!unproven.length) resolve(request, 'satisfied', `trusted passing evidence binds every proof: ${mine.map(entry => `${entry.proof} (${entry.producer})`).join(', ')}`);
-      else kept.push(request);
+      if (decision?.state === 'failed') resolve(request, 'satisfied', `trusted evidence failed for ${decision.failed.map(entry => `${entry.proof} (${entry.producer})`).join(', ')}; the next head is requested afresh`);
+      else if (decision?.state === 'request' && mine.some(entry => entry.outcome === 'unproven')) kept.push(request);
+      else resolve(request, 'satisfied', `trusted passing evidence binds every proof: ${mine.map(entry => `${entry.proof} (${entry.producer})`).join(', ')}`);
     }
     state.producers = kept;
-    for (const group of producerGroups) {
-      if (state.producers.some(request => request.group === group)) continue;
-      const mine = outcomes.filter(entry => entry.group === group);
-      if (!mine.length || mine.some(entry => entry.outcome === 'failed') || !mine.some(entry => entry.outcome === 'unproven')) continue;
-      state.producers.push(open({ kind: 'producer', group, proofs: mine.filter(entry => entry.outcome === 'unproven').map(entry => entry.proof), sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr,
-        reason: `no trusted evidence binds ${short(candidate.sha)} for ${mine.filter(entry => entry.outcome === 'unproven').map(entry => entry.proof).join(', ')}` }));
+    // Opened exactly for the groups the shared decision calls `request` — the same predicate the
+    // planner reads before it names a proof dispatch (next-action.ts).
+    for (const decision of decisions) {
+      if (decision.state !== 'request' || state.producers.some(request => request.group === decision.group)) continue;
+      state.producers.push(open({ kind: 'producer', group: decision.group, proofs: decision.unproven, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: decision.reason }));
     }
   }
   work.autoDispatch = state;
