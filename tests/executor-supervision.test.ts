@@ -25,6 +25,7 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { executorDeclarationFile, executorSlotUndeclaredExit, executorSupervisionStatus, executorUnit, executorUnitTemplate, installExecutorSupervision, readExecutorDeclaration, renderExecutorUnit, setupRepository, writeExecutorDeclaration, type SystemctlRunner } from '../src/repository-setup.js';
 import { executorFleet } from '../src/cli/executor-report.js';
 import OverviewPage from '../web/pages/overview.js';
+import { boardFromStatus } from '../src/model/board.js';
 import WorkDetails from '../web/pages/work-details.js';
 
 /**
@@ -284,6 +285,8 @@ const dashboard = (work: Work[], status: any, selected: string | null = null): a
   busy: false, setBusy: () => {}, observedAt: Date.now(), jobs: [], query: '', setQuery: () => {}, operatorAgents: [], events: [], operatorAgentsError: null,
   features: {}, editingRequirements: false, setEditingRequirements: () => {}, codexAvailable: false, queue: [], sessionEpoch: { current: 0 },
   api: async () => ({}), refresh: async () => {}, action: async () => {}, setError: () => {}, signOut: () => {},
+  // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
+  board: boardFromStatus(work, Date.now(), status),
 });
 
 before(async () => {

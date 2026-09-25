@@ -12,6 +12,10 @@ import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktr
 import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
+import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
+import { liveRun, registeredRun } from './runner/registry.js';
+import { narrowRunner, piProducerPrompt, producerRunOptions, startNarrowRun, submitEvidence } from './runner/roles.js';
+import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 
 /**
  * Producer sessions launched for the control plane's producer requests (model/dispatch.ts).
@@ -67,6 +71,10 @@ export const producerRecordSchema = z.object({
   checkout: z.string().min(1).max(1200).optional(),
   /** Why the checkout could not be removed at settlement; the reclaim pass takes it back. */
   checkoutFailure: z.string().min(1).max(500).optional(),
+  /** `pi`: a headless run (GY-169), with no pane; absent is a Herdr session. */
+  runtime: z.enum(['herdr', 'pi']).optional(),
+  /** A headless run's record: its last events, its result, and what became of each submission. */
+  run: runRecordSchema.optional(),
 }).strict();
 export type ProducerRecord = z.infer<typeof producerRecordSchema>;
 // Bounded and reaped on write by the one implementation the review ledger uses (reviewer.ts
@@ -214,6 +222,9 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   filesystem?: FilesystemProbe;
   /** How closed-question proofs are judged before the launch (GY-109); the control plane's route by default. */
   judge?: ClosedQuestionJudge;
+  /** The headless runner a `pi` producer runs on (GY-169); the configured Pi runner by default. */
+  runner?: Runner;
+  fetcher?: typeof fetch;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   const config = await loadMasterConfig(root);
@@ -249,6 +260,8 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     if (!judged.remaining.length) throw new ClosedQuestionsDecided(work.key, judged.decided);
     binding = { ...binding, proofs: judged.remaining };
   }
+  if (narrowRoleRuntime(config.run, 'producer', binding.group) === 'pi')
+    return launchHeadlessProducer(root, config, work, binding, request, profile, { id, agentName, credential, attempt: prior.length + 1 }, { ...dependencies, now });
   // The group is part of the request: a producer session answers one proof group of one item, so a
   // relaunch for that group replaces its own predecessor instead of being refused by it.
   const selected = await selectAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key, group: binding.group });
@@ -299,6 +312,51 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   });
 }
 
+/**
+ * The unit proof producer on the headless runner (GY-169). The same request, binding, profile and
+ * principal as a Herdr session, and the same ledger record, but no pane: the run is registered
+ * under the session name, each proof comes back as a validated graphyard_submit_evidence call, and
+ * the loop submits it as the producer principal on the route `graphyard evidence` uses, so the
+ * server trusts it by the producer's grants and the exercise rule exactly as it does today. When
+ * the run ends its record is kept on the session record, and reconciliation settles it as usual.
+ */
+async function launchHeadlessProducer(root: string, config: MasterConfig, work: Work, binding: ProducerBinding, request: DispatchRequest, profile: ProducerProfile,
+  session: { id: string; agentName: string; credential: string; attempt: number }, dependencies: { now: () => Date; runner?: Runner; fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
+  const pi = piRuntimeSchema.parse(config.run.pi ?? {});
+  const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, session.id, dependencies.filesystem);
+  const requestedAt = dependencies.now();
+  const timeoutMs = config.run.producerTimeoutMinutes * 60_000;
+  const record: ProducerRecord = producerRecordSchema.parse({ id: session.id, requestId: request.id, attempt: session.attempt, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision,
+    group: binding.group, proofs: binding.proofs, profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null,
+    // A run holds its request on its command line from its first instant: there is nothing to re-prompt.
+    requestedAt: requestedAt.toISOString(), expiresAt: new Date(requestedAt.getTime() + timeoutMs).toISOString(), state: 'pending', outcome: Object.fromEntries(binding.proofs.map(proof => [proof, 'missing'])),
+    delivery: 'request', acknowledgedAt: requestedAt.toISOString(), checkout: checkout.directory, runtime: 'pi' });
+  const ledger = await readProducerLedger(root);
+  try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
+  catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); throw error; }
+  const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}` };
+  let started: ReturnType<typeof startNarrowRun>;
+  try {
+    started = startNarrowRun({ runner: dependencies.runner ?? narrowRunner(pi), name: session.agentName, role: 'producer', work: binding.key, subject: session.id,
+      prompt: piProducerPrompt(config, binding, work.criteria, checkout, root),
+      options: producerRunOptions(checkout.directory, binding, environment, timeoutMs),
+      apply: async result => { const applied = []; for (const payload of result.payloads) applied.push(await submitEvidence(config.url, session.credential, { id: binding.id }, payload, `pi ${pi.model} via ${pi.command}`, dependencies.fetcher)); return applied; } });
+  } catch (error) {
+    await updateProducerRecord(root, session.id, entry => ({ ...entry, state: 'failed', resolution: `the headless run could not start: ${error instanceof Error ? error.message : String(error)}`.slice(0, 900), closedAt: new Date().toISOString() }));
+    await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
+    throw error;
+  }
+  const settled = started.settled.then(run => updateProducerRecord(root, session.id, entry => ({ ...entry, run })).then(() => run));
+  settled.catch(() => { /* reconciliation settles the record on its expiry */ });
+  return { producer: record.id, requestId: request.id, attempt: record.attempt, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, group: binding.group, proofs: binding.proofs,
+    profile: profile.name, principal: profile.principal, agentName: session.agentName, pane: null, checkout: checkout.directory, expiresAt: record.expiresAt, runtime: 'pi' as const, delivery: 'request' as const, account: null, approvals: null,
+    run: started.record, settled, recorded: 'the headless run is recorded; its evidence is submitted as it arrives and master status reconciles it' };
+}
+async function updateProducerRecord(root: string, id: string, change: (record: ProducerRecord) => ProducerRecord) {
+  const ledger = await readProducerLedger(root);
+  await saveProducerLedger(root, { ...ledger, producers: ledger.producers.map(entry => entry.id === id ? change(entry) : entry) });
+}
+
 /** What the control plane holds for one proof on the exact head the session was launched for. */
 export function proofOutcome(work: Work | undefined, record: Pick<ProducerRecord, 'sha' | 'baseSha' | 'policyRevision'>, proof: string): ProducerOutcome {
   const bound = (work?.evidence ?? []).filter(entry => entry.proof === proof && entry.sha === record.sha && entry.baseSha === record.baseSha && entry.policyRevision === record.policyRevision && !entry.revocation);
@@ -343,11 +401,15 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     const results = Object.values(outcome);
     const request = item?.autoDispatch ? [...item.autoDispatch.producers, ...item.autoDispatch.history].find(entry => entry.id === record.requestId) : undefined;
     const agent = agents?.find(candidate => candidate.name === record.agentName);
-    const finished = agents !== null && (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? ''));
+    // A headless run (GY-169) has finished once it ended, which its record or this process's
+    // registry says; a run neither knows about belongs to another process and is left to its expiry.
+    const headless = record.runtime === 'pi', ended = headless ? record.run?.endedAt ? record.run : registeredRun(record.agentName)?.record ?? null : null;
+    if (headless && ended && !record.run) { record.run = ended; changed++; }
+    const finished = headless ? !!ended && !liveRun(record.agentName) : agents !== null && (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? ''));
     const screen = () => readSessionScreen(record.agentName, run);
     // Acknowledgement is judged only from a Herdr that could be read; a submitted proof is the
-    // strongest acknowledgement of all.
-    if (agents !== null) {
+    // strongest acknowledgement of all. A headless run holds its request from its start.
+    if (agents !== null && !headless) {
       const judged = await acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: results.some(result => result !== 'missing'), screen });
       if (judged.changed) changed++;
       if (judged.reprompt) {
@@ -371,13 +433,20 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
       if (!record.idleSince) { record.idleSince = now.toISOString(); changed++; }
       else if (now.getTime() - Date.parse(record.idleSince) >= producerIdleGraceMs && settlementDue(record, agent, { now: now.getTime(), ackMs })) {
         const missing = record.proofs.filter(proof => outcome[proof] !== 'pass').map(proof => `${proof} (${outcome[proof]})`).join(', ');
+        if (headless) {
+          const result = ended?.result, refused = ended?.applied.filter(entry => entry.outcome === 'refused').map(entry => `${entry.subject}: ${entry.detail}`) ?? [];
+          next = { state: 'failed', resolution: `the headless run ended (${!result ? 'no result recorded' : result.ok ? `${result.submitted} submission(s)` : `${result.reason}: ${result.detail}`}) without trusted evidence for ${missing}${refused.length ? `; refused: ${refused.join('; ')}` : ''}`.slice(0, 900) };
+        } else {
         const failure = agent?.agent_status === 'blocked'
           ? `the session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without trusted evidence for ${missing}`
           : `the session finished (${agent?.agent_status ?? 'gone from Herdr'}) without trusted evidence for ${missing}`;
         next = { state: 'failed', resolution: await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, failure) };
+        }
       }
     } else if (record.idleSince) { delete record.idleSince; changed++; }
     if (!next) continue;
+    // A headless run still going when its request settles is stopped, as a pane would be closed.
+    if (headless) liveRun(record.agentName)?.run.cancel(next.resolution);
     let closeFailure: string | undefined, paneGone = false;
     // A pane that is already gone is the state the close wanted (GY-137), so it settles the record
     // with the absence named on the resolution; any other close failure keeps it pending and retried.
