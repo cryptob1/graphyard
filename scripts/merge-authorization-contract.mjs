@@ -69,25 +69,28 @@ export function judgeMergeAuthorization(transcript, inventory = createInventory(
   cases.push('revocation-identity-restricted');
 
   judging('revocation-closes-authorization');
-  const granted = only('execution-granted');
-  assert.equal(granted.owner, 'probe-coordinator'); assert.equal(granted.sha, 'a'.repeat(40));
-  assert.ok(Number.isSafeInteger(granted.authorizationRevision) && granted.authorizationRevision > 0);
-  refused(only('frozen-during-execution'), 409, /merge execution is active/i);
+  const requested = only('merge-requested');
+  assert.equal(requested.requestedBy, 'probe-coordinator'); assert.equal(requested.sha, 'a'.repeat(40));
+  assert.equal(requested.execution, null, 'GitHub executes the merge: the request grants no execution');
+  assert.equal(only('not-frozen-by-request').status, 200, 'a merge request freezes nothing on the record');
   const revoked = only('revoked');
   assert.equal(revoked.stage, 'acceptance', 'a revoked candidate must leave the merge stage');
-  assert.equal(revoked.execution, null, 'revocation must cancel the in-flight execution, not wait for it');
+  assert.equal(revoked.execution, null);
   assert.equal(revoked.authorization, null);
   assert.match(revoked.acceptanceReasons.join(' '), /previously accepted evidence was revoked/);
   assert.equal(revoked.queue, null, 'a revoked candidate must leave the merge queue rather than hold its position');
   assert.equal(revoked.ejection?.sha, 'a'.repeat(40)); assert.match(String(revoked.ejection?.reason), /was revoked on speculative tip/);
-  assert.deepEqual(revoked.revocations.map(item => item.actor), ['probe-producer']);
-  assert.ok(revoked.retainedEvidence >= 1, 'the revoked record must be retained for audit, not deleted');
+  // Both accepted runs — the one before the request and the one recorded after it — are withdrawn.
+  assert.deepEqual(revoked.revocations.map(item => item.actor), ['probe-producer', 'probe-producer']);
+  assert.ok(revoked.retainedEvidence >= 2, 'the revoked records must be retained for audit, not deleted');
   cases.push('revocation-closes-authorization');
 
   judging('broker-refuses-revoked-candidate');
-  refused(only('verify-after-revocation'), 409, /missing, expired, superseded/);
-  refused(only('acquire-replay-after-revocation'), 409, /expired, cancelled, fenced, or superseded/);
-  refused(only('cancel-after-revocation'), 409, /missing, expired, superseded/);
+  refused(only('request-after-revocation'), 409, /Merge authorization is no longer current/);
+  refused(only('execution-request-refused'), 400, /grants no merge executions/);
+  const removed = steps('removed-execution-route');
+  assert.deepEqual(removed.map(entry => entry.route), ['merge-verify', 'merge-commit', 'merge-cancel']);
+  for (const entry of removed) assert.equal(entry.status, 404, `${entry.route} must not exist: GitHub executes merges`);
   cases.push('broker-refuses-revoked-candidate');
 
   judging('concurrent-attempts-refused');
@@ -107,16 +110,12 @@ export function judgeMergeAuthorization(transcript, inventory = createInventory(
 
   judging('provider-commit-serialized');
   const race = only('provider-commit-race');
-  assert.deepEqual([race.commit.status, race.revoke.status].sort(), [200, 409], 'exactly one side of the commit/revocation race must win');
-  if (race.commit.status === 200) {
-    assert.match(race.revoke.message, /already committed this candidate/);
-    assert.equal(race.revokedEvidence, 0, 'a refused late withdrawal must not claim to revoke evidence');
-    assert.ok(race.committingAt);
-  } else {
-    assert.match(race.commit.message, /missing, expired, superseded/);
-    assert.ok(race.revokedEvidence > 0, 'a winning withdrawal must cancel provider authority');
-    assert.equal(race.committingAt, null);
-  }
+  assert.equal(race.revoke.status, 200, 'withdrawal is never refused for a merge GitHub holds');
+  assert.ok(race.revokedEvidence > 0, 'the withdrawal revoked the evidence');
+  if (race.request.status !== 200) assert.match(race.request.message, /Merge authorization is no longer current/);
+  assert.equal(race.execution, null, 'no execution exists on either side of the race');
+  assert.notEqual(race.mergedStage, 'done', 'a merge GitHub lands after the withdrawal is never delivered');
+  assert.match(race.mergedViolations.join(' '), /without a prior authorization/);
   cases.push('provider-commit-serialized');
 
   assert.ok(inventory.complete, 'every merge-authorization case must be judged exactly once');

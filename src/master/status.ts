@@ -5,7 +5,7 @@ import { standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
 import { type Work, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
-import { predictQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
+import { predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
@@ -129,7 +129,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
   const placements = predictQueue(snapshot.work, now);
-  const queueRows = placements.map(placement => queueRow(placement, describeQueueBinding(snapshot.work.find(work => work.id === placement.id)!, snapshot.work, new Date(now), placement)));
+  // Each queued item's place in GitHub's own merge queue, as the control plane last read it (GY-258):
+  // GitHub performs the merge, so this is where a queued item waits once every gate passes.
+  const githubQueueRow = (work: Work) => work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {};
+  const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement)), ...githubQueueRow(work) }; });
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
     const placement = placements.find(entry => entry.id === work.id) ?? null;
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
@@ -142,8 +145,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
-    const activeMerge = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now;
-    const mergeable = !activeMerge && freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
+    const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
       && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
       && work.mergeAuthorization.policyRevision === work.policyRevision
       && work.gates.every(gate => gate.passed) && !work.violations.length;
