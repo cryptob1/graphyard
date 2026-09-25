@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { documentationGlobMatches, documentationScopes } from './scope.js';
+import { documentationGlobMatches } from './documentation-glob.js';
+import { documentationScopes } from './scope.js';
 
 // ---------------------------------------------------------------------------
 // Every ticket keeps its project's documentation current (GY-215).

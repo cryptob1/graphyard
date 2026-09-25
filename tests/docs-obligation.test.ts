@@ -12,7 +12,8 @@ import { workerPrompt } from '../src/master.js';
 import { reviewPrompt } from '../src/reviewer.js';
 import { collectScanInput } from '../src/onboarding.js';
 import { proposeDocumentation, readDocumentationConfig, writeDocumentationConfig } from '../src/repository-setup.js';
-import { decideScopeRequest, documentationGlobMatches, documentationScopes } from '../src/model/scope.js';
+import { documentationGlobMatches } from '../src/model/documentation-glob.js';
+import { decideScopeRequest, documentationScopes } from '../src/model/scope.js';
 import { configuredDocumentation, defaultDocumentationPolicy, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 

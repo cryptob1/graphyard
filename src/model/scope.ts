@@ -1,3 +1,4 @@
+import { documentationGlobMatches } from './documentation-glob.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
 // Unsupported glob expressions are not interpreted as semantic dependency knowledge.
 export function pathScope(value: string) {
@@ -91,19 +92,6 @@ export interface ItemDocumentation { paths: readonly string[]; changelog?: strin
 /** The documentation paths an item's scope rules read: its own, or the default for an item created before GY-215. */
 export const itemDocumentationPaths = (item: { documentation?: ItemDocumentation | null }) =>
   item.documentation ? [...new Set([...item.documentation.paths, ...(item.documentation.changelog ? [item.documentation.changelog] : [])])] : [...documentationScopes];
-/**
- * Whether a file lies inside one documentation glob: `docs/` or `docs/**` is a tree, `README.md` a
- * file, `*` matches within one path segment and `**` across segments (`packages/*\/README.md`).
- * Documentation paths are globs because a repository's docs are a pattern (every package README),
- * not one directory; planned-file scope keeps its deliberately bounded syntax.
- */
-export function documentationGlobMatches(pattern: string, file: string) {
-  const glob = pattern.replace(/^\.\//, ''), path = file.replace(/^\.\//, '');
-  if (!/[*?]/.test(glob.replace(/\/\*{1,2}$/, '/'))) return pathScopeContains(glob, path);
-  const source = glob.endsWith('/') ? `${glob}**` : glob;
-  const expression = source.split(/(\*\*\/?|\*|\?)/).map(part => part === '**/' ? '(?:.*/)?' : part === '**' ? '.*' : part === '*' ? '[^/]*' : part === '?' ? '[^/]' : part.replace(/[.+^${}()|[\]\\]/g, '\\$&')).join('');
-  return new RegExp(`^${expression}$`).test(path);
-}
 /**
  * The surfaces that render, test or point users at the documentation: the web app that links to
  * and embeds doc pages, the browser tests that pin their text, and the integrations whose messages

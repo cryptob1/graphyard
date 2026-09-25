@@ -17,7 +17,7 @@ Commit the updated `AGENTS.md`, `.gitignore` and `graphyard.json`, never `.graph
 
 ### Documentation policy
 
-`init --scan --apply` writes the documentation paths it finds (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to the committed `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Set the printed `GRAPHYARD_DOCUMENTATION` on the deployment (default `docs/`, `README.md`, `AGENTS.md`). Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
+`init --scan --apply` writes the documentation paths found (`docs/`, `site/`, `README*`, package READMEs, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`). Features and bugs carry *Documentation reflects this change*, met by a diff there or `complete --no-docs "WHY"`, judged by the reviewer.
 
 ### What the generated instructions authorize
 
@@ -39,7 +39,7 @@ Profiles default to `"approvals": "auto"` so sessions never block on a permissio
 
 ### Configure the fleet
 
-The **agent registry** (CLI, `/api/agent-registry` or the **Agent fleet** page) records runtimes, accounts and roles; propose it from this host's logins:
+The **agent registry** (CLI, `/api/agent-registry` or the **Agent fleet** page) records runtimes, accounts and roles; propose it from local logins:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
