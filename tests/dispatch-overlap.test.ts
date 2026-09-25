@@ -41,6 +41,8 @@ const submitted = (key: string, plannedFiles: string[], files: string[], sinceMs
   lastAssignment: { owner: `${key}-worker`, epoch: 1, claimedAt: iso(-sinceMs) },
   candidate: candidateOf(key), observation: { candidate: candidateOf(key), files, at: iso(-60_000), merged: false, prState: 'open', checks: [], reviews: [] } as any, ...overrides });
 const candidateOf = (key: string) => ({ sha: key.toLowerCase().padEnd(40, 'f').replace(/[^0-9a-f]/g, 'e'), baseSha: 'b'.repeat(40), pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' });
+/** The same item with its pull request not observed open: the observation carries no pull-request state. */
+const notOpen = (item: Work) => ({ ...item, observation: { ...item.observation!, prState: undefined } }) as Work;
 /** Submitted, then sent back for rework: dispatchable again, a peer of the ready items rather than ahead of anything. */
 const rework = (key: string, plannedFiles: string[], files: string[], sinceMs = hour, overrides: Partial<Work> = {}) => submitted(key, plannedFiles, files, sinceMs, { reworkRequested: true, stageEnteredAt: iso(-sinceMs), ...overrides });
 
@@ -83,23 +85,25 @@ test('integration:overlap-uses-changed-files — once an item has a candidate it
   assert.doesNotThrow(() => assertDispatchable(sameFile, all, iso(0)));
   // A ready item that named its file is not held by a candidate that changed a different file under the same root; one that claimed the root still is.
   assert.deepEqual(dispatchOverlap(narrow, all, clock), []);
-  assert.deepEqual(dispatchOverlap(directory, all, clock).map(entry => [entry.key, entry.paths]), [['GY-a', ['tests/']]], 'the reworked GY-b and GY-c are peers waiting for a worker, not items ahead');
+  // GY-a's pull request is open too, so it holds nothing (GY-194): even the fresh directory claim GY-e is not held behind it.
+  assert.deepEqual(dispatchOverlap(directory, all, clock), [], 'the reworked GY-b and GY-c are peers waiting for a worker, and GY-a\'s open pull request is ordered by the merge queue');
 
-  // The durable loop dispatches the three unheld items in one cycle with workers to spare, and holds only the fresh directory claim.
+  // The durable loop dispatches all four in one cycle, smallest scope first.
   const loop = await daemon(['one', 'two', 'three', 'four']);
   try {
     loop.set(all);
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
-    assert.deepEqual(loop.log, ['GY-d→one', 'GY-b→two', 'GY-c→three'], 'the file-scoped item is offered first, then both reworks, whose pull requests are open; only the fresh GY-e is held');
-    const plan = dispatchSchedule(all, clock);
-    assert.deepEqual(plan.held.map(entry => [entry.key, entry.ahead.map(item => item.key)]), [['GY-e', ['GY-a']]]);
-    assert.deepEqual(plan.order.map(entry => [entry.key, entry.held]), [['GY-d', false], ['GY-b', false], ['GY-c', false], ['GY-e', true]]);
-    // Once GY-a merges, the fresh GY-e is judged against nothing and dispatches too.
-    loop.log.length = 0;
-    loop.set([{ ...landed, stage: 'done' } as Work, disjoint, sameFile, narrow, directory]);
-    await runCycle(loop.master, loop.state, loop.effects, () => clock + 30_000);
-    assert.deepEqual(loop.log, ['GY-e→one'], 'GY-c was already dispatched in the first cycle; only the now-unheld GY-e remains');
+    assert.deepEqual(loop.log, ['GY-d→one', 'GY-b→two', 'GY-c→three', 'GY-e→four'], 'the file-scoped item is offered first, then the directory claims; nothing is held behind an open pull request');
+    assert.deepEqual(dispatchSchedule(all, clock).held, []);
   } finally { await loop.cleanup(); }
+
+  // GY-a's pull request was closed and it is claimed again for rework: it is being built without an open
+  // pull request, and it excludes on the file its candidate changed, not on the tests/ it declared.
+  const reclaimed = { ...landed, observation: { ...landed.observation!, prState: 'closed' }, lease: { owner: 'GY-a-worker', epoch: 2, expiresAt: iso(hour) }, lastAssignment: { owner: 'GY-a-worker', epoch: 2, claimedAt: iso(-5 * 60_000) } } as Work;
+  const again = [reclaimed, narrow, directory];
+  assert.deepEqual(dispatchOverlap(narrow, again, clock), [], 'a named file under the same root is no conflict with the file the candidate changed');
+  assert.deepEqual(dispatchOverlap(directory, again, clock).map(entry => [entry.key, entry.state, entry.paths, entry.theirs]), [['GY-a', 'claimed', ['tests/'], ['tests/a.test.ts']]]);
+  assert.deepEqual(dispatchSchedule(again, clock).held.map(entry => [entry.key, entry.ahead.map(item => item.key)]), [['GY-e', ['GY-a']]]);
 });
 
 test('unit:broad-scope-refused — a tests/ claim is refused where planned files are set, naming the narrower paths, and a tests/one-file.test.ts claim is not; --allow-broad-scope records the exception in the audited reason', async () => {
@@ -154,14 +158,14 @@ test('unit:effective-concurrency-reported — master status reports how many ite
   const profiles = Array.from({ length: 11 }, (_, index) => launchProfile(`worker-${index + 1}`, credential));
   // Fourteen items that each claimed a root directory: every pair of fresh items overlaps. GY-2's pull
   // request is open, so nothing holds it and it excludes nobody: the graph admits it beside one other.
-  const items = [claimed('GY-1', ['src/', 'src/master.ts']), submitted('GY-2', ['tests/'], ['tests/two.test.ts', 'src/master.ts']), ...Array.from({ length: 12 }, (_, index) => work(`GY-${index + 3}`, { plannedFiles: [['src/', 'tests/', 'docs/'][index % 3], 'src/master.ts'] }))];
+  const items = [claimed('GY-1', ['src/', 'src/master.ts'], 10 * 60_000), submitted('GY-2', ['tests/'], ['tests/two.test.ts', 'src/master.ts']), ...Array.from({ length: 12 }, (_, index) => work(`GY-${index + 3}`, { plannedFiles: [['src/', 'tests/', 'docs/'][index % 3], 'src/master.ts'] }))];
   const graph = effectiveConcurrency(items, clock);
   assert.equal(graph.effective, 2); assert.equal(graph.nodes, 14); assert.equal(graph.edges, 78); assert.equal(graph.exact, true);
   const status = buildMasterStatus({ work: items, now: iso(0) }, profiles, [], {}, {}, { pending: [], completed: [] });
   assert.equal(status.effectiveConcurrency.effective, 2); assert.equal(status.effectiveConcurrency.idleWorkers, 11); assert.equal(status.effectiveConcurrency.workers, 11);
   assert.equal(status.effectiveConcurrency.inFlight, 2); assert.equal(status.effectiveConcurrency.dispatchable, 12); assert.equal(status.effectiveConcurrency.held, 12);
   assert.equal(status.counts.effectiveConcurrency, 2); assert.equal(status.counts.idleWorkers, 11); assert.equal(status.counts.held, 12);
-  assert.match(status.effectiveConcurrency.statement, /^2 items could be in flight at once over 14 open items \(78 overlaps\); 11 of 11 launch profiles idle; 12 held, 0 past the 2h hold bound$/);
+  assert.match(status.effectiveConcurrency.statement, /^2 items could be in flight at once over 14 open items \(78 overlaps\); 11 of 11 launch profiles idle; 12 held, 0 past the 0\.5h hold bound$/);
   // The same fourteen items with their files named: the graph falls apart and the fleet can use its workers.
   const named = items.map((item, index) => index < 2 ? item : { ...item, plannedFiles: [`web/pages/page-${index}.tsx`] } as Work);
   const open = effectiveConcurrency(named, clock);
@@ -183,62 +187,64 @@ test('unit:effective-concurrency-reported — master status reports how many ite
 
 test('integration:hold-is-bounded — a hold three deep names its chain, is honoured until the bound, and past it the item dispatches over the overlap with the overlap recorded', async () => {
   // GY-x waits behind GY-b's candidate, which sits third in the merge queue behind GY-c and GY-d: three deep.
-  const queued = (key: string, files: string[], sequence: number) => submitted(key, ['src/cli/'], files, 100 * 60_000, { stage: 'merge', queue: { sequence, enqueuedAt: iso(-100 * 60_000) } as any });
+  // Their pull requests are not observed open (the last observation carries no pull-request state), so
+  // they still hold: an item whose pull request is observed open holds nothing (GY-194).
+  const queued = (key: string, files: string[], sequence: number) => notOpen(submitted(key, ['src/cli/'], files, 100 * 60_000, { stage: 'merge', queue: { sequence, enqueuedAt: iso(-100 * 60_000) } as any }));
   const d = queued('GY-d', ['src/cli/d.ts'], 1), c = queued('GY-c', ['src/cli/c.ts'], 2), b = queued('GY-b', ['src/cli/b.ts'], 3);
-  const x = work('GY-x', { plannedFiles: ['src/cli/b.ts'], stageEnteredAt: iso(-90 * 60_000) });
+  const x = work('GY-x', { plannedFiles: ['src/cli/b.ts'], stageEnteredAt: iso(-20 * 60_000) });
   const all = [d, c, b, x];
   const hold = dispatchHold(x, all, clock)!;
   assert.deepEqual(hold.ahead.map(entry => entry.key), ['GY-b']);
   assert.deepEqual(hold.chain, [{ key: 'GY-b', stage: 'merge', state: 'submitted', position: 3, behind: ['GY-d', 'GY-c'] }, { key: 'GY-d', stage: 'merge', state: 'submitted', position: 1, behind: [] }, { key: 'GY-c', stage: 'merge', state: 'submitted', position: 2, behind: ['GY-d'] }]);
   assert.equal(describeChain(hold.chain), 'GY-b (submitted, merge, merge queue position 3, itself behind GY-d, GY-c) → GY-d (submitted, merge, merge queue position 1) → GY-c (submitted, merge, merge queue position 2, itself behind GY-d)');
-  assert.equal(hold.since, iso(-90 * 60_000), 'the hold began when GY-x became dispatchable, the items ahead having been in flight longer');
-  assert.equal(hold.ageMs, 90 * 60_000); assert.equal(hold.boundMs, dispatchHoldBoundMs); assert.equal(dispatchHoldBoundMs, 2 * hour); assert.equal(hold.overdue, false);
+  assert.equal(hold.since, iso(-20 * 60_000), 'the hold began when GY-x became dispatchable, the items ahead having been in flight longer');
+  assert.equal(hold.ageMs, 20 * 60_000); assert.equal(hold.boundMs, dispatchHoldBoundMs); assert.equal(dispatchHoldBoundMs, 30 * 60_000); assert.equal(hold.overdue, false);
   const claimedAhead = dispatchHold(x, [claimed('GY-w', ['src/cli/b.ts'], 3 * hour), x], clock)!;
   assert.deepEqual(claimedAhead.chain, [{ key: 'GY-w', stage: 'build', state: 'claimed', position: null, behind: [] }], 'a claimed item waits on nobody but its worker');
-  assert.equal(claimedAhead.since, iso(-90 * 60_000));
+  assert.equal(claimedAhead.since, iso(-20 * 60_000));
   // The item ahead moving stage does not restart the hold: GY-v was claimed 3h ago and entered acceptance ten minutes ago,
-  // so a hold behind it is counted from its claim, and GY-u, dispatchable for 2.5h, is past the bound.
-  const moved = submitted('GY-v', ['src/cli/'], ['src/cli/v.ts'], 3 * hour, { stage: 'acceptance', stageEnteredAt: iso(-10 * 60_000) });
-  const u = work('GY-u', { plannedFiles: ['src/cli/v.ts'], stageEnteredAt: iso(-150 * 60_000) });
+  // so a hold behind it is counted from its claim, and GY-u, dispatchable for 45 minutes, is past the bound.
+  const moved = notOpen(submitted('GY-v', ['src/cli/'], ['src/cli/v.ts'], 3 * hour, { stage: 'acceptance', stageEnteredAt: iso(-10 * 60_000) }));
+  const u = work('GY-u', { plannedFiles: ['src/cli/v.ts'], stageEnteredAt: iso(-45 * 60_000) });
   const behindMoved = dispatchHold(u, [moved, u], clock)!;
-  assert.equal(behindMoved.since, iso(-150 * 60_000), 'the stage the item ahead entered ten minutes ago does not reset the hold');
+  assert.equal(behindMoved.since, iso(-45 * 60_000), 'the stage the item ahead entered ten minutes ago does not reset the hold');
   assert.equal(behindMoved.overdue, true);
   assert.doesNotThrow(() => assertDispatchable(u, [moved, u], iso(0)));
   assert.equal(dispatchHold(u, [{ ...moved, lastAssignment: undefined } as Work, u], clock)!.since, iso(-10 * 60_000), 'with no claim on record the stage entry stands in');
 
   // Under the bound the hold stands, naming the chain; a shorter configured bound lifts it.
-  assert.throws(() => assertDispatchable(x, all, iso(0)), /held by planned-file overlap with GY-b \(submitted, merge\) on src\/cli\/b\.ts.*Held since 2030-01-01T10:30:00\.000Z \(1\.5h of the 2h bound\); the chain it waits behind: GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d \(submitted, merge, merge queue position 1\) → GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\).*--allow-overlap/);
-  assert.doesNotThrow(() => assertDispatchable(x, all, iso(0), { holdBoundMs: hour }));
+  assert.throws(() => assertDispatchable(x, all, iso(0)), /held by planned-file overlap with GY-b \(submitted, merge\) on src\/cli\/b\.ts.*Held since 2030-01-01T11:40:00\.000Z \(0\.3h of the 0\.5h bound\); the chain it waits behind: GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d \(submitted, merge, merge queue position 1\) → GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\).*--allow-overlap/);
+  assert.doesNotThrow(() => assertDispatchable(x, all, iso(0), { holdBoundMs: 10 * 60_000 }));
   const before = dispatchSchedule(all, clock);
   assert.deepEqual(before.held.map(entry => entry.key), ['GY-x']); assert.deepEqual(before.overdue, []);
-  assert.match(before.held[0].reason, /1\.5h of the 2h bound.*chain it waits behind: GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d/);
-  assert.equal(before.boundMs, 2 * hour);
+  assert.match(before.held[0].reason, /0\.3h of the 0\.5h bound.*chain it waits behind: GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d/);
+  assert.equal(before.boundMs, 30 * 60_000);
   const loop = await daemon(['one', 'two']);
   try {
     loop.set(all);
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
     assert.deepEqual(loop.log, [], 'nothing dispatches over a hold under its bound');
 
-    // Forty minutes later the hold is 2h10m old: past the bound, GY-x is offered over the overlap.
-    const later = clock + 40 * 60_000;
+    // Fifteen minutes later the hold is 35 minutes old: past the bound, GY-x is offered over the overlap.
+    const later = clock + 15 * 60_000;
     const overdue = dispatchHold(x, all, later)!;
-    assert.equal(overdue.overdue, true); assert.equal(overdue.ageMs, 130 * 60_000);
-    assert.doesNotThrow(() => assertDispatchable(x, all, iso(40 * 60_000)));
-    assert.throws(() => assertDispatchable(x, all, iso(40 * 60_000), { holdBoundMs: 3 * hour }), /held by planned-file overlap/, 'a longer bound still holds');
+    assert.equal(overdue.overdue, true); assert.equal(overdue.ageMs, 35 * 60_000);
+    assert.doesNotThrow(() => assertDispatchable(x, all, iso(15 * 60_000)));
+    assert.throws(() => assertDispatchable(x, all, iso(15 * 60_000), { holdBoundMs: 3 * hour }), /held by planned-file overlap/, 'a longer bound still holds');
     const after = dispatchSchedule(all, later);
     assert.deepEqual(after.overdue.map(entry => entry.key), ['GY-x']); assert.deepEqual(after.held, []);
     assert.deepEqual(after.order.map(entry => [entry.key, entry.held, entry.overdue]), [['GY-x', false, true]]);
-    assert.match(after.overdue[0].reason, /^Held by planned-file overlap with GY-b \(submitted, merge\) on src\/cli\/b\.ts since 2030-01-01T10:30:00\.000Z \(2\.2h\), past the 2h bound; the chain it waits behind: GY-b .*→ GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\); dispatched over the overlap/);
+    assert.match(after.overdue[0].reason, /^Held by planned-file overlap with GY-b \(submitted, merge\) on src\/cli\/b\.ts since 2030-01-01T11:40:00\.000Z \(0\.6h\), past the 0\.5h bound; the chain it waits behind: GY-b .*→ GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\); dispatched over the overlap/);
     // Status raises the overdue hold with its chain while nothing has taken the item, and records the overlap on the row.
-    const status = buildMasterStatus({ work: all, now: iso(40 * 60_000) }, [], [], {}, {}, { pending: [], completed: [] });
+    const status = buildMasterStatus({ work: all, now: iso(15 * 60_000) }, [], [], {}, {}, { pending: [], completed: [] });
     const row = status.work.find(entry => entry.key === 'GY-x')!;
     assert.equal(row.overlap.held, false); assert.equal(row.overlap.hold?.overdue, true); assert.deepEqual(row.overlap.ahead.map(entry => entry.key), ['GY-b']);
-    assert.match(row.attention!, /^GY-x has been held 2\.2h behind GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d \(submitted, merge, merge queue position 1\) → GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\), past the 2h bound; it is offered over the overlap/);
+    assert.match(row.attention!, /^GY-x has been held 0\.6h behind GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d \(submitted, merge, merge queue position 1\) → GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\), past the 0\.5h bound; it is offered over the overlap/);
     assert.equal(row.attentionOwner?.role, 'master'); assert.match(row.attentionOwner!.next, /graphyard master dispatch GY-x PROFILE/);
-    assert.ok(status.attentionItems.some(entry => entry.subject === 'GY-x' && /past the 2h bound/.test(entry.text)));
+    assert.ok(status.attentionItems.some(entry => entry.subject === 'GY-x' && /past the 0\.5h bound/.test(entry.text)));
     assert.equal(status.counts.holdsOverdue, 1); assert.equal(status.effectiveConcurrency.overdue, 1);
     // The loop dispatches it on the next cycle, and the launcher records the overlap it went over.
-    loop.set(all, 40 * 60_000);
+    loop.set(all, 15 * 60_000);
     await runCycle(loop.master, loop.state, loop.effects, () => later);
     assert.deepEqual(loop.log, ['GY-x→one'], 'the overdue item is dispatched over the overlap on the loop\'s own');
     const root = await mkdtemp(join(tmpdir(), 'graphyard-hold-bound-')); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-hold-bound-credentials-'));
@@ -250,11 +256,95 @@ test('integration:hold-is-bounded — a hold three deep names its chain, is hono
       const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : {} });
       const prepare = async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) });
       await assert.rejects(dispatchWork(root, x, profile, [], herdr, all, prepare, async () => {}, 1, iso(0)), /held by planned-file overlap/);
-      const result = await dispatchWork(root, x, profile, [], herdr, all, prepare, async () => {}, 1, iso(40 * 60_000));
+      const result = await dispatchWork(root, x, profile, [], herdr, all, prepare, async () => {}, 1, iso(15 * 60_000));
       assert.equal(result.overlap?.allowed, true); assert.equal(result.overlap?.hold.overdue, true); assert.deepEqual(result.overlap?.ahead.map(entry => entry.key), ['GY-b']);
-      assert.match(result.overlap?.note ?? '', /^Dispatched over a planned-file overlap with GY-b \(submitted, merge\) on src\/cli\/b\.ts after a hold of 2\.2h, past the 2h bound, behind GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d .*→ GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\); expect a sync → review → proof round/);
+      assert.match(result.overlap?.note ?? '', /^Dispatched over a planned-file overlap with GY-b \(submitted, merge\) on src\/cli\/b\.ts after a hold of 0\.6h, past the 0\.5h bound, behind GY-b \(submitted, merge, merge queue position 3, itself behind GY-d, GY-c\) → GY-d .*→ GY-c \(submitted, merge, merge queue position 2, itself behind GY-d\); expect a sync → review → proof round/);
       const forced = await dispatchWork(root, x, profile, [], herdr, all, prepare, async () => {}, 1, iso(0), { allowOverlap: true });
       assert.match(forced.overlap?.note ?? '', /by operator override; expect a sync/);
     } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
   } finally { await loop.cleanup(); }
+});
+
+// GY-194: on 2026-09-25 ten ready items were held and five workers idle, every hold behind items whose
+// pull requests were already open on the same large files. Once an item's pull request is open its
+// change exists and the merge queue orders the two; only work still being built without one holds.
+test('unit:no-hold-behind-open-pr — a fresh item is not held behind an overlapping item whose pull request is open, whatever its stage, and is held behind an overlapping claimed item with no pull request', () => {
+  const hotspot = 'src/master-daemon.ts';
+  const fresh = work('GY-192', { plannedFiles: [hotspot, 'tests/master-daemon.test.ts'], stageEnteredAt: iso(-10 * 60_000) });
+  const inReview = submitted('GY-166', [hotspot], [hotspot], hour, { stage: 'review' });
+  assert.deepEqual(dispatchOverlap(fresh, [inReview, fresh], clock), [], 'an overlapping item in review with an open pull request holds nothing');
+  assert.equal(dispatchHold(fresh, [inReview, fresh], clock), null);
+  assert.doesNotThrow(() => assertDispatchable(fresh, [inReview, fresh], iso(0)));
+  // Whatever the stage the open pull request stands in — and even when its rework round is claimed again.
+  for (const stage of ['test', 'acceptance', 'merge'] as const) assert.deepEqual(dispatchOverlap(fresh, [submitted('GY-182', [hotspot], [hotspot], hour, { stage }), fresh], clock), [], stage);
+  const reclaimed = submitted('GY-185', [hotspot], [hotspot], hour, { stage: 'build', reworkRequested: true, lease: { owner: 'GY-185-worker', epoch: 2, expiresAt: iso(hour) } });
+  assert.deepEqual(dispatchOverlap(fresh, [reclaimed, fresh], clock), [], 'a claimed rework round whose pull request is open holds nothing');
+  // An overlapping item still being built, with no pull request, holds it.
+  const building = claimed('GY-184', [hotspot], 5 * 60_000);
+  assert.deepEqual(dispatchOverlap(fresh, [inReview, building, fresh], clock).map(entry => [entry.key, entry.state, entry.paths]), [['GY-184', 'claimed', [hotspot]]]);
+  assert.throws(() => assertDispatchable(fresh, [inReview, building, fresh], iso(0)), /held by planned-file overlap with GY-184 \(claimed, build\) on src\/master-daemon\.ts/);
+  assert.deepEqual(dispatchSchedule([inReview, building, fresh], clock).held.map(entry => [entry.key, entry.ahead.map(item => item.key)]), [['GY-192', ['GY-184']]]);
+  // A pull request that was closed while nobody holds the item: nothing is being built on it and it cannot
+  // enter the merge queue, so it holds nothing (in master status either) until it is claimed again.
+  const closed = { ...inReview, observation: { ...inReview.observation!, prState: 'closed' } } as Work;
+  assert.deepEqual(dispatchOverlap(fresh, [closed, fresh], clock), [], 'a closed, unclaimed candidate holds nothing');
+  assert.equal(dispatchHold(fresh, [closed, fresh], clock), null);
+  assert.equal(effectiveConcurrency([closed, fresh], clock).edges, 0);
+  // Claimed again for rework, it is being built without an open pull request: it holds on the files its candidate changed.
+  const rebuilding = { ...closed, stage: 'build', reworkRequested: true, lease: { owner: 'GY-166-worker', epoch: 2, expiresAt: iso(hour) } } as Work;
+  assert.deepEqual(dispatchOverlap(fresh, [rebuilding, fresh], clock).map(entry => [entry.key, entry.state]), [['GY-166', 'claimed']]);
+});
+
+test('unit:hold-bound-30m — a dispatch hold lasts at most 30 minutes; past it the hold is overdue and the item is offered a worker over the overlap', async () => {
+  assert.equal(dispatchHoldBoundMs, 30 * 60_000);
+  const building = claimed('GY-184', ['src/master.ts'], 2 * hour);
+  const fresh = work('GY-190', { plannedFiles: ['src/master.ts'], stageEnteredAt: iso(-29 * 60_000) });
+  const all = [building, fresh];
+  const under = dispatchHold(fresh, all, clock)!;
+  assert.equal(under.ageMs, 29 * 60_000); assert.equal(under.boundMs, 30 * 60_000); assert.equal(under.overdue, false);
+  assert.throws(() => assertDispatchable(fresh, all, iso(0)), /held by planned-file overlap with GY-184.*of the 0\.5h bound/);
+  const later = clock + 2 * 60_000;
+  const past = dispatchHold(fresh, all, later)!;
+  assert.equal(past.ageMs, 31 * 60_000); assert.equal(past.overdue, true);
+  assert.doesNotThrow(() => assertDispatchable(fresh, all, iso(2 * 60_000)));
+  assert.deepEqual(dispatchSchedule(all, later).overdue.map(entry => entry.key), ['GY-190']);
+  const loop = await daemon(['one']);
+  try {
+    loop.set(all);
+    await runCycle(loop.master, loop.state, loop.effects, () => clock);
+    assert.deepEqual(loop.log, [], 'under the bound the hold stands');
+    loop.set(all, 2 * 60_000);
+    await runCycle(loop.master, loop.state, loop.effects, () => later);
+    assert.deepEqual(loop.log, ['GY-190→one'], 'a hold older than 30 minutes is overdue and the item is offered a worker');
+  } finally { await loop.cleanup(); }
+});
+
+test('unit:concurrency-counts-open-prs — two items exclude each other only while one is being built without a pull request: three items in review on the same file and one fresh item have an effective concurrency of 4', () => {
+  const file = 'src/master.ts';
+  const reviews = ['GY-166', 'GY-182', 'GY-187'].map(key => submitted(key, [file], [file], hour, { stage: 'review' }));
+  // Dispatchable five minutes ago, well inside the 30-minute bound: were an open pull request ahead to hold it, status would count it held.
+  const fresh = work('GY-191', { plannedFiles: [file], stageEnteredAt: iso(-5 * 60_000) });
+  const items = [...reviews, fresh];
+  assert.deepEqual(effectiveConcurrency(items, clock), { effective: 4, items: ['GY-166', 'GY-182', 'GY-187', 'GY-191'], nodes: 4, edges: 0, exact: true });
+  const status = buildMasterStatus({ work: items, now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] });
+  assert.equal(status.effectiveConcurrency.effective, 4); assert.equal(status.counts.effectiveConcurrency, 4);
+  assert.equal(status.effectiveConcurrency.dispatchable, 1); assert.equal(status.effectiveConcurrency.held, 0, 'the fresh item is not held behind the three open pull requests');
+  assert.equal(status.counts.held, 0); assert.equal(status.effectiveConcurrency.overdue, 0, 'nor is it counted as an overdue hold');
+  const row = status.work.find(entry => entry.key === 'GY-191')!;
+  assert.equal(row.overlap.held, false); assert.deepEqual(row.overlap.ahead, []); assert.equal(row.overlap.hold, null);
+  assert.match(status.effectiveConcurrency.statement, /^4 items could be in flight at once over 4 open items \(0 overlaps\); .*; 0 held, 0 past the 0\.5h hold bound$/);
+  // Built without a pull request, the same three exclude each other and the fresh item: one at a time.
+  const building = ['GY-184', 'GY-189', 'GY-190'].map(key => claimed(key, [file], 5 * 60_000));
+  const serial = effectiveConcurrency([...building, fresh], clock);
+  assert.equal(serial.effective, 1); assert.equal(serial.edges, 6);
+  assert.equal(buildMasterStatus({ work: [...building, fresh], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }).effectiveConcurrency.effective, 1);
+  // Held past the 30-minute bound, the fresh items dispatch over the overlap, so they exclude nobody:
+  // three same-file items held 31 minutes behind one being built report the full count, as the daemon launches them all.
+  const heldFor = (minutes: number) => [claimed('GY-184', [file], 2 * hour), ...['GY-190', 'GY-191', 'GY-192'].map(key => work(key, { plannedFiles: [file], stageEnteredAt: iso(-minutes * 60_000) }))];
+  const within = effectiveConcurrency(heldFor(29), clock);
+  assert.equal(within.effective, 1); assert.equal(within.edges, 6);
+  assert.deepEqual(effectiveConcurrency(heldFor(31), clock), { effective: 4, items: ['GY-184', 'GY-190', 'GY-191', 'GY-192'], nodes: 4, edges: 0, exact: true });
+  const overdue = buildMasterStatus({ work: heldFor(31), now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] });
+  assert.equal(overdue.effectiveConcurrency.effective, 4); assert.equal(overdue.effectiveConcurrency.overdue, 3);
+  assert.deepEqual(dispatchSchedule(heldFor(31), clock).overdue.map(entry => entry.key).sort(), ['GY-190', 'GY-191', 'GY-192']);
 });
