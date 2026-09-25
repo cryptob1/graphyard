@@ -3,13 +3,16 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
-import { actionClaimMs, actionId, type ActionRow } from '../src/model/actions.js';
+import { actionClaimMs, actionId, claimAction, producerLaunchStop, producerLaunchStops, reconcileActions, type ActionRow } from '../src/model/actions.js';
+import { nextAction } from '../src/model/next-action.js';
+import { evaluate } from '../src/model.js';
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, runAutonomyCommand, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
@@ -132,6 +135,25 @@ const stalledRow = (make: (overrides?: Partial<ActionRow>) => ActionRow, retryAt
     { at: iso(-n * 60_000 + 1_000), event: 'failed', requester: 'graphyard', executor: `executor-${n}`, result: null, reason: 'no further automatic attempt' }];
   return make({ attempts: 3, retryAt, history: [...make().history, ...[3, 2, 1].flatMap(refused)] as any, ...overrides });
 };
+
+/** A producer row an executor on host-1 claimed and whose launch `launchProducer` refused for good, as the executor settles it. */
+const durablyStopped = (make: (overrides?: Partial<ActionRow>) => ActionRow) => make({ attempts: 1, retryAt: iso(60_000), result: 'failed', resolvedAt: iso(-1_000),
+  resolution: `Request ${producerRequestId} for GY-7 already had 4 sessions fail or expire; no further automatic attempt`,
+  history: [...make().history, { at: iso(-2_000), event: 'claimed', requester: 'graphyard', executor: 'executor-host-1', result: null, reason: 'attempt 1 claimed by executor-host-1 on host-1' },
+    { at: iso(-1_000), event: 'failed', requester: 'graphyard', executor: 'executor-host-1', result: 'failed', reason: `Request ${producerRequestId} for GY-7 already had 4 sessions fail or expire; no further automatic attempt` }] as any });
+const producerSource = readFileSync(fileURLToPath(new URL('../src/producer.ts', import.meta.url)), 'utf8');
+/** `underProof` as the real evaluator grades it: a candidate observed with its checks green and approved, so the acceptance gate waits on the produced proof. */
+function gradedUnderProof(work: Work): Work {
+  const graded = { ...work, stage: 'build', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:produced-review'] }], policy: { checks: ['test'], review: true },
+    workspaces: [{ host: 'host-1', path: '/tmp/gy-7', branch: 'graphyard/gy-7-1', epoch: 1, owner: 'agent-a' }], implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 }, epoch: 1,
+    submission: { epoch: 1, pr: 12 }, candidate: { sha: headSha, baseSha, pr: 12, branch: 'graphyard/gy-7-1', author: 'implementer' },
+    observation: { clockOffset: { min: 0, max: 0 }, candidate: { sha: headSha, baseSha, pr: 12, branch: 'graphyard/gy-7-1', author: 'implementer' }, checks: [{ name: 'test', result: 'success', appId: 1234 }],
+      reviews: [{ reviewer: 'reviewer', sha: headSha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/x.ts'], scopeFiles: [], at: iso(-60_000),
+      prState: 'open', draft: false, baseTip: baseSha, baseTipContained: true },
+    queue: null, queueSequence: 0, queueHistory: [] } as unknown as Work;
+  const result = evaluate(graded, [graded], new Date(), [1234]);
+  return { ...graded, stage: result.stage, gates: result.gates, violations: result.violations, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection, queueHistory: result.queueHistory } as Work;
+}
 
 // ---- AC-1: no hand dispatch while the executor's dispatch is pending, claimed or just released ----
 
@@ -339,12 +361,20 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
   assert.equal(handDecision(withRow(producerRow({ inputs: { ...producerRow().inputs, requestId: null } as any })), 'attest', attest, stopped), 'evidence', 'a row naming the request only by its group');
   assert.equal(handDecision(withRow(producerRow({ inputs: { ...producerRow().inputs, requestId: 'e'.repeat(32), group: 'unit' } as any })), 'attest', attest, stopped), null, "another request's row does not hold this one");
   assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [], history: [stalledRow(producerRow)] } }, 'attest', attest, stopped), null, 'a retired row launches nothing');
-  // A row whose every claim launchProducer refuses for good — one session per request, or the session limit reached — launches nothing, and the attestation is the only way left.
+  // This host's ledger never outranks a retained row: the ledger is local to the host that launched the sessions, and an executor on another host claims the same row without it and launches afresh (the producer "one session per request" and session-limit refusals come from that ledger).
   const settled = loop([producerSession('completed', -120_000)]), exhausted = loop([1, 2, 3, 4].map(n => producerSession('failed', -n * 3_600_000, 5 - n)));
   for (const [label, row] of Object.entries(launchRows(producerRow))) {
-    assert.equal(handDecision(withRow(row), 'attest', attest, settled), null, `a settled request under a ${label} row`);
-    assert.equal(handDecision(withRow(row), 'attest', attest, exhausted), null, `an exhausted request under a ${label} row`);
+    assert.equal(handDecision(withRow(row), 'attest', attest, settled), 'evidence', `a settled request under a ${label} row`);
+    assert.equal(handDecision(withRow(row), 'attest', attest, exhausted), 'evidence', `an exhausted request under a ${label} row`);
   }
+  // A launcher stop an executor recorded on the row is durable and seen by every host. While the row stands it is still the loop's; once the control plane retires it, the attestation opens even on a host whose ledger saw none of the sessions.
+  const stop = durablyStopped(producerRow);
+  assert.equal(handDecision(withRow(stop), 'attest', attest, loop([])), 'evidence', 'a stopped row the control plane has not retired yet');
+  const retiredStop = { ...underProof(), actionQueue: { actions: [], history: [{ ...stop, resolvedAt: iso(-1_000), resolution: 'retired' }] } };
+  assert.equal(handDecision(retiredStop, 'attest', attest, loop([])), null, 'a retired row whose launch was stopped for good');
+  assert.match(producerRecovery(retiredStop, 'manual:produced-review', loop([]))!, /gets no further launch from any executor: Request d+ for GY-7 already had 4 sessions fail or expire; no further automatic attempt/);
+  // A retired row whose failures were not a launcher stop says nothing about the request.
+  assert.equal(handDecision({ ...underProof(), actionQueue: { actions: [], history: [{ ...producerRow({ history: [{ at: iso(-1_000), event: 'failed', requester: 'graphyard', executor: 'executor-1', result: null, reason: 'every independent producer profile is busy' }] as any }), resolvedAt: iso(-1_000) }] } }, 'attest', attest, loop([])), 'evidence');
   const master = await masterHarness({ work: [underProof()] });
   try {
     const decide = ['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'reviewed', 'by', 'hand'];
@@ -356,14 +386,47 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
     await master.refusedLaunches(producerRequestId, dispatchFailureLimit, 'producer');
     assert.match(await master.refusal(decide), /No master operator-agent identity is provisioned/, 'so does a producer launch the loop gave up on');
   } finally { await master.close(); }
-  // The producer dispatch row stays queued after the request's sessions are exhausted: every claim of it is refused, so the attestation is allowed.
+  // The producer dispatch row stays queued: an executor on any host may still launch it, whatever this host's ledger says.
   const retained = await masterHarness({ work: [{ ...underProof(), actionQueue: { actions: [stalledRow(producerRow)], history: [] } }] });
   try {
     const decide = ['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'reviewed', 'by', 'hand'];
     assert.match(await retained.refusal(decide), /GY-7 is system-driven: master decide attest is a hand action the loop owns/, 'while the loop still launches it');
     await retained.producerSessions([1, 2, 3, 4].map(n => producerSession('failed', -n * 3_600_000, 5 - n)));
-    assert.match(await retained.refusal(decide), /No master operator-agent identity is provisioned/, 'an exhausted request under a retained row reaches the two-party decision');
+    assert.match(await retained.refusal(decide), /GY-7 is system-driven: master decide attest is a hand action the loop owns/, 'an exhausted request under a retained row is still the executor\'s');
   } finally { await retained.close(); }
+  // Retired on a durable stop another host's executor recorded: this host, with no ledger of its own, reaches the two-party decision.
+  const stoppedElsewhere = await masterHarness({ work: [retiredStop] });
+  try {
+    assert.match(await stoppedElsewhere.refusal(['decide', 'GY-7', 'attest', '{"proof":"manual:produced-review"}', 'reviewed', 'by', 'hand']), /No master operator-agent identity is provisioned/);
+  } finally { await stoppedElsewhere.close(); }
+});
+
+test('unit:system-driven-items a producer launch stopped for good on one host is offered to no executor on any host, and names the attestation', () => {
+  const now = new Date();
+  const work = underProof();
+  const candidateItem = structuredClone(work);
+  const executor = (host: string) => ({ id: `executor-${host}`, host, principal: 'master' });
+  // The row as the control plane holds it: an executor on host-1 claimed it and launchProducer refused it for good from host-1's ledger.
+  const row = durablyStopped(producerRow);
+  candidateItem.actionQueue = { actions: [{ ...row, retryAt: iso(-1_000) }], history: [] };
+  assert.ok(producerLaunchStop(candidateItem, producerRequestId), 'the stop is on the durable row');
+  assert.equal(producerLaunchStop(candidateItem, 'e'.repeat(32)), null, "another request's stop is not this one's");
+  // Every refusal launchProducer gives for good carries one of the stops, and a transient one none.
+  assert.ok(producerLaunchStops.every(stop => producerSource.includes(stop.slice(2))), 'the stops are the launcher\'s own refusals');
+  // The planner no longer names the dispatch: the proof step escalates, naming the stop and the attestation.
+  const graded = gradedUnderProof(candidateItem);
+  const next = nextAction(graded, [graded], now);
+  assert.equal(next?.kind, 'escalate');
+  assert.match(next!.reason, /manual proofs manual:produced-review on a{12} get no further producer launch from any executor — Request d+ .*no further automatic attempt; only a two-party attestation \(master decide GY-7 attest\) satisfies them now/);
+  // Reconciling retires the row, so an executor on another host — whose ledger never saw the sessions — has nothing to claim.
+  reconcileActions(graded, [graded], now, { next });
+  assert.equal(graded.actionQueue!.actions.some(entry => entry.id === row.id), false, 'the stopped dispatch row is retired');
+  assert.equal(claimAction([graded], executor('host-2'), now, { kinds: ['dispatch'] }), null, 'host-2 claims no producer dispatch');
+  // Without the stop the same item still dispatches the producer: only the durable stop ends it.
+  const open = gradedUnderProof({ ...structuredClone(work), actionQueue: { actions: [], history: [] } });
+  const dispatch = nextAction(open, [open], now);
+  assert.equal(dispatch?.kind, 'dispatch');
+  assert.equal(dispatch!.inputs.kind === 'dispatch' && dispatch!.inputs.target === 'proof' && dispatch!.inputs.requestId, producerRequestId);
 });
 
 test('unit:dispatch-race-guard a hand launch through a long backoff claims nothing once the backoff is about to end', async () => {

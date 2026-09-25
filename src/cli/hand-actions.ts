@@ -1,8 +1,8 @@
-import { actionClaimMs, claimable, claimLive, settling, waitingToRetry, type ActionRow } from '../model/actions.js';
+import { actionClaimMs, claimable, claimLive, producerLaunchStop, settling, waitingToRetry, type ActionRow } from '../model/actions.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import type { Work } from '../model/work.js';
-import { sessionRetry, sessionRetryLimit } from '../producer.js';
+import { sessionRetry } from '../producer.js';
 import { dispatchFailureLimit } from '../auto-dispatch.js';
 import { mergedWithoutAuthorization } from '../master.js';
 
@@ -83,10 +83,8 @@ export interface LoopSessions {
  * last session settled without satisfying it, its sessions are exhausted, or its launch was
  * refused `dispatchFailureLimit` times. These are the states in which the loop's dispatch step
  * says no further automatic attempt follows. A durable action row an executor still runs for the
- * request (`rowRunning`) means the loop has not stopped — unless the ledger shows a stop the
- * row's own launch is refused on too (`rowRefused`, given for producer rows only): such a row is
- * re-offered forever and every claim of it ends in the same refusal, so it launches nothing and
- * the recovery is the master's.
+ * request (`rowRunning`) means the loop has not stopped, whatever this host's ledger says: the
+ * ledgers are host-local, and an executor on another host claims the row without seeing them.
  *
  * A session closed `completed` on the verdict it posted has answered the request even while the
  * snapshot still carries it: the control plane has not ingested that GitHub review yet. A second
@@ -94,19 +92,17 @@ export interface LoopSessions {
  * together with the first, so the request is stopped only once that verdict is dismissed — and
  * a dismissal reopens the record as `failed`, which the loop relaunches itself.
  */
-function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number, rows: ActionRow[], rowRefused: (retry: SessionRetry) => boolean = () => false): string | null {
+function stoppedRequest(label: string, request: { id: string }, sessions: LoopSession[], failure: { attempts: number } | undefined, now: number, rows: ActionRow[]): string | null {
   const retry = sessionRetry(sessions, request.id, now);
   const answered = sessions.filter(session => session.requestId === request.id).at(-1);
   if (answered?.state === 'completed' && answered.verdict && answered.verdict.state !== 'DISMISSED') return null;
   const stopped = retry.settled && retry.last && retry.last.state !== 'pending' ? `${label} request ${request.id}'s session attempt ${retry.attempts} ${retry.last.state} without satisfying it`
     : retry.exhausted ? `${label} request ${request.id} exhausted its ${retry.attempts} automatic sessions` : null;
-  if (stopped && rowRefused(retry)) return stopped;
   if (rowRunning(rows)) return null;
   if (stopped) return stopped;
   if (failure && failure.attempts >= dispatchFailureLimit) return `the loop's launch of ${label} request ${request.id} was refused ${failure.attempts} time(s)`;
   return null;
 }
-type SessionRetry = ReturnType<typeof sessionRetry>;
 
 /**
  * Whether the loop's executor still runs a durable action row for the request. The local ledgers
@@ -115,9 +111,11 @@ type SessionRetry = ReturnType<typeof sessionRetry>;
  * settles, or waiting out a backoff. A stalled row (`actionStall`) is no exception — it is
  * re-offered every `actionStallRecheckMs` and claimed a minute after the condition that refused it
  * clears, so a hand launch made during that wait would be the second of two launches for one
- * request. Only the row's retirement, when the item no longer needs the action, stops the executor
- * — or, for a producer row, a stop its launch can never get past (`producerRowRefused`). A review
- * row has no such stop: the executor's `request-review` handler launches through `launchReview`
+ * request. Only the row's retirement stops the executor: when the item no longer needs the action,
+ * or — for a producer row — once an executor recorded a launch refusal no time gets past
+ * (`producerLaunchStop`), which the control plane then stops offering to every executor. A
+ * launcher refusal read from this host's ledger alone never counts: an executor on another host
+ * claims the same row without that ledger and launches. A review row has no such stop: the executor's `request-review` handler launches through `launchReview`
  * (src/reviewer.ts), which refuses only while a session for the request is pending or visible in
  * Herdr, never because the request settled or exhausted its sessions. It relaunches the review as
  * soon as no session holds it, so while the row stands the loop has not stopped, and a hand launch
@@ -125,15 +123,6 @@ type SessionRetry = ReturnType<typeof sessionRetry>;
  * withholds together with the first.
  */
 const rowRunning = (rows: ActionRow[]) => rows.length > 0;
-
-/**
- * Whether the executor's claim of a producer dispatch row can only be refused: `launchProducer`
- * (src/producer.ts) refuses a request that already has a session that did not fail or expire ("one
- * session per request") and one that has had `sessionRetryLimit` sessions ("no further automatic
- * attempt"), whatever time passes. A request exhausted only by sessions that never started is
- * still launched by the executor up to that limit, so its row still runs.
- */
-const producerRowRefused = (retry: SessionRetry) => retry.settled || retry.attempts >= sessionRetryLimit;
 
 /** The open review launch rows: the executor's `request-review` handler launches for the item's live review request whatever request its row names. */
 const reviewRows = (work: Pick<Work, 'actionQueue'>) => (work.actionQueue?.actions ?? []).filter(row => row.kind === 'request-review');
@@ -160,7 +149,13 @@ export function reviewRecovery(work: Work, sessions: ReviewSession[], failure: {
  */
 export function producerRecovery(work: Pick<Work, 'autoDispatch' | 'actionQueue'>, proof: string, loop: LoopSessions): string | null {
   const request = work.autoDispatch?.producers.find(entry => entry.state === 'requested' && entry.proofs?.includes(proof));
-  return request ? stoppedRequest('producer', request, loop.sessions, loop.failures[request.id], loop.now, producerRows(work, request), producerRowRefused) : null;
+  if (!request) return null;
+  const rows = producerRows(work, request);
+  // The durable stop an executor recorded holds for every host; it opens the recovery once the
+  // control plane has retired the row it stops, so no executor still holds a claim of it.
+  const stop = producerLaunchStop(work, request.id);
+  if (stop && !rowRunning(rows)) return `producer request ${request.id} gets no further launch from any executor: ${stop.reason}`;
+  return stoppedRequest('producer', request, loop.sessions, loop.failures[request.id], loop.now, rows);
 }
 
 export const systemDriven = (work: Pick<Work, 'systemDriven'>) => work.systemDriven === true;
