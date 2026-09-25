@@ -16,6 +16,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { answerHumanCommand, humanRequestsCommand, parkCommand } from '../src/cli/session-commands.js';
 import type { CliContext } from '../src/cli/context.js';
+import { terminalDecisions } from '../src/cli/decision-report.js';
 import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, emptyDaemonState, failoverKey, handlerSettleMs, launchAppearanceMs, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { approverRoleHealth, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, readApproverLaunch, readEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, profileAccount, recordObservedExhaustion, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
@@ -756,6 +757,12 @@ test('unit:role-exhausted-waits-for-reset — with every approver account exhaus
   assert.deepEqual(status.attentionItems.filter(item => /capacity/.test(item.subject)).map(item => item.text), [line.detail]);
   assert.deepEqual(status.attentionItems.filter(item => /approver session|unjudged|unanswered/.test(item.text)), []);
   assert.deepEqual(actionableSubjects(config, snapshot.work, now(), { approvals: state.approvals }).filter(subject => subject.kind === 'decision'), [], 'waiting on capacity is not a decision the loop reads as stalled');
+  // The CLI's `master status` builds its unanswered-decision alarms and count from the same
+  // snapshot and the loop's watches: a decision waiting on approver capacity is not one of them.
+  const cli = (work: typeof snapshot.work) => terminalDecisions(async () => ({ decisions }), work, { approvals: Object.values(state.approvals), runtime: { available: true, agents: [] }, now: now() });
+  const report = await cli(snapshot.work);
+  assert.deepEqual([report.unanswered, report.attentionItems], [[], []], 'master status names the wait once, as the capacity line');
+  assert.equal((await cli(snapshot.work.map((item: Work) => ({ ...item, capacity: null })))).unanswered.length, 1, 'the same decision with no capacity wait is a stall');
 
   // The earliest reset passes: the loop alone launches the approver on that account.
   clock.skewMs = Date.parse(resetA) - Date.now() + 60_000;
