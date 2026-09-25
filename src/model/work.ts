@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { BaseRefresh, LandingCheck, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
+import type { BaseRefresh, LandingCheck, StaleMergeability, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
 import { criterionSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
@@ -175,6 +175,8 @@ export interface Work extends Create {
    * alone; see merge-queue.ts for the rule and model/carry.ts for what the refresh carries.
    */
   baseRefresh?: BaseRefresh | null;
+  /** A GitHub conflict reading the control plane's test merge found clean (GY-375); see merge-queue.ts. */
+  staleMergeability?: StaleMergeability | null;
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;

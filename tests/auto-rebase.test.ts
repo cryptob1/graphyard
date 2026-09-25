@@ -72,7 +72,7 @@ function provider(options: { head: string; boundBase: string; branchTip: string;
     mergeable: (value: boolean | null) => { pr.mergeable = value; } };
 }
 
-test('integration:auto-rebase-clean-candidate — a candidate the base branch moved under keeps the base it was bound to; a clean one is left as it is (GY-292), and one GitHub reports conflicting is republished on the new tip as a Graphyard-authored merge when the merge succeeds', async () => {
+test('integration:auto-rebase-clean-candidate — a candidate the base branch moved under keeps the base it was bound to; a clean one is left as it is (GY-292), and one GitHub reports conflicting whose test merge is clean is recorded as a stale reading and never written (GY-375)', async () => {
   const head = sha40('a1'), boundBase = sha40('b1'), movedTo = sha40('b2'), refreshed = sha40('a2');
   const f = provider({ head, boundBase, branchTip: boundBase });
   // Before anything moves the candidate binds the live head, exactly as it always did.
@@ -100,18 +100,20 @@ test('integration:auto-rebase-clean-candidate — a candidate the base branch mo
   assert.deepEqual(baseRefreshNeeded(work), { head, boundBase, baseTip: movedTo });
   assert.deepEqual(pendingBaseRefresh(work), { baseTip: movedTo, boundBase });
 
-  // The control plane merges the moved base into the candidate's own branch.
+  // The control plane confirms GitHub's reading first (GY-375): the test merge of the head onto
+  // the new tip, on a scratch branch, is clean, so the reading is stale and the candidate's own
+  // branch is never written.
   f.merges({ sha: refreshed });
-  f.changed(['src/head.ts', 'docs/head.md']);
-  f.commit(refreshed, { parents: [{ sha: head }, { sha: movedTo }], author: { login: 'graphyard-owner-repo[bot]', type: 'Bot' } });
   const writes: string[] = [];
   const refresh = await f.github.refreshCandidateBase(work, async () => { writes.push('guarded'); });
   assert.deepEqual(writes, ['guarded'], 'the job lease is re-checked before the provider write');
-  assert.deepEqual([refresh.from, refresh.base, refresh.head, refresh.conflict], [{ sha: head, baseSha: boundBase }, movedTo, refreshed, null]);
-  assert.deepEqual(refresh.merge, { from: head, parents: [head, movedTo], author: 'graphyard-owner-repo[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/head.ts', 'docs/head.md'] });
+  assert.deepEqual([refresh.from, refresh.base, refresh.head, refresh.conflict, refresh.merge], [{ sha: head, baseSha: boundBase }, movedTo, head, null, null]);
+  assert.match(refresh.stale!, /test merge of the two is clean; the reading is stale/);
   const merge = f.calls.find(call => call.path === '/merges')!;
-  assert.deepEqual(merge.body, { base: 'graphyard/gy-82-1', head: movedTo, commit_message: 'Graphyard base refresh for GY-82 onto main' });
-  assert.equal(f.calls.filter(call => call.method !== 'GET').length, 1, 'exactly one provider write: the merge onto the candidate\'s own branch');
+  assert.deepEqual(merge.body, { base: 'graphyard-merge-check/gy-82', head: movedTo, commit_message: 'Graphyard merge check for GY-82 [skip ci]' });
+  assert.deepEqual(f.calls.filter(call => call.method !== 'GET').map(call => `${call.method} ${call.path}`),
+    ['PATCH /git/refs/heads/graphyard-merge-check/gy-82', 'POST /merges', 'DELETE /git/refs/heads/graphyard-merge-check/gy-82'],
+    'the only writes are the scratch branch, its merge and its deletion');
 });
 
 test('integration:auto-rebase-conflict-guard — a base the control plane cannot merge in cleanly writes nothing, names the conflict, and gives the held base up so nothing carries', async () => {
@@ -126,7 +128,9 @@ test('integration:auto-rebase-conflict-guard — a base the control plane cannot
   assert.equal(refresh.head, null, 'nothing was published');
   assert.match(refresh.conflict!, new RegExp(`Candidate ${head.slice(0, 12)} cannot be brought onto base branch tip ${movedTo.slice(0, 12)} without resolving a conflict`));
   assert.match(refresh.conflict!, /Run graphyard sync GY-82, resolve it and push/);
-  assert.equal(f.calls.filter(call => call.method !== 'GET' && call.path !== '/merges').length, 0, 'a conflicting refresh writes nothing else');
+  assert.equal(refresh.trigger, 'conflict confirmed');
+  assert.deepEqual(f.calls.filter(call => call.method !== 'GET' && !call.path.includes('graphyard-merge-check/') && call.path !== '/merges').length, 0, 'a conflicting refresh writes nothing but its scratch branch');
+  assert.equal(f.calls.filter(call => call.path === '/merges').length, 1, 'the candidate branch is not merged into once the test merge conflicted');
 
   // The held base is a privilege of a candidate Graphyard can still bring forward. A recorded
   // conflict gives it up, so the candidate rebinds to the live head and every binding is

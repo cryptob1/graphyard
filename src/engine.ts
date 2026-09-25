@@ -1253,7 +1253,7 @@ export class Engine {
       this.evaluate(work, all, now);
       if (carry && kept === undefined) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors,
+      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors, trigger: speculation.trigger ?? null,
         ...(kept !== undefined && speculation.carriedBase ? { carriedBase: speculation.carriedBase } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
@@ -1323,12 +1323,23 @@ export class Engine {
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
       requireCurrent(!work.queue && refresh.policyRevision === work.policyRevision
         && work.candidate?.sha === refresh.from.sha && work.candidate.baseSha === refresh.from.baseSha, 'Candidate, queue entry or policy changed while the base was refreshed');
+      if (refresh.stale) {
+        // GitHub's conflict reading was stale (GY-375): the test merge was clean and nothing was
+        // written, so the refresh record — and whatever it carries onto this head — is left as it is.
+        work.staleMergeability = { head: refresh.from.sha, base: refresh.base, policyRevision: refresh.policyRevision, at: refresh.at, reading: refresh.stale };
+        this.evaluate(work, all, now);
+        await this.recordDispatch(db, work, now);
+        await save(db, work, 'graphyard', 'base.stale-mergeability', now, { head: refresh.from.sha, base: refresh.base, reading: refresh.stale });
+        await wakeJob(db, work.id);
+        return work;
+      }
       const carry = refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
-      work.baseRefresh = { ...refresh, carry };
+      const { stale: _stale, ...recorded } = refresh;
+      work.baseRefresh = { ...recorded, carry };
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', refresh.conflict ? 'base.conflict' : 'base.refreshed', now, { from: refresh.from, base: refresh.base, head: refresh.head,
+      await save(db, work, 'graphyard', refresh.conflict ? 'base.conflict' : 'base.refreshed', now, { from: refresh.from, base: refresh.base, head: refresh.head, trigger: refresh.trigger ?? null,
         ...(refresh.conflict ? { conflict: refresh.conflict } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
@@ -1368,7 +1379,7 @@ export class Engine {
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', restore!.outcome === 'restored' ? 'branch.restored' : restore!.outcome === 'conflict' ? 'branch.restore-conflict' : 'branch.unrepairable', now,
-        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason, ...(refresh.conflict ? { conflict: refresh.conflict } : {}) });
+        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, trigger: refresh.trigger ?? null, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason, ...(refresh.conflict ? { conflict: refresh.conflict } : {}) });
       await wakeJob(db, work.id);
       return work;
     });

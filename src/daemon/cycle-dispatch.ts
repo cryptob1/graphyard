@@ -1,6 +1,6 @@
 // Concern: cycle step 4 — dispatch claimable work under capacity and report base refreshes.
 import type { Work } from '../model.js';
-import { pendingBaseRefresh } from '../merge-queue.js';
+import { pendingBaseRefresh, staleMergeability } from '../merge-queue.js';
 import { dispatchOrder } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
@@ -178,16 +178,23 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //     that refresh did — or the conflict that stopped it — so the pass is an action rather
   //     than a "0 actions" line.
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested)) await isolate('refresh', item, item.key, async () => {
-    const refresh = item.baseRefresh, pending = pendingBaseRefresh(item);
+    const refresh = item.baseRefresh, pending = pendingBaseRefresh(item), stale = staleMergeability(item);
     // One action per head, base tip and policy revision: opened when the branch moves under the
     // candidate, resolved when the control plane reports what its merge did.
-    const target = pending ? { head: item.candidate!.sha, base: pending.baseTip } : refresh ? { head: refresh.from.sha, base: refresh.base } : null;
+    const target = pending ? { head: item.candidate!.sha, base: pending.baseTip } : stale ? { head: stale.head, base: stale.base } : refresh ? { head: refresh.from.sha, base: refresh.base } : null;
     if (!target) return;
     const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}`;
+    // GY-375: the test merge found GitHub's conflict reading stale; nothing was refreshed.
+    if (stale && !pending) {
+      if (state.actions[key]?.state === 'done' || state.actions[key]?.state === 'failed') return;
+      performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'done', detail: `${item.key}: ${stale.reading}; it keeps its head, review and proofs`,
+        attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      return;
+    }
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
-        detail: `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)} and GitHub reports ${item.candidate!.sha.slice(0, 12)} conflicting with it; the control plane is trying to bring it onto the new tip. No rework round, no review round and no proof round is requested unless that merge conflicts.`,
+        detail: `${item.key}: base branch moved from ${pending.boundBase.slice(0, 12)} to ${pending.baseTip.slice(0, 12)} and GitHub reports ${item.candidate!.sha.slice(0, 12)} conflicting with it; the control plane is confirming the conflict with a test merge. No rework round, no review round and no proof round is requested unless that merge conflicts.`,
         attempts: 1, cycle: state.cycle }, now(), effects.persist));
       return;
     }
@@ -195,9 +202,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const carry = refresh!.carry;
     const kept = carry ? [...(carry.approval.carried ? ['the approval'] : []), ...carry.evidence.filter(entry => entry.carried).map(entry => entry.proof)] : [];
     const again = carry ? [...(carry.approval.carried ? [] : ['the approval']), ...carry.evidence.filter(entry => !entry.carried).map(entry => entry.proof)] : [];
+    const trigger = refresh!.trigger ? ` [trigger: ${refresh!.trigger}]` : '';
     const detail = refresh!.conflict
-      ? `${item.key}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; it returns to the worker with the conflict named: ${refresh!.conflict}`
-      : `${item.key}: brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}`;
+      ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; it returns to the worker with the conflict named: ${refresh!.conflict}`
+      : `${item.key}${trigger}: brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}`;
     performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   });

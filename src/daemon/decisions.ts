@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, staleMergeability, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
@@ -254,7 +254,8 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const tip = observation.baseTip ?? candidate.baseSha;
-  if (observation.conflicting && !work.queue)
+  // A conflict reading the control plane's test merge found clean asks for nothing (GY-375).
+  if (observation.conflicting && !work.queue && !staleMergeability(work))
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
   if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
