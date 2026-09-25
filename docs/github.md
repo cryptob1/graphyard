@@ -43,11 +43,11 @@ A candidate enters once its gates pass. Its speculative tip (predicted base merg
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. A moved base merges into the branch; all carry if that conflict-free merge kept the patch-id, else the approval if no reviewed file changed, each proof if its `scopeFiles` are disjoint. Carried steps name their ground; CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. The queue head's tip merges moved bases: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. Carried steps name their ground; CI reruns. GitHub conflicts are test-merged; clean ones log `base.stale-mergeability`.
 
 ### Batches
 
-`mergeQueue.batchSize` (master config, default 4, 1 disables; `POST /api/merge-queue` publishes it) tests entries on one tip; members merge in order when it passes, else halving ejects the culprit, naming the check (`mergeStep`); batches behind an unpassed one eject nothing.
+`mergeQueue.batchSize` (master config, default 4; 1 disables; published via `POST /api/merge-queue`) tests entries together; members merge in order if it passes, else halving ejects the culprit, naming its check (`mergeStep`); batches behind an unpassed one eject nothing.
 
 ### Direct merges
 

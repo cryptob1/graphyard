@@ -8,6 +8,8 @@ import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestr
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
 export function queueRef(key: string) { return `refs/graphyard/queue/${key.toLowerCase()}`; }
+/** The scratch branch a base refresh test-merges on before it trusts GitHub's conflict reading (GY-375); deleted after each check. */
+export function mergeCheckBranch(key: string) { return `graphyard-merge-check/${key.toLowerCase()}`; }
 
 export interface QueueSpeculation {
   ref: string; tip: string; base: string; baseTree: string;
@@ -37,6 +39,8 @@ export interface QueueSpeculation {
   reviewedHead?: string;
   /** An approval GitHub dismissed for a merge-base change on this very tip, restored as the binding approval; see `restoredApproval`. */
   restoredApproval?: RestoredApproval | null;
+  /** Why the tip was built (GY-375): the queue head is the one candidate brought onto the base unasked. */
+  trigger?: 'queue-head';
 }
 /**
  * One unresolved review thread on a candidate's pull request: who opened it (the author of its
@@ -399,6 +403,39 @@ export interface BaseRefresh {
   restore?: BranchRestore | null;
   /** An approval GitHub dismissed for a merge-base change on this very head, restored as the binding approval. */
   restoredApproval?: RestoredApproval | null;
+  /**
+   * What made the control plane touch the branch (GY-375): a conflict its own test merge confirmed,
+   * or a branch restore (an ejection's, or a repair the coordinator requested). Absent on records
+   * that predate the rule.
+   */
+  trigger?: RefreshTrigger;
+  /**
+   * GitHub reported the head conflicting with `base`, and the control plane's own test merge of
+   * the two was clean (GY-375): nothing was written, and the reading is recorded here instead of a
+   * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
+   */
+  stale?: StaleMergeability | null;
+}
+/** Why a branch was written by the control plane rather than by its worker (GY-375). */
+export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair';
+/**
+ * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
+ * GitHub recomputes mergeability lazily after the base moves and can report a clean head
+ * conflicting for a while; acting on that reading refreshed clean candidates and dropped their
+ * review and proofs. The reading is recorded for exactly this head, base tip and policy revision,
+ * and every observation of the same pair is stored with the conflict disproved (`disprovedConflict`),
+ * so nothing refreshes, holds or reworks the candidate for it.
+ */
+export interface StaleMergeability { head: string; base: string; policyRevision: number; at: string; reading: string }
+/** The stale reading recorded for exactly the current head and observed base tip, or null. */
+export function staleMergeability(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): StaleMergeability | null {
+  const observation = work.observation;
+  return observation && work.candidate?.sha === observation.candidate.sha ? disprovedConflict(work, observation) : null;
+}
+/** The stale reading that disproves this observation's conflict: recorded for its head, base tip and the current policy. */
+export function disprovedConflict(work: Pick<Work, 'baseRefresh' | 'policyRevision'>, observation: Pick<Observation, 'candidate' | 'baseTip'>): StaleMergeability | null {
+  const stale = work.baseRefresh?.stale;
+  return stale && stale.head === observation.candidate.sha && stale.base === observation.baseTip && stale.policyRevision === work.policyRevision ? stale : null;
 }
 /**
  * A branch that carried another item's unlanded commits, and what the control plane did about it.
@@ -456,7 +493,10 @@ export function heldBase(work: Pick<Work, 'candidate' | 'baseRefresh' | 'policyR
  * needed: for the merge-queue head, whose speculative tip merges its own reviewed head onto the
  * base just before it lands (`predictQueue`, `advanceQueue`), and here for a candidate GitHub
  * reports conflicting with the new base, whose refresh records the conflict and returns it to its
- * worker. A candidate that merges cleanly keeps its head, its CI, its review and its proofs, bound
+ * worker. GitHub's reading alone is not trusted for that (GY-375): the refresh first test-merges
+ * the head onto the new tip on a scratch branch, and a merge that is clean records the reading as
+ * stale (`staleMergeability`), writes nothing to the candidate's branch, and later observations of
+ * the same head and tip are stored with the conflict disproved. A candidate that merges cleanly keeps its head, its CI, its review and its proofs, bound
  * to the base it was built on (`heldBase`), and its stage; one whose mergeability GitHub has not
  * computed yet waits for the next observation. One attempt per head, base tip and policy revision:
  * a refresh already recorded for the same three is never repeated, so neither a conflict nor a
