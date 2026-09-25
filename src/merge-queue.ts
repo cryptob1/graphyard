@@ -140,6 +140,24 @@ export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policy
   const speculation = work.queue?.speculation, candidate = work.candidate;
   return speculation && candidate && speculation.tip !== candidate.sha && speculation.policyRevision === work.policyRevision ? speculation.tip : null;
 }
+/**
+ * The CI a queued entry is still running on its own published speculative tip, worded for the
+ * merge gate, or null when the candidate is not such a tip (GY-292).
+ *
+ * The entry reached the queue with every gate passing on its own reviewed head; the tip merges
+ * that head onto the base (or the entry ahead) and CI runs again on the combined result. That run
+ * is the merge step validating what will land, not the change going back to Test: its checks are
+ * named here, and the test gate, which judges the candidate's own change, stands. A check that
+ * failed on the tip is an adverse conclusion that ejects the entry (`ejectionReason`), after
+ * which this returns null and the test gate refuses it as ever. `testReasons` are the test gate's
+ * refusals for the tip.
+ */
+export const tipValidationPrefix = 'Merge queue is validating speculative tip ';
+export function tipValidation(work: Pick<Work, 'candidate' | 'policyRevision'>, queue: QueueEntry | null, testReasons: string[]): string[] | null {
+  const speculation = queue?.speculation, candidate = work.candidate;
+  if (!testReasons.length || !speculation || !candidate || speculation.tip !== candidate.sha || speculation.base !== candidate.baseSha || speculation.policyRevision !== work.policyRevision) return null;
+  return testReasons.map(reason => `${tipValidationPrefix}${candidate.sha.slice(0, 12)}: ${reason}`);
+}
 /** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's, or a tip's. */
 export function onto(work: Pick<Work, 'queue' | 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
   return [work.queue?.speculation?.carry, work.baseRefresh?.carry].filter((carry): carry is QueueCarry => !!carry && carry.to.sha === sha && carry.policyRevision === work.policyRevision);
@@ -406,11 +424,20 @@ export function heldBase(work: Pick<Work, 'candidate' | 'baseRefresh' | 'policyR
 }
 
 /**
- * The refresh this candidate is waiting for, or null when it needs none. A queued entry refreshes
- * through its own speculative tip, so the queue keeps its entries; everything else in flight — a
- * candidate still in review, still running CI, still collecting proofs — is refreshed here. One
- * attempt per head, base tip and policy revision: a refresh already recorded for the same three is
- * never repeated, so neither a conflict nor a published head makes the reconciliation job spin.
+ * The refresh this candidate is waiting for, or null when it needs none (GY-292).
+ *
+ * Main moves on every merge, and a refresh republishes the head: CI runs again, and whatever the
+ * base touched of the review or the proofs is required afresh. Refreshing every open candidate on
+ * every merge therefore sent items that had already passed review back to Test several times an
+ * hour, never converging. So, as merge queues do, the combined result is built only where it is
+ * needed: for the merge-queue head, whose speculative tip merges its own reviewed head onto the
+ * base just before it lands (`predictQueue`, `advanceQueue`), and here for a candidate GitHub
+ * reports conflicting with the new base, whose refresh records the conflict and returns it to its
+ * worker. A candidate that merges cleanly keeps its head, its CI, its review and its proofs, bound
+ * to the base it was built on (`heldBase`), and its stage; one whose mergeability GitHub has not
+ * computed yet waits for the next observation. One attempt per head, base tip and policy revision:
+ * a refresh already recorded for the same three is never repeated, so neither a conflict nor a
+ * published head makes the reconciliation job spin.
  */
 export function baseRefreshNeeded(work: Work): { head: string; boundBase: string; baseTip: string } | null {
   const candidate = work.candidate, observation = work.observation;
@@ -419,6 +446,7 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   if (observation.candidate.sha !== candidate.sha) return null;
   const baseTip = observation.baseTip;
   if (observation.baseTipContained !== false || !baseTip || baseTip === candidate.baseSha) return null;
+  if (observation.conflicting !== true) return null;
   const refresh = work.baseRefresh;
   if (refresh && refresh.from.sha === candidate.sha && refresh.base === baseTip && refresh.policyRevision === work.policyRevision) return null;
   // A head found carrying another item's unlanded commits is not brought onto a moved base: a
@@ -642,12 +670,12 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
   return placements;
 }
 /**
- * True for a merge-gate reason that only sequences a queued candidate: it is waiting its turn
- * or for its speculative tip, not refused by protection, mergeability, freshness, or a hold.
+ * True for a merge-gate reason that only sequences a queued candidate: it is waiting its turn,
+ * for its speculative tip, or for CI on that tip (`tipValidation`), not refused by protection, mergeability, freshness, or a hold.
  * Kept beside the messages above so a wording change is visible here.
  */
 export function queueSequencingReason(reason: string) {
-  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$)/.test(reason) || !!predecessorWaitReason(reason);
+  return /^(Merge queue position \d+ of \d+: |Speculative tip on predicted base [0-9a-f]+ has not been published|Waiting for \S+ to publish its speculative tip$|Merge queue is validating speculative tip [0-9a-f]+: )/.test(reason) || !!predecessorWaitReason(reason);
 }
 export function queuePlacement(work: Work, all: Work[], now: number) {
   return predictQueue(all, now).find(placement => placement.id === work.id) ?? null;
