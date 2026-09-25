@@ -29,13 +29,13 @@ Dispatch takes smallest planned scope first and holds overlapping items (`--allo
 
 #### A contaminated branch
 
-A branch carrying another item's unlanded commits is listed under `branches.contaminated`: run `master repair GY-42 The branch carries GY-40's ejected tip`.
+A branch carrying another item's unlanded commits is listed under `branches.contaminated`: run `master repair GY-42 REASON`.
 
 A worker restores its own branch with `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
-Where GitHub offers only a page (protection otherwise reconciles through `master protection --apply`), `master browser FLOW` drives the browser profile from `master init --browser-profile`.
+Protection reconciles through `master protection --apply`; where GitHub offers only a page, `master browser FLOW` drives the profile from `master init --browser-profile`: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
 
 | Flow | What it does |
 | --- | --- |
@@ -43,11 +43,11 @@ Where GitHub offers only a page (protection otherwise reconciles through `master
 | `installation-accept` | Accepts the pending permission request |
 | `protection` | Reconciles branch protection |
 
-Each flow records `record.json` under `.graphyard/master-actions/`. Approving its *Confirm access* GitHub Mobile code on the device is the human-only part. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Each flow records `record.json` under `.graphyard/master-actions/` and appends to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
 
 ## Harness permissions
 
-`master harness claude --apply` writes allow and deny rules to `.claude/settings.local.json` (Codex: `master harness codex`).
+A harness classifier refuses routine administration, so `master harness claude --apply` writes allow and deny rules to `.claude/settings.local.json` (Codex: `master harness codex`).
 
 ## Typed actions and executors
 
@@ -57,7 +57,7 @@ Three consecutive failures with an unchanged reason mark a row stalled rather th
 
 ### Loop failure recovery
 
-A failed snapshot read retries once after a 0.5–1.5 s jittered pause; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw becomes its failed `isolated:KIND:ITEM-ID` action with the error while the cycle goes on. Over-long state is truncated when written.
+A failed snapshot read retries once after 0.5–1.5 s jitter; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action. Over-long state is truncated when written.
 
 ### Running executors under supervision
 
@@ -69,11 +69,11 @@ A failed snapshot read retries once after a 0.5–1.5 s jittered pause; a failed
 
 ### The managed worktree root
 
-Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`, never tmpfs).
+Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
 
 ## Recovery
 
-A dead supervisor leaves its item fenced; `containment` lists each surviving process. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor leaves its item fenced; `containment` lists each surviving process with pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator` and `stopped-by-attestation` lapses are history. Any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
 
@@ -81,4 +81,4 @@ A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator`
 
 ## Pipeline speed
 
-The target is submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs [--split GY-N] [--record DIR]` records what `manual:speed-target-met` reads. Never trade a gate or proof for the number.
+The target is submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
