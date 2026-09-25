@@ -1,5 +1,6 @@
 import { candidateCommitUrl, candidatePrUrl } from './links';
 import Term from './components/term';
+import { shaChars, shortShas } from './format';
 
 /** External GitHub destinations open in a new, sandboxed-safe tab. */
 const external = { target: '_blank', rel: 'noopener noreferrer' } as const;
@@ -21,24 +22,22 @@ export function CandidatePr({ repository, candidate, workKey }: { repository: un
     : <span>PR #{pr}</span>;
 }
 
-/** How many characters of a commit SHA the dashboard shows (the operator's review of PR #156). */
-export const shaChars = 8;
+export { shaChars, shortShas };
 /**
- * A commit SHA as the dashboard shows it: its first eight characters on screen (the element is
- * clipped to `shaChars` monospace characters in web/style.css), and the whole SHA still its text,
- * title and link, so selecting or copying it gives the exact commit. Anything that is not a commit
- * SHA is shown as it is.
+ * A commit SHA as the dashboard shows it: its first eight characters are the text itself (GY-168:
+ * never the whole SHA clipped by the stylesheet), and the whole SHA is its title and, where there
+ * is a repository, the commit link — so hovering or following it gives the exact commit. Anything
+ * that is not a commit SHA is shown as it is.
  */
 export function ShortSha({ sha }: { sha: string }) {
   if (!/^[0-9a-f]{9,64}$/i.test(sha)) return <code>{sha}</code>;
-  return <code className="sha" title={sha}>{sha}</code>;
+  return <code className="sha" title={sha}>{sha.slice(0, shaChars)}</code>;
 }
 
 export function CandidateSha({ repository, sha, workKey }: { repository: unknown; sha: unknown; workKey?: string }) {
-  // Eight characters on screen; the exact commit the gates decided on is what a reader selects,
-  // copies and follows (ShortSha keeps the rest of it in the text).
+  // Eight characters on screen and in the accessible name; the link follows the exact commit the gates decided on.
   const text = String(sha);
-  const label = `${text}, open commit${workKey ? ` for ${workKey}` : ''} in GitHub`;
+  const label = `${shortShas(text)}, open commit${workKey ? ` for ${workKey}` : ''} in GitHub`;
   const href = candidateCommitUrl(repository, sha);
   return href
     ? <a className="candidate-link" href={href} aria-label={label} onClick={event => event.stopPropagation()} {...external}><Term term="commit" focusable={false}><ShortSha sha={text}/></Term></a>
