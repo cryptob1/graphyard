@@ -11,9 +11,11 @@ export type ApprovalMode = 'auto' | 'prompt';
  * no-approval mode, so the recipe adds nothing beside them; `settable` are recipe flags whose
  * value an operator may choose because no value of them brings a prompt back (Codex's sandbox);
  * `aliases` map a short spelling onto its recipe flag; `permits` judges an operator's own value
- * of a recipe variable, which otherwise must equal the recipe's.
+ * of a recipe variable, which otherwise must equal the recipe's; `config` names the runtime's
+ * generic `key=value` override flags and the keys whose value is pinned to the recipe's (Codex's
+ * `-c approval_policy=…` would otherwise bring the approval prompt back past `--ask-for-approval`).
  */
-export interface LaunchRecipe { args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean> }
+export interface LaunchRecipe { args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean>; config?: { flags: string[]; pins: Record<string, string> } }
 /** A permission document that answers nothing with "ask", at any depth: OpenCode's prompting value. */
 export function asksNothing(value: string) {
   let document: unknown;
@@ -28,7 +30,7 @@ export function asksNothing(value: string) {
 export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
   claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], prompts: 'tool-approval prompts on first use of each command class',
     tradeoff: 'Claude Code stops classifying commands for this session; everything the agent proposes runs without asking.' },
-  codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, prompts: 'directory-trust and per-command approval prompts',
+  codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, config: { flags: ['-c', '--config'], pins: { approval_policy: 'never' } }, prompts: 'directory-trust and per-command approval prompts',
     tradeoff: 'Codex never asks for approval; only its workspace-write sandbox still limits what a command can touch.' },
   cursor: { args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
     tradeoff: 'cursor-agent runs every command it proposes in the assigned worktree and trusts that worktree without asking.' },
@@ -150,6 +152,12 @@ export function launchPlan(kind: string | undefined, approvals: ApprovalMode = '
     if (!present) { added.push(flag, ...(value === null ? [] : [value])); continue; }
     const contrary = value === null || recipe.settable?.includes(flag) ? undefined : valuesOf(flag).find(given => given !== value);
     if (contrary !== undefined) return refuse(`${flag} ${contrary}`);
+  }
+  // A generic override (`-c key=value`, `--config=key=value`) of a pinned key must carry the pinned
+  // value too, on every occurrence; TOML quoting around the value is the runtime's, not a new value.
+  for (const flag of recipe.config?.flags ?? []) for (const setting of valuesOf(flag)) {
+    const [key, given] = setting.split(/=(.*)/s).map(part => part?.trim().replace(/^(["'])(.*)\1$/s, '$2'));
+    if (key in (recipe.config?.pins ?? {}) && given !== recipe.config!.pins[key]) return refuse(`${flag} ${setting}`);
   }
   const variables: Record<string, string> = {};
   for (const [name, value] of Object.entries(recipe.environment)) {

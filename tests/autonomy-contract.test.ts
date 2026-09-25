@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { autonomyContract, withAutonomyContract } from '../src/autonomy.js';
+import { browserProfileMissing, setupHealth } from '../src/cli/master-setup.js';
 import { assertLaunchRecipe, launchPlan, LaunchRefusedError, registryContractRefusal, nonInteractiveLaunch, refusedLaunchKinds } from '../src/harness.js';
 import { accountLaunch, agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchCommand, launchDelivery, launchEscalationHandler, launchRequestContracts, launchRoleContracts, openCodeAllowAll, requestContractRefusal, requestPlaceholder, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
@@ -125,6 +126,14 @@ test('unit:every-role-carries-autonomy-contract — worker, reviewer, producer, 
     stub = herdr();
     await startMaster(root, 'codex', [], [], stub.run);
     capture('master', stub);
+    // With no browser profile configured, nothing in the master's own text tells it to ask the
+    // operator: the missing profile is a setup attention item master status records for them.
+    const masterText = roles.master.request!;
+    assert.ok(!/(?<!never )\bask (them|the operator)\b/i.test(masterText.replace(autonomyContract, '')), 'the master is never told to ask the operator');
+    assert.ok(masterText.includes('Never ask the operator for it in chat'));
+    const { attention } = await setupHealth(root, await loadMasterConfig(root), { platform: 'linux', home: root, temporaryDirectories: [], run: () => '' });
+    const browser = attention.find(item => item.text === browserProfileMissing);
+    assert.ok(browser && browser.human && browser.humanOnly === 'issuing credentials to people' && browser.next.includes('master init --token-stdin --browser-profile PROFILE'), 'master status records the missing browser profile for the operator');
 
     assert.deepEqual(Object.keys(roles).sort(), ['approver', 'escalation handler', 'master', 'producer', 'reviewer', 'worker']);
     for (const [role, launched] of Object.entries(roles)) {
@@ -184,10 +193,15 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
       ['codex', ['--ask-for-approval', 'never', '--ask-for-approval', 'on-request'], {}, '--ask-for-approval on-request'], ['codex', ['--ask-for-approval', 'never', '-a', 'on-request'], {}, '--ask-for-approval on-request'],
       ['codex', ['-a', 'never', '--ask-for-approval=untrusted'], {}, '--ask-for-approval untrusted'], ['codex', ['--yolo', '--ask-for-approval', 'on-request'], {}, '--ask-for-approval on-request'],
       ['muse', ['--approval-mode', 'never', '--approval-mode', 'always'], {}, '--approval-mode always'], ['claude', ['--dangerously-skip-permissions', '--permission-mode', 'default'], {}, '--permission-mode default'],
+      // Codex's generic config override reaches the same setting; a pinned key keeps the recipe's value.
+      ['codex', ['-c', 'approval_policy=on-request'], {}, '-c approval_policy=on-request'], ['codex', ['--config=approval_policy="untrusted"'], {}, '--config approval_policy="untrusted"'],
+      ['codex', ['--yolo', '-c', 'approval_policy = "on-failure"'], {}, '-c approval_policy = "on-failure"'],
     ] as const) assert.throws(profileLaunch(kind, [...agentArgs], environment), (error: unknown) => error instanceof LaunchRefusedError && error.kind === kind && error.message.includes(`the ${kind} runtime with ${setting}`), `${kind} ${setting} is refused`);
     // A recipe flag the profile leaves out is added beside the ones it sets; a value no prompt depends on is the operator's.
     assert.deepEqual(accountLaunch({ kind: 'copilot', approvals: 'auto', agentArgs: ['--allow-all-tools'], environment: {} }, null).args, ['--allow-all-paths', '--allow-all-tools']);
     assert.deepEqual(accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: ['--sandbox', 'danger-full-access'], environment: {} }, null).args.slice(0, 4), ['--ask-for-approval', 'never', '--sandbox', 'danger-full-access']);
+    const configured = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: ['-c', 'approval_policy="never"', '-c', 'model=o3'], environment: {} }, null).args.join(' ');
+    assert.ok(configured.includes('-c approval_policy="never" -c model=o3'), 'a config override that keeps the pinned value, or sets another key, is the operator\'s');
     const bypass = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: ['--dangerously-bypass-approvals-and-sandbox'], environment: {} }, null).args;
     assert.equal(bypass[0], '--dangerously-bypass-approvals-and-sandbox'); assert.ok(!bypass.includes('--ask-for-approval'), 'a flag that already selects the no-approval mode is not joined by a conflicting one');
     const allowed = accountLaunch({ kind: 'opencode', approvals: 'auto', agentArgs: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":{"*":"allow","rm -rf *":"deny"}}' } }, null);
