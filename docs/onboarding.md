@@ -21,7 +21,7 @@ Commit the updated `AGENTS.md` and `.gitignore`, never `.graphyard/`. A worker w
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder to post its verdict) comes from the same launcher and is acted on without confirmation.
 
-Agents rightly treat Herdr's bracketed paste as untrusted data (a prompt injection defence), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. Nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents treat Herdr's bracketed paste as untrusted data (a prompt injection defence), so sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. Nothing else pasted carries that authority; the role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -75,7 +75,7 @@ node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a 
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --reason "Review on a different model than the author"
 ```
 
-A role's `--concurrency` counts only sessions that are running. Each launch pairs its registry session with the Herdr session it started, and every `master run` cycle ends the registry sessions whose Herdr session is gone, plus an approver's as soon as its decision is judged. An approver launch refused because its role is at the limit does not count against the decision's launch bound, so the first cycle after a slot frees launches it.
+A role's `--concurrency` counts running sessions only: each `master run` cycle ends registry sessions whose Herdr session is gone, and an approver's once its decision is judged. An approver launch refused at the limit waits for a slot without spending the decision's launch bound.
 
 ### Size review and proof capacity
 
@@ -96,9 +96,9 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-The second `init` installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances that run each item's next action; without it resyncs and reclaims go unserved.
+The second `init` installs [executors](../examples/master/graphyard-executor@.service) for each item's next action; without them resyncs and reclaims go unserved.
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. `master start claude` also writes the harness rules. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation, and `master review GY-1` is the recovery path.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. `master start claude` also writes the harness rules. Add the reviewer with `master reviewer setup` and a [launch profile](../examples/master/claude-reviewer.json); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 

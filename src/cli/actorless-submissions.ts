@@ -69,3 +69,12 @@ export function actorlessSubmissions(work: Work[], now: Date, reworkDecisions: R
       ...agentOwner('master', missing.next(item.key)) }];
   });
 }
+
+/**
+ * The actorless submissions `master status` names, from its snapshot and the loop's decision
+ * watches: a rework decision the loop requested and has not seen settled is a rework request.
+ */
+export function actorlessAttention(snapshot: { work: Work[]; now: string }, approvals: readonly { work: string; action: string; settledAt: string | null }[] = []): AttentionItem[] {
+  const reworking = new Set(approvals.filter(watch => watch.action === 'rework' && !watch.settledAt).map(watch => watch.work));
+  return actorlessSubmissions(snapshot.work, new Date(snapshot.now), reworking);
+}

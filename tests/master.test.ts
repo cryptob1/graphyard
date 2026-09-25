@@ -507,12 +507,14 @@ test('routine merge is exact-candidate, double-checked, and never uses an admin 
   assert.match(uncommittedResult.result, /merge requested/); assert.equal(recommitted, execution.id, 'the resumed execution is committed before the provider call');
   assert.equal(resumedCalls.filter(args => args[1] === '--method').length, 1);
   // Only a recorded provider commit marks an unknown provider outcome; that execution is retained
-  // for observation and never retried, whether or not its authority has since lapsed.
+  // for observation and never retried, whether or not its authority has since lapsed. It is
+  // reported as pending, never as merged (GY-195): the loop records it as waiting and asks again.
   const committedExecution = { ...verifiedExecution, committingAt: new Date().toISOString() };
   for (const expiresAt of [committedExecution.expiresAt, new Date(Date.now() - 1000).toISOString()]) {
     const uncertain = work({ observation: candidate.observation, mergeExecution: { ...committedExecution, expiresAt } });
-    const recovered = await mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, cancel, verify, () => { throw new Error('must not repeat a possibly attempted provider call'); }, execution.owner);
-    assert.match(recovered.result, /provider commit was already recorded/);
+    const recovered = await mergeWork(config, uncertain, async () => ({ work: [uncertain], now: new Date().toISOString() }), async () => { throw new Error('must not reacquire'); }, cancel, verify, () => { throw new Error('must not repeat a possibly attempted provider call'); }, execution.owner) as { pending?: boolean; merged?: boolean; result: string };
+    assert.equal(recovered.pending, true, 'an unknown provider outcome is pending'); assert.notEqual(recovered.merged, true, 'and never reported as merged');
+    assert.match(recovered.result, new RegExp(`provider outcome of merge execution ${committedExecution.id} is unknown; Graphyard retained it until ${expiresAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} and waits for GitHub`));
   }
   const lateExecution = { ...execution, issuedAt: new Date(Date.now() - 110_000).toISOString(), expiresAt: new Date(Date.now() + 10_000).toISOString() };
   const late = work({ observation: candidate.observation, mergeExecution: lateExecution }); cancelled = '';

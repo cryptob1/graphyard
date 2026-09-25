@@ -5,7 +5,7 @@
 
 Add a worker with `master worker add FILE` from a template ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); it points to a mode-0600 token file outside every worktree.
 
-Reviewers are added with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json) templates); the loop launches each review; `master review GY-N [PROFILE]` only recovers a refused automatic launch or an attempt that settled unsatisfied.
+Reviewers are added with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json) templates); `master review GY-N [PROFILE]` only recovers a refused automatic launch or an attempt that settled unsatisfied.
 
 `master producer replace FILE`, `master producer remove NAME` and `master reviewer remove NAME` apply on the next tick; `setup.attention` reports setup that would stop every launch.
 
@@ -45,7 +45,7 @@ The typed line is bounded at **512 bytes** whatever the request is.
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it working, idle or done with no prompt on screen, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **30 seconds** means started; one still starting gets up to **120 seconds** (`started.extended`). Anything else is refused naming the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing)`, `(no runtime under the pane)`, `the claude runtime was still starting after 120 s`, or `the claude runtime is blocked before it is ready`. It appears as `Automatic producer launch for GY-N refused 1 time(s): …` and is retried.
+The runtime is **ready** when Herdr reports it working, idle or done with no prompt on screen, or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **30 seconds** means started; one still starting gets up to **120 seconds** (`started.extended`). Anything else is refused naming the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing)`, `(no runtime under the pane)`, `the claude runtime was still starting after 120 s`, or `the claude runtime is blocked before it is ready`. It appears as `Automatic producer launch for GY-N refused …` and is retried.
 
 #### First-run consent prompts
 

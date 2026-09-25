@@ -12,13 +12,13 @@ import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHead
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { directMergeLine, nameOrphanSupervisors, stalledItemAttention } from './status-attention.js';
+import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors, stalledItemAttention } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { reviewConflictAttention } from '../model/review-conflict.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { stalledActionAttention } from './stalled-actions.js';
-import { actorlessSubmissions } from './actorless-submissions.js';
+import { actorlessAttention } from './actorless-submissions.js';
 import { ledgerRefusalAttention } from '../master-status.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { githubBudgetAttention } from './github-budget-attention.js';
@@ -38,37 +38,11 @@ import { attributeAttention, resourceStatus } from '../master-status.js';
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The attention builders live beside each other in `status-attention.ts`; the report reads them
 // from here, as does everything that was reading them from here before the split.
-export { nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
+export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
 export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
-
-/**
- * One attention item per requested decision whose approver could not be launched (GY-101). A
- * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
- * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
- * standing with a session that never started. `master status` used to show that as a decision
- * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
- * named here as what it is, with the loop's own refusal and the command that launches it again.
- */
-export function approverLaunchAttention(daemon: {
-  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
-  actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
-}): AttentionItem[] {
-  const actions = daemon.actions ?? [];
-  return (daemon.approvals ?? []).flatMap(watch => {
-    if (watch.settledAt) return [];
-    // The loop records a refused launch under the decision it was requested for (the request that
-    // could not reach an approver) or under that launch's own key (a replacement that could not).
-    const since = Date.parse(watch.launchedAt ?? watch.requestedAt);
-    const refusal = actions.find(action => action.state === 'failed' && action.kind === 'decision'
-      && (action.key === watch.key || action.key.startsWith(`approver:${watch.decision}:launch:`))
-      && (!Number.isFinite(since) || Date.parse(action.at) >= since));
-    return refusal ? [{ subject: watch.work, text: `${watch.work} is awaiting an approver for ${watch.action} decision ${watch.decision} that could not start${watch.agentName ? ` as ${watch.agentName}` : ''}: ${refusal.detail}`,
-      ...agentOwner('master', `graphyard master approver ${watch.work} ${watch.decision} [AGENT_KIND]`, 'approver') }] : [];
-  });
-}
 
 /**
  * The `master status` report: Graphyard work truth joined with Herdr session health, the local
@@ -147,8 +121,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const stalledItems = stalledItemAttention(snapshot);
   // A submitted item with no review, producer or rework request and no named wait (GY-191).
-  const reworking = new Set((cycling?.approvals ?? []).filter(watch => watch.action === 'rework' && !watch.settledAt).map(watch => watch.work));
-  const actorless = actorlessSubmissions(snapshot.work, new Date(snapshot.now), reworking);
+  const actorless = actorlessAttention(snapshot, cycling?.approvals);
   // An action no live executor can claim is not queued behind other work (GY-105); it is named
   // with its wait and the unit to start, ahead of everything that waits on it.
   const executors = await executorFleet(root, masterApi, snapshot);

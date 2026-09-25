@@ -233,8 +233,10 @@ test('integration:master-config-reload — a running loop adopts master.json cha
       { config: automatic, changed: [], refused: '.graphyard/master.json changes url, which a running master loop is bound to; restart master run to adopt it', at: iso(3000) },
     ];
     const state = emptyDaemonState(manual);
-    const effects = daemonEffects({ snapshot: async () => { if (++cycles >= 4) process.emit('SIGUSR2' as NodeJS.Signals); return { work: [mergeable], now: iso(0) }; } }, log);
-    const result = await runDaemon(manual, state, effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: () => {}, reload: async () => reloads[Math.min(cycles, reloads.length - 1)] });
+    // Cycles are counted at the reload that opens each one, not per snapshot read: the merge step
+    // re-reads the item immediately before the guarded merge (GY-192), so a cycle that merges reads twice.
+    const effects = daemonEffects({ snapshot: async () => { if (cycles >= 4) process.emit('SIGUSR2' as NodeJS.Signals); return { work: [mergeable], now: iso(0) }; } }, log);
+    const result = await runDaemon(manual, state, effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: () => {}, reload: async () => reloads[Math.min(cycles++, reloads.length - 1)] });
     assert.equal(result.cycles.length, 4);
     const actions = Object.values(state.actions);
     assert.ok(actions.some(action => action.kind === 'escalation' && /Automatic merging is disabled/.test(action.detail)), 'the first cycle ran with autoMerge off');
