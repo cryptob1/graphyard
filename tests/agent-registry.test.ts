@@ -23,7 +23,7 @@ import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetV
 import type { Principal, Work } from '../src/model.js';
 import { FleetOverview } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
@@ -258,7 +258,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 
   // The profile is a Graphyard identity and nothing else here: it says codex, with Codex-only
   // arguments, and names no account. The registry decides what actually runs.
-  const { root, config, credentialDirectory } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex', agentArgs: ['--model', 'gpt-codex-only'] }, { name: 'worker-b', principal: 'implementer-b', kind: 'codex' }]);
+  const { root, config, credentialDirectory } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex', agentArgs: ['--model', 'gpt-codex-only'] }, { name: 'worker-b', principal: 'implementer-b', kind: 'codex' }, { name: 'worker-c', principal: 'implementer-c', kind: 'claude', agentArgs: ['--permission-mode', 'default'] }]);
   assert.equal(config.environments, undefined); assert.ok(config.workers.every(entry => !entry.accounts));
   const calls: string[][] = [];
   const dispatched = await dispatch(root, config, 'worker-a', probe, calls);
@@ -302,13 +302,23 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   await assert.rejects(dispatch(root, config, 'worker-a', probe, [], args => args[0] === 'pane' && args[1] === 'run'), /herdr refused the launch/);
   const released = (await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!;
   assert.ok(released.endedAt); assert.match(released.endReason!, /worker launch for GY-\d+ failed: herdr refused the launch/);
+  // So does a launch refused for its effective arguments after the account was chosen: a claude
+  // profile restoring the approval prompt ends the session it reserved, not five minutes later (GY-184).
+  await assert.rejects(dispatch(root, config, 'worker-c', probe), /refuses to launch the claude runtime with --permission-mode default/);
+  const refusedLaunch = (await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!;
+  assert.equal(refusedLaunch.principal, 'implementer-c'); assert.ok(refusedLaunch.endedAt, 'the refused launch gives its session back');
+  assert.match(refusedLaunch.endReason!, /worker launch for GY-\d+ failed: Graphyard refuses to launch the claude runtime/);
 
   // The approver's runtime comes from its role too — here a runtime with no login home and its own contract.
   const approverCalls: string[][] = [];
   const approver = await launchApprover(root, readyWork('GY-950'), 'decision-1', undefined, [], herdr(approverCalls), probe);
   assert.equal(approver.account!.environment, 'muse-a');
   const started = expandTypedCommand(approverCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
-  assert.equal(started.kind, 'muse'); assert.deepEqual(started.args, ['--approval-mode', 'never', '--trust-workspace']);
+  assert.equal(started.kind, 'muse'); assert.deepEqual(started.args.slice(0, 3), ['--approval-mode', 'never', '--trust-workspace']);
+  // Muse takes its request positionally, after its contract's arguments, never pasted (GY-184).
+  assert.equal(started.args.length, 4); assert.match(started.args[3], /You are the independent Graphyard approver/);
+  assert.equal(requestOf(started.kind, started.args), started.args[3]);
+  assert.equal(approverCalls.some(args => args[0] === 'agent' && args[1] === 'prompt'), false);
   // …and a role the registry does not define is not guessed at: reviewer falls to the local profile, which names none.
   assert.deepEqual(await selectAccount(config, 'reviewer', { name: 'review-a' }, probe), { account: null, health: null, skipped: [] });
   const source = await readFile(new URL('../src/master.ts', import.meta.url), 'utf8');

@@ -93,6 +93,7 @@ test('unit:ui-reads-session-state — master status reads the session state: run
   assert.deepEqual(report.running.map(row => row.id).sort(), ['idle', 'working'], 'master status lists as running exactly what the Workers page does');
   assert.deepEqual(report.running.map(row => row.seenAt).sort(), [at(-2 * minute), at(-minute)]);
   assert.ok(!report.running.some(row => row.id === 'stale'));
+  assert.deepEqual(report.unseen.map(row => row.id), ['stale'], 'an open session whose observation went stale is listed unseen, never dropped from the status');
 
   const worker = { name: 'worker-3', principal: 'worker-3', agentName: 'graphyard-worker-3', mode: 'launch', kind: 'claude', credentialFile: '/outside/w3.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
   const held = (sessions: SessionHandle[]): Work => ({ ...work.find(w => w.key === 'GY-14')!, lease: { owner: 'worker-3', epoch: 1, expiresAt: at(30 * minute) }, sessions });

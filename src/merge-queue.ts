@@ -281,8 +281,26 @@ export function restoredApproval(work: Pick<Work, 'candidate' | 'queue' | 'baseR
   return refresh?.head === candidate.sha && refresh.policyRevision === work.policyRevision && refresh.restoredApproval?.sha === candidate.sha ? refresh.restoredApproval : null;
 }
 export interface QueuePlacement {
+  /**
+   * `position` is the entry's place in the chain of validated entries it is predicted on, not its
+   * index in the queue (GY-196): an entry that fell out of validation is predicted on the same
+   * chain as the validated entry behind it, so both can hold the same position, and position 0 is
+   * the chain's head only for a validated entry. An entry that fell back out of validation at the
+   * merge stage (rework, violation) at position 0 is observed at the head cadence (github.ts) and
+   * no more: it cannot merge, and the validated head beside it lands first. `sequence` alone
+   * orders the physical queue: select the entries behind one by a greater sequence, never by
+   * slicing the placements at `position`.
+   */
   id: string; key: string; position: number; size: number; sequence: number; enqueuedAt: string; waitMs: number;
   predecessors: string[]; predictedBase: string | null; tip: string | null;
+  /** Entries ahead by sequence that are not validated (see `validatedQueueEntry`): passed over, never predicted on (GY-196). */
+  skipped?: string[];
+  /**
+   * Set only on an entry that is not validated itself: the validated entries behind it by sequence,
+   * which pass over it and may land first until it is revalidated (GY-196). `size` counts the
+   * validated entries, and this one too while it is passed over.
+   */
+  passedOver?: string[];
   /** The base-branch commit the chain of predictions rests on, as the head entry observed it. */
   base: { sha: string; tree: string | null } | null;
   /** How a current entry binds its predicted base: the exact commit, or a tree-identical advance of it. */
@@ -530,15 +548,43 @@ export function keptTipCarry(work: Pick<Work, 'candidate' | 'queue'>, speculatio
   return recorded && recorded.tip === speculation.tip && recorded.base === speculation.base && recorded.policyRevision === speculation.policyRevision ? recorded.carry ?? null : null;
 }
 
+/**
+ * Whether a queued entry is a predecessor the entries behind it are predicted on (GY-196). An entry
+ * stays one while its tip is being validated by the control plane's own rounds — CI and the proofs
+ * it requests run on every freshly published tip, and the entries behind it validate in parallel
+ * on that tip. It stops being one when it fell back out of validation: its tip needs an approval
+ * afresh (a republication or base refresh the approval did not carry across, a review requested
+ * anew), a rework was requested, or it has an open violation. Such an entry keeps its sequence, but
+ * nothing behind it is built on, bound to, or ejected for a tip that may never land: the entries
+ * behind it are predicted on the base branch plus the predecessors ahead only, and their tips are
+ * rebuilt there. It is predicted on that same chain itself, and counts again once it is approved.
+ * An entry GitHub already merged is not passed over: its content is on the base branch, and it
+ * holds its place until its reconciliation exits it (see `unpublishableEntry`).
+ */
+const validatingStages: readonly Work['stage'][] = ['test', 'acceptance', 'merge'];
+export function validatedQueueEntry(work: Pick<Work, 'queue' | 'stage' | 'violations' | 'reworkRequested' | 'observation'>): boolean {
+  if (!work.queue) return false;
+  if (work.observation?.merged) return true;
+  return validatingStages.includes(work.stage) && !work.reworkRequested && !work.violations.length;
+}
 export function predictQueue(all: Work[], now: number): QueuePlacement[] {
   const entries = queueOrder(all);
   const placements: QueuePlacement[] = [];
-  for (const [position, work] of entries.entries()) {
+  const validated = entries.map(validatedQueueEntry), validatedCount = validated.filter(Boolean).length;
+  for (const [index, work] of entries.entries()) {
     const entry = work.queue!, candidate = work.candidate, speculation = entry.speculation;
-    // Entry 0 predicts against the observed base branch; every other entry predicts against the
-    // validated tip of the entry directly ahead, which is what main will hold once it merges.
-    const predictedBase = position === 0 ? observedBaseTip(work) : placements[position - 1].tip;
-    const base = position === 0 ? predictedBase ? { sha: predictedBase, tree: work.observation?.baseTree ?? null } : null : placements[position - 1].base;
+    // The entries ahead that this one is predicted on: the validated ones only (GY-196). Its
+    // position is its place in that chain, so an entry behind only unvalidated ones is the head.
+    const ahead = entries.slice(0, index).filter((_, at) => validated[at]);
+    const skipped = entries.slice(0, index).filter((_, at) => !validated[at]).map(item => item.key);
+    const passedOver = validated[index] ? null : entries.slice(index + 1).filter((_, at) => validated[index + 1 + at]).map(item => item.key);
+    const position = ahead.length;
+    const previous = position === 0 ? null : placements.find(placement => placement.id === ahead[position - 1].id)!;
+    // The chain's head predicts against the observed base branch; every other entry predicts
+    // against the validated tip of the validated entry directly ahead, which is what main will
+    // hold once it merges.
+    const predictedBase = !previous ? observedBaseTip(work) : previous.tip;
+    const base = !previous ? predictedBase ? { sha: predictedBase, tree: work.observation?.baseTree ?? null } : null : previous.base;
     const published = !!speculation && !!candidate && speculation.tip === candidate.sha
       && speculation.base === candidate.baseSha && speculation.policyRevision === work.policyRevision;
     const onPrediction = !!candidate && !!predictedBase && candidate.baseSha === predictedBase;
@@ -548,7 +594,7 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     // bound; the advance is recorded, not republished. This is the same judgement at every
     // position (GY-100): a tip push replaces the head, and GitHub dismisses its approval with it,
     // so an entry whose prediction moved only in sha must not be republished either.
-    const predictedBaseTree = position === 0 ? work.observation?.baseTree ?? null : placements[position - 1].tipTree ?? null;
+    const predictedBaseTree = !previous ? work.observation?.baseTree ?? null : previous.tipTree ?? null;
     // The queue head lands on the base branch tip itself, and GitHub dismisses the approval of a
     // head that does not contain that exact commit, whatever its tree (GY-145): no carry for it.
     const unancestored = position === 0 && !onPrediction && published && predictedBase === work.observation?.baseTip ? missingBaseAncestry(work) : null;
@@ -563,14 +609,18 @@ export function predictQueue(all: Work[], now: number): QueuePlacement[] {
     // though the candidate branch is deliberately behind the base branch while it waits its turn.
     const current = published && (onPrediction || treeEquivalent || carriedToPrediction);
     const reasons: string[] = [];
-    if (position > 0) reasons.push(`Merge queue position ${position + 1} of ${entries.length}: ${entries[position - 1].key} is ahead`);
+    // The chain this entry is counted in: the validated entries, and itself while passed over. A
+    // passed-over entry says so, naming the validated entries behind it that may land before it.
+    const size = validatedCount + (passedOver ? 1 : 0);
+    const passed = passedOver?.length ? `passed over until revalidated, so ${passedOver.join(', ')} behind may merge first` : null;
+    if (position > 0 || passed) reasons.push(`Merge queue position ${position + 1} of ${size}: ${[position > 0 ? `${ahead[position - 1].key} is ahead` : null, passed].filter(Boolean).join('; ')}`);
     if (!current) reasons.push(predictedBase
       ? unancestored ? `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published onto that exact commit: ${missingAncestryReason(unancestored)}`
       : `Speculative tip on predicted base ${predictedBase.slice(0, 12)} has not been published and validated for this candidate`
-      : `Waiting for ${entries[position - 1]?.key ?? 'the queue head'} to publish its speculative tip`);
+      : `Waiting for ${ahead[position - 1]?.key ?? 'the queue head'} to publish its speculative tip`);
     placements.push({
-      id: work.id, key: work.key, position, size: entries.length, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
-      waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: entries.slice(0, position).map(ahead => ahead.key),
+      id: work.id, key: work.key, position, size, sequence: entry.sequence, enqueuedAt: entry.enqueuedAt,
+      waitMs: Math.max(0, now - Date.parse(entry.enqueuedAt)), predecessors: ahead.map(item => item.key), skipped, ...(passedOver ? { passedOver } : {}),
       predictedBase, tip: current && candidate ? candidate.sha : null, base, binding: current ? treeEquivalent || carriedToPrediction ? 'tree-equivalent' : 'exact' : null,
       tipTree: current && candidate ? speculation!.tipTree ?? null : null, current,
       publishable: !current && !!predictedBase && !!candidate, reasons,

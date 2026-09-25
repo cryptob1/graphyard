@@ -49,6 +49,7 @@ export interface SessionHandle {
   state: SessionState; outcome: string | null;
   /** The one session state every reader shares (GY-172, session-state.ts): what the loop last observed of it, when, and how many consecutive reports missed it. */
   observed?: ObservedSessionState | null; observedAt?: string | null; missedReports?: number;
+  /** The launch attempt holding this handle (`registeredLaunch`): only it may close or re-coordinate it. */ launch?: string | null;
 }
 
 const line = (max: number) => z.string().trim().min(1).max(max).regex(/^[^\u0000-\u001f\u007f]+$/);
@@ -71,9 +72,10 @@ export const sessionHandleSchema = z.object({
   state: z.enum(sessionStates).default('running'),
   outcome: z.string().trim().min(1).max(500).optional(),
   // The loop's observation (GY-172), written by the report `observeSessions` computes.
-  observed: z.enum(observedSessionStates).optional(),
-  observedAt: z.string().datetime().optional(),
-  missedReports: z.number().int().min(0).max(1000).optional(),
+  observed: z.enum(observedSessionStates).optional(), observedAt: z.string().datetime().optional(), missedReports: z.number().int().min(0).max(1000).optional(),
+  // The launch attempt writing this handle (GY-172): a running handle another attempt holds is refused
+  // unless this attempt's runtime started and it supersedes the one recorded (`engine.ts`).
+  launch: z.string().trim().regex(/^[0-9a-f]{8,64}$/, 'A launch token is hexadecimal').optional(), supersede: z.boolean().optional(),
 }).strict();
 export type SessionHandleInput = z.infer<typeof sessionHandleSchema>;
 /** The fields only the loop's session report writes; the control plane refuses them from anybody else (`engine.ts`, `command === 'session'`). */
@@ -120,14 +122,12 @@ const observation = (input: SessionHandleInput, existing: SessionHandle | undefi
   const observed = input.observed ?? existing?.observed, observedAt = input.observedAt ?? existing?.observedAt, missed = input.missedReports ?? existing?.missedReports;
   return { ...(observed ? { observed } : {}), ...(observedAt ? { observedAt } : {}), ...(missed ? { missedReports: missed } : {}) };
 };
-
 /** Record or update one handle on the item, newest last, bounded. */
 export function recordSession(work: Work, input: SessionHandleInput, principal: string, now: Date): SessionHandle {
   work.sessions ??= [];
   const at = now.toISOString();
   const existing = work.sessions.find(handle => handle.id === input.id);
-  const reopened = existing?.state === 'finished' && input.state === 'running';
-  const runtimeFacts = reopened ? undefined : existing;
+  const reopened = existing?.state === 'finished' && input.state === 'running', runtimeFacts = reopened ? undefined : existing;
   const handle: SessionHandle = {
     // The owner is fixed at the first record and never moves: a launcher names the session it
     // started, and an ordinary update cannot hand the handle to somebody else.
@@ -152,10 +152,10 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     // that has not ended — so the note is kept rather than dropped for want of an end.
     state: input.state, outcome: input.outcome ?? (reopened ? null : existing?.outcome ?? null),
     // The observation is the loop's to write; a launcher or the session itself updating its
-    // coordinates keeps the last one rather than blanking what every reader goes by.
-    // A handle recorded running again after it ended is a new session under the same id (a retried
-    // launch for one request): what was observed of the one before says nothing about this one.
+    // coordinates keeps the last one, and a reopened handle starts without the previous session's.
+    // So does the attempt holding the handle: a write without a token (the report, the session) keeps it.
     ...observation(input, reopened ? undefined : existing),
+    ...((input.launch ?? existing?.launch) ? { launch: input.launch ?? existing?.launch } : {}),
   };
   work.sessions = bounded([...work.sessions.filter(entry => entry.id !== input.id), handle], handle);
   return handle;

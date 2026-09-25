@@ -7,7 +7,8 @@ import { agentToken, approvedMerges, assertMasterBinding, autonomySubcommands, c
 import { cliCommit } from '../protocol-version.js';
 import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../master-verification.js';
-import { reviewCommand as launchReviewCommand } from '../reviewer.js';
+import { readReviewLedger, reviewCommand as launchReview } from '../reviewer.js';
+import { readProducerLedger } from '../producer.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection } from '../protection.js';
 import { writeHarnessPermissions } from '../harness.js';
@@ -18,13 +19,13 @@ import { masterInit } from './master-init.js';
 import { sessionCommands } from './session-commands.js';
 import { coordinationViewHeader } from '../server/work-view.js';
 import { executorHostHeader } from '../model/registry.js';
-import { withUnseenSessions } from '../model/session-state.js';
 import { derivedIntent } from './planned-files-intent.js';
 import { readSecretFromStdin } from './context.js';
 import { reviewerCommand } from './master-reviewer.js';
 import { registryCommand, registryHelp } from './master-registry.js';
 import { executorsCommand, executorsHelp } from './master-executors.js';
 import { closeHelp, closeRequest } from './master-close.js';
+import { assertHandAction, assertHandDispatch, assertHandReview, handDecision, systemDriven } from './hand-actions.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -113,11 +114,16 @@ export const masterCommands = defineCommands([
       // The CLI's own commit, for the version-skew guard.
       const cli = { commit: cliCommit(fileURLToPath(new URL('../..', import.meta.url))) };
       const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
-      // `master review` registers its session before the runtime starts, as every launch does (GY-172).
-      const reviewCommand: typeof launchReviewCommand = (at, words, snapshot, agents) => registeredReview(master, words, snapshot, (path, body) => masterMutation(path, body), () => launchReviewCommand(at, words, snapshot, agents));
+      const reviewCommand: typeof launchReview = (...a) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
       if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
+      // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175),
+      // judged on the same work document the decision is built from.
+      const assertDecision = async (work: any, action: string, input: unknown, now: number) => {
+        const loop = { sessions: (await readProducerLedger(root)).producers, failures: (await readDispatchCursor(root, master)).failures, now, requestsDecisions: !!master.operatorAgent };
+        const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
+      };
       if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
-        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, mutate: (path, body) => masterMutation(path, body) }));
+        { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision, mutate: masterMutation }));
       if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
       if (id === 'start') {
         const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
@@ -132,7 +138,13 @@ export const masterCommands = defineCommands([
       if (id === 'reviewer') return reviewerCommand(root, master, args, print);
       // The fleet on this host against the CLI checkout's commit: the release a restart would load.
       if (id === 'executors') return print(await executorsCommand(master, args, { actions: () => masterApi('actions'), coordinatorCommit: cli.commit }));
-      if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), await listHerdrAgents()));
+      // A system-driven item's reviewer is the loop's to launch, save the recovery it sends the master to (GY-175),
+      // judged on the same snapshot the launch reads its review request from.
+      if (id === 'review') {
+        const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
+        if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
+        return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
+      }
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
         const snapshot = await masterApi('work-snapshot');
@@ -155,10 +167,9 @@ export const masterCommands = defineCommands([
         return print(await writeHarnessPermissions(root, masterHarness(root, master, kind.data!), !!values.apply));
       }
       if (id === 'status') {
-        let read: any = null; // the snapshot the report read, for the sessions it shows unseen (GY-172)
-        const report = await masterStatusReport(root, master, async path => { const result = await masterApi(path); if (path === 'work-snapshot') read = result; return result; }, coordinator, cli);
+        const report = await masterStatusReport(root, master, masterApi, coordinator, cli);
         const state = await readDaemonState(root, master).catch(() => null);
-        return print({ ...report, sessions: withUnseenSessions(report.sessions, read), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null } });
+        return print({ ...report, daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null } });
       }
       if (id === 'settle-containment') {
         if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
@@ -182,16 +193,18 @@ export const masterCommands = defineCommands([
       if (id === 'dispatch') {
         const { values, positionals } = parseArgs({ args, options: { 'allow-overlap': { type: 'boolean' } }, allowPositionals: true });
         if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE [--allow-overlap]');
-        const snapshot = await masterApi('work-snapshot');
+        const requestedAt = Date.now(), snapshot = await masterApi('work-snapshot');
         const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
         const profile = master.workers.find(item => item.name === positionals[1]);
-        if (!work) throw new Error(`Unknown work item ${positionals[0]}`); if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
+        if (!work) throw new Error(`Unknown work item ${positionals[0]}`);
+        const { claimBy } = await assertHandDispatch(work, snapshot.now, master.run.dispatchIntervalSeconds, path => masterApi(path), requestedAt);
+        if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
         const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
         if (profile.credentialFile) {
           const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
           if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
         }
-        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'] }));
+        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'], claimBy }));
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
@@ -200,6 +213,9 @@ export const masterCommands = defineCommands([
         const snapshot = await masterApi('work-snapshot');
         const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
+        // `--all` merges the candidates that are not system-driven and leaves the rest to the loop; a named item is refused (GY-175).
+        if (args[0] === '--all') { const hand = selected.filter((item: any) => !systemDriven(item)); if (!hand.length) assertHandAction(selected[0], 'merge'); selected.splice(0, selected.length, ...hand); }
+        else for (const item of selected) assertHandAction(item, 'merge');
         if (!master.autoMerge) selected.splice(0, selected.length, ...await approvedMerges(selected, item => masterApi(`work/${item.id}/decisions`), args[0] !== '--all'));
         // One executor instance per request id (see MergeExecutor in master.ts).
         const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();

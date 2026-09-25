@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | the loop, dispatch and merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes work, merges, verifies deployments and administers GitHub; it never implements, reviews or produces evidence.
+The master (`coordinator`) routes work, merges, verifies deployments and administers GitHub; it never implements, reviews or proves.
 
 ## Autonomy: agents approve agents
 
@@ -9,10 +9,10 @@ The master acts without asking. Only three decisions are human-only: goals and p
 
 ## Operate
 
-Keep cycling: status, dispatch ready work, shepherd review and proof collection, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is live-verified against the exact deployed release or awaits delivery behind a deployment blocker recorded as a follow-up.
+Keep cycling: status, dispatch, review and proofs, guarded merge, then deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merged change is verified against the exact deployed release or has a recorded deployment blocker.
 
 1. `master status` at startup and after events.
-2. `master dispatch GY-N PROFILE` in `schedule.order`.
+2. `master run` dispatches ready work in `schedule.order`.
 3. Route findings and failed proofs to rework.
 4. Merge only when the exact candidate passes every gate.
 5. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: `master config productionEnvironment='graphyard / production'`.
@@ -22,10 +22,14 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 `master run` is this loop as a process under the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it with `systemctl --user restart graphyard-master` when `daemon.liveness` is `stalled` or `absent`.
 
+### System-driven items
+
+The loop drives every item. Unless created `"systemDriven": false`, one refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, naming the loop step, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent. Hand `dispatch` waits out live or just-released ones.
+
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, 10 seconds by default and 30 at most), storing each handle's observation. A handle the runtime stops reporting closes at the second consecutive sweep
+manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10 seconds, 30 at most), storing each observation. A handle the runtime stops reporting closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
 that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
 
@@ -40,18 +44,18 @@ A closure decides no gate, ends no lease, and stops no process. A profile's conc
 sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (with the loop stopped, `graphyard master run --once` sweeps once); for an overlong one, attach to it with the command on the handle. Never mark
+that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
 ## Automatic dispatch at submit
 
 When a candidate passes the build gate, `autoDispatch` records one producer request per proof group (`unit`, `integration`, and `manual` for `producerProofs`), bound to the head, base and policy. The review request follows once the head's unit and integration proofs pass (`proofs-pending` until then; a failed one returns the head to its worker). Only groups with an open request are dispatched; a failed group names rework. `*-postmerge` proofs are refused (use `policy.deploySmoke`). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)), recorded in `.graphyard/reviews.json` and `.graphyard/producers.json`. A reviewer launch first awaits the head's bot reviews (`run.awaitReviewers`, default Codex) for `master config awaitReviewersMinutes` (default 8, 0 disables).
 
-**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) is how many sessions it runs at once, each with a name unique to its request above one. Changes apply without a restart; after lowering it, running sessions drain first. `master status` reports `concurrency` (`running`, `limit`, `waiting`, `longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
+**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) is how many sessions it runs at once, each with a name unique to its request above one. Changes apply without a restart; lowering it drains running sessions first. `master status` reports `concurrency` with `longestWaitMs`; a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: once expired and unreported by Herdr, it settles as `expired`. One still pending is counted in `dispatch.sessionReconcile.stuck`; close its pane.
+**Requests always settle.** A pane already gone (`pane_not_found`) counts as closed. No request outlives its own token: expired and unreported by Herdr, it settles as `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`; close its pane.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after fixing a refused launch.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching that review.
 
 ### Proofs must exercise their criterion
 
@@ -65,6 +69,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` merges only under a current authorization for the exact head, base and policy, never using an administrative merge bypass. Another merge protocol refuses: `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
+`master merge GY-N|--all` (skipping system-driven items) merges only under a current authorization for the exact head, base and policy, never using an administrative merge bypass. Another merge protocol refuses: `server runs <sha>, CLI expects <sha>: deploy main first`. Only the [merge queue](github.md#merge-queue)'s head merges.
 
 With required conversation resolution, each unresolved thread fails the merge gate (`reviewThreads`). An unresolved review thread is a finding to fix: the loop resolves those its reviewer verified; route others to `master decide GY-N rework REASON`. Resolving a thread the master did not write is not the master's call.

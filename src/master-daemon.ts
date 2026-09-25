@@ -9,7 +9,7 @@ import { productionEnvironmentFromEnv } from './flow-analytics.js';
 import { ChildWaitLedger, childRunner, type ChildRun } from './child-runner.js';
 import { uncitedRefusals } from './model/approval.js';
 import { currentEvidence, deliveryState, deploySmokeRequired, exhaustedReviewerProfiles, leaseLossEpoch, postDeployMs, productionLatencyMs, reviewProviderOf, reviewerProfileFor, rollbackGuidance, standingEscalations, type AgentReview, type ContainmentScope, type Work } from './model.js';
-import { pathScopeContains, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeDecisionSample, type ScopeRequestState } from './model/scope.js';
+import { pathScopeContains, redecidableScopeRefusal, routableScopeRequest, scopeBlockedBudgetMs, scopeDecisionBinding, scopeDecisionBudgetMs, scopeDecisionReason, scopeDecisionSample, unplannedPaths, type ScopeRequestState } from './model/scope.js';
 import { scopePattern, watchAssignment } from './supervisor.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
@@ -246,6 +246,8 @@ export const approvalWatchSchema = z.object({
   closeAttempts: z.number().int().min(0).default(0),
   /** The GitHub observation a rework request was decided from (GY-144): its time and candidate head. */
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
+  /** The worker scope request a `requirements` decision answers (GY-176): whose, and for what. */
+  scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 
@@ -508,6 +510,34 @@ export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${wor
  * claim or a lease end has cleared that request, or a push has replaced that head, while the loop
  * was still reading the findings it is grounded on.
  */
+/**
+ * When the control plane recorded the answer to a routed scope request (GY-176): the approval or
+ * refusal event's own time, else the item's `scopeDecision` for that same request, written in the
+ * same transaction. Null when neither is known; the caller then falls back to its observation.
+ */
+export function scopeAnsweredAt(work: Work, request: { epoch: number; at: string }, eventAt: string | null | undefined): string | null {
+  if (eventAt && Number.isFinite(Date.parse(eventAt))) return eventAt;
+  const decision = work.scopeDecision;
+  return decision && decision.requestedAt === request.at && (decision.epoch === undefined || decision.epoch === request.epoch) ? decision.at : null;
+}
+
+/**
+ * Whether an approver's settled judgement answered the routed request it names (GY-176), read from
+ * the item as observed at `clock`. The control plane attaches a refusal only to the open request of
+ * a live attempt under the revision it was asked against; a stale one leaves the request as it stood,
+ * which is no outcome: neither measured nor reported to the worker. An applied widening answers once
+ * the item holds its outcome or plans the paths. `pending` when the judgement was recorded after the
+ * observation, which cannot say yet.
+ */
+export function scopeOutcomeAnswered(work: Work, request: { epoch: number; at: string; paths: string[] }, judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null }, clock: number): 'answered' | 'unanswered' | 'pending' {
+  const approved = judged.state === 'applied', decision = work.scopeDecision;
+  if (decision && decision.requestedAt === request.at && (decision.epoch === undefined || decision.epoch === request.epoch)
+    && decision.state === (approved ? 'approved' : 'refused') && (approved || decision.decidedBy !== 'graphyard')) return 'answered';
+  if (approved && !unplannedPaths(work.plannedFiles, request.paths).length) return 'answered';
+  const at = Date.parse((approved ? judged.approvedAt : judged.refusal?.at) ?? '');
+  return Number.isFinite(at) && at >= clock ? 'pending' : 'unanswered';
+}
+
 export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => ({
   expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
   plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
@@ -526,11 +556,14 @@ export function percentiles(values: number[]) {
  * and nothing left undecided for longer than fifteen. A breach means workers are waiting on the
  * loop, so it is escalated with the numbers rather than left in the metrics.
  */
-export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number) {
+export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: number, routes = false) {
   const measured = percentiles(decisions.map(entry => entry.waitedMs));
+  // A rule refusal the loop puts to the approver (`routes`, GY-176) is not the worker's answer: the
+  // request stays open, and its wait counts, until the approver approves or refuses it.
   const open = work.flatMap(item => {
     const request = item.scopeRequest;
-    return request && !request.decision ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)) }] : [];
+    const routed = routes && request?.decision?.decidedBy === 'graphyard' && !!routableScopeRequest(item, now);
+    return request && (!request.decision || routed) ? [{ key: item.key, epoch: request.epoch, waitedMs: Math.max(0, now - Date.parse(request.at)), routed }] : [];
   }).sort((a, b) => b.waitedMs - a.waitedMs);
   // One id per breach, not per wording: the numbers in the detail move every cycle, and an
   // escalation that changed key each time would read as a new incident every twenty seconds.
@@ -539,7 +572,8 @@ export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: nu
       ? [{ id: 'p90', detail: `Scope decisions are too slow: p90 is ${Math.round(measured.p90Ms / 1000)}s over the last ${measured.count} requests, above the ${scopeDecisionBudgetMs / 60_000}-minute budget` }] : []),
     ...open.filter(entry => entry.waitedMs > scopeBlockedBudgetMs)
       .map(entry => ({ id: `blocked:${entry.key}:${entry.epoch}`,
-        detail: `${entry.key} has been blocked on its scope request for ${Math.round(entry.waitedMs / 60_000)} minutes, above the ${scopeBlockedBudgetMs / 60_000}-minute bound; decide it with graphyard master scope ${entry.key} REASON` })),
+        detail: `${entry.key} has been blocked on its scope request for ${Math.round(entry.waitedMs / 60_000)} minutes, above the ${scopeBlockedBudgetMs / 60_000}-minute bound; ${entry.routed
+          ? `its requirements decision is with the independent approver: read it with graphyard master decisions ${entry.key}` : `decide it with graphyard master scope ${entry.key} REASON`}` })),
   ];
   return { ...measured, open, longestOpenMs: open[0]?.waitedMs ?? 0, breaches, withinBudget: !breaches.length };
 }
@@ -748,11 +782,38 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   return null;
 }
 
-export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve'] as const;
+export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item (a resolve's trigger). */
 /** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
-export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string } }
+/** `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
+export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string }; scope?: NonNullable<ApprovalWatch['scope']> }
+/**
+ * Whether two decisions answer the same scope request. Compared field by field: the ledger keeps
+ * the input as jsonb, which does not keep key order, so a serialised comparison never matches.
+ */
+const sameAnswers = (a: any, b: any) => !a || !b ? !a && !b : a.epoch === b.epoch && a.at === b.at;
+/**
+ * The scope decision one item needs right now, or null (GY-176). A worker's additive request the
+ * implication rule refused and no review finding grounds (`judged`: the loop has read the findings
+ * for this request and policy revision and they named none of it) is put to the independent
+ * approver as a `requirements` decision the master's operator-agent identity requests: the same
+ * additive revision `master scope` applies, so an approved one keeps the worker's lease. A
+ * widening that introduces a root-level directory is requested as the broad-scope exception, and
+ * the approver grants it only with a stated reason. Unlike rework it attests nothing about a
+ * stopped worker: the worker is live and waiting on the answer.
+ */
+export function scopeRoutineDecision(work: Work, now: number, judged: boolean): RoutineDecision | null {
+  if (!judged || work.stage === 'done') return null;
+  const routable = routableScopeRequest(work, now);
+  if (!routable) return null;
+  const { request, paths, plannedFiles } = routable;
+  let broad: string | null = null;
+  try { guardBroadScope({ ...work, plannedFiles }, request.reason, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
+  catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
+  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad),
+    scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
+}
 /**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
  * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
@@ -1465,7 +1526,7 @@ export interface DaemonEffects {
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
    */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; approvedBy: string | null; outcome?: string | null; refusal?: { approver: string; reason: string } | null }[] }>;
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -1853,16 +1914,17 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   //     a refusal on the findings is judged again every findingRecheckMs, never cached for good.
   //     The reads take seconds; the widening names the request it answers, so a claim or lease
   //     end that clears that request meanwhile makes the control plane refuse it, never apply it.
-  const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<boolean> => {
-    if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return false;
-    if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return false;
+  //     It answers with the time the control plane recorded the widening, or null when it did not widen.
+  const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<string | null> => {
+    if (!effects.reviewFindings || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
+    if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return null;
     const paths = (request.decision?.paths?.length ? request.decision.paths : request.paths).filter(path => !(item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
-    if (!paths.length) return false;
+    if (!paths.length) return null;
     const key = `${scopeKey(item, request)}:finding:${item.policyRevision}`;
     const previous = state.actions[key];
-    if (previous?.state === 'done' && /^Widened /.test(previous.detail)) return true;
+    if (previous?.state === 'done' && /^Widened /.test(previous.detail)) return previous.at;
     const judged = previous?.state === 'done';
-    if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return false;
+    if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return null;
     const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
     try {
       const findings = await effects.reviewFindings(item);
@@ -1873,17 +1935,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
         const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
         // An unchanged refusal is the same decision read again, not a new action.
         if (judged && previous.detail !== detail) performed.push(entry);
-        return false;
+        return null;
       }
       const grounds = scoped.grounds.map(entry => `${entry.path} (${entry.ground})`).join('; ');
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...paths])] },
         `Additive scope a review finding on ${item.key}'s own change names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
-      await effects.widenScope(item, request, paths, reason);
+      const widened = await effects.widenScope(item, request, paths, reason) as Work | undefined;
+      // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
+      const recorded = widened?.scopeDecision;
+      const at = recorded?.epoch === request.epoch && recorded.requestedAt === request.at ? recorded.at : new Date(now()).toISOString();
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on the review finding that names ${paths.length === 1 ? 'it' : 'them'}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
-      return true;
+      return at;
     } catch (error) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
-      return false;
+      return null;
     }
   };
   for (const item of open) await isolate('scope', item, item.key, async () => {
@@ -1906,15 +1971,23 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       const decision = decided.scopeDecision;
       if (!decision) throw new Error('The control plane answered without a decision');
       settled.set(item.id, decided);
-      state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: decision.at, waitedMs: decision.waitedMs, state: decision.state }));
+      // An additive refusal no finding grounds is put to the independent approver in step 4c, on
+      // this same cycle: naming `master scope` would leave it waiting for a master to be around. Its
+      // wait is measured when the approver answers, the decision the worker actually waits on.
+      const routed = decision.state === 'refused' && !!effects.decide && !!effects.approver && !!routableScopeRequest(decided.scopeRequest ? decided : { ...item, scopeRequest: { ...request, decision } }, clock);
+      if (!routed) state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: decision.at, waitedMs: decision.waitedMs, state: decision.state }));
       const waited = `${Math.round(decision.waitedMs / 1000)}s after ${request.requestedBy} asked`;
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
         detail: boundDetail(decision.state === 'approved'
           ? `Widened ${item.key} with ${namePaths(request.paths)} ${waited}: ${decision.reason}`
           : `Refused ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'} ${waited}: ${decision.reason}`),
         attempts, cycle: state.cycle }, now(), effects.persist));
-      if (decision.state === 'refused' && await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision })) return;
-      if (decision.state === 'refused') {
+      const widenedAt = decision.state === 'refused' ? await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision }) : null;
+      if (widenedAt) {
+        if (routed) state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: widenedAt, waitedMs: Math.max(0, Date.parse(widenedAt) - Date.parse(request.at)), state: 'approved' }));
+        return;
+      }
+      if (decision.state === 'refused' && !routed) {
         const escalationKey = `escalation:scope:${item.id}:${request.at}`;
         performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
           detail: `${item.key} is blocked on scope: ${request.requestedBy} asked for ${request.paths.length ? namePaths(request.paths) : 'a requirements change'} because ${boundDetail(request.reason, 400)}, and the loop refused it because ${boundDetail(decision.reason, 500)}. Decide it with graphyard master scope ${item.key} REASON, or graphyard master requirements ${item.key} FILE REASON for anything that is not purely additive`,
@@ -1929,7 +2002,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   // 2b. The promise that decision rests on: workers wait minutes, not a shift. A p90 above the
   //     budget, or any request left undecided past the blocked bound, is escalated with the
   //     numbers — the loop is the only thing that could have answered them.
-  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock);
+  const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock, !!effects.decide && !!effects.approver);
   for (const breach of budget.breaches) {
     const key = `escalation:scope-budget:${breach.id}`;
     if (!detailChanged(state.actions[key], breach.detail)) continue;
@@ -2254,6 +2327,49 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       if (standing && decision.action === 'resolve' && decision.escalation && !resolveCovers(standing, decision.escalation)) {
         throw new Error(`resolve decision ${standing.id} is ${standing.state} for ${String(standing.input?.trigger)}, not the ${decision.escalation.trigger} raised at ${decision.escalation.at}; the control plane holds one resolve at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
+      // An approver already refused this very request (a cursor lost since, or a restart): that is
+      // its judgement, not a request to repeat — the server would refuse the repeat on every retry.
+      // The refusal answers the request it names (`answers`): a worker that withdraws a refused ask
+      // and asks again for the same paths with a better reason makes a new request, and it is asked.
+      const judged = decision.action === 'requirements' ? history.find(entry => entry.action === 'requirements' && entry.state === 'refused'
+        && JSON.stringify(entry.input?.plannedFiles) === JSON.stringify(decision.input?.plannedFiles) && entry.input?.expectedPolicyRevision === item.policyRevision
+        && sameAnswers(entry.input?.answers, decision.input?.answers)) : undefined;
+      if (judged) {
+        // A refusal recorded after this observation is settled once an observation shows it.
+        const pending = !!decision.scope && scopeOutcomeAnswered(item, decision.scope, judged, clock) === 'pending';
+        const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: judged.id, requestedAt: stamp, settledAt: pending ? null : stamp, scope: decision.scope ?? null });
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${judged.id} for this widening was already refused by ${judged.refusal?.approver ?? 'its approver'}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        if (!pending) await noteScopeOutcome(item, watch, judged);
+        return;
+      }
+      // The control plane holds one requirements decision at a time. One that answers no scope
+      // request (a master's own revision) is not this request's answer: it is left to its
+      // requester, and this one is asked once it settles.
+      if (standing && decision.action === 'requirements' && !standing.input?.answers) {
+        const other = JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles) ? 'another planned-files revision' : 'a widening that answers no scope request';
+        throw new Error(`requirements decision ${standing.id} is ${standing.state} for ${other}, not the widening ${item.key}'s scope request asks for; it is left to its requester, and the control plane holds one at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
+      }
+      // A scope decision answers the one request it names (`answers`), against the requirements of
+      // one policy revision. One standing for a request the worker has since withdrawn and asked
+      // again, or against a revision a later widening or review-policy bump has superseded (which
+      // may also have moved plannedFiles), can never apply: the server rejects its approval and
+      // leaves its refusal unattached, so adopting it would settle this request unasked. Whatever
+      // the file list now reads, the loop takes it back and asks — as a merge for an earlier
+      // candidate — before treating a differing list as anything but its own stale request.
+      if (standing && decision.action === 'requirements') {
+        const stale = !sameAnswers(standing.input?.answers, decision.input?.answers)
+          ? `requirements decision ${standing.id} is ${standing.state} for the scope request made at ${standing.input?.answers?.at}, not the one ${item.key}'s worker made at ${decision.scope?.at ?? 'now'}`
+          : standing.input?.expectedPolicyRevision !== item.policyRevision
+            ? `requirements decision ${standing.id} is ${standing.state} against policy revision ${String(standing.input?.expectedPolicyRevision)}, not ${item.key}'s current revision ${item.policyRevision}`
+            : JSON.stringify(standing.input?.plannedFiles) !== JSON.stringify(decision.input?.plannedFiles)
+              ? `requirements decision ${standing.id} is ${standing.state} for another planned-files revision than the widening ${item.key}'s scope request now asks for`
+              : null;
+        if (stale) {
+          if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}; ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}, and this one is requested once it settles: graphyard master decisions ${item.key}`);
+          await effects.withdraw(item, standing.id, `${stale}; it can never answer the current request, so it is withdrawn for a decision that does, against the current revision`);
+          standing = undefined;
+        }
+      }
       // A rework request names the observation it was decided from (GY-144), so its approver sees
       // at once whether the item has moved since; the watch keeps the same pair.
       const observed = decision.action === 'rework' && item.observation ? { at: item.observation.at, sha: item.observation.candidate.sha } : null;
@@ -2280,7 +2396,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       const [retired, prior] = standing ? Object.entries(state.approvals).find(([other, entry]) => other !== key && entry.decision === requested.id && !entry.settledAt) ?? [] : [];
       if (retired) delete state.approvals[retired];
       const kept = prior ? { launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt, exhaustedAt: prior.exhaustedAt } : {};
-      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: prior?.requestedAt ?? stamp, ...kept, requests: prior ? prior.requests : (carried?.requests ?? 0) + 1, ended: (prior ?? carried)?.ended ?? [], observation: observed });
+      const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: prior?.requestedAt ?? stamp, ...kept, requests: prior ? prior.requests : (carried?.requests ?? 0) + 1, ended: (prior ?? carried)?.ended ?? [], observation: observed, scope: decision.scope ?? null });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it
       // needs. A base conflict has no verdict behind it, so it is not part of that measurement. It
       // is sampled with the request, before the launch: a request whose first launch throws is
@@ -2298,16 +2414,45 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
   };
+  /**
+   * Record how the approver judged the scope request a `requirements` decision answered (GY-176).
+   * The worker is never sent it: the control plane holds the outcome on the item, in the same
+   * transaction as the approval or refusal, and the worker reads it with its own
+   * `scope-request GY-N EPOCH --wait` or `status` (a paste carries no authority in its session).
+   */
+  const noteScopeOutcome = async (item: Work, watch: ApprovalWatch, judged: { state: string; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; refusal?: { approver: string; reason: string; at?: string } | null; outcome?: string | null }) => {
+    const scope = watch.scope, key = `scope:outcome:${watch.decision}`;
+    if (!scope || state.actions[key]?.state === 'done') return;
+    const approved = judged.state === 'applied', by = approved ? judged.approvedBy : judged.refusal?.approver;
+    // A judgement the control plane did not attach to this request (its revision or the asking
+    // lease had moved on) left the request as it stood: the worker sees no outcome, so none is
+    // measured or reported, only that this decision answered nothing.
+    if (scopeOutcomeAnswered(item, scope, judged, clock) !== 'answered') {
+      await note(key, item, 'scope', 'done', `${watch.action} decision ${watch.decision} (${judged.state}) did not answer ${item.key}'s scope request (epoch ${scope.epoch}, asked at ${scope.at}): the control plane left the request as it stood, so no outcome is measured or reported`);
+      return;
+    }
+    const why = approved ? judged.approvalReason : judged.refusal?.reason ?? judged.outcome;
+    // The wait the worker saw, from its ask to the approver's answer (step 2 left the rule refusal
+    // unmeasured). It ends when the control plane recorded the answer, which the worker reads at
+    // once, never when this cycle observed it: a stopped or slow loop must not lengthen the sample.
+    const answered = scopeAnsweredAt(item, scope, approved ? judged.approvedAt : judged.refusal?.at) ?? stamp;
+    state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: scope.epoch, at: answered, waitedMs: Math.max(0, Date.parse(answered) - Date.parse(scope.at)), state: approved ? 'approved' : 'refused' }));
+    await note(key, item, 'scope', 'done', `${approved ? 'Approved' : 'Refused'} ${item.key}'s scope request (epoch ${scope.epoch}) for ${namePaths(scope.paths)} through ${watch.action} decision ${watch.decision}${by ? ` by ${by}` : ''}${why ? `: ${boundDetail(why, 400)}` : ''}; ${scope.requestedBy} reads it with ${config.cliPath ? `node ${config.cliPath}` : 'graphyard'} scope-request ${item.key} ${scope.epoch} --wait`);
+  };
   /** Look again at a decision already requested: its state on the control plane, and its session. */
   const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
     const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
-    const step = approvalStep(watch, history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null, await sessions(), clock);
+    const judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
+    const step = approvalStep(watch, judged, await sessions(), clock);
     if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
+    // A routed request judged after this observation is settled from one that shows the outcome.
+    if ((step.step === 'settled' || step.step === 'refused') && watch.scope && judged && scopeOutcomeAnswered(item, watch.scope, judged, clock) === 'pending') return;
     const base = `approver:${watch.decision}`;
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
       watch.settledAt = stamp;
       await note(`${base}:settled`, item, 'decision', 'done', step.detail);
+      if (judged) await noteScopeOutcome(item, watch, judged);
       return;
     }
     if (step.step === 'refused') {
@@ -2315,6 +2460,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
       // `master status` until the master answers it with a request that cites it, or acts on it.
       await closeApprover(item, watch, 'its decision is refused');
       watch.settledAt = stamp;
+      // A refused widening is the worker's answer, not the master's: the control plane recorded it
+      // on the item, and the worker reads there that it stays inside plannedFiles.
+      if (watch.scope && judged) { await noteScopeOutcome(item, watch, judged); return; }
       await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }
@@ -2340,9 +2488,21 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
 
   const needed = new Set<string>(), unattestable = new Set<string>();
   const pause = githubPause(snapshot.jobs, clock);
+  // A scope request is judged by the review-finding rule (step 2a) before it is the approver's: the
+  // findings for this request and policy revision were read and named none of it. A loop that
+  // cannot read findings or widen on them has no rule to wait for.
+  const findingsJudged = (item: Work) => {
+    const request = item.scopeRequest;
+    if (!request) return false;
+    if (!effects.reviewFindings || !effects.widenScope) return true;
+    const judged = state.actions[`${scopeKey(item, request)}:finding:${item.policyRevision}`];
+    return judged?.state === 'done' && !/^Widened /.test(judged.detail);
+  };
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
-    const decision = routineDecision(item, config, clock, assessment);
+    // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
+    const scoped = settled.get(item.id) ?? item;
+    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config);
@@ -2391,6 +2551,15 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     // action: left `requested`, it would be adopted for some later round on a reason that describes
     // an older head. One the item still calls for stays, and is adopted when it can be attested.
     let withdrawn = true;
+    // An applied widening clears the request it answered, and so does the approver's refusal, so
+    // the item stops needing it at once: its outcome is noted and measured here, before the watch goes.
+    if (item && watch.scope && !watch.settledAt && effects.decisions) {
+      const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision), () => undefined);
+      if (judged?.state === 'applied' || judged?.state === 'refused') {
+        if (scopeOutcomeAnswered(item, watch.scope, judged, clock) === 'pending') return;
+        watch.settledAt = stamp; await noteScopeOutcome(item, watch, judged);
+      }
+    }
     // Another current watch holds this decision: the request is not moved past, only re-keyed.
     if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) { delete state.approvals[key]; return; }
     if (item && !watch.settledAt && !unattestable.has(key) && effects.withdraw && effects.decisions) {

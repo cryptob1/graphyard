@@ -66,15 +66,6 @@ export function unseenSessions(all: Work[], now: Date) {
 }
 
 /**
- * `master status`'s session report, with every open record it does not show running beside the
- * running and finished ones: a session whose observation went stale is neither, and must not
- * vanish from the status while the Workers page still lists it as unseen.
- */
-export function withUnseenSessions<T extends object>(report: T, snapshot: { work?: Work[]; now?: string } | null): T & { unseen?: ReturnType<typeof unseenSessions> } {
-  return snapshot?.work && snapshot.now ? { ...report, unseen: unseenSessions(snapshot.work, new Date(snapshot.now)) } : report;
-}
-
-/**
  * The one session state (GY-172): what the loop observes of every Graphyard-launched session it
  * can see, on every dispatch tick, and writes to the handle as `observed` and `observedAt`.
  *
@@ -208,17 +199,24 @@ export async function registeredLaunch<T>(record: ((handle: SessionHandleInput) 
   start: () => Promise<T>, coordinates: (launched: T) => LaunchedCoordinates | undefined = launched => launched as LaunchedCoordinates | undefined,
   attach?: (pane: string) => string): Promise<T> {
   if (!record) return start();
-  const registered = await record({ ...handle, state: 'running' }).then(() => true, () => false);
+  // Every write carries this attempt's token, so the control plane refuses one that would register
+  // over, close or re-coordinate a running handle another attempt holds (`engine.ts`): two launches
+  // racing for one request from the same snapshot cannot end the session the other one started.
+  const launch = globalThis.crypto.randomUUID().replaceAll('-', '');
+  const registered = await record({ ...handle, launch, state: 'running' }).then(() => true, () => false);
   let launched: T;
   try { launched = await start(); }
   catch (error) {
-    await record({ ...handle, state: 'finished', outcome: `the launch failed before the session started: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) }).catch(() => {});
+    // Refused when the handle is another attempt's: only a registration this attempt holds is closed.
+    await record({ ...handle, launch, state: 'finished', outcome: `the launch failed before the session started: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) }).catch(() => {});
     throw error;
   }
   const where = coordinates(launched);
   const pane = where?.pane ?? null, agentName = where?.agentName ?? null;
   if (!registered || pane || (agentName && agentName !== handle.agentName)) {
-    const coordinated = { ...handle, state: 'running' as const, ...(agentName ? { agentName } : {}), ...(pane ? { pane, ...(attach ? { attach: attach(pane) } : {}) } : {}) };
+    // A registration that was refused or never written is taken over now: this attempt's runtime
+    // started, so the launcher let it run and it is the session the record must describe.
+    const coordinated = { ...handle, launch, ...(registered ? {} : { supersede: true }), state: 'running' as const, ...(agentName ? { agentName } : {}), ...(pane ? { pane, ...(attach ? { attach: attach(pane) } : {}) } : {}) };
     for (let attempt = 1; attempt <= coordinateAttempts; attempt++) {
       if (await record(coordinated).then(() => true, () => false)) break;
       if (attempt < coordinateAttempts) await new Promise(done => setTimeout(done, coordinateRetryMs * attempt));

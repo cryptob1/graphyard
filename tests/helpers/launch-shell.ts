@@ -11,8 +11,10 @@ export interface TypedLaunch { stem: string | null; words: string[]; kind: strin
 export function expandTypedCommand(command: string): TypedLaunch {
   const bound = /^GY=(\S+); (.*)$/s.exec(command);
   const stem = bound ? bound[1].replace(/^'(.*)'$/s, '$1').replaceAll("'\\''", "'") : null;
+  // A line over the bound sources the runtime's words from `STEM.launch` (master.ts launchCommand).
+  const body = bound && bound[2] === '. "$GY.launch"' ? readFileSync(`${stem}.launch`, 'utf8').trim() : bound ? bound[2] : command;
   const words: string[] = [];
-  for (const match of (bound ? bound[2] : command).matchAll(/'((?:[^']|'\\'')*)'|("\$GY\.role")|("\$\(cat "\$GY\.request"\)")|(\S+)/g)) {
+  for (const match of body.matchAll(/'((?:[^']|'\\'')*)'|("\$GY\.role")|("\$\(cat "\$GY\.request"\)")|(\S+)/g)) {
     if (match[1] !== undefined) words.push(match[1].replaceAll("'\\''", "'"));
     else if (match[2]) words.push(`${stem}.role`);
     else if (match[3]) words.push(readFileSync(`${stem}.request`, 'utf8'));
@@ -26,10 +28,11 @@ export function expandTypedCommand(command: string): TypedLaunch {
 
 /** The instruction the runtime would read from its own arguments, per the real CLI contracts. */
 export function requestOf(kind: string, args: string[]) {
-  if (kind === 'opencode') { const index = args.indexOf('--prompt'); return index >= 0 ? args[index + 1] ?? null : null; }
-  if (!['claude', 'codex', 'cursor'].includes(kind)) return null;
+  const flag = ({ opencode: '--prompt', gemini: '--prompt-interactive', qwen: '--prompt-interactive', copilot: '--interactive' } as Record<string, string>)[kind];
+  if (flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] ?? null : null; }
+  if (!['claude', 'codex', 'cursor', 'pi', 'muse'].includes(kind)) return null;
   // Positional: the one argument that is neither a flag nor a flag's value.
-  const valued = new Set(['--permission-mode', '--setting-sources', '--settings', '--append-system-prompt', '--append-system-prompt-file', '--ask-for-approval', '--sandbox', '-c', '--add-dir', '--model']);
+  const valued = new Set(['--permission-mode', '--setting-sources', '--settings', '--append-system-prompt', '--append-system-prompt-file', '--ask-for-approval', '--sandbox', '-c', '--add-dir', '--model', '--approval-mode']);
   for (let index = 0; index < args.length; index++) {
     if (valued.has(args[index])) { index++; continue; }
     if (!args[index].startsWith('-')) return args[index];

@@ -181,13 +181,31 @@ test('integration:every-launch-registered — the executor, the loop\'s reviewer
     assert.deepEqual([recorded.pane, recorded.agentName, recorded.kind, recorded.head], ['wA:p72', 'review-claude-2', 'review', sha]);
 
     // A second `master review` for the same request while that reviewer runs is refused by the
-    // launcher; it must not register over the running reviewer nor close it with its refusal.
+    // launcher; the control plane refuses its registration and its closure, since the running
+    // handle is held by the launch that started it, so the running reviewer stays recorded open.
     order.length = 0;
     await assert.rejects(registeredReview(master, [item.key], { work: [withReview(await reload(item.id))] }, (path, body) => { order.push(`record:${(body as SessionHandleInput).id}:${(body as SessionHandleInput).state}`); return mutate(path, body); },
       async () => { throw new Error(`A reviewer session for ${item.key} is already pending`); }), /already pending/);
-    assert.deepEqual(order, [], 'nothing is recorded for a duplicate launch');
     const running = (await reload(item.id)).sessions!.find(handle => handle.id === request.id)!;
     assert.deepEqual([running.state, running.pane, running.outcome], ['running', 'wA:p72', null], 'the running reviewer stays recorded open');
+
+    // Two launches racing from one stale snapshot (two `master review`s, or one and the loop's own
+    // reviewer launch): both pass any check against that snapshot, the launcher runs one and
+    // refuses the other, and whichever order their writes land in, the one that runs is recorded
+    // open with its pane and the refused one closes nothing.
+    for (const refusedFirst of [true, false]) {
+      await mutate(`work/${item.id}/session`, { id: request.id, kind: 'review', runtime: 'claude', host: 'machine-a', subject: `${item.key}: review`, state: 'finished', outcome: 'the earlier reviewer ended' });
+      const stale = { work: [withReview(await reload(item.id))] };
+      let registeredBoth!: () => void; const both = new Promise<void>(done => { registeredBoth = done; });
+      let registrations = 0; const record = (path: string, body: unknown) => { const result = mutate(path, body); if ((body as SessionHandleInput).state === 'running' && !(body as SessionHandleInput).pane && ++registrations === 2) registeredBoth(); return result; };
+      let refusedDone!: () => void; const refusalWritten = new Promise<void>(done => { refusedDone = done; });
+      const winner = registeredReview(master, [item.key], stale, record, async () => { await both; if (!refusedFirst) await refusalWritten; return { pane: 'wA:p80', agentName: 'review-claude-3' }; });
+      const loser = registeredReview(master, [item.key], stale, (path, body) => { const result = record(path, body); if ((body as SessionHandleInput).state === 'finished') result.finally(() => refusedDone()).catch(() => {}); return result; },
+        async () => { await both; if (refusedFirst) await winner; throw new Error(`A reviewer session for ${item.key} is already pending`); });
+      await Promise.all([winner, assert.rejects(loser, /already pending/)]);
+      const raced = (await reload(item.id)).sessions!.find(handle => handle.id === request.id)!;
+      assert.deepEqual([raced.state, raced.pane, raced.agentName, raced.outcome], ['running', 'wA:p80', 'review-claude-3', null], `the reviewer that runs stays recorded open (refused ${refusedFirst ? 'after' : 'before'} the winner's coordinates)`);
+    }
 
     // A launch that fails ends its registration with why, rather than leaving an open record to be lost.
     await assert.rejects(registeredLaunch(handle => mutate(`work/${item.id}/session`, handle), { id: 'doomed', kind: 'coordination', runtime: 'claude', host: 'machine-a', subject: `${item.key}: doomed`, state: 'running' },
