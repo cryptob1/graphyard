@@ -137,12 +137,13 @@ export const masterCommands = defineCommands([
       if (id === 'reviewer') return reviewerCommand(root, master, args, print);
       // The fleet on this host against the CLI checkout's commit: the release a restart would load.
       if (id === 'executors') return print(await executorsCommand(master, args, { actions: () => masterApi('actions'), coordinatorCommit: cli.commit }));
-      // A system-driven item's reviewer is the loop's to launch, save the recovery it sends the master to (GY-175).
+      // A system-driven item's reviewer is the loop's to launch, save the recovery it sends the master to (GY-175),
+      // judged on the same snapshot the launch reads its review request from.
       if (id === 'review') {
         const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
         if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
+        return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
       }
-      if (id === 'review') return print(await reviewCommand(root, args, await masterApi('work-snapshot'), await listHerdrAgents()));
       if (id === 'protection') {
         const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
         const snapshot = await masterApi('work-snapshot');

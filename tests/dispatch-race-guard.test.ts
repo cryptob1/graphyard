@@ -255,7 +255,10 @@ test('unit:system-driven-items master review stays open only as the recovery of 
   try {
     assert.match(await master.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/);
     await master.refusedLaunches(reviewRequestId, dispatchFailureLimit);
+    const before = master.reads.filter(url => url.startsWith('/api/work-snapshot')).length;
     assert.doesNotMatch(await master.refusal(['review', 'GY-7']), /is system-driven/, 'the recovery the loop names reaches the launch');
+    // The launch reads its review request from the snapshot the guard judged, never from a later one a new head could change.
+    assert.equal(master.reads.filter(url => url.startsWith('/api/work-snapshot')).length - before, 1, 'master review reads one work snapshot');
   } finally { await master.close(); }
 });
 
