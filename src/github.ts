@@ -191,12 +191,18 @@ export function observationFingerprint(observation: Observation | null | undefin
  * is the classification the whole control plane already uses for what an item needs next, so the
  * cadence follows it rather than inventing a second reading of the same state.
  */
-export function observationBand(work: Work, all: Work[], now: Date): { band: Exclude<CadenceBand, 'steady'>; reason: string } {
-  const next = nextAction(work, all, now);
+export function observationBand(work: Work, all: Work[], now: Date, next = nextAction(work, all, now)): { band: Exclude<CadenceBand, 'steady'>; reason: string; fresh?: true } {
   const open = !!work.candidate && !!work.observation && !work.observation.merged && work.observation.prState === 'open';
   if (next?.kind === 'merge' || open && work.gates.every(gate => gate.name === 'merge' || gate.passed))
     return { band: 'merge', reason: `${work.key} is at the merge gate with every other gate passing; the merge executor spends its observation's freshness` };
-  if (!next || next.kind === 'dispatch' || next.kind === 'request-rework' || next.kind === 'escalate')
+  // The loop requests a rework only from an observation under two minutes old (master-daemon.ts
+  // reworkObservationWait, GY-144). Polled on the idle or steady band — never less than two
+  // minutes apart — the decision nearly always met a stale one: on 2026-09-25 GY-173, GY-177 and
+  // GY-182 sat ejected from the merge queue for over an hour, "rework waits for a fresh GitHub
+  // observation" every cycle. So such an item is observed at the active cadence, never stretched.
+  if (next?.kind === 'request-rework')
+    return { band: 'active', fresh: true, reason: `${work.key} needs a new head, and the loop requests that round only from an observation under two minutes old, so it is observed at the active cadence` };
+  if (!next || next.kind === 'dispatch' || next.kind === 'escalate')
     return { band: 'idle', reason: `${work.key} needs ${next ? `a ${next.kind}` : 'nothing an observation can supply'}; nothing on GitHub can move it, so the webhook wakes it and polling is the safety net` };
   return { band: 'active', reason: `${work.key} needs ${next.kind}; GitHub can still change what it is waiting for` };
 }
@@ -208,9 +214,9 @@ export function observationBand(work: Work, all: Work[], now: Date): { band: Exc
  * Active candidates use the `steady` band; idle candidates retain their idle band and five-minute
  * floor so something GitHub cannot move is never polled more often than an active candidate.
  */
-export function observationCadence(work: Work, all: Work[], now: Date, previous?: Observation | null, steadyMs: number = observationCadenceMs.steady): { band: CadenceBand; ms: number; reason: string } {
-  const state = observationBand(work, all, now);
-  if (state.band !== 'merge' && previous && observationFingerprint(previous) === observationFingerprint(work.observation)) {
+export function observationCadence(work: Work, all: Work[], now: Date, previous?: Observation | null, steadyMs: number = observationCadenceMs.steady, next = nextAction(work, all, now)): { band: CadenceBand; ms: number; reason: string } {
+  const state = observationBand(work, all, now, next);
+  if (state.band !== 'merge' && !state.fresh && previous && observationFingerprint(previous) === observationFingerprint(work.observation)) {
     const band = state.band === 'active' ? 'steady' : state.band;
     return { band, ms: Math.max(observationCadenceMs[band], steadyMs),
       reason: `${work.key} came back with its head, base tip, check state and review state unchanged; polling settles to the steady-state interval and the webhook wakes it the moment any of that moves` };
