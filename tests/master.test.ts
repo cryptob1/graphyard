@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { assertDispatchable, assertMasterBinding, assessContainment, snapshotWithClock, verifyContainmentDeath, assertMergeCandidate, assertMergeProtection, assertQueuedLanding, buildMasterStatus, continueMergeBatch, currentMergeCandidates, dispatchWork, githubProviderDelay, inspectWorkerCredentials, loadMasterConfig, managedMasterInstructions, mergeWork, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -165,7 +166,7 @@ test('dispatch launches through watch, with the instruction on the supervised co
     // line references; a session already working on it is ready, and nothing is pasted.
     assert.match(calls[1][3], /"\$\(cat "\$GY\.request"\)"$/); assert.doesNotMatch(calls[1][3], /Implement GY-42|coordinator-token/);
     const typed = expandTypedCommand(calls[1][3]);
-    assert.equal(typed.stem, join(root, 'assigned', '.graphyard/launch/eng-a')); assert.match(typed.args.at(-1)!, /^Implement GY-42: .*complete/);
+    assert.equal(typed.stem, join(root, 'assigned', '.graphyard/launch/eng-a')); assert.ok(typed.args.at(-1)!.startsWith(`${autonomyContract} Implement GY-42: `), 'Codex loads no role file, so the autonomy contract leads the request (GY-184)'); assert.match(typed.args.at(-1)!, /Implement GY-42: .*complete/);
     assert.equal(probes, 1, 'a session working on its request is accepted at first sight'); assert.equal(result.delivery, 'request');
     assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'rename', 'p1']); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
     const failedCalls: string[][] = []; let releasedEpoch = 0;
@@ -218,7 +219,8 @@ test('Muse dispatch runs the installed binary through claim, assigned worktree, 
     await assert.rejects(saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential }, async () => ({ actor: { id: 'muse-1', role: 'coordinator' } })), /worker role/);
     await assert.rejects(saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential }, async () => ({ actor: { id: 'muse-2', role: 'worker' } })), /profile principal/);
     const saved = await saveWorkerProfile(root, { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch', kind: 'muse', credentialFile: credential, agentArgs: ['--approval-mode', 'never', '--trust-workspace'] }, async token => ({ actor: { id: token === workerToken ? 'muse-1' : 'wrong', role: 'worker' } }));
-    assert.equal(saved.launch!.applied, false); assert.match(saved.launch!.reason!, /no non-interactive launch contract for muse/); assert.deepEqual(saved.launch!.args, ['--approval-mode', 'never', '--trust-workspace']);
+    // Muse's own recipe (GY-184) is exactly the arguments this profile already configures, so Graphyard adds nothing.
+    assert.equal(saved.launch!.applied, true); assert.match(saved.launch!.reason!, /already configures the runtime approval flags/); assert.deepEqual(saved.launch!.args, ['--approval-mode', 'never', '--trust-workspace']);
     const profile = (await loadMasterConfig(root)).workers[0];
     assert.equal(profile.kind, 'muse');
     // The claim runs under the profile's own credential file: the coordinator token in the
@@ -233,20 +235,20 @@ test('Muse dispatch runs the installed binary through claim, assigned worktree, 
     assert.equal(claim.options.env.GRAPHYARD_TOKEN_FILE, credential); assert.equal(claim.options.env.GRAPHYARD_TOKEN, undefined); assert.equal(claim.options.env.GRAPHYARD_MASTER_TOKEN, undefined);
     let probes = 0;
     const result = await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'muse-pane', tab_id: 'muse-tab' }, tab: { tab_id: 'muse-tab' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'muse-pane', agent: 'muse', agent_status: ++probes === 1 ? 'working' : 'idle' } } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base }), undefined, undefined, undefined, { start: { wait: () => {} } });
-    assert.match(result.ownership, /supervising/); assert.equal(result.principal, 'muse-1'); assert.equal(result.launch.applied, false);
+    assert.match(result.ownership, /supervising/); assert.equal(result.principal, 'muse-1'); assert.equal(result.launch.applied, true);
     const tab = calls[0]; assert.deepEqual(tab.slice(0, 4), ['tab', 'create', '--workspace', 'workspace-graphyard']);
     assert.equal(tab[tab.indexOf('--cwd') + 1], join(root, 'assigned'));
     const tabEnvironment = tab.flatMap((argument, index) => argument === '--env' ? [tab[index + 1]] : []);
     assert.ok(tabEnvironment.includes(`GRAPHYARD_TOKEN_FILE=${credential}`)); assert.ok(tabEnvironment.includes('GRAPHYARD_HERDR_AGENT_KIND=muse'));
     assert.ok(tabEnvironment.every(entry => !entry.startsWith('GRAPHYARD_TOKEN=') && !entry.startsWith('GRAPHYARD_MASTER_TOKEN=') && !entry.includes(coordinatorToken)), 'the Muse tab receives only its own credential file');
     assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'muse-pane']);
-    assert.match(calls[1][3], / watch GY-42 4 -- muse --approval-mode never --trust-workspace$/, 'Muse starts only under graphyard watch with the profile arguments');
-    assert.doesNotMatch(calls[1][3], /^GY=/, 'a runtime without a request contract has no request file to reference');
+    assert.match(calls[1][3], / watch GY-42 4 -- muse --approval-mode never --trust-workspace "\$\(cat "\$GY\.request"\)"$/, 'Muse starts only under graphyard watch with the profile arguments, on its own positional request (GY-184)');
+    assert.match(calls[1][3], /^GY=/, 'the line references the request file');
     assert.doesNotMatch(calls[1][3], /herdr agent start|GRAPHYARD_TOKEN/);
-    // Muse has no request contract (GY-93 launchDelivery), so it is prompted once Herdr reports it ready.
-    assert.equal(probes, 2, 'prompting waits for Herdr to report the Muse session ready'); assert.equal(result.delivery, 'paste');
-    assert.deepEqual(calls.at(-2)!.slice(0, 3), ['agent', 'rename', 'muse-pane']); assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'prompt', 'engineering-muse-1']);
-    assert.match(calls.at(-1)![3], /principal muse-1/); assert.equal(JSON.stringify(calls).includes(coordinatorToken), false); assert.equal(JSON.stringify(calls).includes(workerToken), false);
+    // Muse takes its request on its command line, so it is never prompted after it starts.
+    assert.equal(probes, 1, 'a Muse session seen working has started'); assert.equal(result.delivery, 'request');
+    assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'rename', 'muse-pane']); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
+    assert.match(await readFile(join(root, 'assigned/.graphyard/launch/engineering-muse-1.request'), 'utf8'), /principal muse-1/); assert.equal(JSON.stringify(calls).includes(coordinatorToken), false); assert.equal(JSON.stringify(calls).includes(workerToken), false);
     // A Muse session that never becomes visible is closed and its epoch released; one Herdr
     // cannot confirm closed keeps the epoch fenced.
     const failedCalls: string[][] = []; let releasedEpoch = 0;
