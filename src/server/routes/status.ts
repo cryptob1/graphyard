@@ -16,6 +16,7 @@ import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
+import { boardFromStatus } from '../../model/board.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -68,6 +69,20 @@ export const statusRoutes = defineRoutes('status', [
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
+    },
+  },
+  {
+    // The board (GY-200): every open item in its group with who acts next, the command that acts,
+    // since when and whether it is overdue — the classification the Work page renders and
+    // `master status` lists its owed items from, over the same human-only rows and production
+    // view /api/status carries, so no client derives groups of its own.
+    method: 'GET', path: '/api/board',
+    async handle({ actor, services, operatorVisible }) {
+      const { engine, production } = services;
+      const now = ((await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+      const work = operatorVisible(await engine.store.list());
+      return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: await resolvedProductionEnvironment(engine.store.pool),
+        production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds });
     },
   },
   {

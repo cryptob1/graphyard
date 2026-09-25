@@ -20,6 +20,7 @@ import { probeFeatures, unknownFeatures, type Features } from '../web/features.j
 import { primaryEntries, primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
+import { boardFromStatus } from '../src/model/board.js';
 import WorkDetails from '../web/pages/work-details.js';
 import ShippedPage from '../web/pages/shipped.js';
 import GuidePage from '../web/pages/guide.js';
@@ -44,13 +45,15 @@ const work = fixtureWork() as unknown as Work[];
 const find = (key: string) => work.find(w => w.key === key)!;
 const noop = () => {};
 function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin', features: Features = unknownFeatures): Dashboard {
-  return {
+  const d: Dashboard = {
     token: 'fixture', work, status: fixtureStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
     queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, role), refresh: async () => {}, action: async () => {},
     setError: noop, signOut: noop, ...overrides,
   };
+  // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
+  return 'board' in overrides ? d : { ...d, board: boardFromStatus(d.work, d.observedAt, d.status) };
 }
 const markup = (element: any) => renderToStaticMarkup(element);
 const words = (html: string): string[] => visibleWords(html);

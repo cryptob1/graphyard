@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { probeCandidateConflicts } from '../conflicts.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
-import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, inventoryWorktrees, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
+import { agentOwner, agentToken, assessContainment, branchReport, broadScopeFlag, buildMasterStatus, guardBroadScope, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
@@ -26,6 +26,7 @@ import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, 
 import { contextOverflows } from '../model/escalation-context.js';
 import { interventionSummary } from './intervention-status.js';
 import { terminalDecisions } from './decision-report.js';
+import { masterBoard } from '../model/board.js';
 import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { throughputStatus } from '../throughput.js';
 
@@ -72,9 +73,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
   // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes.
+  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes,
+  // over the inventory the loop's reclaim step cached (GY-360): walking a thousand trees here, on
+  // every call, is what made status take minutes.
   const worktrees = worktreesDirectory(root);
-  const trees = await inventoryWorktrees(root).catch(() => []), reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
+  const inventory = await statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false })), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
   // live there, and it is judged against its own minimum and budget, before a write there fails.
@@ -131,10 +134,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   attentionItems.push(...setupItems);
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
-  // Everything the control plane will take from the operator's own credential alone, derived by
-  // the server from the human-only rule table and answered where it is listed — the dashboard's
-  // Needs you page, in the operator's signed-in session. `humanRequests` above is the parked
-  // half of that table; this is the whole of it, approvals included (GY-102).
+  // Everything the control plane takes from the operator's own credential alone, from the
+  // human-only rule table, answered on the dashboard's Needs you page (GY-102).
   const humanOnly = (coordinator?.humanOnly ?? []) as HumanRequestRow[];
   // A standing ledger refusal is attributed first (GY-131); what still reads as a symptom of a
   // resource at its bound is then rewritten to name that resource (GY-132).
@@ -145,6 +146,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + merger.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
+    // The board (GY-200): what the master owes first, with commands, then the rest.
+    board: await masterBoard(masterApi, snapshot, coordinator, decisions.unanswered),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
@@ -171,7 +174,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     branches: branchReport(status.work),
     requests: agentRequestReport(snapshot), impliedScopeRequests: impliedScopeRequests(snapshot.work),
     // What the host has left, what a reclaim would give back, and the bound it was judged against.
-    disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
+    disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), inventory: { at: inventory.at, cached: inventory.cached }, reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
     runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } };
 }
 

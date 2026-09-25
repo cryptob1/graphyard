@@ -33,6 +33,8 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY src ./src
+# The board (src/model/board.ts) shares the dashboard's pure step and status readers under web/.
+COPY web ./web
 COPY bin ./bin
 USER node
 EXPOSE 4310

@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { dependencyDirectories, diskExhaustion, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, inventoryWorktrees, masterConfigSchema, planWorktreeReclaim, prepareWorkerLaunch, reclaimIdleMs, reclaimWorktrees, saveWorkerProfile, setupMaster, shareDependencies, sharedInstallSource, workerPrompt, worktreesDirectory, writeFailure, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
+import { dependencyDirectories, diskExhaustion, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, inventoryWorktrees, masterConfigSchema, planWorktreeReclaim, prepareWorkerLaunch, reclaimIdleMs, reclaimWorktrees, removeReclaimableWorktrees, statusWorktreeInventory, writeWorktreeInventoryCache, worktreeReclaimAuditFile, saveWorkerProfile, setupMaster, shareDependencies, sharedInstallSource, workerPrompt, worktreesDirectory, writeFailure, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
+import { runChild } from '../src/child-runner.js';
 
 // GY-79: worktrees and their dependency trees filled the host's disk mid-cycle. The master loop
 // now reclaims the dependency directories of finished assignments on its own, a fresh attempt
@@ -313,4 +314,131 @@ test('unit:disk-pressure-attention — master status asks for a reclaim before t
     assert.match(failed.detail, /the host's disk quota is exhausted \(EDQUOT\)/);
     assert.match(failed.detail, /lower run\.reclaimIdleHours/);
   } finally { await rm(credentials, { recursive: true, force: true }); }
+});
+
+// GY-360: the finished worktrees themselves are removed, not only their dependency trees, and
+// master status reads the inventory the reclaim step cached instead of walking every tree.
+test('unit:worktree-reclaim-executes — the reclaim step removes delivered and idle ended worktrees with git worktree remove, audits each, and keeps live, dirty and unpushed ones', async () => {
+  const root = await host(false);
+  try {
+    const idleMs = 3 * hour;
+    const delivered = assignment(root, 'GY-90', 1), ended = assignment(root, 'GY-91', 1), live = assignment(root, 'GY-92', 1);
+    const dirty = assignment(root, 'GY-93', 1), unpushed = assignment(root, 'GY-94', 1), session = assignment(root, 'GY-95', 1);
+    // A dirty tree: an uncommitted edit Git would refuse to drop without --force.
+    await writeFile(join(dirty.path, 'source.ts'), 'export const value = 3;\n');
+    // An unpushed tree: a commit no remote ref and no base branch holds.
+    await writeFile(join(unpushed.path, 'source.ts'), 'export const value = 4;\n');
+    execFileSync('git', ['commit', '-qam', 'unpushed'], { cwd: unpushed.path });
+    // A shared install linked in is untracked to Git, and still no reason to keep the tree.
+    await symlink(join(root, 'node_modules'), join(ended.path, 'node_modules'));
+    for (const tree of [ended, live, dirty, unpushed, session]) await idleFor(tree.path, 4 * hour);
+    const finished = { id: 'graphyard-worker-1:1', kind: 'implementation', principal: 'graphyard-worker-1', epoch: 1, runtime: 'claude', host: 'vishrog', workspace: null, tab: null, pane: null, agentName: null, role: null, state: 'finished', outcome: 'submitted' };
+    const snapshot = [
+      work('GY-90', { stage: 'done', workspaces: [workspace(delivered.path, delivered.branch, 1)] }),
+      work('GY-91', { workspaces: [workspace(ended.path, ended.branch, 1)], sessions: [finished] } as Partial<Work>),
+      work('GY-92', { lease: { epoch: 1, owner: 'graphyard-worker-1', expiresAt: new Date(Date.now() + hour).toISOString() }, workspaces: [workspace(live.path, live.branch, 1)] }),
+      work('GY-93', { workspaces: [workspace(dirty.path, dirty.branch, 1)] }),
+      work('GY-94', { workspaces: [workspace(unpushed.path, unpushed.branch, 1)] }),
+      work('GY-95', { workspaces: [workspace(session.path, session.branch, 1)], sessions: [{ ...finished, state: 'running', outcome: null }] } as Partial<Work>),
+    ];
+    const heads = Object.fromEntries([delivered, ended].map(tree => [tree.path, git(tree.path, 'rev-parse', 'HEAD')]));
+    const calls: string[][] = [];
+    const run = (command: string, args: string[]) => { calls.push([command, ...args]); return runChild(command, args); };
+
+    const report = await removeReclaimableWorktrees(root, snapshot, { idleMs, run, baseBranch: 'main' });
+    assert.deepEqual(report.removed.map(entry => entry.key).sort(), ['GY-90', 'GY-91']);
+    assert.equal(report.backlog, 0); assert.deepEqual(report.errors, []);
+    for (const tree of [delivered, ended]) {
+      assert.equal(await exists(tree.path), false, `${tree.path} was not removed`);
+      assert.equal(await readFile(join(root, 'node_modules', 'pg', 'index.js'), 'utf8'), sharedMarker, 'the shared install behind a link survives');
+      assert.ok(git(root, 'rev-parse', '--verify', tree.branch), 'the branch survives its worktree');
+    }
+    for (const tree of [live, dirty, unpushed, session]) assert.equal(await exists(join(tree.path, 'source.ts')), true, `${tree.path} was removed`);
+    assert.equal(await readFile(join(dirty.path, 'source.ts'), 'utf8'), 'export const value = 3;\n', 'the dirty edit survived');
+    const listed = git(root, 'worktree', 'list', '--porcelain').split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice('worktree '.length));
+    assert.equal(listed.length, 5, 'the main checkout and the four kept trees remain registered');
+    assert.ok(!listed.includes(delivered.path) && !listed.includes(ended.path));
+
+    // The dirty and the unpushed tree are reported, with why; the live ones are simply not candidates.
+    const kept = Object.fromEntries(report.kept.map(entry => [entry.key, entry.reason]));
+    assert.match(kept['GY-93'], /Uncommitted changes/);
+    assert.match(kept['GY-94'], /Unpushed commits/);
+    assert.equal(kept['GY-92'], undefined); assert.equal(kept['GY-95'], undefined);
+
+    // git worktree remove, never --force, then one prune.
+    const removals = calls.filter(call => call.includes('remove'));
+    assert.equal(removals.length, 2);
+    for (const call of removals) assert.ok(!call.includes('--force') && !call.includes('-f'), `forced: ${call.join(' ')}`);
+    assert.equal(calls.filter(call => call.includes('prune')).length, 1);
+
+    // One audit entry per removal: path, item, reason and head.
+    const audit = (await readFile(worktreeReclaimAuditFile(root), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(audit.length, 2);
+    for (const entry of audit) {
+      assert.equal(entry.action, 'worktree-remove');
+      assert.equal(entry.head, heads[entry.path]);
+      assert.ok(['GY-90', 'GY-91'].includes(entry.key));
+      assert.match(entry.reason, entry.key === 'GY-90' ? /GY-90 is delivered/ : /Untouched for \d+ minutes/);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:worktree-reclaim-bounded — removal is bounded per cycle and drains a backlog on consecutive cycles; status reads the cached inventory without running git per worktree', async () => {
+  const root = await host(false), credentials = await mkdtemp(join(tmpdir(), 'graphyard-reclaim-bounded-')), scratch = await mkdtemp(join(tmpdir(), 'graphyard-reclaim-git-'));
+  try {
+    const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
+    const master = config(token, { worktreeRemovalLimit: 3, diskThresholdGb: 0.1 });
+    const trees = Array.from({ length: 7 }, (_, index) => assignment(root, `GY-${100 + index}`, 1));
+    const snapshot = trees.map((tree, index) => work(`GY-${100 + index}`, { stage: 'done', workspaces: [workspace(tree.path, tree.branch, 1)] }));
+    const perPass: number[] = [];
+    const reclaim = async (items: Work[]) => {
+      const removal = await removeReclaimableWorktrees(root, items, { idleMs: reclaimIdleMs(master), run: runChild, baseBranch: 'main', limit: master.run.worktreeRemovalLimit });
+      perPass.push(removal.removed.length);
+      await writeWorktreeInventoryCache(root, { at: removal.at, entries: removal.entries, held: [] });
+      return { ...await reclaimWorktrees(root, items, { idleMs: reclaimIdleMs(master), entries: removal.entries }), trees: removal };
+    };
+    const state = emptyDaemonState(master);
+    const first = await runCycle(master, state, effects({ snapshot: async () => ({ work: snapshot, now: new Date().toISOString() }), reclaim }));
+    assert.deepEqual(perPass, [3]);
+    assert.equal(state.reclaim!.trees, 3); assert.equal(state.reclaim!.treeBacklog, 4);
+    assert.match(first.actions.find(action => action.kind === 'reclaim')!.detail, /Removed 3 finished worktree\(s\) with git worktree remove; 4 more are reclaimable and go on the next cycle \(at most 3 per cycle\)/);
+    // Inside the ten-minute interval, a backlog still drains on the very next cycles.
+    await runCycle(master, state, effects({ snapshot: async () => ({ work: snapshot, now: new Date().toISOString() }), reclaim }));
+    await runCycle(master, state, effects({ snapshot: async () => ({ work: snapshot, now: new Date().toISOString() }), reclaim }));
+    assert.deepEqual(perPass, [3, 3, 1]);
+    assert.equal(state.reclaim!.treeBacklog, 0);
+    await runCycle(master, state, effects({ snapshot: async () => ({ work: snapshot, now: new Date().toISOString() }), reclaim }));
+    assert.equal(perPass.length, 3, 'with the backlog drained the step keeps to its interval again');
+    for (const tree of trees) assert.equal(await exists(tree.path), false);
+
+    // A thousand trees: status reads the cache the reclaim step wrote, in one file read, and no
+    // git runs. A git that records every call it receives stands in for the real one on PATH.
+    const base = worktreesDirectory(root);
+    await Promise.all(Array.from({ length: 1000 }, (_, index) => mkdir(join(base, `GY-${2000 + index}-1`), { recursive: true })));
+    const now = Date.now();
+    await writeWorktreeInventoryCache(root, { at: new Date(now).toISOString(), held: [],
+      entries: await (await import('../src/master.js')).inventoryWorktrees(root, now) });
+    const log = join(scratch, 'git-calls.log');
+    await writeFile(join(scratch, 'git'), `#!/bin/sh\necho "$@" >> ${log}\nexit 1\n`, { mode: 0o755 });
+    const path = process.env.PATH;
+    process.env.PATH = `${scratch}:${path}`;
+    let inventory: Awaited<ReturnType<typeof statusWorktreeInventory>>, elapsed: number;
+    try {
+      const started = performance.now();
+      inventory = await statusWorktreeInventory(root);
+      planWorktreeReclaim(inventory.entries, snapshot, { now: Date.now(), idleMs: reclaimIdleMs(master) });
+      elapsed = performance.now() - started;
+    } finally { process.env.PATH = path; }
+    assert.equal(inventory.cached, true);
+    assert.equal(inventory.entries.length, 1000);
+    assert.ok(elapsed < 2000, `the status inventory took ${elapsed} ms for 1,000 worktrees`);
+    assert.equal(await exists(log), false, 'the status path ran git');
+    // The cache is what status reports, not a fresh walk: a tree gone since the last pass is still listed until the next one.
+    await rm(join(base, 'GY-2000-1'), { recursive: true });
+    assert.equal((await statusWorktreeInventory(root)).entries.length, 1000);
+    // And master status itself goes through the cached inventory, never the walk.
+    const source = await readFile(fileURLToPath(new URL('../src/cli/master-status.ts', import.meta.url)), 'utf8');
+    assert.match(source, /statusWorktreeInventory\(root\)/);
+    assert.doesNotMatch(source, /inventoryWorktrees\(/);
+  } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); await rm(scratch, { recursive: true, force: true }); }
 });

@@ -9,6 +9,8 @@ One sidebar: **Work**, **Workers**, **Shipped**, **Tests** (planned, GY-162), **
 
 Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**. A tile counts and filters one group.
 
+`GET /api/board` (`src/model/board.ts`) serves these groups; the page derives none. Items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor` or `human-only`), `command` (or null), `since` and `overdue` (past `overdueAfterMs`). `master status` lists the master's items as `board.owed`.
+
 ## Workers
 
 **Workers** is its own sidebar entry, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), from the item, not from Herdr.
@@ -22,11 +24,11 @@ Running rows offer:
 
 ## The status sentence
 
-Rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`), the current one named. A merged item reads *Merged* until production serves it, then *Live* (counted this week). Moving and Blocked rows time their step: past thirty minutes, `1h 12m overdue`.
+Rows show the steps **Build, Validate, Test, Review, Prove, Merge, Deploy** (`web/pr-steps.ts`). A merged item reads *Merged* until production serves it, then *Live* (counted this week). Moving and Blocked rows time their step: past thirty minutes, `1h 12m overdue`.
 
 ## An item page
 
-Below the summary: **What is left** (unmet requirements by step, who clears each, in plain words, never raw), **Requirements** (✓ or ○ per criterion, full text on click), **Pull request** (link, commit, files, checks, review) and **Activity** (latest events; history, minus routine checks, on click). Collapsed **Technical details** holds gate decisions, sessions with attach commands, review provider, next action, executors, agent requests and evidence; overlaps read `Shares files with GY-166, GY-167 (tests/)`.
+Below the summary: **What is left** (unmet requirements and who clears each), **Requirements** (✓ or ○ per criterion), **Pull request** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 
