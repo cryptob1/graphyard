@@ -106,6 +106,8 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 Before adding workers, let one lease expire and confirm a reclaim fences the old epoch.
 
+CI workflows should cancel superseded pull-request runs. Give each workflow a pull request triggers a `concurrency` group per pull request, `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`: a rework or base-refresh push then cancels the run for the older head, and runs on main are never cancelled. Without it every refresh queues a full run behind the stale ones, and items wait in Test. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
+
 ## What stays manual
 
 Logins (provider, GitHub, agent environments, browser profile), the App confirmation, plan approval, *Confirm access*, producer grants, and the [human-only decisions](glossary.md#who-decides).
