@@ -248,7 +248,7 @@ test('the work page shows one count row, the groups, each tile filtering to exac
 test('invalid login remains on login; whitespace is trimmed and loading never claims empty work', async ({ page }) => {
   const state = await fixture(page);
   await login(page, 'invalid');
-  await expect(page.getByRole('alert')).toContainText('rejected');
+  await expect(page.getByRole('alert')).toHaveText('That token was not accepted');
   await expect(page.getByLabel('Access token')).toBeVisible();
   await expect(workHeading(page)).toHaveCount(0);
   await expect(page.getByText('GitHub is not connected', { exact: false })).toHaveCount(0);
@@ -481,7 +481,7 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   await expect(page.getByRole('status')).toContainText('Verifying');
   await expect(workHeading(page)).toHaveCount(0);
   rejectLogin();
-  await expect(page.getByRole('alert')).toContainText('rejected');
+  await expect(page.getByRole('alert')).toHaveText('That token was not accepted');
   await expect(page.getByLabel('Access token')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toHaveCount(0);
   await expect(workHeading(page)).toHaveCount(0);
