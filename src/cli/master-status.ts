@@ -12,6 +12,7 @@ import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHead
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
+import { livenessReport } from '../model/liveness.js';
 import { directMergeLine, nameOrphanSupervisors, stalledItemAttention } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
@@ -140,9 +141,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
-  // An open item the control plane names no action for. Those waiting on another item or on a
-  // live session are accounted and raise nothing; what is left is named, with what is missing.
-  const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
+  // Open items with no action, and those nothing owns: liveness violations (GY-201).
+  const actionless = actionlessItems(snapshot.work, new Date(snapshot.now)), liveness = livenessReport(snapshot.work, new Date(snapshot.now));
   const stalledItems = stalledItemAttention(snapshot);
   // An action no live executor can claim is not queued behind other work (GY-105); it is named
   // with its wait and the unit to start, ahead of everything that waits on it.
@@ -204,15 +204,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // resource at its bound is then rewritten to name that resource (GY-132).
   const attributed = ledgerRefusalAttention({ work: status.work, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length, needsHuman: owed.rows.length, humanOnly: humanOnly.length,
-      // Items with no action, split the way a reader has to read them: one waiting on another
-      // item is the pipeline working, one with nothing moving it is the pipeline stopped.
-      actionless: actionless.length, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
+      // Items with no action: waiting on another item is working, nothing moving it is stopped.
+      actionless: actionless.length, liveness: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + stalled.length + overlong.length + loopItems.length + dispatchItems.length + executors.attention.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + owed.counted + resources.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, attentionItems: attributeAttention(attributed.attentionItems, resources.readings), resources: resources.report,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names instead
     // and how long it has held its failing gate; the bound the stalled ones were judged against.
-    actionless: { bound: stallBoundMs, items: actionless },
+    actionless: { bound: stallBoundMs, items: actionless }, liveness,
     interventions: interventions.summary,
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.

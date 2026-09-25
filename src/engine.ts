@@ -18,6 +18,7 @@ import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition }
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, type ActionRow } from './model/actions.js';
+import { livenessNext } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -1578,7 +1579,10 @@ export class Engine {
     // executor's claim and settlement write their own named events.
     // One computation answers both: the queue reconciles against it and the item carries it, so
     // two readers of the same evaluation cannot disagree about what this item needs.
-    const computed = nextAction(work, all, now);
+    // Liveness (GY-201): an open item nothing owns — no live lease, no action, no named wait inside
+    // its deadline — is given the successor for its state in this same pass, never left for a loop
+    // to notice; `livenessNext` is the computed action whenever there is one.
+    const computed = livenessNext(work, all, now);
     reconcileActions(work, all, now, { next: computed });
     // Only a different decision is written: an identical action rebuilt in source order would
     // differ from the stored one by key order alone, and the reconciliation tick would rewrite
