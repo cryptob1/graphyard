@@ -386,7 +386,7 @@ test('Muse remains inside the common supervisor and is terminated on lease loss 
   try {
     const museFixture = "if(process.env.GRAPHYARD_PRINCIPALS)process.exit(9);process.on('SIGTERM',()=>{});setInterval(()=>{},20)";
     const code = await supervise(process.execPath, ['-e', museFixture], 12,
-      async () => ++renewals === 1 ? { ...renewal(200), lease: { ...renewal(200).lease, epoch: 12 } } : Promise.reject(new Error('lease epoch superseded')), { intervalMs: 25, graceMs: 50 });
+      async () => ++renewals === 1 ? { ...renewal(200), lease: { ...renewal(200).lease, epoch: 12 } } : Promise.reject(Object.assign(new Error('lease epoch superseded'), { confirmedRefusal: true })), { intervalMs: 25, graceMs: 50 });
     assert.equal(code, 1); assert.equal(renewals, 2);
   } finally { if (previous === undefined) delete process.env.GRAPHYARD_PRINCIPALS; else process.env.GRAPHYARD_PRINCIPALS = previous; }
 });

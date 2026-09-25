@@ -42,10 +42,32 @@ async function reserve(pool: pg.Pool) {
   } finally { clearTimeout(timer); }
 }
 
+/**
+ * Which connections a transaction may use (GY-274). Lease renewals run on a reserved pool, so a
+ * saturated main pool never lets a live worker's lease lapse; background work (the reconciliation
+ * tick, whose first pass after a deploy ran 65 s) holds at most half the main pool.
+ */
+export type StoreLane = 'request' | 'lease' | 'background'; export const leaseLaneConnections = 2;
+/** A counting semaphore over the background share; a waiter inherits a released permit directly. */
+export class BackgroundLane {
+  private held = 0; private waiting: (() => void)[] = []; constructor(readonly limit: number) {}
+  get inUse() { return this.held; }
+  async acquire() {
+    if (this.held >= this.limit) await new Promise<void>(resolve => this.waiting.push(resolve)); else this.held++;
+    let released = false;
+    return () => { if (released) return; released = true; const next = this.waiting.shift(); if (next) next(); else this.held--; };
+  }
+}
+
 export class Store {
   pool: pg.Pool;
-  constructor(url: string) {
-    this.pool = new pg.Pool({ connectionString: url, max: 12, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+  /** Lease renewals only; `background` bounds the tick to half the main pool. */
+  leasePool: pg.Pool; readonly background: BackgroundLane;
+  constructor(url: string, options: { max?: number } = {}) {
+    const max = Math.max(2, Math.floor(options.max ?? 12));
+    this.pool = new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+    this.leasePool = new pg.Pool({ connectionString: url, max: leaseLaneConnections, connectionTimeoutMillis: storeConnectionTimeoutMs, statement_timeout: storeStatementTimeoutMs });
+    this.background = new BackgroundLane(Math.max(1, Math.floor(max / 2)));
   }
   /**
    * Apply the additive migration and record the schema generation it reached. Running
@@ -154,9 +176,10 @@ export class Store {
     return { version: Number(rows[0].version), digest: rows[0].digest };
   }
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
-  async close() { await this.pool.end(); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
-    const db = await this.pool.connect();
+  async close() { await Promise.all([this.pool.end(), this.leasePool.end()]); }
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
+    const permit = lane === 'background' ? await this.background.acquire() : null;
+    const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
       // Serializes short coordination decisions across replicas, including dependency edits
@@ -167,7 +190,7 @@ export class Store {
       await db.query('COMMIT');
       return result;
     } catch (error) { await db.query('ROLLBACK'); throw error; }
-    finally { db.release(); }
+    finally { db.release(); permit?.(); }
   }
   async list(): Promise<Work[]> {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
