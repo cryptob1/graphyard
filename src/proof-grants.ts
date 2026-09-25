@@ -61,8 +61,8 @@ const gapsAgainst = (registry: readonly ProofAuthority[], proofs: readonly strin
 /** The proof names whose authority a work item's stored `proofGaps` reports on. */
 const gapProofs = (work: Work) => [...new Set(work.criteria.flatMap(ac => ac.proofs)), ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])];
 /**
- * Recomputes the stored `proofGaps` of every open item against live authority after a grant or
- * revoke, so status stops asking for a grant that has already been applied (and names one a revoke
+ * Recomputes the stored `proofGaps` of every open item against live authority at startup and after a
+ * grant or revoke, so status stops asking for a grant that has already been applied (and names one a revoke
  * opened). Only the items whose gaps change are locked, in item order, and saved.
  */
 async function refreshProofGaps(db: pg.PoolClient, principals: readonly Principal[], actor: string, now: Date) {
@@ -89,7 +89,9 @@ export class ProofGrants {
   /**
    * Materialize the environment allowlist once per producer so the live grant set is the
    * whole truth from the first request. Never overwrites an existing record, so a revoked
-   * name is not resurrected by the next restart.
+   * name is not resurrected by the next restart. The stored `proofGaps` of every open item are then
+   * recomputed against the authority this boot serves: an item stored under older gap semantics, or
+   * before a change to the configured principals, never keeps gaps no grant or revoke would refresh.
    */
   async seed(actor = 'bootstrap') {
     const seeded: ProofGrant[] = [];
@@ -98,6 +100,7 @@ export class ProofGrants {
         if (await readGrant(db, principal.id, true)) continue;
         seeded.push(await this.write(db, now, this.materialize(principal, now), 'seed', actor, 'Bootstrap seed from the deployment environment allowlist', principal.proofs ?? []));
       }
+      await refreshProofGaps(db, this.principals, actor, now);
     });
     return seeded;
   }

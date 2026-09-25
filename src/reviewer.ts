@@ -267,7 +267,10 @@ export async function updateReviewLedger<T>(root: string, change: (ledger: Revie
 async function saveChangedRecords(root: string, mine: ReviewRecord[], before: Map<string, string>) {
   const changed = new Map(mine.filter(record => JSON.stringify(record) !== before.get(record.id)).map(record => [record.id, record]));
   if (!changed.size) return;
-  await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(record => changed.get(record.id) ?? record); });
+  // A follow-up filing this pass left as it read it is taken from the ledger as it stands: another pass
+  // may have filed it since, under the approval's lock (fileApprovedFollowUps), and saved it at once.
+  const unchangedFiling = (record: ReviewRecord) => { const was = before.get(record.id); return was !== undefined && JSON.stringify(JSON.parse(was).followUps) === JSON.stringify(record.followUps); };
+  await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(record => { const mineRecord = changed.get(record.id); return !mineRecord ? record : unchangedFiling(mineRecord) ? { ...mineRecord, followUps: record.followUps } : mineRecord; }); });
 }
 
 /** A reservation whose launcher never confirmed the runtime within this long died mid-launch. */
@@ -867,7 +870,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // The threads the approval judged FOLLOW-UP become one backlog item, and each is answered with
   // its key and resolved, so conversation resolution no longer holds the merge on them.
   const create = dependencies.createFollowUpItem ?? (dependencies.observe ? undefined : operatorAgentCreate(root, config));
-  const followUps = await fileApprovedFollowUps(ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, create, followUpCreateStore(root), now);
+  const followUps = await fileApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, create, followUpCreateStore(root), now);
   changed += followUps.changed;
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
@@ -940,8 +943,36 @@ export function followUpCreateStore(root: string): FollowUpCreateStore & { clear
   };
 }
 
+/**
+ * The lock one approval's follow-up filing holds (GY-166). The dispatcher and `master status` both
+ * reconcile, and each would read the thread for an existing reply, find none, and post one: the
+ * filing reads its latest saved record, acts on GitHub and saves the outcome, all under this lock,
+ * so a second pass sees the first one's replies instead of repeating them. A pass that finds the
+ * lock held skips the approval; the holder is filing it, and the next pass retries.
+ */
+const followUpLockFile = (root: string, key: string) => resolve(followUpCreateDirectory(root), `${createHash('sha256').update(key).digest('hex')}.lock`);
+/** A filing holding its lock this long is wedged (each GitHub call is bounded well within it); its lock is broken. */
+export const followUpLockStaleMs = 15 * 60_000;
+export async function tryFollowUpLock(root: string, key: string): Promise<(() => Promise<void>) | null> {
+  const file = followUpLockFile(root, key);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  const { open, readFile: read, unlink } = await import('node:fs/promises');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const handle = await open(file, 'wx', 0o600); await handle.writeFile(`${process.pid} ${Date.now()}`); await handle.close();
+      return async () => { await rm(file, { force: true }); };
+    } catch (error: any) { if (error.code !== 'EEXIST') throw error; }
+    const [pid, at] = (await read(file, 'utf8').catch(() => '')).split(' ').map(Number);
+    let alive = true;
+    try { if (pid) process.kill(pid, 0); } catch (error: any) { alive = error.code !== 'ESRCH'; }
+    if (alive && !(Number.isFinite(at) && Date.now() - at > followUpLockStaleMs)) return null;
+    await unlink(file).catch(() => {});
+  }
+  return null;
+}
+
 /** The approved records whose follow-up threads the loop files on this pass; each outcome is kept on the record. */
-async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, create: CreateFollowUpItem | undefined, store: ReturnType<typeof followUpCreateStore>, now: Date) {
+async function fileApprovedFollowUps(root: string, records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, create: CreateFollowUpItem | undefined, store: ReturnType<typeof followUpCreateStore>, now: Date) {
   const events: string[] = [];
   let changed = 0;
   if (!run || !work || !create) return { events, changed };
@@ -950,32 +981,47 @@ async function fileApprovedFollowUps(records: ReviewRecord[], reviewer: string, 
     // The approval of the head that landed still files: the daemon may merge before the dispatcher's
     // first filing pass, and a finding with no thread has nothing holding the merge back.
     if (!verdict || !approvesFinalHead(record, work)) continue;
-    const previous = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
-    const item = work.find(entry => entry.key === record.key)!, observedAt = item.observation?.at && item.observation.at.length <= 40 ? item.observation.at : undefined;
-    // The item is on the saved record, so its kept create payload is no longer needed for a retry.
-    if (previous?.item) await store.clear(followUpCreateKey(repository, record.pr, verdict.reviewId)).catch(() => undefined);
-    if (previous && !previous.failure) {
-      // Once delivered there is no merge left for a reopened thread to hold.
-      if (!approvesCurrentHead(record, work)) continue;
-      const event = await checkReopenedFollowUps(record, previous, item, repository, run);
-      if (event) { changed++; events.push(event); }
-      continue;
-    }
-    // Past its retries a filing that created its item stops: each thread it could not answer is still
-    // open on GitHub and returns to rework. One that created no item keeps retrying, at a slower pace,
-    // for as long as the approval stands: a finding with no thread has nothing else holding the
-    // merge, and would otherwise be lost while the approved candidate lands.
-    if (previous && previous.attempts >= threadResolutionAttempts && (previous.item || now.getTime() - Date.parse(previous.at) < followUpExhaustedRetryMs)) continue;
-    const outcome = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
-      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, create, now);
-    // The observation the loop held when it resolved: a later one showing a resolved thread open is checked on GitHub.
-    record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), ...(outcome.findings ? { findings: outcome.findings.slice(0, followUpFindingLimit).map(finding => ({ ...finding, path: finding.path && ledgerPath(finding.path), text: finding.text.slice(0, followUpFindingMax) })) } : {}), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}), ...(observedAt ? { observedAt } : {}) };
-    changed++;
-    if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} as ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
-    for (const id of outcome.resolved.filter(id => !previous?.resolved.includes(id))) events.push(`resolved follow-up review thread ${id} on ${record.key} PR #${record.pr} with a reply naming ${outcome.item}`);
-    if (outcome.failure) events.push(`follow-up filing for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);
+    const release = await tryFollowUpLock(root, followUpCreateKey(repository, record.pr, verdict.reviewId));
+    if (!release) continue;
+    try {
+      // The filing as last saved, which another pass may have advanced since this pass read the ledger.
+      const saved = (await readReviewLedger(root)).reviews.find(entry => entry.id === record.id)?.followUps;
+      if (saved?.reviewId === verdict.reviewId && JSON.stringify(saved) !== JSON.stringify(record.followUps)) record.followUps = saved;
+      const before = JSON.stringify(record.followUps);
+      await fileApprovedFollowUp(record, verdict, reviewer, repository, work, run, create, store, now, events);
+      if (JSON.stringify(record.followUps) === before) continue;
+      changed++;
+      await updateReviewLedger(root, ledger => { const entry = ledger.reviews.find(candidate => candidate.id === record.id); if (entry) entry.followUps = record.followUps; });
+    } finally { await release(); }
   }
   return { events, changed };
+}
+
+/** One approval's follow-up filing, or its reopen check once filed; the outcome is left on `record.followUps`. */
+async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<ReviewRecord['verdict']>, reviewer: string, repository: string, work: Work[], run: ChildRun, create: CreateFollowUpItem, store: ReturnType<typeof followUpCreateStore>, now: Date, events: string[]) {
+  const previous = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
+  const item = work.find(entry => entry.key === record.key)!, observedAt = item.observation?.at && item.observation.at.length <= 40 ? item.observation.at : undefined;
+  // The item is on the saved record, so its kept create payload is no longer needed for a retry.
+  if (previous?.item) await store.clear(followUpCreateKey(repository, record.pr, verdict.reviewId)).catch(() => undefined);
+  if (previous && !previous.failure) {
+    // Once delivered there is no merge left for a reopened thread to hold.
+    if (!approvesCurrentHead(record, work)) return;
+    const event = await checkReopenedFollowUps(record, previous, item, repository, run);
+    if (event) events.push(event);
+    return;
+  }
+  // Past its retries a filing that created its item stops: each thread it could not answer is still
+  // open on GitHub and returns to rework. One that created no item keeps retrying, at a slower pace,
+  // for as long as the approval stands: a finding with no thread has nothing else holding the
+  // merge, and would otherwise be lost while the approved candidate lands.
+  if (previous && previous.attempts >= threadResolutionAttempts && (previous.item || now.getTime() - Date.parse(previous.at) < followUpExhaustedRetryMs)) return;
+  const outcome = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
+    ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, create, now);
+  // The observation the loop held when it resolved: a later one showing a resolved thread open is checked on GitHub.
+  record.followUps = { ...outcome, threads: outcome.threads.map(ledgerThread), ...(outcome.findings ? { findings: outcome.findings.slice(0, followUpFindingLimit).map(finding => ({ ...finding, path: finding.path && ledgerPath(finding.path), text: finding.text.slice(0, followUpFindingMax) })) } : {}), refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}), ...(observedAt ? { observedAt } : {}) };
+  if (outcome.item && !previous?.item) events.push(`filed ${outcome.threads.length} follow-up review thread(s) on ${record.key} PR #${record.pr} as ${outcome.item}, named by approval ${verdict.reviewId} of ${record.sha.slice(0, 12)}`);
+  for (const id of outcome.resolved.filter(id => !previous?.resolved.includes(id))) events.push(`resolved follow-up review thread ${id} on ${record.key} PR #${record.pr} with a reply naming ${outcome.item}`);
+  if (outcome.failure) events.push(`follow-up filing for ${record.key} approval ${verdict.reviewId} failed (attempt ${outcome.attempts}): ${outcome.failure}`);
 }
 
 /**

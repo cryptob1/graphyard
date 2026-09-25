@@ -288,6 +288,20 @@ test('integration:proof-grants-gap-report a grant or revoke recomputes the store
   assert.deepEqual((await stored()).proofGaps, [proof]);
 });
 
+test('integration:proof-grants-gap-report startup recomputes stored gaps an item kept from older gap semantics', async () => {
+  const proof = 'manual:gap-refreshed-on-startup';
+  const work = await engine.execute(operator, 'create', null, { title: 'Stale stored gap fixture', producerProofs: [proof],
+    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id()) as Work;
+  assert.deepEqual(work.proofGaps, [proof]);
+  // Stored before producer-lane gaps existed: the admin role's manual:* was taken to cover it.
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{proofGaps}', '[]'::jsonb) WHERE id = $1`, [work.id]);
+  const stored = async () => (await store.list()).find(item => item.id === work.id)!;
+  assert.deepEqual((await stored()).proofGaps, []);
+  // The server's boot seeds the grant set and recomputes every open item's gaps against it.
+  await new ProofGrants(store, principals).seed();
+  assert.deepEqual((await stored()).proofGaps, [proof], 'status now asks for the producer grant the item needs');
+});
+
 test('integration:proof-grants-gap-report closing the gap with a grant clears it on the next intent revision', async () => {
   const proof = 'integration:gap-closing';
   const work = await workFor([proof]);

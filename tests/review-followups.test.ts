@@ -832,3 +832,39 @@ test('unit:review-followups-filed — a long finding beside many short threads i
   for (const thread of many) assert.ok(bounded.includes(`${thread.id} — `), thread.id);
   assert.ok(bounded.includes('Finding with no thread: src/c.ts:9'));
 });
+
+test('unit:review-followups-filed — a thread named on both closing lines is filed as follow-up, never resolved as fixed without an item', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const body = 'AC-1 met. AC-2 met.\nResolved threads: PRRT_fixed0001 PRRT_follow001\nFollow-up threads: PRRT_follow001';
+    const gh = github(body), items = creator(), config = await loadMasterConfig(root);
+    const settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
+    const record = settled.reviews[0];
+    assert.deepEqual(record.threadResolution?.named, ['PRRT_fixed0001'], 'the ambiguous thread is not vouched fixed');
+    assert.equal(items.created.length, 1);
+    assert.ok(items.created[0].item.description.includes('PRRT_follow001'), 'the ambiguous thread is in the follow-up item');
+    assert.deepEqual(gh.replies.map(reply => reply.thread), ['PRRT_follow001'], 'it is resolved only with a reply naming the item');
+    assert.deepEqual(record.followUps?.resolved, ['PRRT_follow001']);
+    assert.deepEqual([...gh.resolved].sort(), ['PRRT_fixed0001', 'PRRT_follow001']);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followups-filed — the dispatcher and master status reconciling at once post one reply per thread and file one item', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github(approvalBody), items = creator(), config = await loadMasterConfig(root);
+    // Every GitHub call yields, so two passes interleave between the reply check and the reply.
+    const slow = async (command: string, args: string[]) => { await new Promise(done => setTimeout(done, 5)); return gh.run(command, args); };
+    const pass = () => reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: slow, createFollowUpItem: items.create });
+    await Promise.all([pass(), pass()]);
+    const after = await pass();
+    assert.deepEqual(gh.replies.map(reply => reply.thread), ['PRRT_follow001', 'PRRT_follow002'], 'one reply per named thread');
+    assert.equal(items.created.length, 1, 'one item for the approval');
+    assert.deepEqual(after.reviews[0].followUps?.replied, ['PRRT_follow001', 'PRRT_follow002']);
+    assert.deepEqual(after.reviews[0].followUps?.resolved, ['PRRT_follow001', 'PRRT_follow002']);
+    assert.equal(after.reviews[0].followUps?.failure, undefined);
+    assert.equal((await readReviewLedger(root)).reviews[0].followUps?.item, 'GY-201', 'the filing is on the saved ledger');
+  } finally { await cleanup(); }
+});

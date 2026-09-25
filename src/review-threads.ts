@@ -172,14 +172,15 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
   if (review?.state !== 'APPROVED' || review?.commit_id !== input.sha || String(review?.user?.login).toLowerCase() !== input.reviewer.toLowerCase())
     return { ...base, named: [], resolved: [], refused: [], failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
   const implicit = !hasResolvedThreadsLine(review.body) && !!input.listed && !input.classified;
-  let named = parseResolvedThreads(review.body).slice(0, listedThreadLimit);
+  // A thread named on both closing lines is ambiguous: it is filed as FOLLOW-UP, never vouched fixed.
+  const followUps = parseFollowUpThreads(review.body);
+  let named = parseResolvedThreads(review.body).filter(id => !followUps.includes(id)).slice(0, listedThreadLimit);
   if (!named.length && !implicit) return { ...base, named, resolved: [], refused: [] };
   let open: LaunchThread[];
   try { open = await readUnresolvedThreads(input.repository, input.pr, run); }
   catch (error) { return { ...base, implicit, named, resolved: [], refused: [], failure: `the review threads could not be read: ${firstLine(error)}` }; }
   if (implicit) {
     // A thread the approval judged FOLLOW-UP stands at this head: it is filed, never vouched fixed.
-    const followUps = parseFollowUpThreads(review.body);
     named = input.listed!.slice(0, listedThreadLimit).filter(id => !followUps.includes(id));
     if (!named.length) return { ...base, implicit, named, resolved: [], refused: [] };
   }
@@ -366,8 +367,8 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
   catch (error) { return { ...base, ...carried, failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
   if (review?.state !== 'APPROVED' || review?.commit_id !== input.sha || String(review?.user?.login).toLowerCase() !== input.reviewer.toLowerCase())
     return { ...base, ...carried, failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
-  const resolvedLine = parseResolvedThreads(review.body);
-  const named = parseFollowUpThreads(review.body).filter(id => !resolvedLine.includes(id)).slice(0, listedThreadLimit);
+  // Every ID on the Follow-up line, even one the Resolved line names too: resolveNamedThreads leaves such a thread for this filing.
+  const named = parseFollowUpThreads(review.body).slice(0, listedThreadLimit);
   // A create already attempted is repeated exactly as it was sent, never rebuilt from GitHub's data now.
   let pending: PendingFollowUpCreate | undefined;
   if (!previous?.item && input.store) {
