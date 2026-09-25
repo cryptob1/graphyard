@@ -209,7 +209,7 @@ export const masterCommands = defineCommands([
         // Skew is refused before any candidate is read: an undeployed server is protocol skew, not a failed gate.
         assertProtocol(coordinator);
         const snapshot = await masterApi('work-snapshot');
-        const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now, coordinator.actor.id) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
+        const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
         if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
         // `--all` merges the candidates that are not system-driven and leaves the rest to the loop; a named item is refused (GY-175).
         if (args[0] === '--all') { const hand = selected.filter((item: any) => !systemDriven(item)); if (!hand.length) assertHandAction(selected[0], 'merge'); selected.splice(0, selected.length, ...hand); }

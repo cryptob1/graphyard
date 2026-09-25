@@ -4,7 +4,7 @@ import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, holdsMergeExecution, MergeExecutionInProgress, providerDelayAfterVerification, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, evidenceBindsCandidate, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -19,7 +19,7 @@ import { reconcileReviewConflict, type ReviewConflictTransition } from './model/
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
-import { livenessFallback, livenessOf, livenessRepairEntry, repairLiveness } from './model/liveness.js';
+import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -125,25 +125,13 @@ const actionSettleSchema = z.object({ executor: executorName.optional(), result:
 // inside the handler, and asks for the lease it already holds to run on.
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
-// A merge execution is owned by the executor instance that acquired it — one daemon process or
-// one interactive `master merge` request — never by the coordinator principal alone (GY-92). Two
-// executors sharing one credential otherwise each read the other's in-flight execution as their
-// own to resume, re-verify it under a new idempotency key, and cancel it on the refusal, before the
-// provider merge the first one already committed. The instance is minted by the executor and
-// bound here to the principal that authenticates it, so no instance can name another principal's.
+// The merge request names the executor instance that recorded it — one daemon process or one
+// interactive `master merge` request — bound here to the principal that authenticates it (GY-92).
 const executorInstance = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
-const mergeAcquireSchema = z.object({ expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
 /** The coordinator's request that GitHub merge exactly this candidate (GY-258): the merge step's whole authority now. */
 const mergeEnqueueSchema = z.object({ enqueue: z.literal(true), expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
-const mergeCancelSchema = z.object({ executionId: z.string().uuid(), reason: z.string().trim().min(1).max(2000), executor: executorInstance.optional() }).strict();
-const mergeVerifySchema = z.object({ executionId: z.string().uuid(), executor: executorInstance.optional() }).strict();
-/**
- * The recorded owner of a merge execution: `principal#instance` for an executor that names its
- * instance, the bare principal for a caller that names none. Every later step must present the
- * same instance; the executor side derives the same string (mergeExecutionOwner in master.ts).
- */
+/** Who recorded a merge request: `principal#instance` for an executor that names its instance, else the bare principal. */
 export const mergeExecutionOwner = (actor: Pick<Principal, 'id'>, executor?: string | null) => executor ? `${actor.id}#${executor}` : actor.id;
-const ownedByAnother = 'Merge execution is missing, expired, superseded, or owned by another coordinator executor instance';
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
@@ -441,13 +429,6 @@ export class Engine {
       const deliveredSessionClosure = work.stage === 'done' && command === 'session' && data.state === 'finished'
         && (work.sessions ?? []).some(handle => handle.id === data.id);
       preserveAssignment(work); retainQuarantineFence(work);
-      if (!containmentCleanup.includes(command) && !postDeployment && work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
-      // Revocation is the one mutation an in-flight merge execution cannot outrun: freezing it
-      // for the execution's lifetime would leave a withdrawn proof merging against a published
-      // GitHub success check. Every other command still waits for the bounded execution — and a
-      // committed one outlives its expiry here until GitHub has answered for the provider call.
-      demand(!work.mergeExecution || command === 'heartbeat' || command === 'revoke' || containmentCleanup.includes(command) || postDeployment,
-        work.mergeExecution?.committingAt ? 'The merge broker committed this candidate to the provider; retry after GitHub reconciliation' : 'A merge execution is active; retry after it completes or expires');
       if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
         if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
@@ -461,7 +442,6 @@ export class Engine {
       if (command === 'repair') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
         demand(work.submission && !work.observation?.merged && work.stage !== 'done', 'Open submitted work is required');
-        demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
         demand(work.observation?.candidate.sha === work.candidate?.sha && work.observation?.prState === 'open' && work.observation.draft === false, 'An open pull request observed at the current head is required');
         demand(!work.queue, `${work.key} is a live merge-queue entry; its tip is rebuilt from its own reviewed head when the queue changes, and is not repaired by hand`);
         // Decided from the record and the observation alone; the command asserts nothing.
@@ -938,29 +918,9 @@ export class Engine {
         // pass withdraws every record derived from it, for whichever later heads they cover.
         const directIds = new Set(direct.map(item => item.id));
         const withdrawn = work.evidence.filter(item => directIds.has(item.id) || item.trusted && !item.revocation && !!item.reuse && directIds.has(item.reuse.evidenceId));
-        // The execution is recalled when a withdrawn record — executed or derived — bound its
-        // candidate, exactly or carried across a Graphyard-authored tip, for a proof the
-        // candidate's criteria require.
-        const execution = work.mergeExecution && work.candidate
-          && work.mergeExecution.sha === work.candidate.sha
-          && work.mergeExecution.baseSha === work.candidate.baseSha
-          && work.mergeExecution.policyRevision === data.policyRevision
-          && withdrawn.some(item => evidenceBindsCandidate(work!, item))
-          && work.criteria.some(criterion => criterion.proofs.includes(data.proof))
-          ? work.mergeExecution : null;
-        // mergeCommit is the serialization point immediately before the provider mutation.
-        // Once it wins the row lock, a withdrawal that contributed to that execution must
-        // refuse rather than falsely claim it recalled the candidate — and keeps refusing past
-        // the execution's expiry, because the committed record is retained until a GitHub
-        // observation settles the provider outcome. Historical/unrelated evidence can still be
-        // withdrawn without disturbing the current execution.
-        demand(!execution?.committingAt, 'The merge broker already committed this candidate to the provider; wait for reconciliation before revoking');
         for (const item of withdrawn) item.revocation = { at: now.toISOString(), actor: actor.id, reason: data.reason };
-        if (execution) work.mergeExecution = null;
-        // Reuse the cancellation ledger the merge broker and delivery attribution already read,
-        // so an observed merge that lands after this instant refuses instead of completing.
-        if (execution) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
-          [work.id, actor.id, 'merge.execution.cancelled', JSON.stringify({ details: { executionId: execution.id, reason: `Evidence ${data.proof} revoked: ${data.reason}` } })]);
+        // No execution is recalled: the revocation withdraws the authorization, and the next
+        // observation fails the 'Graphyard / merge' check and dequeues the pull request (GY-258).
       }
       // A widening that covers an open scope ask is the answer to it: the deterministic rule the
       // request named has been applied, so the request closes rather than waiting on nobody.
@@ -1155,6 +1115,7 @@ export class Engine {
   async requestEnqueue(actor: Principal, id: string, input: unknown, key: string) {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+    demand((input as { enqueue?: unknown } | null)?.enqueue === true, 'Graphyard grants no merge executions: GitHub executes merges, and the merge step requests one with enqueue: true (merge protocol 3)', 400);
     const data = mergeEnqueueSchema.parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.enqueue', id, data })).digest('hex');
     return this.store.transaction(async (db, now) => {
@@ -1205,169 +1166,6 @@ export class Engine {
       return work;
     });
   }
-  async acquireMerge(actor: Principal, id: string, input: unknown, key: string) {
-    // The merge step's request that GitHub merge the candidate travels on the same route (GY-258).
-    if ((input as { enqueue?: unknown } | null)?.enqueue !== undefined) return this.requestEnqueue(actor, id, input, key);
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = mergeAcquireSchema.parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.acquire', id, data })).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-      const work = all.find(item => item.id === id || item.key === id);
-      demand(work, 'Work item not found', 404);
-      if (receipt) {
-        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
-        this.evaluate(work, all, now);
-        const execution = receipt.result?.execution;
-        demand(execution && work.mergeExecution?.id === execution.id && !work.mergeExecution?.fenced
-          && Date.parse(execution.expiresAt) > now.getTime() && work.stage === 'merge' && work.gates.every(gate => gate.passed)
-          && !work.violations.length && work.candidate?.sha === execution.sha && work.candidate?.baseSha === execution.baseSha
-          && work.policyRevision === execution.policyRevision, 'Replayed merge execution is expired, cancelled, fenced, or superseded');
-        return receipt.result;
-      }
-      // The grant is bound to what it merges, not to the document revision the caller read (GY-192):
-      // observations and bookkeeping bump the revision constantly without changing the candidate.
-      // A revision from the future was never read; any other change is re-validated below, in this
-      // transaction, against the binding — head, base, policy revision, the queue tip the caller
-      // verified, and the all-gates authorization for exactly those.
-      demand(data.expectedRevision <= work.revision, 'Task changed before merge execution; retry');
-      demand(data.queueTip === undefined || work.queue?.speculation?.tip === data.queueTip && work.queue.speculation.base === data.baseSha, 'Task changed before merge execution; retry');
-      if (work.mergeExecution && !holdsMergeExecution(work, now.getTime())) work.mergeExecution = null;
-      demand(!work.mergeExecution, work.mergeExecution?.committingAt ? 'A committed merge execution awaits GitHub reconciliation; no new execution can be granted until it is observed' : 'A merge execution is already active');
-      this.evaluate(work, all, now);
-      const authorization = work.mergeAuthorization;
-      const age = work.observation ? now.getTime() - Date.parse(work.observation.at) : NaN;
-      demand(work.stage === 'merge' && work.gates.every(gate => gate.passed) && !work.violations.length && authorization
-        && authorization.sha === data.sha && authorization.baseSha === data.baseSha && authorization.policyRevision === data.policyRevision
-        && work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && Number.isFinite(age) && age >= 0 && age < 120_000,
-      'Merge authorization is no longer current');
-      const requiredEvidence = requiredProofs(work, all).map(proof => currentEvidence(work, proof, now));
-      const validityDeadlines = [now.getTime() + 120_000, Date.parse(work.observation!.at) + 120_000,
-        ...requiredEvidence.flatMap(evidence => evidence?.expiresAt ? [Date.parse(evidence.expiresAt)] : [])];
-      const expiresAt = Math.min(...validityDeadlines);
-      demand(Number.isFinite(expiresAt) && expiresAt - now.getTime() > 95_000, 'Required gate inputs expire too soon for a bounded merge execution; refresh them and retry');
-      const execution = { id: randomUUID(), owner: mergeExecutionOwner(actor, data.executor), sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, authorizationRevision: work.revision, issuedAt: now.toISOString(), expiresAt: new Date(expiresAt).toISOString() };
-      work.mergeExecution = execution;
-      await this.recordDispatch(db, work, now);
-      await save(db, work, actor.id, 'merge.execution.acquired', now, { executionId: execution.id, owner: execution.owner, sha: execution.sha, baseSha: execution.baseSha, policyRevision: execution.policyRevision });
-      const result = { key: work.key, revision: work.revision, execution };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      return result;
-    });
-  }
-  async cancelMerge(actor: Principal, id: string, input: unknown, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = mergeCancelSchema.parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.cancel', id, data })).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result; }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
-      const work = all.find(item => item.id === id || item.key === id);
-      demand(work, 'Work item not found', 404);
-      // Only the instance that acquired the execution may cancel it: a second executor under the
-      // same credential that lost the race stands down instead (GY-92).
-      demand(work.mergeExecution?.id === data.executionId && work.mergeExecution.owner === mergeExecutionOwner(actor, data.executor), ownedByAnother);
-      work.mergeExecution = null; this.evaluate(work, all, now);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, actor.id, 'merge.execution.cancelled', now, { executionId: data.executionId, reason: data.reason });
-      await wakeJob(db, work.id);
-      const result = { key: work.key, revision: work.revision, cancelled: data.executionId };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      return result;
-    });
-  }
-  async replayMergeVerification(actor: Principal, id: string, input: unknown, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = mergeVerifySchema.parse(input); const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.verify', id, data })).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (!receipt) return null;
-      demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
-      const work = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
-      demand(work?.mergeExecution?.id === data.executionId && work.mergeExecution.owner === mergeExecutionOwner(actor, data.executor) && work.mergeExecution.verifiedAt === receipt.result.verifiedAt
-        && Date.parse(work.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, or superseded');
-      return receipt.result;
-    });
-  }
-  async verifyMerge(actor: Principal, id: string, input: unknown, observation: Observation, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = mergeVerifySchema.parse(input); const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.verify', id, data })).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) {
-        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
-        const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
-        demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === mergeExecutionOwner(actor, data.executor) && current.mergeExecution.verifiedAt === receipt.result.verifiedAt
-          && !current.mergeExecution.fenced && Date.parse(current.mergeExecution.expiresAt) > now.getTime(), 'Replayed merge verification is expired, cancelled, fenced, or superseded');
-        return receipt.result;
-      }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
-      const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
-      const execution = work.mergeExecution;
-      demand(execution?.id === data.executionId && execution.owner === mergeExecutionOwner(actor, data.executor) && Date.parse(execution.expiresAt) > now.getTime(), ownedByAnother);
-      demand(!execution.verifiedAt, 'Merge execution was already verified; retry with the original idempotency key');
-      demand(!execution.fenced, `Merge execution was fenced and cannot be verified: ${execution.fenced?.reason}`);
-      demand(!observation.merged && observation.prState === 'open' && observation.draft === false, 'Pull request is no longer open and ready for merge');
-      demand(observation.candidate.sha === execution.sha && observation.candidate.baseSha === execution.baseSha && observation.candidate.pr === work.submission?.pr
-        && work.workspaces.some(workspace => workspace.epoch === work.submission!.epoch && workspace.branch === observation.candidate.branch), 'GitHub candidate changed during merge execution');
-      // The final verification re-runs the landing check against the branch head as it is now
-      // (GY-97). It is taken without the other items, so what the recorded observation of this
-      // exact head found carried in its history stands beside it rather than being dropped.
-      const recorded = work.observation && work.observation.candidate.sha === observation.candidate.sha ? work.observation.landing?.carried : undefined;
-      if (observation.landing && observation.landing.carried === undefined && recorded) observation.landing = { ...observation.landing, carried: recorded };
-      const probe = structuredClone(work); probe.candidate = observation.candidate; probe.observation = observation;
-      this.evaluate(probe, all.map(item => item.id === probe.id ? probe : item), now);
-      demand(probe.stage === 'merge' && probe.gates.every(gate => gate.passed) && !probe.violations.length, `GitHub gates changed during merge execution: ${probe.gates.flatMap(gate => gate.reasons).concat(probe.violations).join('; ')}`);
-      execution.verifiedAt = now.toISOString();
-      const offset = observation.clockOffset;
-      demand(offset && Number.isFinite(offset.min) && Number.isFinite(offset.max) && offset.min <= offset.max && offset.max - offset.min <= 20_000, 'A bounded GitHub/database clock observation is required');
-      execution.clockOffset = offset;
-      await save(db, work, actor.id, 'merge.execution.verified', now, { executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt });
-      const providerDelayMs = providerDelayAfterVerification(now.getTime(), offset);
-      const result = { key: work.key, executionId: execution.id, sha: execution.sha, verifiedAt: execution.verifiedAt, providerDelayMs, clockOffset: offset, revision: work.revision };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      return result;
-    });
-  }
-  async commitMerge(actor: Principal, id: string, input: unknown, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = mergeVerifySchema.parse(input); const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.commit', id, data })).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) {
-        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
-        const current = (await db.query('SELECT document FROM work_items WHERE id::text=$1 OR document->>\'key\'=$1', [id])).rows[0]?.document as Work | undefined;
-        demand(current?.mergeExecution?.id === data.executionId && current.mergeExecution.owner === mergeExecutionOwner(actor, data.executor)
-          && current.mergeExecution.committingAt === receipt.result.committingAt && Date.parse(current.mergeExecution.expiresAt) > now.getTime(),
-        'Replayed merge commit is expired, cancelled, or superseded');
-        return receipt.result;
-      }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
-      const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
-      const execution = work.mergeExecution;
-      demand(execution?.id === data.executionId && execution.owner === mergeExecutionOwner(actor, data.executor) && Date.parse(execution.expiresAt) > now.getTime(), ownedByAnother);
-      demand(execution.verifiedAt, 'Merge execution has not passed final verification');
-      demand(!execution.committingAt, 'Merge execution was already committed; retry with the original idempotency key');
-      this.evaluate(work, all, now);
-      demand(work.stage === 'merge' && work.gates.every(gate => gate.passed) && !work.violations.length && work.mergeAuthorization
-        && work.mergeAuthorization.sha === execution.sha && work.mergeAuthorization.baseSha === execution.baseSha
-        && work.mergeAuthorization.policyRevision === execution.policyRevision,
-      'Merge authorization changed after final verification; provider merge refused');
-      execution.committingAt = now.toISOString();
-      await this.recordDispatch(db, work, now);
-      await save(db, work, actor.id, 'merge.execution.committed', now, { executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt });
-      const result = { key: work.key, executionId: execution.id, sha: execution.sha, committingAt: execution.committingAt, revision: work.revision };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      return result;
-    });
-  }
   async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
@@ -1375,7 +1173,6 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
-      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       const provider = reviewProviderOf(work.policy);
       demand(work.policy.review && (request.provider ?? 'codex') === provider && ['codex', 'agent'].includes(provider)
         && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
@@ -1404,7 +1201,6 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
-      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
       // A tip re-bound to a tree-identical prediction keeps the carry it was first bound with (GY-100).
       const kept = keptTipCarry(work, speculation);
@@ -1485,7 +1281,6 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
-      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       requireCurrent(!work.queue && refresh.policyRevision === work.policyRevision
         && work.candidate?.sha === refresh.from.sha && work.candidate.baseSha === refresh.from.baseSha, 'Candidate, queue entry or policy changed while the base was refreshed');
       const carry = refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
@@ -1527,7 +1322,6 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the branch was restored');
-      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       const restore = refresh.restore;
       requireCurrent(!work.queue && !!restore && restore.contaminated === work.candidate?.sha && refresh.policyRevision === work.policyRevision, 'Candidate, queue entry or policy changed while the branch was restored');
       work.baseRefresh = { ...refresh, carry: null };
@@ -1612,7 +1406,6 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
-      demand(!holdsMergeExecution(work, now.getTime()), 'Merge execution is active');
       const request = work.reviewRequest;
       demand(work.policy.review && reviewProviderOf(work.policy) === 'agent' && request?.provider === 'agent'
         && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision,
@@ -1697,23 +1490,10 @@ export class Engine {
         // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
         const stranded = livenessOf(work, all, now).violation;
         preserveAssignment(work); retainQuarantineFence(work);
-        const executing = holdsMergeExecution(work, now.getTime());
         const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
-        // An in-flight merge execution defers reconciliation, but never a lease
-        // loss: that escalation must reach the record and fence the execution
-        // rather than wait for it, so delivery cannot outrun the concern. A
-        // committed execution is retired only by the GitHub observation that
-        // settles its provider outcome, never by reconciliation — but one that outlived its
-        // authority with the pull request open is owed a fresh reading, queued here.
-        if (executing && !leaseLost) {
-          if (repairLiveness(work, all, now).length && JSON.stringify(work) !== before) {
-            const entry = stranded ? livenessRepairEntry(stranded, work, all, now) : null;
-            if (entry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
-            await save(db, work, 'graphyard', 'reconciled', now, entry ? { ledger: [entry.kind] } : undefined);
-          }
-          continue;
-        }
-        if (!executing && work.mergeExecution) work.mergeExecution = null;
+        // GitHub executes merges (GY-258): a merge execution recorded before that stays in the
+        // ledger, where delivery attribution reads it, and no longer holds the record.
+        if (work.mergeExecution) work.mergeExecution = null;
         const ledger: { kind: string; details: Record<string, unknown> }[] = [];
         // The ledger explains a lapse: the epoch's own blocked report or the admin's stopped-worker
         // attestation. It is read only where a lapse or a standing lease-loss makes it relevant.
@@ -1769,14 +1549,6 @@ export class Engine {
       const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision, 'Task changed while GitHub was being observed; retry');
-      const execution = work.mergeExecution ?? null;
-      const activeExecution = execution && Date.parse(execution.expiresAt) > now.getTime() ? execution : null;
-      if (activeExecution && (!observation.merged || observation.candidate.sha !== activeExecution.sha || observation.candidate.baseSha !== activeExecution.baseSha)) throw new MergeExecutionInProgress('Merge execution is active; reconciliation is deferred unless GitHub observes its matching merge');
-      // A committed execution outlives its expiry on the record. Only an observation taken after
-      // the authority lapsed can rule the provider merge out: an earlier unmerged reading leaves
-      // the in-flight call unresolved, so the record stays frozen and revocation stays refused.
-      if (execution?.committingAt && !activeExecution && !observation.merged && !(Date.parse(observation.at) >= Date.parse(execution.expiresAt)))
-        throw new MergeExecutionInProgress('Committed merge execution awaits an observation taken after its authority expired; reconciliation is deferred');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
@@ -1802,26 +1574,27 @@ export class Engine {
         // Never allow evidence from after the earliest possible merge instant.
         // Whole-second timestamps can therefore conservatively refuse same-second authorization.
         const acquired = (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1`, [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
+        // A merge execution recorded before GY-258, when Graphyard called the provider itself, still
+        // attributes the merge it committed; GitHub-executed merges stand on the enqueue request below.
         // The execution that called the provider for this head is the one that bounds its merge: a
         // later execution acquired on a lagging read that still showed the pull request open never
         // committed, and binding the merge to it would record a merge its predecessor authorized as
         // unauthorized (GY-202). So the latest committed execution for the observed head is preferred.
         const commits = (candidate: Work['mergeExecution'] | undefined) => !!candidate?.committingAt && candidate.sha === observation.candidate.sha && candidate.baseSha === observation.candidate.baseSha;
-        const committed = commits(activeExecution) ? activeExecution : (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind='merge.execution.committed' AND ${eventWorkSql()}->'mergeExecution'->>'sha'=$2 AND ${eventWorkSql()}->'mergeExecution'->>'baseSha'=$3 ORDER BY seq DESC LIMIT 1`,
+        const committed = (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind='merge.execution.committed' AND ${eventWorkSql()}->'mergeExecution'->>'sha'=$2 AND ${eventWorkSql()}->'mergeExecution'->>'baseSha'=$3 ORDER BY seq DESC LIMIT 1`,
           [id, observation.candidate.sha, observation.candidate.baseSha])).rows[0]?.execution as Work['mergeExecution'] | undefined;
-        const boundedExecution = (commits(committed) ? committed : null) ?? activeExecution ?? acquired ?? null;
+        const boundedExecution = (commits(committed) ? committed : null) ?? acquired ?? null;
         const offset = boundedExecution?.clockOffset;
         const mergedTime = providerMergedTime + (offset?.min ?? 0);
         // The lower bound of the offset, so the recorded instant is the earliest the merge
         // can have happened on the repository clock and a derived duration is never
-        // inflated by skew. The bound is narrow: `verifyMerge` refuses an offset
+        // inflated by skew. The bound is narrow: the recorded verification refused an offset
         // observation wider than 20 seconds, so the true instant is at most that far later.
         if (offset) { repositoryClockOffsetMs = offset.min; mergedAtRepository = new Date(mergedTime).toISOString(); }
         const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000) + (offset?.max ?? 0);
-        // Every authorization path below requires `executionValid`, which bounds
-        // `cutoff` by the execution expiry, and `acquireMerge` bounds that expiry by the
-        // earliest required-evidence expiry. So evidence live at authorization is still
-        // live at `cutoff - 1`, the same instant the historical check uses.
+        // Evidence is judged live at `cutoff - 1`, the instant the historical check uses: a recorded
+        // execution's expiry was bounded by the earliest required-evidence expiry, and the enqueue
+        // path re-checks every required proof on the record before the cutoff.
         evidenceAsOf = new Date(cutoff - 1).toISOString();
         let cancelledExecution = false;
         if (boundedExecution) {
@@ -1833,13 +1606,6 @@ export class Engine {
           && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
           && Date.parse(boundedExecution.verifiedAt) <= Date.parse(boundedExecution.committingAt)
           && Date.parse(boundedExecution.committingAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
-        if (activeExecution && activeExecution.id === boundedExecution?.id && executionValid && work.mergeAuthorization
-          && activeExecution.sha === observation.candidate.sha && activeExecution.baseSha === observation.candidate.baseSha
-          && activeExecution.policyRevision === work.policyRevision && work.mergeAuthorization.sha === activeExecution.sha
-          && work.mergeAuthorization.baseSha === activeExecution.baseSha && work.mergeAuthorization.policyRevision === activeExecution.policyRevision
-          && work.gates.every(gate => gate.passed) && !work.violations.length) {
-          authorizedSnapshot = structuredClone(work); authorizationRevision = activeExecution.authorizationRevision;
-        }
         // The record as it stood immediately before the merge: what the historical authorization
         // check reads, and what a two-party reconciliation re-checks (GY-92). The cutoff carries
         // the clock-offset allowance so an authorization recorded up to the merge instant on the
@@ -1847,7 +1613,7 @@ export class Engine {
         // a snapshot whose own observation already reports this pull request merged was written
         // after the merge, whatever its timestamp, and carries the merge's consequences.
         // A row stored as a delta (store/snapshot-delta.ts) is read as the document it stands for.
-        const past = authorizedSnapshot ? undefined : await documentBefore(db, id, new Date(cutoff),
+        const past = await documentBefore(db, id, new Date(cutoff),
           record => !(record.observation?.merged && record.observation.candidate?.pr === observation.candidate.pr));
         const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
         // GitHub executes the merge (GY-258): the coordinator's request that GitHub merge exactly
@@ -1955,7 +1721,6 @@ export class Engine {
           if (reconciliation || operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
           else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
-          work.mergeExecution = null;
           const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
@@ -1970,15 +1735,10 @@ export class Engine {
           // The queue shifted: every entry behind this one has a new position and predicted base.
           for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
         } else {
-          work.mergeExecution = null;
           if (!work.violations.includes(violation)) work.violations.push(violation);
           if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
             JSON.stringify({ details: { ...refusedReconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, at: now.toISOString() } })]);
         }
-      } else if (execution && !activeExecution) {
-        // GitHub answered for the lapsed authority: the pull request is still unmerged after it
-        // expired, so the execution — committed or not — is reconciled and the record reopens.
-        work.mergeExecution = null;
       }
       // A queue entry the evaluation derived out is recorded as an ejection, and every entry behind
       // it is woken to predict against the real base. For a merged entry that could never publish

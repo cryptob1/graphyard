@@ -55,7 +55,7 @@ With `"deploySmoke": true`, the master dispatches the smoke workflow (`master in
 
 ## Enforcement boundary
 
-No transaction spans GitHub and Postgres: GitHub merges only heads whose required check passed. Restrict other merge identities; a worker can still push its own branch after losing its lease.
+No transaction spans GitHub and Postgres: GitHub merges only heads whose required check passed. Graphyard issues no merge execution and holds no merge route: `merge-acquire` only records the request (merge protocol 3). Restrict other merge identities; a worker can still push its own branch after losing its lease.
 
 ## Identity-bound agent review
 

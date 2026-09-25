@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { assertMergeCandidate, buildMasterStatus, masterConfigSchema, mergeExecutionOwner, mergeExecutor, mergedWithoutAuthorization, type MasterConfig, type MergeExecutor } from '../src/master.js';
+import { assertMergeCandidate, buildMasterStatus, masterConfigSchema, mergeExecutor, mergedWithoutAuthorization, type MasterConfig, type MergeExecutor } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
@@ -91,15 +91,11 @@ async function candidate(proven = true) {
  * a confirmed refusal carrying the server's error document.
  */
 const transport = (actor: Principal) => async (path: string, data: any, key: string = randomUUID()) => {
-  const match = /^work\/([^/]+)\/merge-(acquire|cancel|verify|commit)$/.exec(path);
+  const match = /^work\/([^/]+)\/merge-(acquire)$/.exec(path);
   if (!match) throw new Error(`Unexpected mutation ${path}`);
   const [, workId, step] = match;
   try {
-    if (step === 'acquire') return await engine.acquireMerge(actor, workId, data, key);
-    if (step === 'cancel') return await engine.cancelMerge(actor, workId, data, key);
-    if (step === 'commit') return await engine.commitMerge(actor, workId, data, key);
-    const replay = await engine.replayMergeVerification(actor, workId, data, key); if (replay) return replay;
-    return await engine.verifyMerge(actor, workId, data, { ...observation(await reload(workId)), prState: 'open', draft: false, clockOffset: { min: -1000, max: 0 } }, key);
+    return await engine.requestEnqueue(actor, workId, data, key);
   } catch (error) {
     if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 });
     throw error;
@@ -147,14 +143,9 @@ test('GitHub executes the merge (GY-258): the daemon loop and an interactive mer
   assert.equal(delivered.delivery?.mergeSha, mergeSha);
 });
 
-test('integration:merged-without-authorization-recovery — an observed merge whose execution was cancelled records the violation, stays out of done, and reaches done only through a two-party merge decision re-checked at the merge cutoff, with authorizationRevision and evidenceAsOf from the historical snapshot', async () => {
-  // GY-81's ledger: acquired, verified, committed, cancelled before the merge cutoff, then merged.
+test('integration:merged-without-authorization-recovery — an observed merge that no merge request authorized records the violation, stays out of done, and reaches done only through a two-party merge decision re-checked at the merge cutoff, with authorizationRevision and evidenceAsOf from the historical snapshot', async () => {
+  // GY-81's ledger, as GitHub now executes merges (GY-258): merged with no coordinator request before the cutoff.
   const work = await candidate();
-  const executor: MergeExecutor = { principal: coordinator.id, instance: `daemon-${randomUUID()}` };
-  const granted = await engine.acquireMerge(coordinator, work.id, { expectedRevision: work.revision, sha: head, baseSha: base, policyRevision: work.policyRevision, executor: executor.instance }, id());
-  await engine.verifyMerge(coordinator, work.id, { executionId: granted.execution.id, executor: executor.instance }, { ...observation(work), prState: 'open', draft: false }, id());
-  await engine.commitMerge(coordinator, work.id, { executionId: granted.execution.id, executor: executor.instance }, id());
-  await engine.cancelMerge(coordinator, work.id, { executionId: granted.execution.id, reason: '{"error":"Merge execution was already verified; retry with the original idempotency key"}', executor: executor.instance }, id());
   await delay(5);
   const mergedObservation = await merged(work);
   let current = await engine.observe(work.id, (await reload(work.id)).revision, mergedObservation);
@@ -172,24 +163,23 @@ test('integration:merged-without-authorization-recovery — an observed merge wh
   let earlyState = await engine.observe(early.id, (await reload(early.id)).revision, await merged(early));
   assert.equal(earlyState.stage, 'merge'); assert.ok(earlyState.violations.includes(unauthorizedMergeViolation), 'a decision requested before the merge reconciles nothing');
   // The recovery: request the decision now, after the merge. Requested alone it changes nothing.
-  const decision = await mergeDecision(current, `Reconcile ${current.key}: GitHub merged ${mergeSha.slice(0, 12)} after the execution was cancelled by a second executor`);
+  const decision = await mergeDecision(current, `Reconcile ${current.key}: GitHub merged ${mergeSha.slice(0, 12)} with no merge request recorded before it`);
   current = await engine.observe(work.id, (await reload(work.id)).revision, mergedObservation);
   assert.equal(current.stage, 'merge', 'a requested but unapproved decision does not deliver');
   assert.deepEqual(current.violations, [unauthorizedMergeViolation]);
   // Approved by the independent approver, the next observation re-checks the record at the cutoff and delivers.
   await decision.approve();
   const delivered = await engine.observe(work.id, current.revision, mergedObservation);
-  assert.equal(delivered.stage, 'done'); assert.equal(delivered.mergeExecution, null);
+  assert.equal(delivered.stage, 'done');
   assert.deepEqual(delivered.violations, [], 'the reconciled violation leaves the record; the ledger keeps it');
   const delivery = delivered.delivery as NonNullable<Work['delivery']> & { reconciliation: any };
   assert.equal(delivery.mergeSha, mergeSha); assert.equal(delivery.mergedAt, mergedObservation.mergedAt);
-  assert.equal(delivery.authorizationRevision, granted.execution.authorizationRevision, 'authorizationRevision comes from the historical execution, not the observation that delivered');
+  assert.equal(delivery.authorizationRevision, delivery.reconciliation.snapshotRevision, 'authorizationRevision comes from the historical snapshot, not the observation that delivered');
   assert.ok(delivery.authorizationRevision < delivered.revision - 2);
   // The merge instant on the repository clock, the instant the historical evidence was judged at: a
   // millisecond timestamp under a zero offset makes the cutoff the merge instant plus one, so the
-  // evidence instant is the merge instant itself, and it precedes the execution's expiry.
+  // evidence instant is the merge instant itself.
   assert.equal(delivery.evidenceAsOf, mergedObservation.mergedAt);
-  assert.ok(Date.parse(delivery.evidenceAsOf!) < Date.parse(granted.execution.expiresAt));
   assert.equal(delivery.reconciliation.decision, decision.id);
   assert.equal(delivery.reconciliation.requestedBy, operator.id); assert.equal(delivery.reconciliation.approvedBy, approver.id);
   assert.match(delivery.reconciliation.reason, /Reconcile/); assert.match(delivery.reconciliation.approvalReason, /Approved/);

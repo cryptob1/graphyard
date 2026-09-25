@@ -18,7 +18,7 @@ A producer that ever held an assignment on the item or belongs to its slice is r
 | `security-concern` | A lead files an `escalate` ruling naming it. |
 | `requirement-weakening` | A revision retires a criterion or narrows its proofs. |
 
-Each unresolved trigger drops merge authorization and refuses the merge gate; raising one fences any in-flight merge execution. A lapse the ledger explains is instead a `lease.expired` entry with its cause: `submitted`, `blocked-awaiting-operator` (a `blocked` report for that epoch), `stopped-by-attestation` (an admin `--previous-worker-stopped` for that epoch) or `exhausted-capacity`. Reconciliation auto-settles a `lease-loss` whose epoch is later explained, recording `escalation.auto-settled` with a note such as `auto-settled: blocked report for epoch N explains the lapse` or `auto-settled: stopped-worker attestation for epoch N explains the lapse`. A replacement worker may claim meanwhile; delivery waits.
+Each unresolved trigger drops merge authorization and refuses the merge gate; raising one fails the check, so GitHub's queue drops the head. A lapse the ledger explains is instead a `lease.expired` entry with its cause: `submitted`, `blocked-awaiting-operator` (a `blocked` report for that epoch), `stopped-by-attestation` (an admin `--previous-worker-stopped` for that epoch) or `exhausted-capacity`. Reconciliation auto-settles a `lease-loss` whose epoch is later explained, recording `escalation.auto-settled` with a note such as `auto-settled: blocked report for epoch N explains the lapse` or `auto-settled: stopped-worker attestation for epoch N explains the lapse`. A replacement worker may claim meanwhile; delivery waits.
 
 ### Who may settle what
 

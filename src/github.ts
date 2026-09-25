@@ -1,4 +1,4 @@
-import { MergeExecutionInProgress, ReconciliationRetry, Refusal, SpeculativeConflict, requireCurrent } from './model.js';
+import { ReconciliationRetry, Refusal, SpeculativeConflict, requireCurrent } from './model.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { observeCodex } from './codex-review.js';
@@ -1026,17 +1026,6 @@ export class GitHub {
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
   }
-  async serverTime(): Promise<number> {
-    await this.authenticate();
-    const response = await fetch('https://api.github.com/rate_limit', { headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github+json', 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15_000) });
-    const time = Date.parse(response.headers.get('date') ?? '');
-    this.record('/rate_limit', response, true, Date.now(), false);
-    const refused = await this.refusal(response, 'GET /rate_limit');
-    if (refused) throw refused;
-    demand(Number.isFinite(time), 'GitHub server time is unavailable', 502);
-    await response.body?.cancel();
-    return time;
-  }
   /** Resolve a policy profile to the numeric App identity registered with this control plane. */
   reviewerAppFor(profile: ReviewerProfile | null | undefined): ReviewerApp | undefined {
     if (!profile) return undefined;
@@ -1692,11 +1681,6 @@ export async function processJob(engine: Engine, github: GitHub) {
     if (paused && error instanceof Refusal && /requests paused/.test(message)) { await engine.store.finishJob(job.work_id, job.token, message, false, Math.max(2000, Date.parse(paused.until) - Date.now() + 1000)); return; }
     const current = (await engine.store.pool.query('SELECT document,clock_timestamp() AS now FROM work_items WHERE id=$1', [job.work_id])).rows[0];
     const latest = current?.document as Work | undefined;
-    const execution = latest?.mergeExecution;
-    const executionActive = !!execution && Date.parse(execution.expiresAt) > current.now.getTime();
-    if (execution && (executionActive || error instanceof MergeExecutionInProgress)) {
-      await engine.store.deferJob(job.work_id, job.token, execution.expiresAt); return;
-    }
     if (latest?.candidate && latest.stage !== 'done' && !hold('check')) try { await github.publish(latest, 'Reconciliation failed; fresh verification required', guard(latest, false)); } catch { /* Durable retry follows. */ }
     // A head Graphyard could not verify is not left for GitHub to merge (GY-258).
     if (latest?.candidate && latest.stage !== 'done' && !hold('check') && typeof github.mergeQueueState === 'function') try {

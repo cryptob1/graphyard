@@ -270,13 +270,13 @@ async function authorized() {
 
 test('GitHub-executed merge: a requested, authorized head is delivered from the merged observation; a merge nobody requested is not', async () => {
   const { w, observation } = await authorized();
-  const request = await engine.acquireMerge(coordinator, w.id, { enqueue: true, expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision, executor: 'daemon-1' }, randomUUID());
+  const request = await engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision, executor: 'daemon-1' }, randomUUID());
   assert.equal(request.enqueue.sha, head);
   assert.equal(request.execution, undefined, 'no merge execution is issued');
   assert.equal((await engine.enqueueRequest(w.id))?.sha, head);
   assert.equal((await store.list()).find(item => item.id === w.id)?.mergeExecution ?? null, null);
   // The request is refused for a head that is not authorized.
-  await assert.rejects(engine.acquireMerge(coordinator, w.id, { enqueue: true, expectedRevision: w.revision, sha: moved, baseSha: base, policyRevision: w.policyRevision }, randomUUID()), /no longer current/);
+  await assert.rejects(engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: w.revision, sha: moved, baseSha: base, policyRevision: w.policyRevision }, randomUUID()), /no longer current/);
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   const current = (await store.list()).find(item => item.id === w.id)!;
   const delivered = await engine.observe(w.id, current.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'f'.repeat(40) });

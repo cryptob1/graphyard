@@ -93,15 +93,6 @@ async function staleWait() {
   await setDocument(w, 'stageEnteredAt', new Date(Date.now() - 2 * livenessWaitBoundMs).toISOString());
   return reload(w);
 }
-async function retainedExecution() {
-  const w = await candidate('pass');
-  const past = new Date(Date.now() - 10 * 60_000).toISOString();
-  await setDocument(w, 'mergeExecution', { id: `execution-${w.key}`, owner: coordinator.id, sha: head(w), baseSha: base, policyRevision: w.policyRevision, authorizationRevision: w.revision,
-    issuedAt: past, expiresAt: past, verifiedAt: past, committingAt: past });
-  await strand(w);
-  return reload(w);
-}
-
 // ---- AC-1 ---------------------------------------------------------------------------------------
 
 test('unit:liveness-violations-detected — every open item holds exactly one obligation (a live leased session, an open action row, or a named wait with a dueAt) and an item holding none is a violation, classified by its state: a stranded merge with no execution and an open PR, a retained merge execution past its authority, a failed proof with no rework, a refused scope request, and a wait past its dueAt', async () => {
@@ -127,10 +118,9 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   const failed = await candidate('fail');
   const scope = await refusedScope();
   const stale = await staleWait();
-  const retained = await retainedExecution();
   for (const item of [merge, failed, scope]) await strand(item);
 
-  const expected: [Work, ViolationClass, string][] = [[merge, 'stranded-merge', 'merge'], [retained, 'stranded-merge', 'resync'], [failed, 'failed-proof', 'request-rework'],
+  const expected: [Work, ViolationClass, string][] = [[merge, 'stranded-merge', 'merge'], [failed, 'failed-proof', 'request-rework'],
     [scope, 'refused-scope', 'escalate'], [stale, 'stale-wait', 'escalate']];
   const found = livenessViolations(await store.list(), now());
   for (const [item, kind, successor] of expected) {
@@ -142,10 +132,8 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
     assert.ok(found.some(entry => entry.key === item.key), `${item.key} is listed among the violations`);
   }
   assert.deepEqual(found.map(entry => entry.key).sort(), expected.map(([item]) => item.key).sort(), 'and nothing healthy is');
-  // What each is owed, precisely: the retained execution a fresh reading of its outcome, the
-  // refused scope request a scope decision naming the command, the stale wait an escalation.
-  const reading = (await judge(retained)).violation!.successor!;
-  assert.equal(reading.binding, `reconcile-merge:execution-${retained.key}`);
+  // What each is owed, precisely: the refused scope request a scope decision naming the command,
+  // the stale wait an escalation.
   // The live attempt's additive request is the independent approver's to judge (GY-176 routes it);
   // one the loop cannot route (here it also asks for a criteria change) names the master's command.
   const decision = (await judge(scope)).violation!.successor!;
@@ -172,9 +160,9 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
 // ---- AC-2 ---------------------------------------------------------------------------------------
 
 test('unit:violations-get-successor-actions — one reconciliation tick opens exactly one successor for each violation (merge, reconcile-merge, request-rework, scope decision, escalate), deduplicated by reason across ticks, and an action failing N times for one unchanged reason is converted to escalate instead of retried', async () => {
-  const merge = await candidate('pass', {}, true), failed = await candidate('fail'), scope = await refusedScope(), stale = await staleWait(), retained = await retainedExecution();
+  const merge = await candidate('pass', {}, true), failed = await candidate('fail'), scope = await refusedScope(), stale = await staleWait();
   for (const item of [merge, failed, scope]) await strand(item);
-  const cases: [Work, ViolationClass, string, string | null][] = [[merge, 'stranded-merge', 'merge', null], [retained, 'stranded-merge', 'resync', 'reconcile-merge'],
+  const cases: [Work, ViolationClass, string, string | null][] = [[merge, 'stranded-merge', 'merge', null],
     [failed, 'failed-proof', 'request-rework', null], [scope, 'refused-scope', 'escalate', 'scope'], [stale, 'stale-wait', 'escalate', 'stale-wait']];
   for (const [item, kind] of cases) assert.equal((await judge(item)).violation?.class, kind, `${item.key} starts in violation`);
 
@@ -186,8 +174,7 @@ test('unit:violations-get-successor-actions — one reconciliation tick opens ex
     assert.equal(verdict.obligation!.kind, 'action');
     const owed = rows(after).filter(row => row.kind === successor);
     assert.equal(owed.length, 1, `${item.key}: exactly one ${successor} row`);
-    if (tag === 'reconcile-merge') assert.match(owed[0].binding, /^reconcile-merge:/);
-    else if (tag) assert.ok(owed[0].inputs.kind === 'escalate' && owed[0].inputs.trigger === tag, JSON.stringify(owed[0].inputs));
+    if (tag) assert.ok(owed[0].inputs.kind === 'escalate' && owed[0].inputs.trigger === tag, JSON.stringify(owed[0].inputs));
     const repaired = await events(item, 'liveness.repaired');
     assert.equal(repaired.length, 1, `${item.key}: the repair is on the ledger`);
     assert.equal(repaired[0].class, kind);
@@ -350,25 +337,21 @@ test('unit:liveness-violations-detected — a pending producer request or a runn
   assert.equal(requested.obligation!.dueAt, new Date(Date.parse(requestedAt) + 120 * 60_000).toISOString());
 });
 
-test('unit:unknown-merge-reconciled-from-github — a merge the provider made under a committed execution is delivered even when a lagging read cancelled that execution and a fresh one was acquired before the merged observation arrived', async () => {
+test('unit:unknown-merge-reconciled-from-github — a merge GitHub made on the coordinator\'s request is delivered even when a lagging read still showed the pull request open and the request was repeated before the merged observation arrived', async () => {
   let w = await candidate('pass', {}, true);
   // Published at the head of the merge queue, as the queue leaves a candidate it is about to merge.
   await setDocument(w, 'queue,speculation', { ref: `refs/graphyard/queue/${w.key.toLowerCase()}`, tip: head(w), base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() });
   w = await engine.observe(w.id, (await reload(w)).revision, observation(w));
   assert.ok(w.gates.every(gate => gate.passed), `authorized to merge: ${w.gates.flatMap(gate => gate.reasons).join('; ')}`);
-  const granted = await engine.acquireMerge(coordinator, w.id, { expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
-  await engine.verifyMerge(coordinator, w.id, { executionId: granted.execution.id }, { ...observation(w), prState: 'open', draft: false }, id());
-  const committed = await engine.commitMerge(coordinator, w.id, { executionId: granted.execution.id }, id());
-  // The provider merges; GitHub's replica still answers open, so the broker cancels its execution.
+  const requested = await engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
+  // GitHub merges; its replica still answers open.
   await new Promise(resolve => setTimeout(resolve, 5));
   const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
   await new Promise(resolve => setTimeout(resolve, 5));
-  await engine.cancelMerge(coordinator, w.id, { executionId: granted.execution.id, reason: 'GitHub shows the pull request open and unmerged' }, id());
-  // Another reading on the same lagging replica, and a fresh execution acquired on it.
+  // Another reading on the same lagging replica, and the merge step asking again on it.
   await engine.observe(w.id, (await reload(w)).revision, observation(w));
-  const fresh = await engine.acquireMerge(coordinator, w.id, { expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
-  assert.notEqual(fresh.execution.id, granted.execution.id);
-  assert.ok(committed.committingAt, 'the first execution called the provider');
+  const again = await engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
+  assert.deepEqual(again.enqueue, requested.enqueue, 'the standing request is returned, not a second one');
   const merged = await engine.observe(w.id, (await reload(w)).revision, observation(w, { merged: true, mergedAt, mergeSha: sha(`merge-${w.key}`) }));
   assert.equal(merged.stage, 'done', `delivered: ${merged.violations.join('; ')}`);
   assert.ok(!merged.violations.some(entry => entry.startsWith('Merge observed without a prior authorization')), 'no false unauthorized-merge violation');

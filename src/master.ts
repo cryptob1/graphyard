@@ -2514,8 +2514,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const session = profile ? workerSessions.find(item => item.profile === profile.name) : undefined;
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
-    const activeMerge = !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > now;
-    const mergeable = !activeMerge && freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
+    const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
       && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
       && work.mergeAuthorization.policyRevision === work.policyRevision
       && work.gates.every(gate => gate.passed) && !work.violations.length;
@@ -3250,13 +3249,10 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
 /**
  * One merge executor instance: the coordinator principal and the instance minted for one daemon
  * process or one interactive `master merge` request (its request id, so a replay under
- * `GRAPHYARD_REQUEST_ID` is the same instance). The engine records the execution owner as
- * `principal#instance` (Engine.acquireMerge), so two executors under one credential never read
- * each other's execution as their own: the executor presents the same owner to
- * assertMergeCandidate and the same instance to every merge step.
+ * `GRAPHYARD_REQUEST_ID` is the same instance). The engine records who requested a merge as
+ * `principal#instance` (Engine.requestEnqueue); GitHub performs the merge itself.
  */
 export interface MergeExecutor { principal: string; instance: string }
-export const mergeExecutionOwner = (executor: MergeExecutor) => `${executor.principal}#${executor.instance}`;
 /**
  * The durable loop's executor instance, minted once per daemon process: an execution this loop
  * acquires is resumed by this loop alone, and an interactive `master merge` under the same
@@ -3267,22 +3263,14 @@ export const daemonExecutor = (principal: string): MergeExecutor => ({ principal
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
 /** True for an item held at the merge stage by an observed merge no execution authorized (GY-92). */
 export const mergedWithoutAuthorization = (work: Work) => work.stage !== 'done' && !!work.observation?.merged && work.violations.includes(unauthorizedMergeViolation);
-export function assertMergeCandidate(work: Work, observedAt?: string, executionOwner?: string) {
+export function assertMergeCandidate(work: Work, observedAt?: string) {
   const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
   const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
-  const activeMerge = !!observedAt && !!work.mergeExecution && Date.parse(work.mergeExecution.expiresAt) > Date.parse(observedAt);
-  // Only the executor instance that acquired an execution resumes it. Another instance — the
-  // daemon beside an interactive merge, or a second daemon — is not a candidate for this item
-  // while it stands, and stands down here, before any authority is acquired or cancelled.
-  const resumable = activeMerge && !!executionOwner && work.mergeExecution!.owner === executionOwner && !work.mergeExecution!.fenced
-    && work.mergeExecution!.sha === work.candidate?.sha && work.mergeExecution!.baseSha === work.candidate?.baseSha
-    && work.mergeExecution!.policyRevision === work.policyRevision;
-  if (activeMerge && !resumable) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization for this executor: merge execution ${work.mergeExecution!.id} is held by ${work.mergeExecution!.owner} until ${work.mergeExecution!.expiresAt}; this executor stands down without cancelling it`);
   // Unresolved review threads never refuse a merge by themselves; a branch that still requires
   // conversation resolution (protection drift) is a merge GitHub will refuse, so that is refused
-  // here, naming the threads, before any execution is issued.
-  const threads = activeMerge ? null : conversationProtectionRefusal(work);
-  if (threads) throw new Error(`${work.key} was refused before any merge execution was issued: ${threads}`);
+  // here, naming the threads, before GitHub is asked to merge.
+  const threads = conversationProtectionRefusal(work);
+  if (threads) throw new Error(`${work.key} was refused before GitHub was asked to merge it: ${threads}`);
   // An unresolved escalation, a standing blocking lead ruling, and trusted
   // evidence whose producer has since implemented the item each refuse delivery
   // in the broker as well as in the gate, so a stale snapshot can never present
@@ -3292,12 +3280,12 @@ export function assertMergeCandidate(work: Work, observedAt?: string, executionO
 }
 // Merge order is recomputed from current dependencies and conflicts on every
 // batch; registration order carries no authority.
-export function currentMergeCandidates(work: Work[], observedAt: string, executionOwner?: string) {
+export function currentMergeCandidates(work: Work[], observedAt: string) {
   const observed = Date.parse(observedAt);
   const order = mergeOrder(work, Number.isFinite(observed) ? observed : Date.now());
   const rank = (item: Work) => order.indexOf(item.key) + 1 || Number.MAX_SAFE_INTEGER;
   return work.filter(item => {
-    try { assertMergeCandidate(item, observedAt, executionOwner); return true; }
+    try { assertMergeCandidate(item, observedAt); return true; }
     catch { return false; }
   }).sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
