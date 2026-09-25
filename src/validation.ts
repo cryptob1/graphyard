@@ -174,7 +174,6 @@ export class Validation {
   async work(db: pg.PoolClient, id: string, now: Date, expected?: number): Promise<Work> {
     const work = (await db.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document as Work | undefined;
     demand(work && work.stage !== 'done' && !work.observation?.merged, 'Work missing or already delivered');
-    demand(!work.mergeExecution || Date.parse(work.mergeExecution.expiresAt) <= now.getTime(), 'A merge execution is active');
     demand(expected === undefined || work.revision === expected, 'Work changed; read current revision');
     return work;
   }
@@ -188,8 +187,6 @@ export class Validation {
   }
   async persist(db: pg.PoolClient, r: ValidationRequest) { await db.query('UPDATE validation_requests SET document=$2 WHERE id=$1', [r.id, JSON.stringify(r)]); }
   async changed(db: pg.PoolClient, w: Work, actor: string, kind: string, now: Date, details: unknown) {
-    if (w.mergeExecution && Date.parse(w.mergeExecution.expiresAt) <= now.getTime()) w.mergeExecution = null;
-    demand(!w.mergeExecution, 'A merge execution is active');
     const all: Work[] = (await db.query('SELECT document FROM work_items')).rows.map(r => r.document);
     this.engine.evaluate(w, all.map(x => x.id === w.id ? w : x), now);
     await save(db, w, actor, `validation.${kind}`, now, details); await wakeJob(db, w.id);

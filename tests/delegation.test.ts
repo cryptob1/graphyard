@@ -180,7 +180,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   for (const [command, body] of [['claim', {}], ['evidence', proof()], ['ready', {}], ['submit', { epoch: 1, pr: 1 }],
     ['requirements', { expectedPolicyRevision: 1, reason: 'lead rewrite', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], dependencies: [], plannedFiles: [], exclusiveResources: [] }]] as const)
     await assert.rejects(engine.execute(lead, command as never, item.id, body, id()), /Slice leads cannot perform lifecycle mutations/, command);
-  await assert.rejects(engine.acquireMerge(lead, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Coordinator permission/);
+  await assert.rejects(engine.requestEnqueue(lead, item.id, { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Coordinator permission/);
   // A lead identity that also holds producer credentials cannot self-prove its slice.
   const leadProducer: Principal = { ...lead, role: 'producer', proofs: ['unit:works'] };
   await assert.rejects(engine.execute(leadProducer, 'evidence', item.id, proof(), id()), /slice-lead authority/);
@@ -214,15 +214,13 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(unscoped.payload.slice, 'product');
   assert.equal(unscoped.payload.targetSlice, 'infrastructure');
   assert.match(unscoped.payload.reason, /targets another slice/);
-  // The merge routes match above the generic work route. Routing order decides
+  // The merge route matches above the generic work route. Routing order decides
   // which handler answers a forbidden request; it must never decide whether the
   // attempt reaches the ledger, so each one records its own refusal.
   const asLead = (path: string, payload: unknown) => fetch(`${url}${path}`, { method: 'POST',
     headers: { Authorization: `Bearer ${credentials.find(c => c.id === lead.id)!.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: JSON.stringify(payload) });
   for (const [route, payload] of [
-    ['merge-acquire', { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }],
-    ['merge-cancel', { executionId: id(), reason: 'Lead cancels the broker execution' }],
-    ['merge-verify', { executionId: id() }],
+    ['merge-acquire', { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }],
   ] as const) {
     const refused = await asLead(`/api/work/${item.id}/${route}`, payload);
     assert.equal(refused.status, 403, route);
@@ -283,7 +281,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
     await recordLeadRuling(store, lead, ready.id, { action, ruleId: 'rules/plan-v1#retry', reason: `Attempted ${action}` }, id());
   held = await reload(ready);
   assert.equal(held.leadHold!.action, 'send-back', 'only the operator rework lifecycle clears a send-back');
-  await assert.rejects(engine.acquireMerge(coordinator, ready.id, { expectedRevision: held.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Merge authorization is no longer current/);
+  await assert.rejects(engine.requestEnqueue(coordinator, ready.id, { enqueue: true, expectedRevision: held.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Merge authorization is no longer current/);
   await assert.rejects(engine.execute(lead, 'rework', ready.id, { reason: 'Clearing my own hold', previousWorkerStopped: true }, id()), /Slice leads cannot perform lifecycle mutations/);
   // The held item is reported as a slice bottleneck naming the ruling.
   const blocked = delegationSnapshot(roster, await store.list(), Date.now()).slices.find(s => s.id === 'product')!;
@@ -388,8 +386,8 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   item = await engine.observe(item.id, item.revision, observation(item));
   // Delivery stays behind the guarded broker: gates refuse, and only a coordinator may acquire.
   assert.equal(item.gates.find(gate => gate.name === 'acceptance')!.passed, false);
-  await assert.rejects(engine.acquireMerge(workerA, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Coordinator permission/);
-  await assert.rejects(engine.acquireMerge(coordinator, item.id, { expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /authorization/i);
+  await assert.rejects(engine.requestEnqueue(workerA, item.id, { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Coordinator permission/);
+  await assert.rejects(engine.requestEnqueue(coordinator, item.id, { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /authorization/i);
   // Control-plane truth never depends on the session runtime.
   for (const module of ['model.ts', 'engine.ts', 'store.ts', 'delegation.ts', 'server.ts'])
     assert.doesNotMatch(await readFile(new URL(`../src/${module}`, import.meta.url), 'utf8'), /herdr/i, module);
@@ -900,30 +898,19 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   assert.ok(resolved.mergeAuthorization, 'authorization is reissued only after the human resolution');
   assert.deepEqual(currentMergeCandidates([resolved], resolved.observation!.at).map(item => item.key), [resolved.key]);
   await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Again', expectedRevision: resolved.revision }, id()), /no escalation to resolve/);
-  // A concern raised while a merge execution is in flight must still stop the
-  // delivery it refuses. The ruling fences the execution in its own transaction,
-  // so neither a pending verification nor a verified one can reach GitHub.
-  let pending = await candidate(workerB, 'escalation-fences-pending-merge', 'product');
+  // A concern raised after the merge was requested must still stop the delivery it refuses.
+  // GitHub merges; the ruling withdraws the authorization in its own transaction, so the
+  // standing request no longer binds an authorized head and GitHub is told to dequeue it.
+  let pending = await candidate(workerB, 'escalation-withdraws-requested-merge', 'product');
   pending = await proven(pending);
-  const pendingGrant = await engine.acquireMerge(coordinator, pending.id, { expectedRevision: pending.revision, sha: head, baseSha: base, policyRevision: pending.policyRevision }, id());
+  await engine.requestEnqueue(coordinator, pending.id, { enqueue: true, expectedRevision: pending.revision, sha: head, baseSha: base, policyRevision: pending.policyRevision }, id());
   const heldBack = (await recordLeadRuling(store, lead, pending.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Out of agreed scope' }, id())).work;
-  assert.ok(heldBack.mergeExecution!.fenced, 'a blocking ruling fences the in-flight execution in its own transaction');
-  await assert.rejects(engine.verifyMerge(coordinator, pending.id, { executionId: pendingGrant.execution.id }, { ...observation(pending), prState: 'open', draft: false }, id()), /fenced and cannot be verified/);
-  // The fenced execution is still the owner's to cancel, so the broker is never
-  // stranded waiting for an expiry it cannot reach.
-  await engine.cancelMerge(coordinator, pending.id, { executionId: pendingGrant.execution.id, reason: 'Lead send-back fenced the execution' }, id());
-
-  let inflight = await candidate(workerB, 'escalation-fences-verified-merge', 'product');
-  inflight = await proven(inflight);
-  const inflightGrant = await engine.acquireMerge(coordinator, inflight.id, { expectedRevision: inflight.revision, sha: head, baseSha: base, policyRevision: inflight.policyRevision }, id());
-  await engine.verifyMerge(coordinator, inflight.id, { executionId: inflightGrant.execution.id }, { ...observation(inflight), prState: 'open', draft: false }, id());
-  const fenced = (await recordLeadRuling(store, lead, inflight.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Dependency review reopened', trigger: 'security-concern' }, id())).work;
-  assert.ok(fenced.mergeExecution!.fenced, 'an escalation fences an already-verified execution');
-  assert.match(fenced.mergeExecution!.fenced!.reason, /security-concern/);
+  assert.equal(heldBack.mergeAuthorization, null, 'a blocking ruling withdraws the authorization in its own transaction');
+  assert.equal(heldBack.mergeExecution ?? null, null, 'no merge execution exists to fence');
+  const fenced = (await recordLeadRuling(store, lead, pending.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Dependency review reopened', trigger: 'security-concern' }, id())).work;
   assert.equal(fenced.mergeAuthorization, null);
-  assert.deepEqual(currentMergeCandidates([fenced], fenced.observation!.at, coordinator.id), [], 'a fenced execution is never resumable');
-  await assert.rejects(engine.acquireMerge(coordinator, inflight.id, { expectedRevision: fenced.revision, sha: head, baseSha: base, policyRevision: fenced.policyRevision }, id()), /already active/);
-  await engine.cancelMerge(coordinator, inflight.id, { executionId: inflightGrant.execution.id, reason: 'Escalation fenced the execution' }, id());
+  assert.deepEqual(currentMergeCandidates([fenced], fenced.observation!.at), [], 'the withdrawn item is never selected again');
+  await assert.rejects(engine.requestEnqueue(coordinator, pending.id, { enqueue: true, expectedRevision: fenced.revision, sha: head, baseSha: base, policyRevision: fenced.policyRevision }, id()), /Merge authorization is no longer current/);
 
   // The resolution itself is append-only history with its audit reason.
   const audit = (await store.events(ready.id)).find(event => event.kind === 'resolve');

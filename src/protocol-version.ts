@@ -1,18 +1,20 @@
 import { execFileSync } from 'node:child_process';
 
 /**
- * The master-merge exchange contract: the shapes of the merge-acquire, merge-verify,
- * merge-commit and merge-cancel replies the CLI broker reads. Bump it whenever a reply
- * gains a field the broker refuses without, so a CLI ahead of its server reports the skew
- * as skew instead of an "invalid final GitHub gate verification".
+ * The master-merge exchange contract: the shape of the merge request the CLI's merge step
+ * sends and the reply it reads. Bump it whenever the exchange changes, so a CLI ahead of its
+ * server reports the skew as skew instead of a refusal of a request shape the server predates.
  *
  *   1 — the original merge-verify reply (executionId, sha, verifiedAt, providerDelayMs)
  *   2 — merge-verify carries the bounded GitHub/repository clockOffset and the broker
  *       commits through merge-commit (GY-4)
+ *   3 — GitHub executes merges (GY-258): merge-acquire takes `enqueue: true` and records a
+ *       request that GitHub merge the candidate; merge-verify, merge-commit and merge-cancel
+ *       are gone, and no execution or clock offset is issued
  *
  * A server that reports no protocol at all predates the exchange and is version 1.
  */
-export const MERGE_PROTOCOL = 2;
+export const MERGE_PROTOCOL = 3;
 
 /** How the running build identifies itself: the source commit it was built from, when the deployment says. */
 export interface BuildIdentity { commit: string | null; protocol: number; source: 'GRAPHYARD_BUILD_SHA' | 'RAILWAY_GIT_COMMIT_SHA' | 'SOURCE_COMMIT' | null }
