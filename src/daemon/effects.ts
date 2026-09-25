@@ -1,5 +1,5 @@
 // Concern: the effects a cycle acts through — their interface, cursor records, and the production wiring.
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
@@ -13,7 +13,7 @@ import { readProducerLedger, saveProducerLedger, independentProducerProfiles, la
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, readReviewFindings, basePaths } from '../review-scope.js';
 import { defaultAwaitReviewers } from '../auto-dispatch.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, decisionInput, launchApprover, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, decisionInput, launchApprover, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, reclaimIdleMs, writeFailure, assessContainment } from '../master.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { reconcileFleetSessions } from '../fleet.js';
 import { clampCount, type ContainmentRetention, type DaemonAction, daemonActionSchema, type DaemonState, type DeploymentObservation, message, writeDaemonState } from './state.js';
@@ -125,6 +125,14 @@ export interface DaemonEffects {
    * session over and never escalates capacity: it cycles exactly as it did before.
    */
   sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>;
+  /**
+   * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the
+   * prompt's non-destructive answer into the session's pane; `promptSession` then gives it the one
+   * instruction to carry on with a safe alternative. A loop wired without them never answers a
+   * prompt, and fails an attempt blocked on one once it has stood for `blockedPromptFailMs`.
+   */
+  answerSession?: (agent: HerdrAgent, keys: string[]) => void | Promise<void>;
+  promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
@@ -199,6 +207,15 @@ export const preserveKey = (work: Pick<Work, 'id'>, epoch: number) => `preserve:
 export const findingRecheckMs = 120_000;
 /** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
 export const launchAppearanceMs = 120_000;
+/**
+ * A session blocked on its runtime's own prompt (GY-197). A known prompt is answered on the cycle
+ * that sees it — within one loop interval, well inside two minutes — and answered at most
+ * `blockedPromptAnswers` times, `blockedPromptSettleMs` apart, before it counts as one the loop
+ * cannot answer. A prompt the loop cannot answer is a failed attempt, not a wait: once it has
+ * stood for `blockedPromptFailMs` the session is closed as failed with the prompt as the reason.
+ */
+export const blockedPromptFailMs = 5 * 60_000, blockedPromptAnswers = 2, blockedPromptSettleMs = 15_000;
+export const promptDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 12);
 /**
  * Keep what a worker that died left behind, the same way an exhausted one's is kept (GY-105).
  *
@@ -309,6 +326,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     childWaits: () => ledger.drain(),
     // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
     sessionOutput: async agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
+    // The decline is typed into the pane and given a moment to close the dialog, so the instruction
+    // that follows lands in the runtime's input rather than in the closing menu.
+    answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
+    promptSession: async (agent, text) => { await deliverPrompt(agent.name ?? agent.pane_id!, text, run); },
     reportCapacity: (work, event) => deps.mutate(`work/${work.id}/capacity`, event),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),

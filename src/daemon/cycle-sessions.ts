@@ -1,11 +1,11 @@
-// Concern: cycle steps 1–1d — close finished sessions, fail over exhausted ones, recover dead workers.
+// Concern: cycle steps 1–1d — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers.
 import type { Work } from '../model.js';
 import { detectExhaustion, type CapacityRole } from '../model/capacity.js';
-import { type HerdrAgent, profileAccount } from '../master.js';
+import { classifyRuntimePrompt, continueAfterDecline, type HerdrAgent, profileAccount, type RuntimePrompt } from '../master.js';
 import { message, orphanObservationSchema } from './state.js';
 import { closeKey } from './reconcile.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
-import { failoverKey, launchAppearanceMs, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
+import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, launchAppearanceMs, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
 
 /** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
@@ -106,23 +106,94 @@ export async function closeStep(cycle: Cycle) {
     });
   }
 
-  // 1b. A worker session that stops on a prompt while it holds its assignment is waiting on input
-  //     no one will give; it is recorded as failed with that reason, once per pane, for the master.
+  // 1b. A session that stops on a prompt is waiting on input no one will give (GY-197). The loop
+  //     reads the prompt off its screen: a known one — a Yes/No or proceed/cancel menu whose "yes"
+  //     runs a destructive command — is declined, and the session is told once to carry on with a
+  //     safe alternative; the prompt and the answer go on the record and on the session's handle.
+  //     A prompt the loop cannot classify is a failed attempt, not a wait: once it has stood for
+  //     `blockedPromptFailMs` the session is closed as failed with the prompt's text as the reason,
+  //     and the item is dispatched again (a reviewer's or producer's request is launched again).
+  const readPrompt = async (agent: HerdrAgent): Promise<RuntimePrompt> => {
+    let screen: string | null = null;
+    try { screen = effects.sessionOutput ? await effects.sessionOutput(agent) : null; } catch { screen = null; }
+    return classifyRuntimePrompt(screen) ?? { kind: 'unknown', text: 'its screen could not be read', keys: null, answer: null };
+  };
+  const unblock = async (who: string, slot: string, agent: HerdrAgent, item: Work, principal: string | null, epoch: number | null, directory: string | null,
+    handle: (outcome: string, finished: boolean) => Promise<unknown>, fail: (reason: string) => Promise<string>) => {
+    const prompt = await readPrompt(agent), digest = promptDigest(prompt.text);
+    const answeredKey = `session:answered:${slot}:${agent.pane_id}:${digest}`, answered = state.actions[answeredKey];
+    if (prompt.kind === 'destructive-command' && prompt.keys && effects.answerSession && (answered?.attempts ?? 0) < blockedPromptAnswers) {
+      // An answered dialog is given time to close before it is answered again.
+      if (answered && now() - Date.parse(answered.at) < blockedPromptSettleMs) return;
+      const attempts = (answered?.attempts ?? 0) + 1;
+      await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key} is blocked on its runtime's destructive-command prompt "${prompt.text}"; declining it with "${prompt.answer}"`, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        await effects.answerSession(agent, prompt.keys);
+        await effects.promptSession?.(agent, continueAfterDecline(item.key, prompt, directory));
+        const outcome = `answered its runtime's destructive-command prompt "${prompt.text}" with "${prompt.answer}" and told it to continue with a safe alternative (explicit paths or a mktemp -d directory)`;
+        performed.push(await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key}: the loop ${outcome}`, attempts, cycle: state.cycle }, now(), effects.persist));
+        await handle(`The loop ${outcome}`, false);
+      } catch (error) {
+        performed.push(await record(state, answeredKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} is blocked on its runtime's destructive-command prompt "${prompt.text}", and declining it failed: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+      return;
+    }
+    const why = prompt.kind === 'destructive-command' ? effects.answerSession ? `the loop declined it ${blockedPromptAnswers} times and it is still showing` : 'this loop cannot send it keys' : 'the loop cannot classify it';
+    const seenKey = `session:blocked:${slot}:${agent.pane_id}:${digest}`, seen = state.actions[seenKey];
+    const minutes = Math.round(blockedPromptFailMs / 60_000);
+    if (!seen) {
+      performed.push(await record(state, seenKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key}${epoch !== null ? ` (epoch ${epoch})` : ''} is waiting on input (Herdr reports it blocked) instead of deciding on its own, at a runtime prompt (${why}): "${prompt.text}". Unless it moves on, the loop closes it as failed with that prompt as the reason in ${minutes} minutes and dispatches ${item.key} again. A session that needs something records a typed request and exits — POST /api/work/${item.key}/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item, rather than holding its slot at a prompt`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      // The session is blocked, not gone: it still holds its pane, and the one moment somebody
+      // needs the attach command is this one. The handle stays running, carrying why it stalled.
+      await handle(`waiting on input instead of recording a typed request, at a runtime prompt (${why}): "${prompt.text}"; closed as failed after ${minutes} minutes unless it moves on`, false);
+      return;
+    }
+    if (now() - Date.parse(seen.at) < blockedPromptFailMs) return;
+    const failKey = `session:unanswered:${slot}:${agent.pane_id}:${digest}`, previous = state.actions[failKey];
+    if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+    const reason = `blocked for ${minutes} minutes on a runtime prompt (${why}): "${prompt.text}"`, attempts = (previous?.attempts ?? 0) + 1;
+    await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key} was ${reason}; closing it as a failed attempt`, attempts, cycle: state.cycle }, now(), effects.persist);
+    try {
+      const next = await fail(reason);
+      performed.push(await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key} was closed as failed: ${reason}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} was ${reason}, but it could not be closed as failed: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+    }
+  };
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
     if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || failedOver.has(item.id)) return;
-    const key = `session:blocked:${profile.name}:${agent.pane_id}:${item.epoch}`;
-    if (state.actions[key]) return;
-    performed.push(await record(state, key, { kind: 'session', work: item.key, principal: profile.principal, state: 'failed', detail: `Worker session ${profile.agentName} on ${item.key} (epoch ${item.epoch}) is waiting on input (Herdr reports it blocked) instead of deciding on its own; answer or stop it. A session that needs something records a typed request and exits — POST /api/work/${item.key}/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item, rather than holding the lease at a prompt`, attempts: 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-    // The session is blocked, not gone: it still holds its pane, and the one moment somebody
-    // needs the attach command is this one. The handle stays running, carrying why it stalled;
-    // step 1 records it finished once the agent is actually closed.
-    await effects.recordSession?.(item, { id: `${profile.principal}:${item.epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
+    const epoch = item.lease!.epoch, pane = agent.pane_id;
+    const handle = (outcome: string, finished: boolean) => effects.recordSession?.(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
       ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      ...(agent.pane_id ? { pane: agent.pane_id, attach: `herdr pane attach ${agent.pane_id}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
-      subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-      outcome: 'waiting on input instead of recording a typed request; answer or stop it, and the attempt is recorded as failed with that reason' }).catch(() => {});
+      pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`,
+      subject: `${item.key}: ${item.title}`.slice(0, 300), state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {}) ?? Promise.resolve();
+    await unblock(`Worker session ${profile.agentName}`, `${profile.name}:${epoch}`, agent, item, profile.principal, epoch, item.workspaces.find(entry => entry.epoch === epoch)?.path ?? null, handle, async reason => {
+      // The attempt ends on the record — what it left uncommitted kept, the prompt as the reason —
+      // which ends the lease, so the dispatch step claims the item again on the next cycle.
+      const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, `ended without submitting: its session ${profile.agentName} was ${reason}`, now, performed);
+      if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
+      const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
+      let stop = 'its supervisor stops on the ended lease';
+      try {
+        if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
+      } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+      await effects.closeSession(pane);
+      await handle(`closed as failed: ${reason}`, true);
+      return `the attempt ended on the record, ${stop}, pane ${pane} was closed, and ${item.key} is dispatched again`;
+    });
+  });
+  for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('session', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
+    const agent = agents.find(candidate => candidate.name === session.agentName), item = open.find(candidate => candidate.key === session.work);
+    if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || state.actions[failoverKey(session.role, item, session.record)]?.state === 'done') return;
+    await unblock(`${session.role} session ${session.agentName}`, `${session.role}:${session.record}`, agent, item, null, null, null, async () => {}, async reason => {
+      if (!effects.endSession) { await effects.closeSession(agent.pane_id!); return 'its pane was closed and its request launches again on the next dispatch tick'; }
+      await effects.endSession(session, `closed as failed: ${reason}`.slice(0, 500));
+      if (!session.requestId || !effects.relaunch) return 'its request launches again on the next dispatch tick';
+      try { return `relaunched on profile ${(await effects.relaunch(session, item, snapshot)).profile}`; }
+      catch (error) { return `it could not be launched again at once (${message(error)}), so the dispatcher launches it on its retry schedule`; }
+    });
   });
 
   // 1c. A lease that keeps advancing while Herdr no longer reports the session renewing it is an
