@@ -147,6 +147,8 @@ test('unit:threads-listed-resolution — an approval without a Resolved threads 
       // The prompt listed one of the PR's two pre-existing threads; the unlisted one is never resolved.
       await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => [listedThread('PRRT_fixed0001')] });
       assert.deepEqual((await readReviewLedger(root)).reviews[0].threadsListed, ['PRRT_fixed0001']);
+      // A launch from before the criteria-only rule (GY-166), whose approval vouched for its listing.
+      await updateReviewLedger(root, ledger => { const { criteriaOnly: _rule, ...record } = ledger.reviews[0]; ledger.reviews[0] = record; });
       const gh = github({ body: scenario.body });
       const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run });
       assert.deepEqual(gh.resolved, scenario.resolved, scenario.name);
