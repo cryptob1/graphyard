@@ -29,12 +29,12 @@ The loop drives every item. Unless created `"systemDriven": false`, one refuses 
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing finished sessions is not the master's
-manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, 10 seconds by default and 30 at most). A handle the runtime stops reporting gets a 60-second grace, counted from the first sweep
-that missed it, so its record closes within 90 seconds of the runtime dropping it. A handle another host launched is left to
-that host's loop. `dispatch.sessionReconcile` reports each closure:
+manual duty.** A sweep runs on every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10 seconds, 30 at most), storing each observation. A handle the runtime stops reporting closes at the second consecutive sweep
+that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
+that host's loop. `master status` lists stale handles as `sessions.unseen`. `dispatch.sessionReconcile` reports each closure:
 
-- **Vanished**: absent from the runtime's listing for the whole grace.
-- **Ended**: in a runtime terminal state. `idle`, `done` and
+- **Vanished**: missing from two consecutive listings.
+- **Ended**: agentless pane, or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
 - **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
   way as any other. Implementation sessions are left to the lease.
@@ -44,7 +44,7 @@ A closure decides no gate, ends no lease, and stops no process. A profile's conc
 sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention and is never closed.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (with the loop stopped, `graphyard master run --once` sweeps once); for an overlong one, attach to it with the command on the handle. Never mark
+that finished or died (with the loop stopped, `graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
 ## Automatic dispatch at submit

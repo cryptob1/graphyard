@@ -1244,7 +1244,8 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   const held = workersView(deploying, new Date(NOW), undefined, releaseView(status));
   for (const id of ['p1', 's1']) { assert.ok(ids(held.running).includes(id), `${id} stays open while its item is at Deploy`); assert.equal(held.running.find(row => row.id === id)!.leftOn, null); }
   assert.equal(held.finished.find(row => row.id === 'd1')!.leftOn, 'delivered', 'a merge that left the flow still files its session as ended');
-  assert.equal(held.principals.find(entry => entry.principal === 'worker-p1')!.current?.key, pendingItem.key);
+  // Open is not running: a session not observed for three hours is no principal's current work (GY-172).
+  assert.equal(held.principals.find(entry => entry.principal === 'worker-p1')!.current, null);
   const heldPage = markup(createElement(WorkersPage, dashboard({ work: deploying, status: status as any })));
   const heldOpen = heldPage.slice(heldPage.indexOf('aria-label="Agent sessions"'), heldPage.indexOf('<details class="finished-sessions"'));
   for (const id of ['p1', 's1']) assert.match(heldOpen, new RegExp(`data-session="${id}"`));
