@@ -201,6 +201,58 @@ export function InsightsDetails({ pulse, repository, api, token, canAudit, initi
   </>;
 }
 
+/** The clock the replay runs on: the browser's animation frames, or a test's hand-advanced one. */
+export type FrameClock = { now(): number; request(tick: (at: number) => void): number; cancel(frame: number): void };
+const browserClock: FrameClock = { now: () => performance.now(), request: tick => requestAnimationFrame(tick), cancel: frame => cancelAnimationFrame(frame) };
+
+/**
+ * One run of the replay (GY-204): from position `t` it advances with the clock, reaching the end
+ * `replaySeconds` after a start from the first frame, then stops. It runs only while `playing` —
+ * nothing starts it but the viewer's press — and never under reduced motion. Returns the stop.
+ */
+export function replayLoop(playing: boolean, t: number, clock: FrameClock, setT: (t: number) => void, setPlaying: (playing: boolean) => void): (() => void) | undefined {
+  // Under reduced motion the replay never animates: the slider steps through it instead.
+  if (!playing || reducedMotion()) return;
+  let frame = 0; const started = clock.now() - t * replaySeconds * 1000;
+  const tick = (at: number) => { const next = Math.min(1, (at - started) / (replaySeconds * 1000)); setT(next); if (next < 1) frame = clock.request(tick); else setPlaying(false); };
+  frame = clock.request(tick);
+  return () => clock.cancel(frame);
+}
+
+const PlayIcon = () => <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>;
+const ReplayIcon = () => <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" focusable="false"><path d="M12 5a7 7 0 1 1-6.6 4.7" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/><path d="M4.2 4.5v5.6h5.6" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>;
+
+/**
+ * The replay, played like a video (GY-204): it waits at its first frame under a large play button
+ * and runs once, over `replaySeconds`, only when that button is pressed. While it plays the button
+ * gives way to a small pause control; at the end it holds the last frame under a replay button.
+ * Under prefers-reduced-motion there is no button: the replay shows its last frame and the
+ * slider steps through it. `initial` sets where it stands on first render.
+ */
+export function ReplaySection({ frames, truncated, initial, clock = browserClock }: { frames: ReplayFrame[]; truncated: boolean; initial?: { t: number; playing: boolean }; clock?: FrameClock }) {
+  const [t, setT] = useState(initial?.t ?? (reducedMotion() ? 1 : 0));
+  const [playing, setPlaying] = useState(initial?.playing ?? false);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => replayLoop(playing, t, clock, setT, setPlaying), [playing]);
+  const ended = t >= 1;
+  return <>
+    <div className="replay-stage" data-playing={playing} data-position={t}>
+      <ReplayLane frames={frames} t={t}/>
+      {!reducedMotion() && <button type="button" className="replay-overlay" hidden={playing} data-replay={ended ? 'replay' : 'play'} aria-label={ended ? 'Replay the last 24 hours' : 'Play the last 24 hours'} onClick={() => { if (t >= 1) setT(0); setPlaying(true); }}>
+        <span className="replay-disc">{ended ? <ReplayIcon/> : <PlayIcon/>}</span>
+      </button>}
+    </div>
+    <div className="replay-controls">
+      <span>24 h ago</span>
+      {reducedMotion() ? <input type="range" min={0} max={1000} value={Math.round(t * 1000)} aria-label="Replay position" onChange={e => setT(Number(e.target.value) / 1000)}/>
+        : <span className="replay-progress" role="progressbar" aria-label="Replay position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(t * 100)}><span style={{ width: `${t * 100}%` }}/></span>}
+      <span>now</span>
+      {playing && <button type="button" className="text-button replay-pause" aria-label="Pause the replay" onClick={() => setPlaying(false)}>Pause</button>}
+      {truncated && <small>Only the first rows of the recorded history were returned.</small>}
+    </div>
+  </>;
+}
+
 /**
  * Insights (GY-161, one page since GY-168 as design/dashboard/Insights.dc.html draws it): the
  * headline numbers, then the Flow panel, then landed per day beside where the time goes, and the
@@ -212,12 +264,12 @@ export function InsightsDetails({ pulse, repository, api, token, canAudit, initi
  * - **Now** places every open item at its true step (`prSteps`, the same reading the Work page
  *   draws). A dot is keyed by its item, so it moves only when that item's step changes.
  * - **Last 24 hours, replayed** plays the recorded step changes (web/flow-replay.ts) in
- *   twenty seconds; a return to Build is rework and is drawn red.
+ *   twenty seconds, once the viewer presses its play button; a return to Build is rework and is drawn red.
  * - **Landed on main per day** and **where the time goes** are the flow report's own daily
  *   deliveries and per-step dwell medians, computed from the same recorded step moves.
  *
  * Every animation stops under prefers-reduced-motion: the replay then shows its last frame with
- * a slider to step through it, and the CSS rule turns the dots' movement off.
+ * a slider to step through it in place of the play button, and the CSS rule turns the dots' movement off.
  */
 export default function InsightsPage({ work, status, api, token, observedAt, setSelected }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -225,30 +277,19 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
   const [frames, setFrames] = useState<ReplayFrame[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState('');
-  const [t, setT] = useState(1);
-  const [playing, setPlaying] = useState(false);
   const [detailed, setDetailed] = useState(false);
   const pulse = usePulse(token);
   useEffect(() => {
     let active = true;
     readFlow(api, now).then(flow => {
       if (!active) return;
+      // Loading only shows the replay: it waits, still at its first frame, for the viewer to press play.
       setReport(flow.report); setFrames(flow.frames); setTruncated(flow.truncated);
-      if (!reducedMotion()) { setT(0); setPlaying(true); }
     }).catch((e: Error) => { if (active) setError(e.message); });
     return () => { active = false; };
     // Read once per visit: the replay is the last day's record, not a live feed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  useEffect(() => {
-    // Under reduced motion the replay never animates: the slider steps through it instead.
-    if (!playing || reducedMotion()) return;
-    let frame = 0; const started = performance.now() - t * replaySeconds * 1000;
-    const tick = (at: number) => { const next = Math.min(1, (at - started) / (replaySeconds * 1000)); setT(next); if (next < 1) frame = requestAnimationFrame(tick); else setPlaying(false); };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing]);
 
   // The page reads the release view flowNow classified with, so every figure uses one reading.
   const { byGroup, release, entries: now7, outside } = flowNow(work, now, status);
@@ -278,14 +319,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
       <div className="flow-subhead"><h3>Last 24 hours, replayed</h3><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>
       {frames === null ? <p className="muted flow-wait">{error ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
         : frames.length === 0 ? <p className="muted flow-wait">No item changed step in the last 24 hours.</p>
-          : <ReplayLane frames={frames} t={t}/>}
-      {frames && frames.length > 0 && <div className="replay-controls">
-        <span>24 h ago</span>
-        <input type="range" min={0} max={1000} value={Math.round(t * 1000)} aria-label="Replay position" onChange={e => { setPlaying(false); setT(Number(e.target.value) / 1000); }}/>
-        <span>now</span>
-        {!reducedMotion() && <button type="button" className="text-button" onClick={() => { if (t >= 1) setT(0); setPlaying(value => !value); }}>{playing ? 'Pause' : 'Play'}</button>}
-        {truncated && <small>Only the first rows of the recorded history were returned.</small>}
-      </div>}
+          : <ReplaySection frames={frames} truncated={truncated}/>}
     </section>
     <div className="insight-charts">
       <LandedPerDay report={report}/>
