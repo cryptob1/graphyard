@@ -561,3 +561,63 @@ test('unit:fault-classes — unserved executor attention is classified once, as 
   // Without the reported attention (the dashboard's read), the status's copy is the one fault.
   assert.deepEqual(cycleFaults(state, [], clock, { config: config(), status }).filter(fault => fault.kind === 'executor').map(fault => fault.subject), ['executors']);
 });
+
+test('unit:recurring-class-item — distinct faults of one kind on one subject are as many instances as the dashboard counts', async () => {
+  const lines = ['App lacks Contents: write', 'App lacks Checks: read', 'App lacks Pull requests: write'];
+  const status = { github: true, appPermissions: { attention: lines } };
+  const faults = statusFaults(status).filter(fault => fault.kind === 'app-permissions');
+  assert.equal(faults.length, 3);
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  assert.equal(trackFaults(record, faults, iso(0)).length, 3, 'three distinct installation faults open three instances');
+  assert.equal(new Set(record.instances.map(entry => entry.id)).size, 3, 'each instance has its own id');
+  assert.equal(groupFaults(faults).find(group => group.faultClass === faults[0].faultClass)!.count, record.instances.length, 'the record agrees with the dashboard count');
+  assert.equal(trackFaults(record, faults, iso(60_000)).length, 0, 'still standing: the same three instances');
+  trackFaults(record, faults.slice(0, 2), iso(120_000));
+  assert.equal(Object.keys(record.open).length, 2, 'one fewer ends one');
+  assert.equal(trackFaults(record, faults, iso(180_000)).length, 1, 'its return is one new instance');
+  // Three distinct faults of the class in the window reach the threshold, so the loop files it once.
+  const filed: any[] = [];
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {}, controlPlane: async () => status, reportedAttention: async () => [],
+    fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${500 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  await runCycle(config(), state, effects, () => clock);
+  assert.deepEqual(filed.map(input => [input.origin.faultClass.class, input.origin.faultClass.count]), [[faults[0].faultClass, 3]]);
+});
+
+test('unit:recurring-class-item — the loop reads the attention master status adds with the coordinator credential, so intervention patterns recur', async () => {
+  const secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  try {
+    const coordinatorToken = join(secrets, 'coordinator.token'), operatorToken = join(secrets, 'operator.token');
+    const coordinator = 'coordinator-token-'.padEnd(48, 'c'), operator = 'operator-token-'.padEnd(48, 'o');
+    await writeFile(coordinatorToken, coordinator, { mode: 0o600 });
+    await writeFile(operatorToken, operator, { mode: 0o600 });
+    const reads: { path: string; auth: string | null }[] = [];
+    // What the control plane answers: the intervention report refuses operator-agent callers (routes/interventions.ts).
+    const fetcher = (async (url: string, init: RequestInit = {}) => {
+      const path = url.replace('https://graphyard.example/api/', ''), auth = new Headers(init.headers).get('Authorization');
+      reads.push({ path, auth });
+      if (path.startsWith('interventions')) {
+        if (auth !== `Bearer ${coordinator}`) return new Response(JSON.stringify({ error: 'Route is not available to operator agents' }), { status: 403 });
+        return new Response(JSON.stringify({ window: { days: 7 }, deliveries: 0, total: 3, open: 3, waitedMs: 0, ratePerDelivery: null, byKind: {}, byStage: {}, costliest: [], judgements: [], ledger: null,
+          patterns: [{ kind: 'blocked', stage: 'build', count: 3, threshold: 3, crossed: true, work: null }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' }, fetcher };
+    const source = { ...config(), credentialFile: coordinatorToken, operatorAgent: { id: 'graphyard-master-operator', credentialFile: operatorToken } } as MasterConfig;
+    const effects = daemonEffects(await mkdtemp(join(secrets, 'root-')), source, deps);
+    const reported = await effects.reportedAttention!([], { github: true } as any, { agents: [], approvals: {} as any, loop: {} as any, now: iso(0) });
+    const interventionReads = reads.filter(entry => entry.path.startsWith('interventions'));
+    assert.ok(interventionReads.length > 0, `the intervention report is read: ${reads.map(entry => entry.path).join(', ')}`);
+    assert.ok(reads.every(entry => entry.auth === `Bearer ${coordinator}`), 'every read is the coordinator\'s, as master status reads them');
+    const pattern = classifyAttention(reported).filter(entry => entry.kind === 'intervention-pattern');
+    assert.equal(pattern.length, 1, `the crossed pattern reaches the loop: ${JSON.stringify(reported)}`);
+    assert.ok(cycleFaults(emptyDaemonState(source), [], clock, { config: source, reported }).some(fault => fault.kind === 'intervention-pattern'), 'and is a fault the loop tracks');
+  } finally {
+    await rm(secrets, { recursive: true, force: true });
+  }
+});

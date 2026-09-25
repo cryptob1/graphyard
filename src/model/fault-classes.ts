@@ -247,7 +247,7 @@ export function statusFaults(status: any): FaultObservation[] {
 /** The loop's record: every instance it retains, the one each standing fault is, and each failing action's run. */
 export interface FaultRecord { instances: FaultInstance[]; open: Record<string, string>; failing: Record<string, string> }
 export const retainedFaultInstances = 1000;
-const instanceOf = (observation: FaultObservation, at: string): FaultInstance => ({ id: `${observation.kind}|${observation.subject.slice(0, 200)}|${at}`, kind: observation.kind, faultClass: observation.faultClass,
+const instanceOf = (observation: FaultObservation, at: string, nth = 0): FaultInstance => ({ id: `${observation.kind}|${observation.subject.slice(0, 200)}|${at}${nth ? `#${nth}` : ''}`, kind: observation.kind, faultClass: observation.faultClass,
   subject: observation.subject.slice(0, 200), text: observation.text.slice(0, 500), at, lastSeenAt: at, linkedTo: null });
 function retain(record: FaultRecord) { // drops the oldest past the bound: first those no standing fault or failing run names, then any, so the bound holds
   for (const spare of [new Set([...Object.values(record.open), ...Object.values(record.failing)]), new Set<string>()]) { let excess = record.instances.length - retainedFaultInstances;
@@ -257,16 +257,16 @@ function retain(record: FaultRecord) { // drops the oldest past the bound: first
 /**
  * One cycle's observations against the record. A fault that stood last cycle and still stands is
  * the same instance (its `lastSeenAt` moves); one not seen before, or seen again after it cleared,
- * is a new instance; one no longer observed has ended — unless the cycle's reads were `partial`, when an unread source ends nothing. Returns what opened.
+ * is a new instance (n of one kind on one subject are n); one no longer observed has ended — unless the cycle's reads were `partial`, when an unread source ends nothing. Returns what opened.
  */
 export function trackFaults(record: FaultRecord, observations: readonly FaultObservation[], at: string, partial = false): FaultInstance[] {
-  const opened: FaultInstance[] = [], seen = new Set<string>();
-  for (const observation of observations) {
-    const key = `${observation.kind}|${observation.subject.slice(0, 200)}`;
-    if (seen.has(key)) continue; seen.add(key);
+  const opened: FaultInstance[] = [], seen = new Set<string>(), repeats = new Map<string, number>();
+  for (const observation of observations) { // distinct faults of one kind on one subject stand as that many instances, as the dashboard counts them
+    const base = `${observation.kind}|${observation.subject.slice(0, 200)}`, nth = repeats.get(base) ?? 0, key = nth ? `${base}#${nth}` : base;
+    repeats.set(base, nth + 1); seen.add(key);
     const standing = record.open[key] ? record.instances.find(entry => entry.id === record.open[key]) : undefined;
     if (standing) { standing.lastSeenAt = at; continue; }
-    const instance = instanceOf(observation, at);
+    const instance = instanceOf(observation, at, nth);
     record.instances.push(instance); record.open[key] = instance.id; opened.push(instance);
   }
   if (!partial) for (const key of Object.keys(record.open)) if (!seen.has(key)) delete record.open[key];

@@ -1582,8 +1582,10 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
   }
-  // The reported attention names each unserved executor kind on the item it holds; the status's copy of the same lines is not a second fault.
-  if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }).filter(fault => !(sources.reported && fault.kind === 'executor')));
+  // The reported attention names each unserved executor kind on the item it holds, and master status already derived its installation
+  // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
+  const derivedKinds = new Set(derived.map(fault => `${fault.kind}|${fault.subject}`));
+  if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }).filter(fault => !(sources.reported && fault.kind === 'executor') && !derivedKinds.has(`${fault.kind}|${fault.subject}`)));
   const shown = new Set(own.map(fault => `${fault.subject}|${fault.faultClass}`));
   return [...own, ...derived.filter(fault => !shown.has(`${fault.subject}|${fault.faultClass}`))];
 }
@@ -3086,14 +3088,17 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
    * The status read faults are classified from, with the loop's own coordinator credential: the
    * operator-agent read withholds held jobs, integration jobs and production (routes/status.ts),
    * so faults in those catalogued kinds could never recur to the loop and file their class (GY-173).
+   * The attention master status adds is read the same way, as `master status` reads it: the
+   * intervention report refuses operator-agent callers (routes/interventions.ts).
    */
-  const coordinatorStatus = async () => {
+  const asCoordinator = async (path: string) => {
     const config = current();
-    const response = await fetcher(`${config.url}/api/status`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(30_000) });
+    const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(30_000) });
     const result = await response.json();
-    if (!response.ok) throw new Error(`Graphyard refused status (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
-    return result as ControlPlaneStatus & Record<string, unknown>;
+    if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    return result;
   };
+  const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
   const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
     const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
     try { return await post(work); }
@@ -3232,7 +3237,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get reportedAttention() {
       return current().operatorAgent ? async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) =>
         // Imported when first read: the status report imports this module, so a static import would be a cycle.
-        (await (await import('./cli/master-status.js')).reportedAttention(root, current(), path => asOperatorAgent('GET', path), coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
+        (await (await import('./cli/master-status.js')).reportedAttention(root, current(), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
           runtime: { available: true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true })).items : undefined;
     },
     get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
