@@ -18,7 +18,9 @@ const T0 = Date.parse('2026-09-24T12:00:00Z');
 /** The ledger and work items the watch reads, in memory: only the queries the watch issues. */
 function memoryStore(work: Work[]) {
   const events: { seq: number; work_id: string | null; kind: string; payload: any }[] = [];
+  const reads: { sql: string; params: any[] }[] = [];
   const pool = { async query(sql: string, params: any[] = []) {
+    if (sql.startsWith('SELECT')) reads.push({ sql, params });
     if (sql.startsWith('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL')) { events.push({ seq: events.length + 1, work_id: null, kind: params[1], payload: JSON.parse(params[2]) }); return { rows: [] }; }
     if (sql.startsWith('INSERT INTO events')) { events.push({ seq: events.length + 1, work_id: params[0], kind: params[2], payload: JSON.parse(params[3]) }); return { rows: [] }; }
     const limit = Number(sql.match(/LIMIT (\d+)/)?.[1] ?? Infinity);
@@ -26,7 +28,7 @@ function memoryStore(work: Work[]) {
     if (sql.includes('kind=$1')) return { rows: events.filter(row => row.kind === params[0]).reverse().slice(0, limit) };
     throw new Error(`unexpected query ${sql}`);
   } };
-  return { store: { pool, list: async () => work } as unknown as Store, events };
+  return { store: { pool, list: async () => work } as unknown as Store, events, reads };
 }
 function delivered(count: number): Work[] {
   return Array.from({ length: count }, (_, index) => ({ id: `work-${index + 1}`, key: `GY-${index + 1}`, stage: 'done',
@@ -50,7 +52,7 @@ const isAheadBy = (path: string) => path.includes('...main');
 
 test('unit:containment-monotonic — over 150 delivered items a new serving SHA costs at most (pending items + 1) compares, an unchanged one no containment compares, and recorded containment survives a restart', async () => {
   const work = delivered(150);
-  const { store, events } = memoryStore(work);
+  const { store, events, reads } = memoryStore(work);
   const github = linearGitHub(150);
   let clock = T0, release = sha(140);
   const provider = { name: 'railway', description: 'stub', list: () => serving(release).list() };
@@ -91,6 +93,12 @@ test('unit:containment-monotonic — over 150 delivered items a new serving SHA 
   assert.equal(pendingRecords.at(-1)!.payload.serving, sha(145));
   clock += 61_000; await sameRelease.tick();
   assert.equal(events.filter(event => event.kind === PENDING_EVENT).length, pendingRecords.length, 'an unchanged pending set is not recorded again');
+
+  // With no pending record at all (the steady state) the startup lookup must not walk the whole
+  // ledger: it is a range on insertion time bounded by the window, answered by events_created.
+  const pendingRead = reads.findLast(read => read.params[0] === PENDING_EVENT)!;
+  assert.match(pendingRead.sql, /created_at >= \$2 ORDER BY created_at DESC/, 'the pending lookup is bounded by insertion time');
+  assert.equal(pendingRead.params[1], new Date(clock - 61_000 - 15 * 86_400_000).toISOString(), 'bounded by the watch window');
 
   // Every deploy restarts the process: the record is the ledger, so a new watch at a new serving
   // SHA still compares only what was pending.

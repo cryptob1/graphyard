@@ -148,8 +148,11 @@ export class ProductionWatch {
     const contained = (await this.store.pool.query('SELECT DISTINCT ON (work_id) work_id, payload FROM events WHERE kind=$1 AND created_at >= $2 AND work_id IS NOT NULL ORDER BY work_id, seq DESC', [CONTAINED_EVENT, since])).rows;
     for (const row of contained) if (row.work_id && typeof row.payload?.serving === 'string' && !this.deployedIn.has(row.work_id)) this.deployedIn.set(row.work_id, row.payload.serving);
     // The negative answers for the last serving commit: only the newest record matters, since a
-    // record for an older serving commit would be asked again anyway.
-    const pending = (await this.store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq DESC LIMIT 1', [PENDING_EVENT])).rows[0]?.payload;
+    // record for an older serving commit would be asked again anyway. The read is a range on
+    // insertion time (events_created) bounded by the window, so a ledger with no pending record —
+    // the steady state — is not walked end to end at startup. Nothing is lost: a record older than
+    // the window names only deliveries merged before it, which the watch no longer compares.
+    const pending = (await this.store.pool.query('SELECT payload FROM events WHERE kind=$1 AND created_at >= $2 ORDER BY created_at DESC, seq DESC LIMIT 1', [PENDING_EVENT, since])).rows[0]?.payload;
     if (typeof pending?.serving === 'string' && Array.isArray(pending.workIds)) {
       for (const id of pending.workIds) if (typeof id === 'string' && !this.deployedIn.has(id)) this.notIn.set(id, pending.serving);
       this.recordedPending = pendingKey(pending.serving, pending.workIds.filter((id: unknown) => typeof id === 'string' && !this.deployedIn.has(id)));
