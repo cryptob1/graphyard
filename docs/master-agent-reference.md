@@ -15,7 +15,7 @@ A worker needing a file outside `plannedFiles` runs `scope-request GY-N EPOCH PA
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports conflicts between candidates under `conflicts` ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
+Dispatch is optimistic, smallest planned scope first; `git merge-tree` reports candidate conflicts under `conflicts` ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
 
 ### Speculative tips and branch protection
 
@@ -23,13 +23,13 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is.
 
-**A branch must never keep another item's unlanded commits.** Tips are built from the reviewed head, and an ejection restores the branches it leaves behind (`baseRefresh.restore`).
+**A branch must never keep another item's unlanded commits.** Tips build from the reviewed head; an ejection restores the branches it leaves (`baseRefresh.restore`).
 
 #### A contaminated branch
 
 A branch carrying another item's unlanded commits is listed under `branches.contaminated`: run `master repair GY-42 REASON`.
 
-A worker restores its own branch with `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
+A worker restores its own with `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
@@ -51,7 +51,7 @@ A harness classifier refuses routine administration, so `master harness claude -
 
 The control plane names one typed action per item (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements, listed under `actions.needsHuman`.
 
-Three failures with an unchanged reason mark a row stalled rather than retrying: a fleet that looks idle and is not. Once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff never outlives it, doubling from one minute. Eight escalate it, retried half-hourly; ticks requeue ownerless items (`liveness.violations`).
+Three failures with an unchanged reason mark a row stalled (`actions.stalled` and the item's card) instead of retrying unseen; backoff doubles from one minute and never outlives it. Eight escalate it (half-hourly retries); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
@@ -71,9 +71,9 @@ Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/shar
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists each surviving process with pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists each surviving process (pid, cmdline, cwd). With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
-A lease that lapsed unexplained raises `lease-loss`; `blocked-awaiting-operator` and `stopped-by-attestation` lapses are history. Any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
+An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([who may settle what](delegation.md#who-may-settle-what)). 
 
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
@@ -83,4 +83,4 @@ Faults carry `faultClass` (`master status` `faults`); recurring classes file one
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten or more deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over at least ten deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
