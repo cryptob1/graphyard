@@ -11,10 +11,11 @@ import { independentProducerProfiles } from './producer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
-import { agentOwner, loadMasterConfig, type AttentionItem, type HerdrAgent, type MasterConfig, type MergeExecutor, type ProducerProfile, type WorkerProfile } from './master.js';
+import type { HerdrAgent, MasterConfig, MergeExecutor, ProducerProfile, WorkerProfile } from './master.js';
+import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
+import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
 import { loopUnitName } from './supervisor.js';
 import { executorUnitDirectory } from './repository-setup.js';
-import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 
 /**
  * What a stateless executor actually does when it claims a row.
