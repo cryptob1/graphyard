@@ -26,6 +26,8 @@ export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as cons
 export type SliceId = typeof sliceIds[number];
 export const escalationTriggers = ['lease-loss', 'evidence-policy-conflict', 'security-concern', 'requirement-weakening'] as const;
 export type EscalationTrigger = typeof escalationTriggers[number];
+/** The shipped setting: every new item is system-driven unless its intent says `"systemDriven": false`. */
+export const systemDrivenDefault = true;
 export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
@@ -48,6 +50,10 @@ export const createSchema = z.object({
   // Where Graphyard itself opened the item from feedback (GY-98): a recurring intervention
   // pattern with its linked instances, or an operator's judgement about delivered work.
   origin: z.lazy(() => workOriginSchema).optional(),
+  // A system-driven item moves only through the loop: the master CLI refuses the hand actions the
+  // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item
+  // created before the field existed carries none and is not system-driven.
+  systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent

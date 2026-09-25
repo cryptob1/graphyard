@@ -1,8 +1,6 @@
 <!-- page: Start here | 3 | machines, accounts, the master, the first PR. -->
 # Onboard a repository
 
-Start with one worker; add capacity after the first PR reaches Done.
-
 ## 1. Install the control plane
 
 Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply` after reviewing `--plan`.
@@ -21,7 +19,7 @@ Commit the updated `AGENTS.md` and `.gitignore`, never `.graphyard/`. A worker w
 
 The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder to post its verdict) comes from the same launcher and is acted on without confirmation.
 
-Agents treat Herdr's bracketed paste as untrusted data (a prompt injection defence), so sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. Nothing else pasted carries that authority; the role files under `.graphyard/harness/` hold permissions, not instructions.
+Agents rightly treat Herdr's bracketed paste as untrusted data (a prompt injection defence), so with the request on the command line sessions start without anybody sending `go`; Claude Code gets the statement through `--append-system-prompt-file`. Nothing else pasted carries that authority, and the role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -75,8 +73,6 @@ node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a 
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --reason "Review on a different model than the author"
 ```
 
-A role's `--concurrency` counts running sessions only: each `master run` cycle ends registry sessions whose Herdr session is gone, and an approver's once its decision is judged. An approver launch refused at the limit waits for a slot without spending the decision's launch bound.
-
 ### Size review and proof capacity
 
 Each candidate needs one review and one producer session per proof group; a profile runs `"concurrency"` sessions at once, changed without a restart:
@@ -96,9 +92,9 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs th
 node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 ```
 
-The second `init` installs [executors](../examples/master/graphyard-executor@.service) for each item's next action; without them resyncs and reclaims go unserved.
+The second `init` installs the [`graphyard-executor@.service`](../examples/master/graphyard-executor@.service) instances that run each item's next action; without it resyncs and reclaims go unserved.
 
-Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. `master start claude` also writes the harness rules. Add the reviewer with `master reviewer setup` and a [launch profile](../examples/master/claude-reviewer.json); its manifest flow is the only App confirmation.
+Run it under an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as administrator, for `master browser` flows; approving *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
 ### The loop must be supervised
 
@@ -106,7 +102,7 @@ Run it under an OS identity whose GitHub credentials workers cannot read. `--bro
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. Create a small real item and `master dispatch GY-1 PROFILE`; the worker opens a PR and runs `complete GY-1 EPOCH PR_NUMBER`, and review and proofs start automatically. When `Graphyard / merge` appears, require it in branch protection, then `master merge GY-1`.
+`graphyard doctor --profile through-merge` names every missing piece. Create a small item: `master run` dispatches it, the worker submits, review and proofs start, and the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 Before adding workers, let one lease expire and confirm a reclaim fences the old epoch.
 
