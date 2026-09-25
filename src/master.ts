@@ -15,7 +15,7 @@ import { broadScopeRefusals, describeChain, dispatchHold, dispatchHoldBoundMs, d
 import type { ConflictReport } from './conflicts.js';
 import { blockedPath, environmentBlocked, grantWorkerPaths, verifyWorkerSandbox, workerPaths, writablePaths, type SandboxExec } from './worker-sandbox.js';
 import { mergeOrder } from './delegation.js';
-import { assertLaunchable, assertNoApprovalOptOut, LaunchRefusedError, requestPlaceholder, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule, type RegisteredLaunch } from './harness.js';
+import { assertLaunchable, assertNoApprovalOptOut, LaunchRefusedError, nonInteractiveLaunch, requestPlaceholder, harnessDecision, launchPlan, masterHarnessPlan, writeHarnessPermissions, type HarnessPlan, type HarnessRule, type RegisteredLaunch } from './harness.js';
 import { withAutonomyContract } from './autonomy.js';
 import { capacityRetryAt, describeCapacity, standingCapacity, type CapacityAccount, type CapacityRole, type PartialWork } from './model/capacity.js';
 import { answerCommand, humanDecisionLabel, openHumanRequests, parkedOnHuman } from './model/human-request.js';
@@ -1356,7 +1356,8 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
  * attempted and the command that retries the launch, rather than reaching the caller as whatever
  * the runtime says about its arguments (GY-101).
  */
-export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null }
+export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null;
+  /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
   assertSessionName(name, options.retry);
   // A runtime Graphyard cannot start without its own approval prompts is refused here, before
@@ -1365,6 +1366,9 @@ export async function startAgentSession(name: string, kind: string, pane: string
   assertLaunchable(kind, options.contract);
   const delivery = launchDelivery(kind, args);
   if (delivery !== 'request') throw new LaunchRefusedError(kind, requestContractRefusal(kind));
+  // A runtime whose trust prompt no flag suppresses has its working directory recorded as trusted
+  // first, or the launch is refused naming it (GY-184): nothing is typed into a session that would wait.
+  const trust = await nonInteractiveLaunch[kind]?.trust?.(options.cwd ?? options.directory, options.environment ?? {});
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
   // otherwise at the start of its first request (GY-184).
   const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
@@ -1387,7 +1391,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   }
   // The request is already the runtime's own first argument, so nothing waits to be pasted: a
   // session held on a consent dialog reads it once the dialog is answered.
-  return { delivery, command, files, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
+  return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
@@ -2913,12 +2917,12 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
   const harness = await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--no-focus'], run));
-    pane = created.pane; tabId = created.tab;
     // The master runs with its runtime's broadest approval mode too; the harness rules above, not
     // runtime prompts, say what it may do. Codex's sandbox is widened to the private state the
-    // master's own commands write beside its credential.
+    // master's own commands write beside its credential, and its tab carries the recipe's variables.
     const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment: {} }, null, { writable: [dirname(config.credentialFile)] });
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    pane = created.pane; tabId = created.tab;
     const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and invoke routine merge only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`;
     const reviewInstruction = config.reviewer
       ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery path for a refused reviewer launch.`
@@ -2931,7 +2935,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes are not yet yours: master status records that as a setup attention item owned by the operator, naming node ${config.cliPath} master init --token-stdin --browser-profile PROFILE as what makes them yours. Never ask the operator for it in chat; leave that item to master status and keep routing the rest of the work.`;
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`, run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }
@@ -3045,7 +3049,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract });
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs, directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment });
     // A worker stopped on a prompt the launcher does not answer is held for a human rather than
     // closed: its record beside the launch files is what master status raises and what the watch
     // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
@@ -3902,7 +3906,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment }));
   } catch (error) {
     if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
@@ -3945,7 +3949,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry }));
+    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment }));
   } catch (error) {
     if (pane || tabId) try { await stopCreatedHerdrTab(pane, tabId, run); } catch { /* the launch error below is the report */ }
     throw error;

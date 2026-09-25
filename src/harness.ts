@@ -1,8 +1,11 @@
 import { ChildProcessError, defaultChildRun } from './child-runner.js';
 import { chmod, lstat, readFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { endedRuntimeStates, type RuntimeStates } from './model/sessions.js';
+import { temporaryDirectories, underTestRunner } from './supervisor.js';
 
 export type ApprovalMode = 'auto' | 'prompt';
 /**
@@ -13,9 +16,11 @@ export type ApprovalMode = 'auto' | 'prompt';
  * `aliases` map a short spelling onto its recipe flag; `permits` judges an operator's own value
  * of a recipe variable, which otherwise must equal the recipe's; `config` names the runtime's
  * generic `key=value` override flags and the keys whose value is pinned to the recipe's (Codex's
- * `-c approval_policy=…` would otherwise bring the approval prompt back past `--ask-for-approval`).
+ * `-c approval_policy=…` would otherwise bring the approval prompt back past `--ask-for-approval`);
+ * `trust` records the session's working directory as trusted where the runtime has no flag for it,
+ * before the session starts (Claude Code's folder-trust dialog).
  */
-export interface LaunchRecipe { args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean>; config?: { flags: string[]; pins: Record<string, string> } }
+export interface LaunchRecipe { args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; trust?: (directory: string, environment: Record<string, string>) => Promise<FolderTrust>; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean>; config?: { flags: string[]; pins: Record<string, string> } }
 /** A permission document that answers nothing with "ask", at any depth: OpenCode's prompting value. */
 export function asksNothing(value: string) {
   let document: unknown;
@@ -28,8 +33,8 @@ export function asksNothing(value: string) {
 // launched session blocks on. These are runtime CLI contracts, not Graphyard authority: a session
 // that never asks can still only act inside its own assigned worktree and its own credentials.
 export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
-  claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], prompts: 'tool-approval prompts on first use of each command class',
-    tradeoff: 'Claude Code stops classifying commands for this session; everything the agent proposes runs without asking.' },
+  claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], trust: trustClaudeFolder, prompts: 'tool-approval prompts on first use of each command class, and the folder-trust dialog in a folder it has not been trusted in',
+    tradeoff: 'Claude Code stops classifying commands for this session and trusts its working directory without asking; everything the agent proposes runs without asking.' },
   codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, config: { flags: ['-c', '--config'], pins: { approval_policy: 'never' } }, prompts: 'directory-trust and per-command approval prompts',
     tradeoff: 'Codex never asks for approval; only its workspace-write sandbox still limits what a command can touch.' },
   cursor: { args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
@@ -48,6 +53,48 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
   muse: { args: ['--approval-mode', 'never', '--trust-workspace'], environment: {}, prompts: 'approval and workspace-trust prompts',
     tradeoff: 'Muse never asks for approval and trusts the assigned worktree without asking.' },
 };
+
+/**
+ * Claude Code asks "Do you trust the files in this folder?" the first time it starts in a folder
+ * that neither it nor any ancestor has been trusted in, and `--permission-mode bypassPermissions`
+ * does not skip that dialog: a worker in a fresh worktree outside the trusted checkout, or a
+ * session under a fresh account home, would wait at it for a human. The dialog's "Yes, proceed"
+ * records `hasTrustDialogAccepted` for the folder in the global config of the account the session
+ * reads (`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`); Graphyard records the same
+ * before the session starts, so it never shows. A folder already trusted, itself or through an
+ * ancestor, is left alone. A config that cannot be read as JSON or cannot be written refuses the
+ * launch, naming the runtime, rather than starting a session that would wait (GY-184). Under the
+ * test runner only a config in the temporary directory is written: a stubbed launch starts no
+ * runtime, and the operator's own config is never the suite's to edit.
+ */
+export interface FolderTrust { file: string; directory: string; written: boolean }
+export const claudeConfigFile = (environment: Record<string, string> = {}) => {
+  const home = environment.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR;
+  return home ? resolve(home, '.claude.json') : resolve(homedir(), '.claude.json');
+};
+const canonicalPath = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+const ancestors = (path: string) => { const chain = [path]; while (dirname(chain[chain.length - 1]) !== chain[chain.length - 1]) chain.push(dirname(chain[chain.length - 1])); return chain; };
+export async function trustClaudeFolder(directory: string, environment: Record<string, string> = {}): Promise<FolderTrust> {
+  const file = claudeConfigFile(environment), folder = canonicalPath(directory);
+  if (underTestRunner() && !temporaryDirectories().some(temporary => canonicalPath(file).startsWith(`${temporary}${sep}`))) return { file, directory: folder, written: false };
+  const refuse = (why: string) => new LaunchRefusedError('claude', `Graphyard refuses to launch the claude runtime in ${folder}: ${why}, so the session would stop at Claude Code's folder-trust dialog for a human. Fix or remove ${file}, then launch again.`);
+  let document: Record<string, any> = {};
+  try { document = JSON.parse(await readFile(file, 'utf8')); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw refuse(`its config ${file} could not be read as JSON (${error instanceof Error ? error.message : String(error)})`);
+  }
+  if (!document || typeof document !== 'object' || Array.isArray(document)) throw refuse(`its config ${file} is not a JSON object`);
+  const projects: Record<string, any> = document.projects && typeof document.projects === 'object' ? document.projects : {};
+  if (ancestors(folder).some(path => projects[path]?.hasTrustDialogAccepted === true)) return { file, directory: folder, written: false };
+  const updated = { ...document, projects: { ...projects, [folder]: { ...projects[folder], hasTrustDialogAccepted: true } } };
+  const staged = `${file}.graphyard-${randomUUID()}`;
+  try {
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    await writeFile(staged, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 });
+    await rename(staged, file);
+  } catch (error) { throw refuse(`the folder could not be recorded as trusted in ${file} (${error instanceof Error ? error.message : String(error)})`); }
+  return { file, directory: folder, written: true };
+}
 
 /**
  * Runtimes Graphyard accepts in a profile but cannot yet start unattended: none has both a known

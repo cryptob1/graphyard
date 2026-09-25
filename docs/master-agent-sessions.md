@@ -15,7 +15,7 @@ Each session's handle (runtime, host, pane, transcript, attach command) is under
 
 ### Approval modes
 
-Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions` (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). Profile flags merge in; asking values are refused. `"prompt"`, `refusedLaunchKinds` (Kimi, Amp: one-shot only) and runtimes without command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need registered arguments including `{request}`.
+Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, folder pre-trusted in `.claude.json` (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). Profile flags merge in; asking values refused. `"prompt"`, `refusedLaunchKinds` (Kimi, Amp: one-shot only) and runtimes without command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need registered arguments including `{request}`.
 
 ### Worker sandbox
 

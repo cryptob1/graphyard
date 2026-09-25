@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -237,6 +238,33 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
     await assert.rejects(startAgentSession('registry-bare', 'aider', 'pane-r', bare.args, 'Implement GY-184', (_command, args) => { unregistered.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory, contract: bare.contract }),
       (error: unknown) => error instanceof LaunchRefusedError && error.message === registryContractRefusal('aider'));
     assert.deepEqual(unregistered, [], 'refused before anything reached Herdr');
+
+    // Claude Code's folder-trust dialog has no flag that skips it, bypassPermissions included: the
+    // session's working directory is recorded as trusted in the config home the session reads, the
+    // record the dialog's "Yes, proceed" writes, before anything is typed into the pane.
+    const home = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-claude-home-')), worktree = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-worktree-'));
+    try {
+      const config = join(home, '.claude.json');
+      await writeFile(config, JSON.stringify({ numStartups: 3, projects: { '/elsewhere': { hasTrustDialogAccepted: true, lastCost: 1 } } }));
+      const seen: unknown[] = [];
+      const claude = herdr();
+      const claudeRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') seen.push(JSON.parse(readFileSync(config, 'utf8')).projects[realpathSync(worktree)]); return claude.run(command, args); };
+      const trusted = await startAgentSession('trusted-claude', 'claude', 'pane-c', ['--permission-mode', 'bypassPermissions'], 'Implement GY-184', claudeRun, { directory, cwd: worktree, environment: { CLAUDE_CONFIG_DIR: home }, attempts: 1 });
+      assert.deepEqual(seen, [{ hasTrustDialogAccepted: true }], 'the folder was trusted before the launch line reached the pane');
+      assert.deepEqual(trusted.trust, { file: config, directory: realpathSync(worktree), written: true });
+      const recorded = JSON.parse(await readFile(config, 'utf8'));
+      assert.equal(recorded.numStartups, 3); assert.deepEqual(recorded.projects['/elsewhere'], { hasTrustDialogAccepted: true, lastCost: 1 }, 'the rest of the account\'s config is kept');
+      // A folder already trusted, itself or through an ancestor, is left as it is.
+      const nested = join(worktree, 'nested'); mkdirSync(nested);
+      const again = await startAgentSession('trusted-again', 'claude', 'pane-c', ['--permission-mode', 'bypassPermissions'], 'Implement GY-184', herdr().run, { directory, cwd: nested, environment: { CLAUDE_CONFIG_DIR: home }, attempts: 1 });
+      assert.equal(again.trust!.written, false); assert.equal(JSON.parse(await readFile(config, 'utf8')).projects[realpathSync(nested)], undefined);
+      // A config that cannot be read refuses the launch, naming the runtime, before anything reaches Herdr.
+      await writeFile(config, '{ not json');
+      const untrusted: string[][] = [];
+      await assert.rejects(startAgentSession('untrusted-claude', 'claude', 'pane-c', ['--permission-mode', 'bypassPermissions'], 'Implement GY-184', (_command, args) => { untrusted.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); }, { directory, cwd: worktree, environment: { CLAUDE_CONFIG_DIR: home } }),
+        (error: unknown) => error instanceof LaunchRefusedError && error.kind === 'claude' && /refuses to launch the claude runtime in .*folder-trust dialog/.test(error.message));
+      assert.deepEqual(untrusted, [], 'refused before anything reached Herdr');
+    } finally { await rm(home, { recursive: true, force: true }); await rm(worktree, { recursive: true, force: true }); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
