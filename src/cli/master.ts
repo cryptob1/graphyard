@@ -56,9 +56,8 @@ export const masterCommands = defineCommands([
       '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
       '  master status                 Graphyard work truth joined with Herdr session health, the',
       '                                dispatch order, overlaps and merge conflicts',
-      '  master dispatch GY-N PROFILE [--allow-overlap]',
-      '                                Invite a worker to claim ready work in a visible tab; an',
-      '                                overlap holds it (bounded) unless --allow-overlap is passed',
+      '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab;',
+      '                                planned-file overlap never holds it (optimistic dispatch)',
       '  master settle-containment GY-N REASON',
       '                                Settle a containment quarantine whose supervisor this host',
       '                                verifies dead; unverifiable signals refuse',
@@ -190,8 +189,8 @@ export const masterCommands = defineCommands([
         return print({ key: settled.key, epoch: assessment.epoch, scope: assessment.scope, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
       }
       if (id === 'dispatch') {
-        const { values, positionals } = parseArgs({ args, options: { 'allow-overlap': { type: 'boolean' } }, allowPositionals: true });
-        if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE [--allow-overlap]');
+        const { positionals } = parseArgs({ args, options: {}, allowPositionals: true });
+        if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE');
         const requestedAt = Date.now(), snapshot = await masterApi('work-snapshot');
         const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
         const profile = master.workers.find(item => item.name === positionals[1]);
@@ -203,7 +202,7 @@ export const masterCommands = defineCommands([
           const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
           if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
         }
-        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { allowOverlap: !!values['allow-overlap'], claimBy }));
+        return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { claimBy }));
       }
       if (id === 'merge') {
         if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
