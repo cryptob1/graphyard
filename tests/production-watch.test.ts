@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { CONTAINED_EVENT, PENDING_EVENT, ProductionWatch, startProductionWatch } from '../src/production-watch.js';
 import { startReconciliation } from '../src/server/main.js';
 import { GitHub } from '../src/github.js';
+import { events as eventsTable } from '../src/store/tables/work.js';
 import { buildIdentity } from '../src/protocol-version.js';
 import type { Store } from '../src/store.js';
 import type { Work } from '../src/model.js';
@@ -95,7 +96,7 @@ test('unit:containment-monotonic — over 150 delivered items a new serving SHA 
   assert.equal(events.filter(event => event.kind === PENDING_EVENT).length, pendingRecords.length, 'an unchanged pending set is not recorded again');
 
   // With no pending record at all (the steady state) the startup lookup must not walk the whole
-  // ledger: it is a range on insertion time bounded by the window, answered by events_created.
+  // ledger: it is a range on insertion time bounded by the window, answered by events_deployment_pending.
   const pendingRead = reads.findLast(read => read.params[0] === PENDING_EVENT)!;
   assert.match(pendingRead.sql, /created_at >= \$2 ORDER BY created_at DESC/, 'the pending lookup is bounded by insertion time');
   assert.equal(pendingRead.params[1], new Date(clock - 61_000 - 15 * 86_400_000).toISOString(), 'bounded by the watch window');
@@ -120,6 +121,12 @@ test('unit:containment-monotonic — over 150 delivered items a new serving SHA 
   assert.equal(large.deployed.length, 6_000);
   assert.deepEqual(wide.compares.filter(path => !isAheadBy(path)), [], 'no restored delivery is compared again');
   assert.equal(ledger.events.length, 6_000, 'no containment is recorded twice');
+});
+
+test('the startup containment reads are answered by partial indexes on their own event kinds, not a scan of the window', () => {
+  // load() runs before the server listens, on every restart; each read must touch only its own records.
+  assert.ok(eventsTable.ddl.includes(`CREATE INDEX IF NOT EXISTS events_deployment_contained ON events(work_id,seq DESC)\n  WHERE kind='${CONTAINED_EVENT}'`));
+  assert.ok(eventsTable.ddl.includes(`CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,seq DESC)\n  WHERE kind='${PENDING_EVENT}'`));
 });
 
 test('unit:ahead-by-minimal — the ahead-by read asks GitHub for the count only: one commit per page, no commit or file lists read', async () => {

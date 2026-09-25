@@ -145,11 +145,13 @@ export class ProductionWatch {
     const since = new Date(this.now - (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS) - 86_400_000).toISOString();
     // Every containment record in the window, newest per item and with no cap: a record left out
     // would be compared and recorded again, and the duplicate could crowd out another on a later restart.
+    // This runs before the server listens, so it reads only containment records, through their
+    // partial index (events_deployment_contained), never the window's other events.
     const contained = (await this.store.pool.query('SELECT DISTINCT ON (work_id) work_id, payload FROM events WHERE kind=$1 AND created_at >= $2 AND work_id IS NOT NULL ORDER BY work_id, seq DESC', [CONTAINED_EVENT, since])).rows;
     for (const row of contained) if (row.work_id && typeof row.payload?.serving === 'string' && !this.deployedIn.has(row.work_id)) this.deployedIn.set(row.work_id, row.payload.serving);
     // The negative answers for the last serving commit: only the newest record matters, since a
     // record for an older serving commit would be asked again anyway. The read is a range on
-    // insertion time (events_created) bounded by the window, so a ledger with no pending record —
+    // insertion time over pending records only (events_deployment_pending) bounded by the window, so a ledger with no pending record —
     // the steady state — is not walked end to end at startup. Nothing is lost: a record older than
     // the window names only deliveries merged before it, which the watch no longer compares.
     const pending = (await this.store.pool.query('SELECT payload FROM events WHERE kind=$1 AND created_at >= $2 ORDER BY created_at DESC, seq DESC LIMIT 1', [PENDING_EVENT, since])).rows[0]?.payload;
