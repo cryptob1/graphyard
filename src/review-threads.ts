@@ -64,8 +64,9 @@ export const listedThreadLimit = 100;
  * reason to hold the change. `criteria` are the item's own, written by its operator.
  */
 export function criteriaRuleSection(key: string, sha: string, criteria: { id: string; text: string }[] = []) {
-  // Each criterion whole: a condition cut from its tail would be judged FOLLOW-UP and silently dropped.
-  const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text.replace(/\s+/g, ' ').trim()}`).join(' ');
+  // Each criterion verbatim: a condition cut from its tail would be judged FOLLOW-UP and silently
+  // dropped, and collapsed whitespace changes an indented fragment or exact output it quotes.
+  const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
     + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `
     + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: the head fails a stated acceptance criterion, or a correctness or security defect in the changed code breaks one of the item\'s own criteria. '
@@ -136,9 +137,6 @@ export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
 /** Whether a verdict carries a `Resolved threads:` line at all; `Resolved threads: none` names nothing, explicitly. */
 export const hasResolvedThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^resolved threads:/i.test(entry.trim()));
 
-/** Whether a verdict carries a `Follow-up threads:` line at all. */
-export const hasFollowUpThreadsLine = (body: unknown) => typeof body === 'string' && body.split(/\r?\n/).some(entry => /^follow-up threads:/i.test(entry.trim()));
-
 /** `implicit`: the approval had no `Resolved threads:` line, so it vouches for every thread its launch prompt listed. */
 export interface ThreadResolution { at: string; reviewId: number; named: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number; implicit?: boolean }
 
@@ -158,9 +156,9 @@ export interface ThreadResolution { at: string; reviewId: number; named: string[
  * the launch could not read the threads, so that prompt vouches for nothing either.
  *
  * `classified`: the launch carried the criteria-only rule (GY-166), under which an approval means only
- * that no thread is BLOCKING. Its approval vouches implicitly only when it wrote the `Follow-up
- * threads:` line, classifying what stands; one with neither line resolves nothing, so a nonblocking
- * finding it failed to name is never erased without a backlog item.
+ * that no thread is BLOCKING. Its approval never vouches implicitly: it resolves only the IDs its
+ * `Resolved threads:` line names, so a nonblocking finding it failed to name on either line — even
+ * beside a `Follow-up threads:` line — is never erased without a backlog item.
  */
 export async function resolveNamedThreads(input: { repository: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: ThreadResolution; listed?: string[]; classified?: boolean }, run: ChildRun, now: Date): Promise<ThreadResolution> {
   const attempts = (input.previous?.attempts ?? 0) + 1;
@@ -170,7 +168,7 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
   catch (error) { return { ...base, named: [], resolved: [], refused: [], failure: `the review ${input.reviewId} could not be read: ${firstLine(error)}` }; }
   if (review?.state !== 'APPROVED' || review?.commit_id !== input.sha || String(review?.user?.login).toLowerCase() !== input.reviewer.toLowerCase())
     return { ...base, named: [], resolved: [], refused: [], failure: `review ${input.reviewId} is not ${input.reviewer}'s approval of ${input.sha.slice(0, 12)}` };
-  const implicit = !hasResolvedThreadsLine(review.body) && !!input.listed && (!input.classified || hasFollowUpThreadsLine(review.body));
+  const implicit = !hasResolvedThreadsLine(review.body) && !!input.listed && !input.classified;
   let named = parseResolvedThreads(review.body).slice(0, listedThreadLimit);
   if (!named.length && !implicit) return { ...base, named, resolved: [], refused: [] };
   let open: LaunchThread[];
@@ -208,7 +206,9 @@ export async function resolveNamedThreads(input: { repository: string; pr: numbe
  */
 export interface FollowUpFiling { at: string; reviewId: number; named: string[]; threads: LaunchThread[]; findings?: FollowUpFinding[]; item?: string; replied: string[]; resolved: string[]; refused: string[]; failure?: string; attempts: number }
 /** The backlog item the follow-ups become: the loop's create payload for the control plane. */
-export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; dependencies: string[]; criteria: { id: string; text: string; proofs: string[] }[]; plannedFiles: string[]; reason: string }
+export interface FollowUpItem { title: string; description: string; type: 'chore'; priority: 2; dependencies: string[]; criteria: { id: string; text: string; proofs: string[] }[]; producerProofs: string[]; plannedFiles: string[]; reason: string }
+/** The follow-up item's one proof: a manual review of the triage that a producer session may run. */
+export const followUpTriageProof = 'manual:review-followups-triaged';
 /** Creates the item, idempotent on `key`: a retry with the same key returns the item already created. */
 export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ key: string }>;
 
@@ -309,7 +309,10 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
     description: [head, '', ...threads.map((thread, index) => describeFollowUp(thread, index, budget)),
       ...findings.map((finding, index) => clipEnd(`${threads.length + index + 1}. Finding with no thread: ${finding.text}`, budget))].join('\n'),
     type: 'chore', priority: 2, dependencies: [input.workId],
-    criteria: [{ id: 'AC-1', text: `Each follow-up listed in the description is addressed in code, or declined with a recorded reason.`, proofs: ['manual:review-followups-triaged'] }],
+    criteria: [{ id: 'AC-1', text: `Each follow-up listed in the description is addressed in code, or declined with a recorded reason.`, proofs: [followUpTriageProof] }],
+    // A producer session judges the triage, so the item is shepherded to completion without an
+    // attestation decision nobody requests.
+    producerProofs: [followUpTriageProof],
     plannedFiles: scopes.slice(0, plannedFilesMax),
     reason: `Follow-ups named by approval ${input.reviewId} of ${input.key} at ${input.sha.slice(0, 12)}`,
   };

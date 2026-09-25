@@ -80,6 +80,9 @@ test('unit:review-criteria-only-prompt — the reviewer launch prompt states the
   // A criterion as long as the schema allows is stated whole: a condition in its tail is never judged FOLLOW-UP for want of being shown.
   const long = [{ id: 'AC-1', text: `${'The widget counts every frob. '.repeat(66)}TAIL-CONDITION holds.`.slice(-2000) }];
   assert.ok(reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, long).includes(`[AC-1] ${long[0].text.trim()}`));
+  // Stated verbatim: indentation, newlines and repeated spaces in a criterion reach the reviewer unchanged.
+  const exact = [{ id: 'AC-1', text: 'The config reads:\n  retries:  3\n    backoff: exponential' }];
+  assert.ok(reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, exact).includes(`[AC-1] ${exact[0].text}`));
   // The retry prompt repeats the request with the item's criteria, and never states the rule without them.
   const record = { key: 'GY-64', pr: 64, sha: H, baseSha: B, policyRevision: 1 };
   const retry = reviewRetryPrompt('owner/project', record, criteria);
@@ -171,6 +174,7 @@ test('unit:review-followups-filed — one backlog item for the approval, a reply
     assert.equal(items.created.length, 1);
     const { item, key } = items.created[0];
     assert.equal(item.priority, 2);
+    assert.deepEqual(item.producerProofs, item.criteria.flatMap((criterion: { proofs: string[] }) => criterion.proofs), 'a producer session may run the triage proof; no attestation decision is awaited');
     assert.deepEqual(item.dependencies, ['work-64'], 'the follow-up waits for the approved source item to land');
     assert.match(key, /77/, 'the create is idempotent on the approval');
     for (const id of ['PRRT_follow001', 'PRRT_follow002']) {
@@ -292,14 +296,16 @@ test('unit:review-followups-filed — nothing is filed for a change request, a s
   }
 });
 
-test('unit:review-followups-filed — an approval with follow-ups but no Resolved line does not vouch the follow-up threads fixed', async () => {
+test('unit:review-followups-filed — a criteria-only approval with a Follow-up line but no Resolved line vouches no thread fixed', async () => {
   const { root, cleanup } = await boundMaster();
   try {
     const listed = ['PRRT_fixed0001', 'PRRT_follow001'].map(id => ({ id, author: 'codex', path: 'src/a.ts', line: 3, outdated: false, excerpt: 'finding', createdAt: '2026-09-24T11:00:00Z' }));
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => listed });
     const gh = github('Criteria met.\nFollow-up threads: PRRT_follow001'), items = creator();
     const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, createFollowUpItem: items.create });
-    assert.deepEqual(settled.reviews[0].threadResolution?.resolved, ['PRRT_fixed0001'], 'implicitly vouched: the listed threads the approval did not file');
+    assert.deepEqual(settled.reviews[0].threadResolution?.resolved, [], 'a listed thread named on neither line is never resolved');
+    assert.equal(settled.reviews[0].threadResolution?.implicit, false);
+    assert.deepEqual(gh.resolved, ['PRRT_follow001'], 'only the filed follow-up thread is resolved');
     assert.deepEqual(gh.replies.map(reply => reply.thread), ['PRRT_follow001'], 'the follow-up is filed, with its reply, not resolved as fixed');
   } finally { await cleanup(); }
 });
