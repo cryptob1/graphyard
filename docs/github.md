@@ -39,15 +39,17 @@ The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, approval of the 
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, re-entering at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue; `CLEAN`, `UNSTABLE`, `HAS_HOOKS`) an immediate head-bound merge. Branch protection decides; withdrawal dequeues. Refusals (`merge.enqueue.refused`) and merges pending five minutes on a mergeable head (`merge-stalled`) show in `master status`.
+A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired; one leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
+
+Without a queue, `CLEAN`, `UNSTABLE` and `HAS_HOOKS` PRs merge directly; one pending five minutes shows as `merge-stalled`.
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. A moved base is merged in; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow runs on every push to a `graphyard/*` PR branch, with workflow and secrets from the default branch: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits each report through the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips run it too; dependencies are cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow, with the default branch's workflow and secrets, runs on every `graphyard/*` PR push: **plan** finds the item's registered `unit:*` and `integration:*` proofs, **exercise** runs one secret-free job per proof against the candidate merged with its base, and **publish** submits reports via the [CI producer](deployment.md#ci-producer) with a `ciRun` binding. Queue tips run it too; dependencies are cached. Manual proofs stay producer sessions.
 
 ## Post-deployment smoke proof
 
@@ -59,4 +61,4 @@ No transaction spans GitHub and Postgres: GitHub merges only heads whose require
 
 ## Identity-bound agent review
 
-`reviewProvider: "codex"` accepts only the Codex connector's clean result on the exact head. The `agent` provider requires a registered reviewer App distinct from the author (`github-setup URL --reviewer claude`, listed in `GRAPHYARD_REVIEWER_APPS`), adopted with `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json). The reviewer replies with `<!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->`; `verdict:usage-limit` or silence fails over to the next profile.
+`reviewProvider: "codex"` accepts only Codex's clean result on the exact head. `agent` requires a registered reviewer App distinct from the author (`github-setup URL --reviewer claude`, listed in `GRAPHYARD_REVIEWER_APPS`), adopted with `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json). The reviewer replies with `<!-- graphyard-verdict:MARKER head:FULL_40_CHAR_SHA verdict:approved -->`; `verdict:usage-limit` or silence fails over.
