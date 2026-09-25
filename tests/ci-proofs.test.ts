@@ -226,8 +226,11 @@ test('integration:ci-proofs-workflow the acceptance workflow plans, exercises an
 test('the unit runner installs the candidate before the protected inventory lands and verifies it byte for byte before the run', async () => {
   // A candidate's install lifecycle scripts run during `npm ci`; the inventory must be copied after
   // them, and checked right before the test process starts, or the judged cases are not the harness's.
+  // The install is contained (containedInstall): its own PID namespace ends every process it started
+  // before the copy, so nothing it left behind can replace the inventory after the check.
   const runner = await readFile(new URL('../scripts/run-unit-acceptance.mjs', import.meta.url), 'utf8');
-  const install = runner.indexOf("execFileSync('npm', ['ci'"), copy = runner.indexOf('await copyFile(join(harness, selected.file)'), compare = runner.indexOf('.equals(await readFile(join(candidate, selected.file)))'), run = runner.indexOf('spawnSync(process.execPath');
+  assert.match(runner, /const install = containedInstall\(candidate\);\n\s*execFileSync\(install\.command, install\.args,/);
+  const install = runner.indexOf('execFileSync(install.command, install.args'), copy = runner.indexOf('await copyFile(join(harness, selected.file)'), compare = runner.indexOf('.equals(await readFile(join(candidate, selected.file)))'), run = runner.indexOf('spawnSync(process.execPath');
   assert.ok(install >= 0 && copy >= 0 && compare >= 0 && run >= 0);
   assert.ok(install < copy && copy < compare && compare < run);
   assert.doesNotMatch(runner.slice(compare, run), /execFileSync|spawnSync|copyFile/);
