@@ -10,7 +10,7 @@ import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { autonomyContract, withAutonomyContract } from '../src/autonomy.js';
 import { assertLaunchRecipe, launchPlan, LaunchRefusedError, registryContractRefusal, nonInteractiveLaunch, refusedLaunchKinds } from '../src/harness.js';
-import { accountLaunch, agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchCommand, launchDelivery, launchEscalationHandler, launchRequestContracts, launchRoleContracts, requestContractRefusal, requestPlaceholder, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
+import { accountLaunch, agentKindSchema, atomicPrivateWrite, dispatchWork, launchApprover, launchCommand, launchDelivery, launchEscalationHandler, launchRequestContracts, launchRoleContracts, openCodeAllowAll, requestContractRefusal, requestPlaceholder, loadMasterConfig, saveProducerProfile, setupMaster, startAgentSession, startMaster, type WorkerProfile } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
@@ -180,6 +180,10 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
       ['codex', ['--ask-for-approval', 'on-request'], {}, '--ask-for-approval on-request'], ['codex', ['-a', 'untrusted'], {}, '--ask-for-approval untrusted'], ['codex', ['--ask-for-approval=on-failure'], {}, '--ask-for-approval on-failure'],
       ['claude', ['--permission-mode', 'acceptEdits'], {}, '--permission-mode acceptEdits'], ['muse', ['--approval-mode', 'always'], {}, '--approval-mode always'],
       ['opencode', [], { OPENCODE_PERMISSION: '{"edit":"allow","bash":{"git push *":"ask"}}' }, 'OPENCODE_PERMISSION='], ['opencode', [], { OPENCODE_PERMISSION: 'not json' }, 'OPENCODE_PERMISSION='],
+      // Every occurrence is checked, in every spelling: a later one the runtime may honour cannot restore prompts.
+      ['codex', ['--ask-for-approval', 'never', '--ask-for-approval', 'on-request'], {}, '--ask-for-approval on-request'], ['codex', ['--ask-for-approval', 'never', '-a', 'on-request'], {}, '--ask-for-approval on-request'],
+      ['codex', ['-a', 'never', '--ask-for-approval=untrusted'], {}, '--ask-for-approval untrusted'], ['codex', ['--yolo', '--ask-for-approval', 'on-request'], {}, '--ask-for-approval on-request'],
+      ['muse', ['--approval-mode', 'never', '--approval-mode', 'always'], {}, '--approval-mode always'], ['claude', ['--dangerously-skip-permissions', '--permission-mode', 'default'], {}, '--permission-mode default'],
     ] as const) assert.throws(profileLaunch(kind, [...agentArgs], environment), (error: unknown) => error instanceof LaunchRefusedError && error.kind === kind && error.message.includes(`the ${kind} runtime with ${setting}`), `${kind} ${setting} is refused`);
     // A recipe flag the profile leaves out is added beside the ones it sets; a value no prompt depends on is the operator's.
     assert.deepEqual(accountLaunch({ kind: 'copilot', approvals: 'auto', agentArgs: ['--allow-all-tools'], environment: {} }, null).args, ['--allow-all-paths', '--allow-all-tools']);
@@ -187,7 +191,10 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
     const bypass = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: ['--dangerously-bypass-approvals-and-sandbox'], environment: {} }, null).args;
     assert.equal(bypass[0], '--dangerously-bypass-approvals-and-sandbox'); assert.ok(!bypass.includes('--ask-for-approval'), 'a flag that already selects the no-approval mode is not joined by a conflicting one');
     const allowed = accountLaunch({ kind: 'opencode', approvals: 'auto', agentArgs: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":{"*":"allow","rm -rf *":"deny"}}' } }, null);
-    assert.equal(allowed.environment.OPENCODE_PERMISSION, '{"edit":"allow","bash":{"*":"allow","rm -rf *":"deny"}}', 'a permission document that asks nothing is the operator\'s');
+    assert.deepEqual(JSON.parse(allowed.environment.OPENCODE_PERMISSION), { ...openCodeAllowAll, edit: 'allow', bash: { '*': 'allow', 'rm -rf *': 'deny' } }, 'a permission document that asks nothing keeps the operator\'s values');
+    // It is laid over Graphyard's allow-all, so a key it leaves out keeps `allow` rather than OpenCode's asking default.
+    const partial = JSON.parse(accountLaunch({ kind: 'opencode', approvals: 'auto', agentArgs: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow"}' } }, null).environment.OPENCODE_PERMISSION);
+    assert.equal(partial.external_directory, 'allow'); assert.equal(partial.doom_loop, 'allow'); assert.equal(partial['*'], 'allow');
 
     // A runtime the agent registry adds (GY-91) brings its own launch contract: its registered
     // arguments are its no-approval mode and say where it takes its first request, so a kind with

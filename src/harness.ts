@@ -132,28 +132,33 @@ export function launchPlan(kind: string | undefined, approvals: ApprovalMode = '
   if (!recipe) return { ...base, reason: kind ? `Graphyard has no non-interactive launch contract for ${kind}; a session of it is refused at launch rather than left at its own approval prompt` : 'A launched session requires an agent kind' };
   if (approvals === 'prompt') return { ...base, reason: approvalOptOutRefusal(kind!), refusal: approvalOptOutRefusal(kind!) };
   const refuse = (setting: string) => { const refusal = `Graphyard refuses to launch the ${kind} runtime with ${setting}: that setting leaves the session able to stop at its own approval prompts for a human, and every launched session must run without asking. Remove it from the profile, or set the value Graphyard's ${kind} recipe uses.`; return { ...base, reason: refusal, refusal }; };
-  if (recipe.equivalents?.some(flag => agentArgs.includes(flag))) return { ...base, applied: true, reason: 'This profile already selects the runtime\'s no-approval mode; Graphyard added nothing' };
-  // The operator's value of a recipe flag, whichever spelling (`--flag value`, `--flag=value`, an alias) it uses.
-  const valueOf = (flag: string) => {
+  // Every value the operator gives a recipe flag, in whichever spelling (`--flag value`,
+  // `--flag=value`, an alias): a runtime may honour a later occurrence over an earlier one, so each
+  // is checked, and a repeated flag with any value but the recipe's is refused.
+  const valuesOf = (flag: string) => {
+    const values: string[] = [];
     for (let index = 0; index < agentArgs.length; index++) {
-      const argument = agentArgs[index], [name, inline] = argument.split(/=(.*)/s);
-      if ((recipe.aliases?.[name] ?? name) !== flag) continue;
-      return { value: inline ?? agentArgs[index + 1] ?? '' };
+      const [name, inline] = agentArgs[index].split(/=(.*)/s);
+      if ((recipe.aliases?.[name] ?? name) === flag) values.push(inline ?? agentArgs[index + 1] ?? '');
     }
-    return null;
+    return values;
   };
   const added: string[] = [];
   for (let index = 0; index < recipe.args.length; index++) {
     const flag = recipe.args[index], value = recipe.args[index + 1] !== undefined && !recipe.args[index + 1].startsWith('-') ? recipe.args[++index] : null;
-    const present = value === null ? (agentArgs.includes(flag) ? { value: '' } : null) : valueOf(flag);
+    const present = value === null ? agentArgs.includes(flag) : valuesOf(flag).length > 0;
     if (!present) { added.push(flag, ...(value === null ? [] : [value])); continue; }
-    if (value !== null && present.value !== value && !recipe.settable?.includes(flag)) return refuse(`${flag} ${present.value}`);
+    const contrary = value === null || recipe.settable?.includes(flag) ? undefined : valuesOf(flag).find(given => given !== value);
+    if (contrary !== undefined) return refuse(`${flag} ${contrary}`);
   }
   const variables: Record<string, string> = {};
   for (const [name, value] of Object.entries(recipe.environment)) {
     if (!(name in environment)) { variables[name] = value; continue; }
     if (environment[name] !== value && !recipe.permits?.[name]?.(environment[name])) return refuse(`${name}=${environment[name]}`);
   }
+  // A flag that already selects the no-approval mode stands in for the recipe, which adds nothing
+  // beside it; the values checked above still may not contradict it.
+  if (recipe.equivalents?.some(flag => agentArgs.includes(flag))) return { ...base, applied: true, reason: 'This profile already selects the runtime\'s no-approval mode; Graphyard added nothing' };
   const addedNothing = !added.length && Object.keys(variables).length === 0 && (recipe.args.length > 0 || Object.keys(recipe.environment).length > 0);
   return { ...base, args: [...added, ...agentArgs], environment: variables, applied: true, reason: addedNothing ? 'This profile already configures the runtime approval flags with no-approval values; Graphyard added nothing' : null };
 }

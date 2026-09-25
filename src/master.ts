@@ -1004,10 +1004,20 @@ export async function onSelectedSession<T>(selected: LaunchSelection, failed: st
  * still stop a session to ask, and are allowed here too.
  */
 export const openCodeAllowAll = { '*': 'allow', edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow', doom_loop: 'allow' };
+/**
+ * An operator's own OpenCode permission document that asks nothing (the recipe's `permits`) is laid
+ * over the allow-all rather than replacing it: a key it leaves out (`external_directory`,
+ * `doom_loop`, …) keeps Graphyard's `allow` instead of falling back to OpenCode's default, which asks.
+ */
+function openCodePermission(operator: string | undefined) {
+  if (operator === undefined) return JSON.stringify(openCodeAllowAll);
+  const document: unknown = JSON.parse(operator);
+  return document && typeof document === 'object' && !Array.isArray(document) ? JSON.stringify({ ...openCodeAllowAll, ...document }) : operator;
+}
 export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'prompt' = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
   const plan = launchPlan(kind, approvals, agentArgs, environment);
-  if (!plan.applied || kind !== 'opencode' || !plan.environment.OPENCODE_PERMISSION) return plan;
-  return { ...plan, environment: { ...plan.environment, OPENCODE_PERMISSION: JSON.stringify(openCodeAllowAll) }, prompts: 'every permission prompt, including edits, shell commands, fetches, and paths outside the worktree',
+  if (!plan.applied || kind !== 'opencode') return plan;
+  return { ...plan, environment: { ...plan.environment, OPENCODE_PERMISSION: openCodePermission(environment.OPENCODE_PERMISSION) }, prompts: 'every permission prompt, including edits, shell commands, fetches, and paths outside the worktree',
     tradeoff: 'opencode edits files, runs shell commands, fetches URLs, and reaches outside its worktree without asking.' };
 }
 
@@ -1031,7 +1041,9 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   const plan = agentLaunchPlan(kind, profile.approvals, [...(contract?.args ?? []), ...model, ...own], { ...contract?.environment, ...profile.environment });
   // So is an effective launch whose own arguments or environment still let the runtime ask.
   if (plan.refusal) throw new LaunchRefusedError(kind ?? 'unnamed', plan.refusal);
-  const environment: Record<string, string> = { ...plan.environment, ...contract?.environment, ...profile.environment };
+  // The plan's variables come last: they are the recipe's, where the profile set none, or the
+  // profile's own OpenCode permissions laid over the allow-all.
+  const environment: Record<string, string> = { ...contract?.environment, ...profile.environment, ...plan.environment };
   if (account) {
     const variable = contract ? contract.homeVariable : environmentVariable[account.kind as EnvironmentKind];
     if (variable && account.home) environment[variable] = account.home;
