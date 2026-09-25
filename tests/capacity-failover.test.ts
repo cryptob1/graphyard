@@ -691,6 +691,7 @@ test('unit:exhaustion-shared-across-roles — an account a worker session exhaus
     revision: 1, runtimes: [{ name: 'claude', launch: { kind: 'claude', args: [], environment: {}, homeVariable: 'CLAUDE_CONFIG_DIR' } }], models: [{ name: 'default', runtime: 'claude', id: null }],
     accounts: ['env-a', 'env-b'].map(name => ({ name, runtime: 'claude', model: 'default', enabled: true, credential: { host: 'loop-host', home: null }, quota: { state: 'unknown' } })),
     roles: ['approver', 'reviewer'].map(name => ({ name, accounts: ['env-a', 'env-b'], concurrency: 2 })),
+    sessions: [],
   };
   const client: FleetClient = {
     document: async () => registry as any, end: async () => {},

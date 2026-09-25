@@ -4047,7 +4047,9 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // yet runs the approver on its first reviewer profile's runtime. No runtime is assumed.
   // The override picks the runtime, never past a hold: the runtime's own login a session saw spent
   // is not launched on again before its reset, whichever form of the command asked for it.
-  const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe, explicitKind) : await selectApproverAccount(config, work.key, config.approver!.id, probe);
+  // The sessions Herdr lists are what the role's count is judged against (GY-190): an approver that
+  // judged its decision and exited no longer holds a slot the next one needs.
+  const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe, explicitKind) : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: { agents, available: true }, ...probe });
   const selected = chosen?.fleet ?? null;
   // Nothing here names a runtime: the role's account decides, then the operator's own argument,
   // then a runtime this installation already configured for another session.
@@ -4072,7 +4074,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
     throw await abandonLaunch(error, pane, tabId, selected, `approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`, run);
   }
   const spentOn = selected?.account.name ?? chosen?.account?.name ?? null;
-  // The registry session is kept with the launch, so the loop can end it the moment the session is spent.
+  // The registry session is kept with the launch: the loop ends it once the decision is judged, or
+  // the moment the session is spent.
   const session = selected?.account.fleet.session ?? null;
   // The record is part of the launch: without it an adopted session's spent account and registry
   // slot are unknown, so a launch whose record cannot be written is closed and fails.

@@ -30,6 +30,7 @@ import { agentOwner, agentToken, approvedMerge, approverSessionName, assertDispa
 import { worktreeRootMinFreeBytes } from './install/worktree-root.js';
 import { httpFleetClient } from './fleet.js';
 import { probeSupervisorAbsence } from './containment-probe.js';
+import { capacityRefusal, reconcileFleetSessions } from './fleet.js';
 
 /**
  * The durable coordination loop. Every step is a pure decision over one Graphyard snapshot plus
@@ -248,10 +249,13 @@ export const approvalWatchSchema = z.object({
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
   /** The account and runtime the current session was launched on, so its exhaustion holds the right account (GY-182). */
   account: z.string().max(200).nullable().default(null), runtime: z.string().max(40).nullable().default(null),
-  /** The agent registry session the current approver holds, ended when its quota is spent so the replacement has the slot. */
-  session: z.string().max(200).nullable().default(null),
   /** The worker scope request a `requirements` decision answers (GY-176): whose, and for what. */
   scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
+  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged,
+   * or as soon as its quota is spent so the replacement has the slot (GY-182). */
+  session: z.string().max(200).nullable().default(null),
+  /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
+  capacity: z.string().max(500).nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 /**
@@ -1558,6 +1562,12 @@ export interface DaemonEffects {
    */
   endRegistrySession?: (session: string, reason: string) => Promise<void>;
   /**
+   * Ends the agent-registry sessions that no longer run (GY-190): every live one whose runtime
+   * session is gone from this host's Herdr, and every one `finished` names, with its reason.
+   * Returns what it ended. A loop wired without it leaves the registry to its own time windows.
+   */
+  reconcileSessions?: (runtime: { agents: HerdrAgent[]; available: boolean }, finished: ReadonlyMap<string, string>) => Promise<{ session: string; role: string; work: string | null; account: string; reason: string }[]>;
+  /**
    * One item's decision history: the approved merge decision automatic merging asks for, and what
    * became of every decision this loop requested.
    */
@@ -2479,12 +2489,21 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     try { launched = await effects.approver!(item, watch.decision); }
     catch (error) {
       if ((error as { capacityExhausted?: boolean })?.capacityExhausted) { Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, account: null, runtime: null, session: null }); return `the decision waits for approver capacity: ${message(error)}`; }
-      // A registry session the failed launch could not end stays on the watch, so the next launch ends it first.
-      const orphan = (error as { registrySession?: string })?.registrySession;
-      if (orphan) { watch.session = orphan; await effects.persist(state); }
-      throw error;
+      // A role at its concurrency limit is a wait for a slot, not a failed session (GY-190): the
+      // launch is not counted against the decision's bound, and the next cycle makes it again, so
+      // the approver starts on the first cycle after a slot frees without anybody asking.
+      const full = capacityRefusal(error);
+      if (!full) {
+        // A registry session the failed launch could not end stays on the watch, so the next launch ends it first.
+        const orphan = (error as { registrySession?: string })?.registrySession;
+        if (orphan) { watch.session = orphan; await effects.persist(state); }
+        throw error;
+      }
+      Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: null, capacity: full.slice(0, 500) });
+      await effects.persist(state);
+      return `left it pending for an approver slot, launched on the first cycle one frees: ${full}`;
     }
-    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, account: launched?.account ?? null, runtime: launched?.runtime ?? null, session: launched?.session ?? null });
+    Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, account: launched?.account ?? null, runtime: launched?.runtime ?? null, session: launched?.session ?? null, capacity: null });
     return `launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   /**
@@ -2701,6 +2720,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     // Every other step replaces the session, so the one that ended goes first. While it cannot be
     // closed its name is still taken, and the step is taken again next cycle.
     if (!await closeApprover(item, watch, step.detail) && watch.closeAttempts < maxApproverCloses) return;
+    // A launch waiting for a slot never ran a session, so there is no ending to record: it is only made again.
+    if (step.step === 'relaunch' && watch.capacity && !watch.agentName) {
+      try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} waits for an approver slot; ${await launch(item, watch, false)}`); }
+      catch (error) { await note(`${base}:launch:${watch.launches}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} waited for an approver slot; its approver session could not be launched: ${message(error)}`); }
+      return;
+    }
     if (watch.ended.at(-1) !== step.detail.slice(0, 300)) watch.ended = [...watch.ended, step.detail.slice(0, 300)].slice(-10);
     if (step.step === 'rerequest') {
       // The server settled it some other way — failed on a precondition, stale, withdrawn — and
@@ -2821,6 +2846,21 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
     // A registry session is not: its id is the only way to end it, and while it lives it holds the
     // role's slot, so the watch stays, past any bound, until the registry is told.
     if ((closed && withdrawn) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
+  });
+
+  // 4d. Registry sessions end with the sessions they record (GY-190). A registry session is a
+  //     launch, not a process, and nothing reports its end: an approver that judged its decision and
+  //     exited kept its role's slot, and after `concurrency` launches the role stopped launching.
+  //     Each cycle therefore ends every live registry session whose runtime session is gone from
+  //     Herdr, and every session of an approver whose decision is judged, naming why; a launch
+  //     step 4c left waiting for a slot is made on the next cycle, into the room this frees.
+  if (effects.reconcileSessions) await isolate('decision', null, 'agent-registry', async () => {
+    const finished = new Map<string, string>();
+    for (const watch of Object.values(state.approvals)) if (watch.session && watch.settledAt) finished.set(watch.session, `approver decision ${watch.decision} on ${watch.work} is judged`);
+    const ended = await effects.reconcileSessions!(await sessions(), finished);
+    for (const watch of Object.values(state.approvals)) if (watch.session && ended.some(entry => entry.session === watch.session)) watch.session = null;
+    for (const entry of ended) performed.push(await record(state, `registry:end:${entry.session}`, { kind: 'close', work: entry.work, principal: null, state: 'done',
+      detail: `Ended the ${entry.role} registry session ${entry.session} on ${entry.account}${entry.work ? ` for ${entry.work}` : ''}: ${entry.reason}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
 
   spent('decisions');
@@ -3459,6 +3499,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   let publishedEnvironment: string | null = null;
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
+    reconcileSessions: (runtime, finished) => reconcileFleetSessions(current(), runtime, finished),
     childWaits: () => ledger.drain(),
     // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
     sessionOutput: async agent => { const target = agent.name ?? agent.pane_id; return target ? run('herdr', ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', '60', '--format', 'text']) : null; },
