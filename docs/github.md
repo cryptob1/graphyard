@@ -35,15 +35,15 @@ Review uses a separate reviewer App, created by `graphyard master reviewer setup
 
 On the base branch require `Graphyard / merge` bound to this App, leave `strict` ("require up to date") **off**, enforce for administrators, forbid force pushes and deletion, and give workers no bypass. `master browser protection` reconciles it; `master protection --apply` also adds a merge queue requiring it (CI must run on `merge_group`).
 
-The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, approval of the current head, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head.
+The gate also requires CI checks from `GITHUB_CI_APP_IDS` Apps, current-head approval, trusted evidence (executed > 0, skipped 0), a mergeable non-draft PR, and the queue head.
 
 ## Merge queue
 
-A candidate enters once its gates pass. Its speculative tip (predicted base merged into the candidate) is pushed onto the candidate branch and `refs/graphyard/queue/KEY`; every check, review and proof must bind it. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry, which re-enters at the back once repaired. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. One leaving validation is passed over until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge it: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals are recorded (`merge.enqueue.refused`) and shown in `master status`.
+A candidate enters once its gates pass. Its speculative tip (predicted base merged in), pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof. A failed check, requested changes, a revoked proof, a conflict or rework ejects the entry; repaired, it re-enters at the back. One conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one leaving validation is skipped until revalidated. Once requested, the App passes the check for an authorized head and its merge group, then asks GitHub to merge: queue, auto-merge, or (no queue, PR already mergeable) an immediate head-bound merge. Branch protection decides; withdrawal fails and dequeues it. Refusals (`merge.enqueue.refused`) show in `master status`.
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, and each proof if its `scopeFiles` are disjoint. CI always re-runs.
+Reviews and proofs bind one head, base and policy revision. A moved base is merged into the branch; the approval carries if no reviewed file changed, each proof if its `scopeFiles` are disjoint. CI always re-runs.
 
 ### Proofs in CI
 
