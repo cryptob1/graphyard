@@ -68,10 +68,11 @@ function provider(options: { head: string; boundBase: string; branchTip: string;
     merges: (result: { sha: string } | 'conflict' | null) => { mergeResult = result; },
     ancestry: (map: Record<string, boolean>) => { contains = { ...contains, ...map }; },
     changed: (files: string[]) => { baseChanges = files.map(filename => ({ filename })); },
-    commit: (sha: string, detail: any) => { commits[sha] = detail; } };
+    commit: (sha: string, detail: any) => { commits[sha] = detail; },
+    mergeable: (value: boolean | null) => { pr.mergeable = value; } };
 }
 
-test('integration:auto-rebase-clean-candidate — a candidate the base branch moved under keeps the base it was bound to, and the control plane republishes it on the new tip as a Graphyard-authored merge', async () => {
+test('integration:auto-rebase-clean-candidate — a candidate the base branch moved under keeps the base it was bound to; a clean one is left as it is (GY-292), and one GitHub reports conflicting is republished on the new tip as a Graphyard-authored merge when the merge succeeds', async () => {
   const head = sha40('a1'), boundBase = sha40('b1'), movedTo = sha40('b2'), refreshed = sha40('a2');
   const f = provider({ head, boundBase, branchTip: boundBase });
   // Before anything moves the candidate binds the live head, exactly as it always did.
@@ -87,7 +88,15 @@ test('integration:auto-rebase-clean-candidate — a candidate the base branch mo
   const behind = await f.github.observe(f.work);
   assert.deepEqual([behind.candidate.baseSha, behind.baseTip, behind.baseTipContained], [boundBase, movedTo, false],
     'the bound base is held while the branch head is ahead of it');
-  const work = { ...f.work, observation: behind, candidate: behind.candidate };
+  // GitHub reports it merging cleanly with the new tip: nothing is rebuilt (GY-292).
+  assert.notEqual(behind.conflicting, true);
+  assert.equal(baseRefreshNeeded({ ...f.work, observation: behind, candidate: behind.candidate }), null, 'a clean candidate is not refreshed');
+
+  // GitHub reports a conflict: the control plane tries the merge itself.
+  f.mergeable(false);
+  const conflicting = await f.github.observe(f.work);
+  assert.deepEqual([conflicting.candidate.baseSha, conflicting.conflicting], [boundBase, true]);
+  const work = { ...f.work, observation: conflicting, candidate: conflicting.candidate };
   assert.deepEqual(baseRefreshNeeded(work), { head, boundBase, baseTip: movedTo });
   assert.deepEqual(pendingBaseRefresh(work), { baseTip: movedTo, boundBase });
 
@@ -109,6 +118,7 @@ test('integration:auto-rebase-conflict-guard — a base the control plane cannot
   const head = sha40('a1'), boundBase = sha40('b1'), movedTo = sha40('b2');
   const f = provider({ head, boundBase, branchTip: movedTo });
   f.ancestry({ [`${boundBase}...${movedTo}`]: true, [`${movedTo}...${head}`]: false });
+  f.mergeable(false);
   const behind = await f.github.observe(f.work);
   const work = { ...f.work, observation: behind, candidate: behind.candidate };
   f.merges('conflict');
@@ -223,16 +233,33 @@ async function mergeHead(work: Work, candidate: { sha: string; baseSha: string }
 /** A candidate whose required checks have not all landed: in flight, never queue-eligible. */
 const inFlight = (extra: Partial<Observation> = {}): Partial<Observation> => ({ checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'in_progress', appId: 15368 }], ...extra });
 
-test('integration:auto-rebase-clean-candidate — the reconciliation job brings a stale in-flight candidate onto the new base, carries the approval and every scope-disjoint proof, and the item never leaves its stage', async () => {
+/** What GitHub reports for a head that does not merge cleanly with the moved base: the one kind of in-flight candidate a base refresh is for (GY-292). */
+const conflicts: Partial<Observation> = { mergeable: false, conflicting: true };
+
+test('integration:auto-rebase-clean-candidate — the reconciliation job leaves a clean stale candidate as it is (GY-292), brings one GitHub reports conflicting onto the new base, carries the approval and every scope-disjoint proof, and the item never leaves its stage', async () => {
   const main = sha40('11'), moved = sha40('12'), head = sha40('13'), refreshedHead = sha40('14');
   let work = await submitted('Clean refresh');
   work = await validated(work, { sha: head, baseSha: main }, inFlight());
   assert.equal(work.stage, 'test'); assert.equal(gate(work, 'review').passed, true); assert.equal(gate(work, 'acceptance').passed, true);
   const before = { evidence: work.evidence.map(entry => entry.id), stage: work.stage };
 
-  // The base branch moves. The candidate holds the base it was bound to, so nothing is lost while
-  // Graphyard brings it forward: master status has nothing to report to anybody about it.
-  const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false }));
+  // The base branch moves and the candidate still merges cleanly with it: nothing is rebuilt. It
+  // keeps its head, its bound base, its approval and its proofs, and its stage (GY-292).
+  const clean = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false }));
+  work = await engine.observe(work.id, work.revision, clean(work));
+  assert.deepEqual([work.stage, gate(work, 'review').passed, gate(work, 'acceptance').passed], [before.stage, true, true]);
+  assert.equal(pendingBaseRefresh(work), null);
+  await onlyJob(work);
+  const untouched = adapter(clean, null);
+  await processJob(engine, untouched.github);
+  assert.deepEqual([untouched.refreshed, untouched.published], [[], []], 'a clean candidate is not refreshed');
+  work = await reload(work);
+  assert.deepEqual([work.candidate!.sha, work.candidate!.baseSha, work.stage, work.baseRefresh ?? null], [head, main, before.stage, null]);
+
+  // GitHub reports it conflicting with the moved base. The candidate holds the base it was bound
+  // to, so nothing is lost while Graphyard tries to bring it forward: master status has nothing to
+  // report to anybody about it.
+  const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false, ...conflicts }));
   work = await engine.observe(work.id, work.revision, stale(work));
   assert.deepEqual([work.stage, gate(work, 'review').passed, gate(work, 'acceptance').passed], [before.stage, true, true]);
   assert.deepEqual(pendingBaseRefresh(work), { baseTip: moved, boundBase: main });
@@ -267,7 +294,7 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   const main = sha40('21'), moved = sha40('22'), head = sha40('23'), refreshedHead = sha40('24');
   let conflicting = await submitted('Conflicting refresh');
   conflicting = await validated(conflicting, { sha: head, baseSha: main }, inFlight());
-  const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false }));
+  const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false, ...conflicts }));
   conflicting = await engine.observe(conflicting.id, conflicting.revision, stale(conflicting));
   await onlyJob(conflicting);
   const conflict = `Candidate ${head.slice(0, 12)} cannot be brought onto base branch tip ${moved.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: Speculative merge of ${moved.slice(0, 12)} into graphyard/gy-1 conflicts and cannot be resolved by Graphyard. Run graphyard sync ${conflicting.key}, resolve it and push; the approval and proofs bound to ${head.slice(0, 12)} do not survive the resolution.`;
@@ -289,7 +316,7 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   const main2 = sha40('25'), moved2 = sha40('26'), head2 = sha40('27');
   let partial = await submitted('Partial carry');
   partial = await validated(partial, { sha: head2, baseSha: main2 }, inFlight());
-  const stale2 = (item: Work) => seen(item, { sha: head2, baseSha: main2 }, inFlight({ baseTip: moved2, baseTree: treeOf(moved2), baseTipContained: false }));
+  const stale2 = (item: Work) => seen(item, { sha: head2, baseSha: main2 }, inFlight({ baseTip: moved2, baseTree: treeOf(moved2), baseTipContained: false, ...conflicts }));
   partial = await engine.observe(partial.id, partial.revision, stale2(partial));
   await onlyJob(partial);
   await processJob(engine, adapter(stale2, item => {
@@ -318,7 +345,7 @@ test('integration:loop-acts-on-stale-base — an item that is only waiting for a
   work = await validated(work, { sha: head, baseSha: main }, inFlight());
   // Dwell past the hour that used to make every stale candidate an attention line.
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stageEnteredAt}',to_jsonb((now()-interval '3 hours')::text)) WHERE id=$1", [work.id]);
-  const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false }));
+  const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false, ...conflicts }));
   work = await engine.observe(work.id, (await reload(work)).revision, stale(work));
 
   const snapshot = await store.workSnapshot();
@@ -342,8 +369,8 @@ test('integration:loop-acts-on-stale-base — an item that is only waiting for a
   const pending = mine(waiting)[0];
   assert.ok(pending, `a cycle that can act reports it: ${JSON.stringify(waiting.actions)}`);
   assert.equal(waiting.metrics.actions > 0, true, 'not "0 actions"');
-  assert.match(pending.detail, new RegExp(`${work.key}: base branch moved from ${main.slice(0, 12)} to ${moved.slice(0, 12)}`));
-  assert.match(pending.detail, /No rework round, no review round and no proof round is requested for the move\./);
+  assert.match(pending.detail, new RegExp(`${work.key}: base branch moved from ${main.slice(0, 12)} to ${moved.slice(0, 12)} and GitHub reports ${head.slice(0, 12)} conflicting with it`));
+  assert.match(pending.detail, /No rework round, no review round and no proof round is requested unless that merge conflicts\./);
 
   // The loop keeps reporting the same wait once, then reports what the refresh actually did.
   const quiet = await runCycle(config, state, effects((await store.workSnapshot()).work));
@@ -356,9 +383,9 @@ test('integration:loop-acts-on-stale-base — an item that is only waiting for a
   assert.match(acted2.detail, new RegExp(`brought ${head.slice(0, 12)} onto base branch tip ${moved.slice(0, 12)} as ${refreshedHead.slice(0, 12)} with no rework round; kept the approval, unit:rebase, integration:rebase`));
 });
 
-test('integration:parallel-candidates-survive-merge — merging one of five in-flight candidates forces no rework round on the other four: each keeps its stage, its approval and every proof', async () => {
+test('integration:parallel-candidates-survive-merge — merging one of five in-flight candidates forces no rework round, and no rebuild, on the other four: each keeps its head, its stage, its approval and every proof', async () => {
   const main = sha40('41'), mergedSha = sha40('42');
-  const heads = ['43', '44', '45', '46', '47'].map(sha40), refreshedHeads = ['53', '54', '55', '56', '57'].map(sha40);
+  const heads = ['43', '44', '45', '46', '47'].map(sha40);
   const items: Work[] = [];
   for (const [index, head] of heads.entries()) {
     let item = await submitted(`Parallel ${index + 1}`);
@@ -382,17 +409,16 @@ test('integration:parallel-candidates-survive-merge — merging one of five in-f
     // Nothing moved for this candidate: the tree it was reviewed and proved on is unchanged.
     assert.deepEqual([current.stage, current.candidate!.baseSha], [before[index].stage, main], `${item.key} stayed put`);
     assert.deepEqual([gate(current, 'review').passed, gate(current, 'acceptance').passed], [true, true], `${item.key} kept its approval and proofs`);
-    assert.equal(pendingBaseRefresh(current)!.baseTip, mergedSha);
+    assert.equal(pendingBaseRefresh(current), null, `${item.key} merges cleanly, so nothing waits to rebuild it`);
 
+    // Its reconciliation neither refreshes it nor asks for a review: CI does not run again (GY-292).
     await onlyJob(current);
-    const run = adapter(stale, candidate => refreshRecord(candidate, { head: refreshedHeads[index], base: mergedSha }));
+    const run = adapter(stale, null);
     await processJob(engine, run.github);
-    assert.deepEqual(run.requested, [], `${item.key} needed no fresh review round`);
+    assert.deepEqual([run.refreshed, run.requested, run.published], [[], [], []], `${item.key} was neither rebuilt nor re-reviewed`);
     current = await reload(current);
-    const carry = current.baseRefresh!.carry!;
-    assert.deepEqual([carry.approval.carried, ...carry.evidence.map(entry => entry.carried)], [true, true, true], `${item.key} carried every binding`);
-    current = await engine.observe(current.id, current.revision, seen(current, { sha: refreshedHeads[index], baseSha: mergedSha }, inFlight({ reviews: [] })));
-    assert.deepEqual([current.stage, gate(current, 'review').passed, gate(current, 'acceptance').passed], [before[index].stage, true, true], `${item.key} is still in its stage on the new base`);
+    assert.deepEqual([current.candidate!.sha, current.candidate!.baseSha, current.baseRefresh ?? null], [heads[index], main, null], `${item.key} kept its head`);
+    assert.deepEqual([current.stage, gate(current, 'review').passed, gate(current, 'acceptance').passed], [before[index].stage, true, true], `${item.key} is still in its stage`);
     assert.deepEqual(current.evidence.map(entry => entry.id), before[index].evidence, `${item.key} produced no new evidence`);
   }
 
