@@ -30,9 +30,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   // 4-research. Research before build (GY-259): an item about to be offered whose requirements
   //     were never researched gets one cheap Pi session first, and waits only while that run is
   //     within its time limit. A run that fails or times out is recorded and the item is built
-  //     without a brief; research never holds an item past its bound.
+  //     without a brief; research never holds an item past its bound. It runs only once
+  //     `run.research` names the research account: an unconfigured loop dispatches as before.
   const held = new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id));
-  if (effects.recordResearch && effects.research) await isolate('dispatch', null, 'research', async () => {
+  if (effects.recordResearch && effects.research && config.run?.research) await isolate('dispatch', null, 'research', async () => {
     const settings = researchSettings(config.run);
     const step = await researchStep({ items: offered.filter(item => !held.has(item.id)), clock, settings, config, cwd: effects.research!.cwd,
       runner: effects.research!.runner ?? researchRunner(settings), record: effects.recordResearch! });

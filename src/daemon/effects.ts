@@ -168,7 +168,7 @@ export interface DaemonEffects {
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
-   * A loop wired without it researches nothing and dispatches as before.
+   * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
   research?: { cwd: string; runner?: Runner };
