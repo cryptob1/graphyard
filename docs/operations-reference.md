@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely: it reconciles and never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master` the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; logs name the slowest; status reads a cached intervention report.
+Restart `graphyard master run` freely: it reconciles and never dispatches twice. `master status` → `daemon` gives health; `journalctl --user -u graphyard-master` the log. `daemon.metrics.timings` and status `timings` time steps and calls over 1s; logs name slowest; status reads a cached intervention report.
 
 ### Perpetual master loop
 

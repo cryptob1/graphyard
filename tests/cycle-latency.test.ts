@@ -135,8 +135,8 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     // Two slow fakes the production wiring times: a GitHub deployment listing through the loop's
     // child runner, and an account-quota probe; everything else answers at once.
     const server = slowServer(() => work);
-    const run = timedRun(async (command: string, args: string[]) => { await sleep(args[1]?.includes('/deployments') ? 1_400 : 1); return '[]'; });
-    const probe = timedFetch(async () => { await sleep(1_100); return new Response('{}'); });
+    const run = timedRun(async (command: string, args: string[]) => { await sleep(args[1]?.includes('/deployments') ? 1_450 : 1); return '[]'; });
+    const probe = timedFetch(async () => { await sleep(1_150); return new Response('{}'); });
     const lines: string[] = [];
     const state: DaemonState = emptyDaemonState(master);
     const effects = loopEffects(root, master, server, {
@@ -166,7 +166,7 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     // master status: the same recorder over its own phases, returned under `timings`, with the slow
     // server read named by route and phase.
     const status = slowServer(() => work);
-    const slowActions = async (path: string, _credential?: string, timeoutMs?: number) => path === 'actions' ? (await sleep(1_200), { executors: undefined }) : status.read(path, timeoutMs);
+    const slowActions = async (path: string, _credential?: string, timeoutMs?: number) => path === 'actions' ? (await sleep(1_250), { executors: undefined }) : status.read(path, timeoutMs);
     const report = await masterStatusReport(root, master, slowActions, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
     assert.ok(report.timings, 'master status reports its timings');
     const phases = report.timings.steps.map(step => step.step);
