@@ -2,7 +2,6 @@ import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
 import type { Work } from '../model.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
-import { mergeStalls } from '../merge-queue.js';
 
 // The orphaned-supervisor builders live in their own module (GY-138); they are read from here too.
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
@@ -62,18 +61,14 @@ const missingFrom = (entry: ActionlessItem) => entry.refusal ?? entry.detail;
  * control-plane defect that a state produced no answer at all.
  */
 export function stalledItemAttention(snapshot: { work: Work[]; now: string }, thresholdMs = stallBoundMs): AttentionItem[] {
-  return [...stalledItems(snapshot.work, new Date(snapshot.now), thresholdMs).map(entry => {
+  return stalledItems(snapshot.work, new Date(snapshot.now), thresholdMs).map(entry => {
     const held = `has held its ${entry.gate ?? 'unevaluated'} gate for ${elapsed(entry.heldMs)} with no action named and nothing moving it`;
     return entry.outcome === 'human'
       ? { subject: entry.key, text: `${entry.key} ${held}: ${missingFrom(entry)} — ${entry.detail}`, ...humanOwner('goals and priorities', entry.detail) }
       : { subject: entry.key, text: `${entry.key} ${held}: ${missingFrom(entry)} — the control plane computed neither an action, a dependency nor a human need for this state, which is a defect in the control plane rather than in the item (${entry.detail})`,
         ...agentOwner('master', `graphyard master create files the control-plane defect that left ${entry.key} without an action; until it is fixed, graphyard master status names no step for this item and nothing will claim it`) };
-  }), ...mergeStallAttention(snapshot)];
+  });
 }
-
-/** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
-export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
-  mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
 
 /** Direct-merge mode (src/direct-merge.ts), first in master status and in one line while it is on: gated merging is bypassed. */
 export const directMergeLine = (coordinator: any): { directMerge?: string } => coordinator?.directMerge?.line ? { directMerge: coordinator.directMerge.line } : {};
