@@ -1,6 +1,6 @@
-import { statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { autonomyContract } from '../../src/autonomy';
 
 /**
@@ -113,37 +113,110 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
 export interface GuardContext { cwd: string; home?: string; sessionDirectories?: Iterable<string> }
 export type GuardVerdict = { allow: true } | { allow: false; reason: string };
 
-/** Split a shell line into words and command separators, honouring quotes; marks words whose value the shell would expand. */
-function shellWords(line: string) {
-  const segments: { words: { value: string; dynamic: boolean; glob: boolean }[] }[] = [{ words: [] }];
-  let word: { value: string; dynamic: boolean; glob: boolean } | null = null, quote: '"' | '\'' | null = null;
+/** The end of a command substitution opened just before `start`: the index of its closing `)` (or backtick), honouring nesting and quotes. */
+function substitutionEnd(line: string, start: number, backtick: boolean) {
+  let depth = 0, quote: '"' | '\'' | null = null;
+  for (let index = start; index < line.length; index++) {
+    const char = line[index];
+    if (quote === '\'') { if (char === '\'') quote = null; continue; }
+    if (char === '\\') { index++; continue; }
+    if (backtick) { if (char === '`') return index; continue; }
+    if (quote === '"') { if (char === '"') quote = null; continue; }
+    if (char === '\'' || char === '"') quote = char;
+    else if (char === '(') depth++;
+    else if (char === ')') { if (depth === 0) return index; depth--; }
+  }
+  return line.length;
+}
+
+type ShellWord = { value: string; dynamic: boolean; glob: boolean };
+
+/**
+ * Split a shell line into the words of each simple command, honouring quotes; marks words whose
+ * value the shell would expand. The body of every command substitution — `$(…)` or backticks,
+ * quoted or not — is a command line of its own, so its commands are returned as segments too.
+ */
+function shellWords(line: string): ShellWord[][] {
+  const segments: { words: ShellWord[] }[] = [{ words: [] }], nested: ShellWord[][] = [];
+  let word: ShellWord | null = null, quote: '"' | '\'' | null = null;
   const push = () => { if (word) segments.at(-1)!.words.push(word); word = null; };
   const current = () => word ??= { value: '', dynamic: false, glob: false };
+  const substitution = (index: number) => {
+    const backtick = line[index] === '`', start = index + (backtick ? 1 : 2), end = substitutionEnd(line, start, backtick);
+    nested.push(...shellWords(line.slice(start, end)));
+    current().dynamic = true;
+    current().value += line.slice(index, end + 1);
+    return end;
+  };
   for (let index = 0; index < line.length; index++) {
     const char = line[index];
     if (quote === '\'') { if (char === '\'') quote = null; else current().value += char; continue; }
     if (quote === '"') {
       if (char === '"') quote = null;
       else if (char === '\\' && index + 1 < line.length) current().value += line[++index];
-      else { if (char === '$' || char === '`') current().dynamic = true; current().value += char; }
+      else if (char === '`' || (char === '$' && line[index + 1] === '(')) index = substitution(index);
+      else { if (char === '$') current().dynamic = true; current().value += char; }
       continue;
     }
     if (char === '\'' || char === '"') { quote = char; current(); continue; }
     if (char === '\\' && index + 1 < line.length) { current().value += line[++index]; continue; }
+    if (char === '`' || (char === '$' && line[index + 1] === '(')) { index = substitution(index); continue; }
     if (/\s/.test(char) && char !== '\n') { push(); continue; }
     if (char === '\n' || char === ';' || char === '|' || char === '&' || char === '(' || char === ')') { push(); segments.push({ words: [] }); continue; }
-    if (char === '$' || char === '`') current().dynamic = true;
+    if (char === '$') current().dynamic = true;
     if ('*?[{'.includes(char)) current().glob = true;
     if (char === '~' && !word) current().dynamic = !line.slice(index + 1).match(/^(\/|\s|$)/);
     current().value += char;
   }
   push();
-  return segments.map(segment => segment.words).filter(words => words.length);
+  return [...segments.map(segment => segment.words), ...nested].filter(words => words.length);
 }
 
 const inside = (path: string, directory: string) => { const rel = relative(directory, path); return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel); };
-const wrappers = new Set(['sudo', 'command', 'builtin', 'nohup', 'time', 'nice', 'exec', 'env']);
-const indirect = new Set(['xargs', 'eval', 'bash', 'sh', 'zsh', 'dash', 'find', 'parallel', 'watch']);
+/** The path with every symbolic link it passes through resolved, as far as the path exists; a final component without a trailing slash is the link itself, as rm and mv treat it. */
+function physical(path: string, trailingSlash: boolean) {
+  const real = (entry: string): string => { try { return realpathSync(entry); } catch { const parent = dirname(entry); return parent === entry ? entry : join(real(parent), basename(entry)); } };
+  return trailingSlash ? real(path) : join(real(dirname(path)), basename(path));
+}
+/** Words that open or continue a compound command: the simple command starts after them. */
+const reserved = new Set(['!', '{', '}', 'if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'coproc']);
+/**
+ * Programs that run the command after them, with the options of each that take a separate
+ * argument and how many plain arguments come before the command (timeout's duration, flock's file).
+ */
+const wrappers = new Map<string, { arguments?: string[]; positional?: number }>([
+  ['sudo', { arguments: ['-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U', '-r', '-t', '--user', '--group', '--host', '--prompt', '--chdir', '--chroot', '--close-from', '--other-user', '--role', '--type', '--command-timeout'] }],
+  ['doas', { arguments: ['-u', '-C'] }], ['command', {}], ['builtin', {}], ['nohup', {}], ['setsid', {}], ['unbuffer', {}], ['chronic', {}],
+  ['time', { arguments: ['-f', '-o', '--format', '--output'] }], ['exec', { arguments: ['-a'] }],
+  ['env', { arguments: ['-u', '-C', '--unset', '--chdir'] }], ['nice', { arguments: ['-n', '--adjustment'] }],
+  ['ionice', { arguments: ['-c', '-n', '-p', '-P', '-u', '--class', '--classdata'] }], ['stdbuf', { arguments: ['-i', '-o', '-e', '--input', '--output', '--error'] }],
+  ['timeout', { arguments: ['-s', '-k', '--signal', '--kill-after'], positional: 1 }], ['chrt', { positional: 1 }], ['taskset', { positional: 1 }],
+  ['flock', { arguments: ['-w', '-E', '--timeout', '--conflict-exit-code'], positional: 1 }],
+]);
+const indirect = new Set(['xargs', 'eval', 'bash', 'sh', 'zsh', 'dash', 'find', 'parallel', 'watch', 'su', 'runuser', 'script']);
+const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** The index of the word that names the simple command a segment runs, past reserved words, assignments and wrappers with their options and arguments, and whether a wrapper was passed. */
+function commandIndex(words: ShellWord[]) {
+  let index = 0, wrapped = false;
+  for (;;) {
+    while (index < words.length && (reserved.has(words[index].value) || assignment.test(words[index].value))) index++;
+    const wrapper = wrappers.get(words[index]?.value.split('/').pop() ?? '');
+    if (!wrapper) return { index, wrapped };
+    wrapped = true;
+    index++;
+    let positional = wrapper.positional ?? 0;
+    while (index < words.length) {
+      const value = words[index].value;
+      if (value === '--') { index++; break; }
+      if (value.startsWith('-') && value.length > 1) { index += wrapper.arguments?.includes(value) ? 2 : 1; continue; }
+      if (assignment.test(value)) { index++; continue; }
+      if (positional > 0) { positional--; index++; continue; }
+      break;
+    }
+    while (positional-- > 0 && index < words.length) index++;
+  }
+}
 
 /**
  * Whether a bash command may run. rm and mv are refused when a target is a glob, a variable or
@@ -153,16 +226,18 @@ const indirect = new Set(['xargs', 'eval', 'bash', 'sh', 'zsh', 'dash', 'find', 
  * not on the line. The reason says what to do instead.
  */
 export function guardCommand(command: string, context: GuardContext): GuardVerdict {
-  const home = context.home ?? homedir(), worktree = resolve(context.cwd), sessions = [...(context.sessionDirectories ?? [])].map(entry => resolve(entry));
+  const home = context.home ?? homedir(), worktree = physical(resolve(context.cwd), true), sessions = [...(context.sessionDirectories ?? [])].map(entry => physical(resolve(entry), true));
   const retry = `Retry with each target spelled out as a literal path inside the worktree ${worktree}${sessions.length ? ` or inside your mktemp directory ${sessions.join(', ')}` : ' or inside a directory you created with mktemp -d'}.`;
   let cwd: string | null = worktree;
   for (const words of shellWords(command)) {
-    let index = 0;
-    while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index].value) || wrappers.has(words[index].value))) index++;
+    const { index, wrapped } = commandIndex(words);
     const name = words[index]?.value.split('/').pop() ?? '';
     if (name === 'cd') { const target = words[index + 1]; cwd = target && !target.dynamic && !target.glob && cwd ? resolve(cwd, target.value.replace(/^~(?=\/|$)/, home)) : null; continue; }
     if (indirect.has(name) && words.slice(index + 1).some(entry => /(^|\/|\s)(rm|mv)(\s|$)/.test(entry.value)))
       return { allow: false, reason: `Graphyard refused this command: it runs rm or mv through ${name}, so its targets cannot be checked. Run rm or mv directly. ${retry}` };
+    // A wrapper whose arguments were not recognised could hide rm or mv behind them: refuse rather than guess.
+    if (wrapped && name !== 'rm' && name !== 'mv' && words.slice(index + 1).some(entry => /^(rm|mv)$/.test(entry.value.split('/').pop() ?? '')))
+      return { allow: false, reason: `Graphyard refused this command: it runs rm or mv behind ${words[0].value} with arguments Graphyard cannot parse, so its targets cannot be checked. Run rm or mv directly. ${retry}` };
     if (name !== 'rm' && name !== 'mv') continue;
     let options = true, redirect = false;
     for (const target of words.slice(index + 1)) {
@@ -175,7 +250,9 @@ export function guardCommand(command: string, context: GuardContext): GuardVerdi
       if (target.dynamic) return { allow: false, reason: `Graphyard refused this command: ${name} target "${target.value}" is a variable or expansion whose value cannot be checked before it runs. ${retry}` };
       if (target.glob) return { allow: false, reason: `Graphyard refused this command: ${name} target "${target.value}" is a glob whose matches cannot be checked before it runs. ${retry}` };
       if (!cwd && !isAbsolute(target.value) && !target.value.startsWith('~')) return { allow: false, reason: `Graphyard refused this command: ${name} target "${target.value}" is relative to a directory changed through an expansion, so it cannot be resolved. ${retry}` };
-      const path = resolve(cwd ?? worktree, target.value.replace(/^~(?=\/|$)/, home));
+      const lexical = resolve(cwd ?? worktree, target.value.replace(/^~(?=\/|$)/, home));
+      // Resolve symbolic links too: `rm -rf link/` on a link to a directory outside deletes outside.
+      const path = physical(lexical, /\/\.?$/.test(target.value));
       if (sessions.some(directory => path === directory || inside(path, directory))) continue;
       if (!inside(path, worktree)) return { allow: false, reason: `Graphyard refused this command: ${name} target "${target.value}" resolves to ${path}, outside the worktree. ${retry}` };
     }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import graphyard, { guardCommand, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
@@ -130,6 +130,17 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
       ['rm -rf /', /outside the worktree/], ['rm -rf ../sibling', /outside the worktree/], ['rm -rf ~', /outside the worktree/], [`rm -rf ${session}/x`, /outside the worktree/],
       ['cd "$DIR" && rm -rf build', /cannot be resolved/], ['find . -name x -exec rm {} +', /through find/], ['echo a | xargs rm', /through xargs/], ['bash -c "rm -rf build"', /through bash/],
       ['sudo rm -rf /etc', /outside the worktree/], ['X=1 rm -rf $X', /variable or expansion/],
+      // rm inside loops, conditionals and groups: the reserved word is not the command.
+      ['for d in *; do rm -rf "$d"; done', /variable or expansion/], ['if [ -d x ]; then rm -rf ../sibling; fi', /outside the worktree/],
+      ['if true; then :; else rm -rf /; fi', /outside the worktree/], ['if false; then :; elif true; then rm -rf /; fi', /outside the worktree/],
+      ['while true; do mv a /tmp/a; done', /outside the worktree/], ['{ rm -rf /; }', /outside the worktree/], ['! rm -rf ~', /outside the worktree/],
+      // Wrappers with options and arguments.
+      ['timeout 60 rm -rf /', /outside the worktree/], ['timeout -s KILL 5m rm -rf /', /outside the worktree/], ['sudo -u root rm -rf /etc', /outside the worktree/],
+      ['env -i rm -rf "$X"', /variable or expansion/], ['nice -n 5 rm -rf ~', /outside the worktree/], ['/usr/bin/env FOO=1 rm -rf /', /outside the worktree/],
+      ['stdbuf -oL rm -rf /', /outside the worktree/], ['ionice -c 3 nice rm -rf /', /outside the worktree/], ['flock /tmp/lock rm -rf /', /outside the worktree/],
+      ['exec -a name rm -rf /', /outside the worktree/], ['timeout 5 bash -c "rm -rf /"', /through bash/], ['sudo --weird-option value rm -rf /', /behind sudo/],
+      // Command substitutions run their own commands, quoted or not.
+      ['echo "$(rm -rf ~)"', /outside the worktree/], ['echo "`rm -rf /`"', /outside the worktree/], ['echo $(echo "$(rm -rf "$X")")', /variable or expansion/],
     ] as const) {
       const verdict = await call(command);
       assert.equal(verdict?.block, true, `${command} is refused`);
@@ -138,7 +149,8 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
     }
 
     // Literal targets inside the worktree, and commands that are not rm or mv, run.
-    for (const command of ['rm -rf build', `rm -f ${join(worktree, 'out.txt')}`, 'rm -rf -- node_modules/.cache', 'mv a.txt b.txt', 'git rm -q file.ts', 'ls -la *', 'rm build 2>/dev/null', 'cd src && rm old.ts'])
+    for (const command of ['rm -rf build', `rm -f ${join(worktree, 'out.txt')}`, 'rm -rf -- node_modules/.cache', 'mv a.txt b.txt', 'git rm -q file.ts', 'ls -la *', 'rm build 2>/dev/null', 'cd src && rm old.ts',
+      'for f in a b; do rm -f "build/a"; done', 'if [ -d build ]; then rm -rf build; fi', 'timeout 60 rm -rf build', 'sudo -u root rm -rf build', 'echo "$(git rev-parse HEAD)"', 'nice -n 5 git status'])
       assert.equal(await call(command), undefined, `${command} runs`);
     assert.equal(await emit('tool_call', { toolName: 'read', input: { path: '*' } }, worktree), undefined, 'other tools are not guarded');
 
@@ -153,6 +165,14 @@ test('unit:pi-destructive-guard the tool-call guard refuses rm on a statically u
     await emit('tool_result', { toolName: 'bash', input: { command: `echo ${other}` }, content: [{ type: 'text', text: other }] }, worktree);
     assert.equal((await call(`rm -rf ${other}`))?.block, true);
     await rm(other, { recursive: true, force: true });
+
+    // Symbolic links are followed as rm follows them: a trailing slash on a link to a directory outside deletes outside.
+    const outside = await mkdtemp(join(tmpdir(), 'graphyard-pi-guard-outside-'));
+    await symlink(outside, join(worktree, 'link'));
+    assert.match((await call('rm -rf link/'))!.reason, /outside the worktree/, 'a link to outside with a trailing slash is refused');
+    assert.equal(await call('rm link'), undefined, 'removing the link itself runs');
+    assert.match((await call('rm -rf link/inner'))!.reason, /outside the worktree/, 'a path through a link to outside is refused');
+    await rm(outside, { recursive: true, force: true });
 
     assert.deepEqual(prompted, [], 'the guard never prompts');
     // The same verdicts from the guard function itself.
