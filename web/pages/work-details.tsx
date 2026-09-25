@@ -65,7 +65,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // The inverted loop, as this item sees it: what the control plane says to do next, which
   // executor has it, who is waiting on a decision, and every session that can be watched or read.
   const sessions = sessionSummary(item, new Date(now));
-  const running = sessions.filter(handle => handle.state === 'running');
+  // Shown running only while its latest observation is working or idle, and fresh (GY-172).
+  const running = sessions.filter(handle => handle.live);
   const requests = openAgentRequests(item, new Date(now));
   // What this item needs from the operator themselves, from the same human-only rule table the
   // Needs you page renders: it is answered there, in this session, never on a command line.
@@ -83,7 +84,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // The Work page's own classification of this item, so its badge is the tile that led here.
   const group = groupWithin(item, work, now, status?.humanOnly, release);
   const steps = prSteps(item, now, release);
-  const actor = nextActor(item, group, now, release);
+  const actor = nextActor(item, group, now, release, work);
   // Work closed without merging has no step: no bar, nothing left, nobody acting (`prSteps`).
   const closed = isClosed(item);
   const showSteps = !closed && (group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog'));
@@ -184,12 +185,12 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <p>Requested by {row.requestedBy} {age(row.requestedAt)} ago · attempt {row.attempts}{row.resolution ? ` · last result: ${shortShas(row.resolution)}` : ''}</p>
         <ul>{row.history.slice(-5).map((entry, index) => <li key={index}>{entry.event}{entry.executor ? ` by ${entry.executor}` : ''}: {shortShas(entry.reason)}</li>)}</ul></div>)}
       {running.length > 0 && <><h3>Sessions running now</h3><ul className="sessions">{running.map(handle => <li key={handle.id}>
-        <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {shortShas(handle.subject)} · {age(handle.startedAt)}<br/><code>{handle.attach}</code></li>)}</ul></>}
+        <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {shortShas(handle.subject)} · {age(handle.startedAt)} · seen {formatAge(handle.seenAt ?? handle.updatedAt, now)} ago<br/><code>{handle.attach}</code></li>)}</ul></>}
       <h3>Sessions ({sessions.length})</h3>
       {sessions.length === 0 && <p className="muted">No session has recorded a handle on this item.</p>}
-      {sessions.map(handle => <div className="criterion" key={handle.id}><strong>{handle.state === 'running' ? '▶' : '■'} {handle.kind} · {handle.principal}</strong>
+      {sessions.map(handle => <div className="criterion" key={handle.id}><strong>{handle.live ? '▶' : handle.state === 'running' ? '?' : '■'} {handle.kind} · {handle.principal}</strong>
         <p>{handle.runtime} on {handle.host}{handle.workspace ? ` · workspace ${handle.workspace}` : ''}{handle.tab ? ` · tab ${handle.tab}` : ''}{handle.pane ? ` · pane ${handle.pane}` : ''} · {shortShas(handle.subject)}</p>
-        <p>{handle.state === 'running' ? `Running for ${age(handle.startedAt)}` : `Finished ${age(handle.endedAt ?? handle.updatedAt)} ago${handle.outcome ? `: ${shortShas(handle.outcome)}` : ''}`}</p>
+        <p>{handle.live ? `Running for ${age(handle.startedAt)}` : handle.state === 'running' ? `Not seen for ${formatAge(handle.seenAt ?? handle.updatedAt, now)}` : `Finished ${age(handle.endedAt ?? handle.updatedAt)} ago${handle.outcome ? `: ${shortShas(handle.outcome)}` : ''}`}</p>
         <code>{handle.attach}</code></div>)}
       <h3>Agent requests ({(item.agentRequests ?? []).length})</h3>
       {requests.length > 0 && <div className="notice"><strong>{requests.length === 1 ? 'An agent is waiting' : `${requests.length} agents are waiting`} on a decision</strong>

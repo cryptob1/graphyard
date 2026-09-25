@@ -22,7 +22,7 @@ import { claimCandidatesParams, claimCandidatesSql } from './model/action-candid
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
-import { recordSession, sessionHandleSchema } from './model/sessions.js';
+import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
@@ -435,8 +435,12 @@ export class Engine {
       // a runtime fact, never a decision — it decides no gate, ends no lease and binds no
       // candidate — and this one may only finish a handle the item already carries, so nothing new
       // is recorded on a delivered item and nothing it holds is reopened.
-      const deliveredSessionClosure = work.stage === 'done' && command === 'session' && data.state === 'finished'
-        && (work.sessions ?? []).some(handle => handle.id === data.id);
+      // The loop's observation of a session still open on it is the same kind of runtime fact
+      // (GY-172): a session that outlives its item's delivery is still observed, or every reader
+      // would show a live session as unseen until it closed. It keeps the handle open, never reopens one.
+      const deliveredSessionClosure = work.stage === 'done' && command === 'session'
+        && (work.sessions ?? []).some(handle => handle.id === data.id
+          && (data.state === 'finished' || handle.state === 'running' && data.observed !== undefined && ['coordinator', 'admin'].includes(actor.role)));
       preserveAssignment(work); retainQuarantineFence(work);
       if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'rereview') {
@@ -777,7 +781,21 @@ export class Engine {
         // any credential that happens to reach this item.
         demand(!existing || existing.principal === actor.id || actor.role === 'coordinator' || actor.role === 'admin',
           `Session handle ${data.id} belongs to ${existing?.principal}; only that session, its launcher or an admin may update it`, 403);
-        recordSession(work, data, actor.id, now);
+        // What the loop observed of a session is the one state every reader shows (GY-172): only
+        // the observer writes it, never the session it describes, and never ahead of the clock.
+        demand(!sessionObservationFields.some(field => data[field] !== undefined) || actor.role === 'coordinator' || actor.role === 'admin',
+          'Only the coordinator that observes sessions, or an admin, records what was observed of one', 403);
+        // A running handle belongs to the launch attempt that registered it (GY-172): two launches
+        // for one request racing from the same snapshot both reach this point, and the one the
+        // launcher then refuses must neither close nor re-coordinate the session the other started.
+        // So a launch writes only a handle no other live attempt holds; an attempt whose runtime did
+        // start after its registration was refused supersedes the record, since the launcher let it run.
+        demand(!data.launch || data.supersede || existing?.state !== 'running' || !existing.launch || existing.launch === data.launch,
+          `Session handle ${data.id} is held by another launch attempt that is still recorded running`, 409);
+        // An observation dated ahead of this clock would read fresh for good, so it is stored as of now.
+        const observedAt = data.observedAt && Date.parse(data.observedAt) > now.getTime() ? now.toISOString() : data.observedAt;
+        const { supersede: _supersede, ...handle } = data;
+        recordSession(work, { ...handle, ...(observedAt ? { observedAt } : {}) }, actor.id, now);
       }
       if (command === 'request') {
         demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
